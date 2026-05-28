@@ -1,0 +1,223 @@
+import 'dart:typed_data';
+import 'package:image_picker/image_picker.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+import 'supabase_client.dart';
+
+// ── Model ─────────────────────────────────────────────────────────────────────
+
+class UserProfile {
+  final String id;
+  final String username;
+  final String displayName;
+  final String? bio;
+  final String? avatarUrl;
+  final String? coverUrl;
+  final int followerCount;
+  final int followingCount;
+  final DateTime createdAt;
+
+  const UserProfile({
+    required this.id,
+    required this.username,
+    required this.displayName,
+    this.bio,
+    this.avatarUrl,
+    this.coverUrl,
+    required this.followerCount,
+    required this.followingCount,
+    required this.createdAt,
+  });
+
+  factory UserProfile.fromMap(Map<String, dynamic> map) {
+    return UserProfile(
+      id: map['id'] as String,
+      username: map['username'] as String,
+      displayName: map['display_name'] as String,
+      bio: map['bio'] as String?,
+      avatarUrl: map['avatar_url'] as String?,
+      coverUrl: map['cover_url'] as String?,
+      followerCount: (map['follower_count'] as num?)?.toInt() ?? 0,
+      followingCount: (map['following_count'] as num?)?.toInt() ?? 0,
+      createdAt: DateTime.parse(map['created_at'] as String),
+    );
+  }
+
+  UserProfile copyWith({
+    String? username,
+    String? displayName,
+    String? bio,
+    String? avatarUrl,
+    String? coverUrl,
+    int? followerCount,
+    int? followingCount,
+  }) {
+    return UserProfile(
+      id: id,
+      username: username ?? this.username,
+      displayName: displayName ?? this.displayName,
+      bio: bio ?? this.bio,
+      avatarUrl: avatarUrl ?? this.avatarUrl,
+      coverUrl: coverUrl ?? this.coverUrl,
+      followerCount: followerCount ?? this.followerCount,
+      followingCount: followingCount ?? this.followingCount,
+      createdAt: createdAt,
+    );
+  }
+}
+
+// ── Service ───────────────────────────────────────────────────────────────────
+
+class ProfileService {
+  // ─── Read ─────────────────────────────────────────────────────────────────
+
+  /// Fetch a single profile by user ID.
+  ///
+  /// Follower/following counts are computed live from the `follows` table
+  /// rather than the denormalized `follower_count` / `following_count`
+  /// columns on `profiles`, which can drift out of sync.
+  static Future<UserProfile?> fetchProfile(String userId) async {
+    final profileFuture =
+        supabase.from('profiles').select().eq('id', userId).maybeSingle();
+    final followersFuture =
+        supabase.from('follows').select('follower_id').eq('following_id', userId);
+    final followingFuture =
+        supabase.from('follows').select('following_id').eq('follower_id', userId);
+
+    final data = await profileFuture;
+    if (data == null) return null;
+
+    final followers = await followersFuture;
+    final following = await followingFuture;
+
+    data['follower_count'] = (followers as List).length;
+    data['following_count'] = (following as List).length;
+
+    return UserProfile.fromMap(data);
+  }
+
+  /// Fetch the currently signed-in user's profile.
+  static Future<UserProfile?> fetchCurrentProfile() async {
+    final uid = supabase.auth.currentUser?.id;
+    if (uid == null) return null;
+    return fetchProfile(uid);
+  }
+
+  // ─── Write ────────────────────────────────────────────────────────────────
+
+  /// Update mutable profile fields. Pass only the fields you want to change.
+  static Future<UserProfile> updateProfile({
+    required String userId,
+    String? displayName,
+    String? username,
+    String? bio,
+  }) async {
+    final updates = <String, dynamic>{
+      if (displayName != null) 'display_name': displayName,
+      if (username != null) 'username': username,
+      if (bio != null) 'bio': bio,
+    };
+
+    final data = await supabase
+        .from('profiles')
+        .update(updates)
+        .eq('id', userId)
+        .select()
+        .single();
+
+    return UserProfile.fromMap(data);
+  }
+
+  // ─── Avatar upload ────────────────────────────────────────────────────────
+
+  /// Pick an image from the gallery, upload it, and return both the bytes
+  /// (for instant local preview) and the new public URL.
+  /// Returns null if the user cancels.
+  static Future<({Uint8List bytes, String url})?> pickAndUploadAvatar(
+      String userId) async {
+    final bytes = await pickImageBytes();
+    if (bytes == null) return null;
+    final url = await uploadAvatarBytes(userId, bytes);
+    return (bytes: bytes, url: url);
+  }
+
+  /// Upload raw bytes as the user's avatar and return the public URL.
+  static Future<String> uploadAvatarBytes(
+      String userId, Uint8List bytes) async {
+    return _uploadImage(
+      storagePath: '$userId/avatar.jpg',
+      bytes: bytes,
+      profileField: 'avatar_url',
+      userId: userId,
+    );
+  }
+
+  // ─── Cover photo upload ───────────────────────────────────────────────────
+
+  /// Pick an image from the gallery, upload it as the cover photo, and return
+  /// both bytes (for instant preview) and the new public URL.
+  /// Returns null if the user cancels.
+  static Future<({Uint8List bytes, String url})?> pickAndUploadCover(
+      String userId) async {
+    final bytes = await pickImageBytes(maxWidth: 1200, maxHeight: 600);
+    if (bytes == null) return null;
+    final url = await uploadCoverBytes(userId, bytes);
+    return (bytes: bytes, url: url);
+  }
+
+  /// Upload raw bytes as the user's cover photo and return the public URL.
+  static Future<String> uploadCoverBytes(
+      String userId, Uint8List bytes) async {
+    return _uploadImage(
+      storagePath: '$userId/cover.jpg',
+      bytes: bytes,
+      profileField: 'cover_url',
+      userId: userId,
+    );
+  }
+
+  // ─── Shared helpers ───────────────────────────────────────────────────────
+
+  /// Opens the gallery picker and returns raw bytes, or null if cancelled.
+  /// Used by screens that need the bytes for an instant local preview before
+  /// uploading (e.g. [EditProfileScreen]).
+  static Future<Uint8List?> pickImageBytes({
+    double maxWidth = 512,
+    double maxHeight = 512,
+  }) async {
+    final picker = ImagePicker();
+    final picked = await picker.pickImage(
+      source: ImageSource.gallery,
+      maxWidth: maxWidth,
+      maxHeight: maxHeight,
+      imageQuality: 85,
+    );
+    if (picked == null) return null;
+    return picked.readAsBytes();
+  }
+
+  static Future<String> _uploadImage({
+    required String storagePath,
+    required Uint8List bytes,
+    required String profileField,
+    required String userId,
+  }) async {
+    await supabase.storage.from('avatars').uploadBinary(
+          storagePath,
+          bytes,
+          fileOptions: const FileOptions(
+            contentType: 'image/jpeg',
+            upsert: true,
+          ),
+        );
+
+    final publicUrl = supabase.storage.from('avatars').getPublicUrl(storagePath);
+    final bustUrl = '$publicUrl?t=${DateTime.now().millisecondsSinceEpoch}';
+
+    await supabase
+        .from('profiles')
+        .update({profileField: bustUrl})
+        .eq('id', userId);
+
+    return bustUrl;
+  }
+}

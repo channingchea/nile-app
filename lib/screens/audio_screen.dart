@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:livekit_client/livekit_client.dart';
 import '../config.dart';
+import '../theme.dart';
 
 class AudioScreen extends StatefulWidget {
   const AudioScreen({super.key});
@@ -55,7 +56,6 @@ class _AudioScreenState extends State<AudioScreen> {
       final token = data['token'] as String;
       final wsUrl = data['wsUrl'] as String;
 
-      // Connect and publish microphone only (no video)
       final room = Room();
       await room.connect(wsUrl, token);
       await room.localParticipant?.setMicrophoneEnabled(true);
@@ -83,17 +83,18 @@ class _AudioScreenState extends State<AudioScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      backgroundColor: NileColors.bgPage,
       appBar: AppBar(
-        title: const Text('Stream Audio'),
+        title: Text('Stream Audio', style: NileTextStyles.headingMd()),
         backgroundColor: Colors.transparent,
       ),
-      body: SingleChildScrollView(
+      body: NileMaxWidth(child: SingleChildScrollView(
         padding: const EdgeInsets.all(32.0),
         child: switch (_streamState) {
           AudioStreamState.idle || AudioStreamState.connecting => _buildForm(),
           AudioStreamState.live => _buildLive(),
         },
-      ),
+      )),
     );
   }
 
@@ -104,34 +105,38 @@ class _AudioScreenState extends State<AudioScreen> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         const SizedBox(height: 48),
-        const Icon(Icons.album, size: 64, color: Colors.white38),
+        const Icon(Icons.album, size: 64, color: NileColors.border),
         const SizedBox(height: 24),
-        const Text(
+        Text(
           'Master Audio',
           textAlign: TextAlign.center,
-          style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+          style: NileTextStyles.headingLg(),
         ),
         const SizedBox(height: 8),
-        const Text(
+        Text(
           'Connect a mixer or sound board to this device\nand stream audio to all viewers.',
           textAlign: TextAlign.center,
-          style: TextStyle(fontSize: 14, color: Colors.white54),
+          style: NileTextStyles.bodyMd().copyWith(color: NileColors.txtSecondary),
         ),
         const SizedBox(height: 48),
         TextField(
           controller: _eventIdController,
           enabled: !isConnecting,
+          style: NileTextStyles.bodyLg(),
           decoration: const InputDecoration(
             labelText: 'Event ID',
             hintText: 'e.g. show-2024-01',
-            border: OutlineInputBorder(),
           ),
         ),
         if (_errorMessage != null) ...[
           const SizedBox(height: 16),
-          Text(_errorMessage!, style: const TextStyle(color: Colors.red)),
+          Text(
+            _errorMessage!,
+            style: NileTextStyles.bodyMd().copyWith(color: NileColors.error),
+          ),
         ],
         const SizedBox(height: 32),
+        // Go Live — volt CTA
         FilledButton.icon(
           onPressed: isConnecting ? null : _startStreaming,
           icon: isConnecting
@@ -140,15 +145,19 @@ class _AudioScreenState extends State<AudioScreen> {
                   height: 18,
                   child: CircularProgressIndicator(
                     strokeWidth: 2,
-                    color: Colors.white,
+                    color: NileColors.bgPage,
                   ),
                 )
               : const Icon(Icons.mic),
           label: Text(isConnecting ? 'Connecting...' : 'Go Live'),
           style: FilledButton.styleFrom(
+            backgroundColor: NileColors.volt,
+            foregroundColor: NileColors.bgPage,
             padding: const EdgeInsets.symmetric(vertical: 16),
-            textStyle: const TextStyle(fontSize: 18),
-            backgroundColor: Colors.green,
+            textStyle: NileTextStyles.labelLg(),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(NileRadius.sm),
+            ),
           ),
         ),
       ],
@@ -159,42 +168,43 @@ class _AudioScreenState extends State<AudioScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const Icon(Icons.mic, size: 80, color: Colors.greenAccent),
+        const Icon(Icons.mic, size: 80, color: NileColors.volt),
         const SizedBox(height: 24),
         Container(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
           decoration: BoxDecoration(
-            color: Colors.green,
-            borderRadius: BorderRadius.circular(8),
+            color: NileColors.coral,
+            borderRadius: BorderRadius.circular(NileRadius.sm),
           ),
-          child: const Text(
+          child: Text(
             '● LIVE AUDIO',
             textAlign: TextAlign.center,
-            style: TextStyle(
+            style: NileTextStyles.labelLg().copyWith(
               color: Colors.white,
-              fontWeight: FontWeight.bold,
-              fontSize: 18,
               letterSpacing: 2,
             ),
           ),
         ),
         const SizedBox(height: 16),
-        const Text(
+        Text(
           'Master audio is streaming.\nViewers are hearing this feed.',
           textAlign: TextAlign.center,
-          style: TextStyle(fontSize: 14, color: Colors.white54),
+          style: NileTextStyles.bodyMd().copyWith(color: NileColors.txtSecondary),
         ),
         const SizedBox(height: 48),
         OutlinedButton.icon(
           onPressed: _stopStreaming,
-          icon: const Icon(Icons.stop, color: Colors.red),
-          label: const Text(
+          icon: const Icon(Icons.stop, color: NileColors.error),
+          label: Text(
             'Stop Audio',
-            style: TextStyle(color: Colors.red, fontSize: 16),
+            style: NileTextStyles.labelMd().copyWith(color: NileColors.error),
           ),
           style: OutlinedButton.styleFrom(
             padding: const EdgeInsets.symmetric(vertical: 16),
-            side: const BorderSide(color: Colors.red),
+            side: const BorderSide(color: NileColors.error),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(NileRadius.sm),
+            ),
           ),
         ),
       ],

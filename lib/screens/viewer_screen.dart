@@ -2,7 +2,10 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:livekit_client/livekit_client.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 import '../config.dart';
+import '../services/event_service.dart';
+import '../theme.dart';
 
 class ViewerScreen extends StatefulWidget {
   final String? initialEventId;
@@ -18,25 +21,13 @@ enum ViewerState { idle, connecting, watching }
 class CameraFeed {
   final String identity;
   final String cameraName;
-  final VideoTrack? track; // null when the camera operator has disabled video
+  final VideoTrack? track;
 
-  CameraFeed({
-    required this.identity,
-    required this.cameraName,
-    this.track,
-  });
+  CameraFeed({required this.identity, required this.cameraName, this.track});
 }
 
 class _ViewerScreenState extends State<ViewerScreen> {
   final _eventIdController = TextEditingController();
-
-  @override
-  void initState() {
-    super.initState();
-    if (widget.initialEventId != null) {
-      _eventIdController.text = widget.initialEventId!;
-    }
-  }
 
   ViewerState _state = ViewerState.idle;
   Room? _room;
@@ -47,20 +38,62 @@ class _ViewerScreenState extends State<ViewerScreen> {
 
   // Audio management
   final Map<String, RemoteTrackPublication> _audioPublications = {};
-  bool _audioEnabled = true;           // viewer's master mute toggle
-  String? _masterAudioIdentity;        // identity of whoever is master audio
+  bool _audioEnabled = true;
+  String? _masterAudioIdentity;
+
+  // Phase 7: viewer count + realtime
+  int _viewerCount = 0;
+  String? _streamEventId; // liveKitEventId for cleanup
+  bool _streamEnded = false;
+  RealtimeChannel? _realtimeChannel;
+  bool _hasIncrementedViewerCount = false;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.initialEventId != null) {
+      _eventIdController.text = widget.initialEventId!;
+      // Auto-join when launched from the feed
+      WidgetsBinding.instance.addPostFrameCallback((_) => _joinAsViewer());
+    }
+  }
 
   @override
   void dispose() {
+    _decrementAndCleanup();
     _eventIdController.dispose();
     _listener?.dispose();
     _room?.disconnect();
     super.dispose();
   }
 
+  void _decrementAndCleanup() {
+    if (_hasIncrementedViewerCount && _streamEventId != null) {
+      EventService.decrementViewerCount(_streamEventId!).catchError((_) {});
+      _hasIncrementedViewerCount = false;
+    }
+    _realtimeChannel?.unsubscribe();
+    _realtimeChannel = null;
+  }
+
+  // ── Realtime callback ─────────────────────────────────────────────────────
+
+  void _onRealtimeUpdate(Map<String, dynamic> record) {
+    if (!mounted) return;
+    setState(() {
+      if (record['viewer_count'] != null) {
+        _viewerCount = record['viewer_count'] as int;
+      }
+      if (record['status'] == 'ended') {
+        _streamEnded = true;
+      }
+    });
+  }
+
+  // ── Join ──────────────────────────────────────────────────────────────────
+
   Future<void> _joinAsViewer() async {
     final eventId = _eventIdController.text.trim();
-
     if (eventId.isEmpty) {
       setState(() => _errorMessage = 'Please enter an Event ID.');
       return;
@@ -72,6 +105,16 @@ class _ViewerScreenState extends State<ViewerScreen> {
     });
 
     try {
+      // Fetch initial event state (viewer count + guard against already-ended)
+      final eventState = await EventService.fetchEventState(eventId);
+      if (eventState != null && eventState['status'] == 'ended') {
+        setState(() {
+          _state = ViewerState.idle;
+          _errorMessage = 'This stream has already ended.';
+        });
+        return;
+      }
+
       final response = await http.post(
         Uri.parse('$backendUrl/api/viewer-token'),
         headers: {'Content-Type': 'application/json'},
@@ -97,11 +140,11 @@ class _ViewerScreenState extends State<ViewerScreen> {
         ..on<TrackUnsubscribedEvent>(_onTrackUnsubscribed)
         ..on<ParticipantConnectedEvent>(_onParticipantConnected)
         ..on<ParticipantDisconnectedEvent>(_onParticipantDisconnected)
-        ..on<ParticipantMetadataUpdatedEvent>(_onParticipantMetadataUpdated);
+        ..on<ParticipantMetadataUpdatedEvent>(_onParticipantMetadataUpdated)
+        ..on<RoomDisconnectedEvent>(_onRoomDisconnected);
 
       await room.connect(wsUrl, token);
 
-      // Handle participants already in the room when we join
       for (final participant in room.remoteParticipants.values) {
         for (final publication in participant.videoTrackPublications) {
           if (publication.subscribed &&
@@ -117,10 +160,22 @@ class _ViewerScreenState extends State<ViewerScreen> {
         }
       }
 
+      // Increment viewer count + subscribe to realtime
+      EventService.incrementViewerCount(eventId).catchError((_) {});
+
+      final channel = EventService.subscribeToEvent(
+        liveKitEventId: eventId,
+        onUpdate: _onRealtimeUpdate,
+      );
+
       setState(() {
         _room = room;
         _listener = listener;
         _masterAudioIdentity = _findMasterAudioIdentity(room);
+        _streamEventId = eventId;
+        _viewerCount = eventState?['viewer_count'] as int? ?? 0;
+        _hasIncrementedViewerCount = true;
+        _realtimeChannel = channel;
         _state = ViewerState.watching;
       });
 
@@ -133,12 +188,11 @@ class _ViewerScreenState extends State<ViewerScreen> {
     }
   }
 
-  // ── Event handlers ────────────────────────────────────────────────────
+  // ── LiveKit event handlers ────────────────────────────────────────────────
 
   void _onTrackSubscribed(TrackSubscribedEvent event) {
     if (event.track is VideoTrack &&
         event.publication.source == TrackSource.camera) {
-      // If camera already in list (re-enabling video), update its track
       final idx = _cameras.indexWhere((c) => c.identity == event.participant.identity);
       if (idx != -1) {
         setState(() {
@@ -158,7 +212,6 @@ class _ViewerScreenState extends State<ViewerScreen> {
 
   void _onTrackUnsubscribed(TrackUnsubscribedEvent event) {
     if (event.track is VideoTrack) {
-      // Keep the camera slot visible but mark video as off
       final idx = _cameras.indexWhere((c) => c.identity == event.participant.identity);
       if (idx != -1) {
         setState(() {
@@ -177,20 +230,16 @@ class _ViewerScreenState extends State<ViewerScreen> {
 
   void _onParticipantDisconnected(ParticipantDisconnectedEvent event) {
     _audioPublications.remove(event.participant.identity);
-
     setState(() {
       _cameras.removeWhere((c) => c.identity == event.participant.identity);
       if (_focusedIndex >= _cameras.length && _cameras.isNotEmpty) {
         _focusedIndex = _cameras.length - 1;
       }
     });
-
-    // Re-detect master audio in case it was this participant
     if (event.participant.identity == _masterAudioIdentity) {
       final newIdentity = _findMasterAudioIdentity(_room);
       setState(() => _masterAudioIdentity = newIdentity);
     }
-
     _updateAudioRouting();
   }
 
@@ -210,7 +259,14 @@ class _ViewerScreenState extends State<ViewerScreen> {
     }
   }
 
-  // ── Audio management ──────────────────────────────────────────────────
+  void _onRoomDisconnected(RoomDisconnectedEvent event) {
+    // LiveKit room dropped — treat as stream ended if we're still watching
+    if (mounted && _state == ViewerState.watching && !_streamEnded) {
+      setState(() => _streamEnded = true);
+    }
+  }
+
+  // ── Audio management ──────────────────────────────────────────────────────
 
   void _storeAudioPublication(
     RemoteParticipant participant,
@@ -226,20 +282,14 @@ class _ViewerScreenState extends State<ViewerScreen> {
     } catch (_) {}
   }
 
-  /// Scans room participants to find who is currently master audio.
-  /// Standalone 'master-audio' role takes priority over camera isMasterAudio flag.
   String? _findMasterAudioIdentity(Room? room) {
     if (room == null) return null;
-
-    // Priority 1: standalone master-audio device
     for (final p in room.remoteParticipants.values) {
       try {
         final meta = jsonDecode(p.metadata ?? '{}');
         if (meta['role'] == 'master-audio') return p.identity;
       } catch (_) {}
     }
-
-    // Priority 2: camera with isMasterAudio: true
     for (final p in room.remoteParticipants.values) {
       try {
         final meta = jsonDecode(p.metadata ?? '{}');
@@ -248,12 +298,9 @@ class _ViewerScreenState extends State<ViewerScreen> {
         }
       } catch (_) {}
     }
-
     return null;
   }
 
-  /// Routes audio to master audio source. Falls back to focused camera
-  /// if no master audio is designated. Honours the viewer's mute toggle.
   void _updateAudioRouting() {
     if (!_audioEnabled) {
       for (final pub in _audioPublications.values) {
@@ -261,14 +308,11 @@ class _ViewerScreenState extends State<ViewerScreen> {
       }
       return;
     }
-
     final target = _masterAudioIdentity ??
         (_cameras.isNotEmpty
             ? _cameras[_focusedIndex.clamp(0, _cameras.length - 1)].identity
             : null);
-
     if (target == null) return;
-
     for (final entry in _audioPublications.entries) {
       if (entry.key == target) {
         entry.value.subscribe();
@@ -287,8 +331,6 @@ class _ViewerScreenState extends State<ViewerScreen> {
         _masterAudioIdentity!;
   }
 
-  /// Returns true when the master audio source is a standalone Stream Audio
-  /// device (role: 'master-audio') rather than a camera.
   bool _isStreamAudioSource() {
     if (_masterAudioIdentity == null || _room == null) return false;
     try {
@@ -301,24 +343,21 @@ class _ViewerScreenState extends State<ViewerScreen> {
     }
   }
 
-  // ── Camera helpers ────────────────────────────────────────────────────
+  // ── Camera helpers ────────────────────────────────────────────────────────
 
   void _addCamera(RemoteParticipant participant, VideoTrack track) {
+    Map<String, dynamic> meta;
     try {
-      final meta = jsonDecode(participant.metadata ?? '{}');
-      if (meta['role'] != 'camera') return;
+      meta = jsonDecode(participant.metadata ?? '{}') as Map<String, dynamic>;
     } catch (_) {
       return;
     }
-
-    // Guard against double-adds — one feed per participant identity
+    if (meta['role'] != 'camera') return;
     if (_cameras.any((c) => c.identity == participant.identity)) return;
 
-    String cameraName = participant.name ?? participant.identity;
-    try {
-      final meta = jsonDecode(participant.metadata ?? '{}');
-      if (meta['cameraName'] != null) cameraName = meta['cameraName'];
-    } catch (_) {}
+    final cameraName = (meta['cameraName'] as String?)
+        ?? participant.name
+        ?? participant.identity;
 
     setState(() {
       _cameras.add(CameraFeed(
@@ -327,11 +366,13 @@ class _ViewerScreenState extends State<ViewerScreen> {
         track: track,
       ));
     });
-
     _updateAudioRouting();
   }
 
+  // ── Leave ─────────────────────────────────────────────────────────────────
+
   Future<void> _leave() async {
+    _decrementAndCleanup();
     await _listener?.dispose();
     await _room?.disconnect();
     setState(() {
@@ -342,26 +383,25 @@ class _ViewerScreenState extends State<ViewerScreen> {
       _focusedIndex = 0;
       _masterAudioIdentity = null;
       _audioEnabled = true;
+      _viewerCount = 0;
+      _streamEventId = null;
+      _streamEnded = false;
       _state = ViewerState.idle;
     });
   }
 
-  // ── Build ─────────────────────────────────────────────────────────────
+  // ── Build ─────────────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Watch'),
-        backgroundColor: Colors.transparent,
-        actions: [
-          if (_state == ViewerState.watching)
-            TextButton(
-              onPressed: _leave,
-              child: const Text('Leave', style: TextStyle(color: Colors.red)),
+      backgroundColor: NileColors.bgPage,
+      appBar: _state == ViewerState.watching
+          ? null // full-screen watching: no AppBar
+          : AppBar(
+              title: Text('Watch', style: NileTextStyles.headingMd()),
+              backgroundColor: Colors.transparent,
             ),
-        ],
-      ),
       body: switch (_state) {
         ViewerState.idle => _buildForm(),
         ViewerState.connecting => _buildConnecting(),
@@ -376,22 +416,22 @@ class _ViewerScreenState extends State<ViewerScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          const Text(
-            'Join a stream',
-            style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
-          ),
+          Text('Join a stream', style: NileTextStyles.headingLg()),
           const SizedBox(height: 32),
           TextField(
             controller: _eventIdController,
+            style: NileTextStyles.bodyLg(),
             decoration: const InputDecoration(
               labelText: 'Event ID',
               hintText: 'e.g. show-2024-01',
-              border: OutlineInputBorder(),
             ),
           ),
           if (_errorMessage != null) ...[
             const SizedBox(height: 16),
-            Text(_errorMessage!, style: const TextStyle(color: Colors.red)),
+            Text(
+              _errorMessage!,
+              style: NileTextStyles.bodyMd().copyWith(color: NileColors.error),
+            ),
           ],
           const SizedBox(height: 32),
           FilledButton.icon(
@@ -399,8 +439,13 @@ class _ViewerScreenState extends State<ViewerScreen> {
             icon: const Icon(Icons.tv),
             label: const Text('Watch Now'),
             style: FilledButton.styleFrom(
+              backgroundColor: NileColors.volt,
+              foregroundColor: NileColors.bgPage,
               padding: const EdgeInsets.symmetric(vertical: 16),
-              textStyle: const TextStyle(fontSize: 18),
+              textStyle: NileTextStyles.labelLg(),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(NileRadius.sm),
+              ),
             ),
           ),
         ],
@@ -409,13 +454,13 @@ class _ViewerScreenState extends State<ViewerScreen> {
   }
 
   Widget _buildConnecting() {
-    return const Center(
+    return Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          CircularProgressIndicator(),
-          SizedBox(height: 16),
-          Text('Joining stream...'),
+          const CircularProgressIndicator(color: NileColors.volt),
+          const SizedBox(height: 16),
+          Text('Joining stream...', style: NileTextStyles.bodyMd()),
         ],
       ),
     );
@@ -423,7 +468,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
 
   Widget _buildCameraOffPlaceholder({required bool large}) {
     return Container(
-      color: Colors.black,
+      color: NileColors.bgSurface,
       child: Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
@@ -431,13 +476,13 @@ class _ViewerScreenState extends State<ViewerScreen> {
             Icon(
               Icons.videocam_off,
               size: large ? 48 : 24,
-              color: Colors.white24,
+              color: NileColors.border,
             ),
             if (large) ...[
               const SizedBox(height: 8),
-              const Text(
+              Text(
                 'Camera Off',
-                style: TextStyle(color: Colors.white38, fontSize: 14),
+                style: NileTextStyles.bodyMd().copyWith(color: NileColors.txtTertiary),
               ),
             ],
           ],
@@ -447,50 +492,119 @@ class _ViewerScreenState extends State<ViewerScreen> {
   }
 
   Widget _buildWatching() {
-    if (_cameras.isEmpty) {
-      return const Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
+    return Stack(
+      children: [
+        Column(
           children: [
-            CircularProgressIndicator(),
-            SizedBox(height: 16),
-            Text('Waiting for cameras to connect...'),
+            _buildTopBar(),
+            if (_cameras.isEmpty)
+              Expanded(
+                child: Center(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const CircularProgressIndicator(color: NileColors.volt),
+                      const SizedBox(height: 16),
+                      Text(
+                        'Waiting for cameras to connect...',
+                        style: NileTextStyles.bodyMd()
+                            .copyWith(color: NileColors.txtSecondary),
+                      ),
+                    ],
+                  ),
+                ),
+              )
+            else
+              Expanded(
+                child: OrientationBuilder(
+                  builder: (context, orientation) {
+                    final isLandscape = orientation == Orientation.landscape;
+                    return Column(
+                      children: [
+                        _buildAudioBar(),
+                        Expanded(
+                          child: isLandscape
+                              ? _buildLandscapeLayout()
+                              : _buildPortraitLayout(),
+                        ),
+                      ],
+                    );
+                  },
+                ),
+              ),
           ],
         ),
-      );
-    }
 
-    return OrientationBuilder(
-      builder: (context, orientation) {
-        final isLandscape = orientation == Orientation.landscape;
-        return Column(
-          children: [
-            _buildAudioBar(),
-            Expanded(
-              child: isLandscape
-                  ? _buildLandscapeLayout()
-                  : _buildPortraitLayout(),
+        // Stream ended overlay
+        if (_streamEnded) _buildStreamEndedOverlay(),
+      ],
+    );
+  }
+
+  // ── Top bar (viewer count + leave) ────────────────────────────────────────
+
+  Widget _buildTopBar() {
+    return Container(
+      padding: EdgeInsets.only(
+        top: MediaQuery.of(context).padding.top + 8,
+        left: 16,
+        right: 8,
+        bottom: 8,
+      ),
+      color: NileColors.bgPage,
+      child: Row(
+        children: [
+          // LIVE badge
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            decoration: BoxDecoration(
+              color: NileColors.coral,
+              borderRadius: BorderRadius.circular(NileRadius.xs),
             ),
-          ],
-        );
-      },
+            child: Text(
+              'LIVE',
+              style: NileTextStyles.caption().copyWith(
+                color: Colors.white,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 1.2,
+              ),
+            ),
+          ),
+          const SizedBox(width: 10),
+          // Viewer count
+          const Icon(Icons.visibility, size: 14, color: NileColors.txtTertiary),
+          const SizedBox(width: 4),
+          Text(
+            '$_viewerCount',
+            style: NileTextStyles.bodySm().copyWith(color: NileColors.txtSecondary),
+          ),
+          const Spacer(),
+          // Leave button
+          TextButton(
+            onPressed: _leave,
+            child: Text(
+              'Leave',
+              style: NileTextStyles.bodyMd().copyWith(color: NileColors.error),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
   // ── Audio bar ─────────────────────────────────────────────────────────────
 
   Widget _buildAudioBar() {
+    final hasAudio = _masterAudioIdentity != null;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      color: Colors.black26,
+      color: NileColors.bgSurface,
       child: Row(
         children: [
           Icon(
             _isStreamAudioSource() ? Icons.tune : Icons.album,
             size: 16,
-            color: _masterAudioIdentity != null
-                ? Colors.greenAccent
-                : Colors.white38,
+            color: hasAudio ? NileColors.volt : NileColors.txtTertiary,
           ),
           const SizedBox(width: 6),
           Text(
@@ -499,17 +613,14 @@ class _ViewerScreenState extends State<ViewerScreen> {
                 : _isStreamAudioSource()
                     ? 'Stream Audio'
                     : 'Master: ${_masterAudioName()}',
-            style: TextStyle(
-              color: _masterAudioIdentity != null
-                  ? Colors.greenAccent
-                  : Colors.white38,
-              fontSize: 13,
+            style: NileTextStyles.bodySm().copyWith(
+              color: hasAudio ? NileColors.volt : NileColors.txtTertiary,
             ),
           ),
           const Spacer(),
           IconButton(
             icon: Icon(_audioEnabled ? Icons.volume_up : Icons.volume_off),
-            color: _audioEnabled ? Colors.white : Colors.white38,
+            color: _audioEnabled ? NileColors.txtPrimary : NileColors.txtTertiary,
             iconSize: 20,
             onPressed: () {
               setState(() => _audioEnabled = !_audioEnabled);
@@ -521,7 +632,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
     );
   }
 
-  // ── Portrait: main on top, thumbnail strip along the bottom ──────────────
+  // ── Layouts ───────────────────────────────────────────────────────────────
 
   Widget _buildPortraitLayout() {
     return Column(
@@ -532,8 +643,6 @@ class _ViewerScreenState extends State<ViewerScreen> {
     );
   }
 
-  // ── Landscape: main on the left, thumbnail sidebar on the right ──────────
-
   Widget _buildLandscapeLayout() {
     return Row(
       children: [
@@ -542,8 +651,6 @@ class _ViewerScreenState extends State<ViewerScreen> {
       ],
     );
   }
-
-  // ── Main camera view ─────────────────────────────────────────────────────
 
   Widget _buildMainCamera() {
     final focused = _cameras[_focusedIndex.clamp(0, _cameras.length - 1)];
@@ -557,7 +664,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
           const Positioned(
             top: 12,
             right: 12,
-            child: Icon(Icons.album, color: Colors.greenAccent, size: 18),
+            child: Icon(Icons.album, color: NileColors.volt, size: 18),
           ),
         Positioned(
           bottom: 12,
@@ -565,24 +672,20 @@ class _ViewerScreenState extends State<ViewerScreen> {
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
             decoration: BoxDecoration(
-              color: Colors.black54,
-              borderRadius: BorderRadius.circular(8),
+              color: NileColors.bgPage.withOpacity(0.7),
+              borderRadius: BorderRadius.circular(NileRadius.sm),
             ),
-            child: Text(
-              focused.cameraName,
-              style: const TextStyle(color: Colors.white, fontSize: 14),
-            ),
+            child: Text(focused.cameraName, style: NileTextStyles.bodyMd()),
           ),
         ),
       ],
     );
   }
 
-  // ── Thumbnail helpers ────────────────────────────────────────────────────
-
   Widget _buildHorizontalThumbnails() {
-    return SizedBox(
+    return Container(
       height: 100,
+      color: NileColors.bgPage,
       child: ListView.builder(
         scrollDirection: Axis.horizontal,
         padding: const EdgeInsets.all(8),
@@ -598,8 +701,9 @@ class _ViewerScreenState extends State<ViewerScreen> {
   }
 
   Widget _buildVerticalThumbnails() {
-    return SizedBox(
+    return Container(
       width: 110,
+      color: NileColors.bgPage,
       child: ListView.builder(
         scrollDirection: Axis.vertical,
         padding: const EdgeInsets.all(6),
@@ -635,13 +739,13 @@ class _ViewerScreenState extends State<ViewerScreen> {
         margin: margin,
         decoration: BoxDecoration(
           border: Border.all(
-            color: isFocused ? Colors.blue : Colors.transparent,
+            color: isFocused ? NileColors.volt : Colors.transparent,
             width: 2,
           ),
-          borderRadius: BorderRadius.circular(8),
+          borderRadius: BorderRadius.circular(NileRadius.sm),
         ),
         child: ClipRRect(
-          borderRadius: BorderRadius.circular(6),
+          borderRadius: BorderRadius.circular(NileRadius.sm - 2),
           child: Stack(
             fit: StackFit.expand,
             children: [
@@ -652,7 +756,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
                 const Positioned(
                   top: 4,
                   right: 4,
-                  child: Icon(Icons.album, color: Colors.greenAccent, size: 14),
+                  child: Icon(Icons.album, color: NileColors.volt, size: 14),
                 ),
               Positioned(
                 bottom: 4,
@@ -660,16 +764,56 @@ class _ViewerScreenState extends State<ViewerScreen> {
                 right: 4,
                 child: Text(
                   camera.cameraName,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 11,
-                    shadows: [Shadow(blurRadius: 4)],
+                  style: NileTextStyles.caption().copyWith(
+                    color: NileColors.txtPrimary,
+                    shadows: const [Shadow(blurRadius: 4)],
                   ),
                   overflow: TextOverflow.ellipsis,
                 ),
               ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+
+  // ── Stream ended overlay ──────────────────────────────────────────────────
+
+  Widget _buildStreamEndedOverlay() {
+    return Container(
+      color: Colors.black87,
+      child: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(
+              Icons.stop_circle_outlined,
+              size: 72,
+              color: NileColors.txtTertiary,
+            ),
+            const SizedBox(height: 20),
+            Text('Stream Ended', style: NileTextStyles.headingLg()),
+            const SizedBox(height: 8),
+            Text(
+              'The host has ended the stream.',
+              style: NileTextStyles.bodyMd().copyWith(color: NileColors.txtSecondary),
+            ),
+            const SizedBox(height: 36),
+            FilledButton(
+              onPressed: _leave,
+              style: FilledButton.styleFrom(
+                backgroundColor: NileColors.volt,
+                foregroundColor: NileColors.bgPage,
+                padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 14),
+                textStyle: NileTextStyles.labelLg(),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(NileRadius.sm),
+                ),
+              ),
+              child: const Text('Close'),
+            ),
+          ],
         ),
       ),
     );
