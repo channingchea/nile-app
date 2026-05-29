@@ -3,6 +3,7 @@ import '../services/notification_service.dart';
 import '../services/post_service.dart';
 import '../theme.dart';
 import 'post_detail_screen.dart';
+import 'profile_screen.dart';
 
 class NotificationsScreen extends StatefulWidget {
   const NotificationsScreen({super.key});
@@ -45,8 +46,12 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
           MaterialPageRoute(builder: (_) => PostDetailScreen(post: post)),
         );
       case NotificationType.follow:
-        // No deep-link target yet — could navigate to actor profile in a future phase.
-        break;
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => ProfileScreen(userId: n.actorId),
+          ),
+        );
     }
   }
 
@@ -153,7 +158,7 @@ class _NotificationTile extends StatelessWidget {
   Color _iconColor() => switch (notification.type) {
         NotificationType.postLike => NileColors.coral,
         NotificationType.postComment => NileColors.volt,
-        NotificationType.follow => NileColors.txtSecondary,
+        NotificationType.follow => NileColors.volt,
       };
 
   String _timeAgo(DateTime dt) {
@@ -181,19 +186,27 @@ class _NotificationTile extends StatelessWidget {
             Stack(
               clipBehavior: Clip.none,
               children: [
-                CircleAvatar(
-                  radius: 20,
-                  backgroundColor: NileColors.bgRaised,
-                  backgroundImage: notification.actorAvatarUrl != null
-                      ? NetworkImage(notification.actorAvatarUrl!)
-                      : null,
-                  child: notification.actorAvatarUrl == null
-                      ? Text(
-                          notification.actorUsername[0].toUpperCase(),
-                          style: NileTextStyles.labelSm()
-                              .copyWith(color: NileColors.txtPrimary, letterSpacing: 0),
-                        )
-                      : null,
+                GestureDetector(
+                  onTap: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => ProfileScreen(userId: notification.actorId),
+                    ),
+                  ),
+                  child: CircleAvatar(
+                    radius: 20,
+                    backgroundColor: NileColors.bgRaised,
+                    backgroundImage: notification.actorAvatarUrl != null
+                        ? NetworkImage(notification.actorAvatarUrl!)
+                        : null,
+                    child: notification.actorAvatarUrl == null
+                        ? Text(
+                            notification.actorUsername[0].toUpperCase(),
+                            style: NileTextStyles.labelSm()
+                                .copyWith(color: NileColors.txtPrimary, letterSpacing: 0),
+                          )
+                        : null,
+                  ),
                 ),
                 Positioned(
                   bottom: -2,
