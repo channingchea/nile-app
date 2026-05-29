@@ -247,6 +247,12 @@ class _FeedTabState extends State<_FeedTab> {
     });
   }
 
+  void _removeEvent(String eventId) {
+    if (_items == null) return;
+    setState(() => _items!
+        .removeWhere((it) => it is _EventFeedItem && it.event.id == eventId));
+  }
+
   Future<void> _togglePostLike(Post post) async {
     final wasLiked = post.likedByMe;
     final delta = wasLiked ? -1 : 1;
@@ -403,6 +409,9 @@ class _FeedTabState extends State<_FeedTab> {
                           onEdited: myId == event.hostId
                               ? (e) => _replaceEvent(e)
                               : null,
+                          onDeleted: myId == event.hostId
+                              ? () => _removeEvent(event.id)
+                              : null,
                           onLikeToggle: () => _toggleEventLike(event),
                         ),
                       _PostFeedItem(:final post) => _PostCard(
@@ -432,8 +441,13 @@ class _FeedTabState extends State<_FeedTab> {
 class _EventCard extends StatelessWidget {
   final Event event;
   final void Function(Event)? onEdited;
+  final VoidCallback? onDeleted;
   final VoidCallback? onLikeToggle;
-  const _EventCard({required this.event, this.onEdited, this.onLikeToggle});
+  const _EventCard(
+      {required this.event,
+      this.onEdited,
+      this.onDeleted,
+      this.onLikeToggle});
 
   String _timeAgo(DateTime dt) {
     final d = DateTime.now().difference(dt);
@@ -450,14 +464,17 @@ class _EventCard extends StatelessWidget {
       borderRadius: BorderRadius.circular(NileRadius.md),
       clipBehavior: Clip.antiAlias,
       child: InkWell(
-        onTap: () => Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (_) => event.isLive
-                ? ViewerScreen(initialEventId: event.liveKitEventId)
-                : EventDetailScreen(event: event),
-          ),
-        ),
+        onTap: () async {
+          final result = await Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => event.isLive
+                  ? ViewerScreen(initialEventId: event.liveKitEventId)
+                  : EventDetailScreen(event: event),
+            ),
+          );
+          if (result == true) onDeleted?.call();
+        },
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [

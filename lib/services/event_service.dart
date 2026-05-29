@@ -241,6 +241,20 @@ class EventService {
     return Event.fromJson(row);
   }
 
+  /// Delete an event (host only). RLS `events_delete_own` enforces ownership;
+  /// tickets cascade via the FK. Best-effort removal of the cover image too.
+  static Future<void> deleteEvent(String eventId,
+      {String? liveKitEventId}) async {
+    await supabase.from('events').delete().eq('id', eventId);
+    if (liveKitEventId != null) {
+      try {
+        await supabase.storage
+            .from('events')
+            .remove(['$liveKitEventId/cover.jpg']);
+      } catch (_) {/* cover may not exist — ignore */}
+    }
+  }
+
   /// Upload a cover image for an event and return its public URL.
   /// Stored at `events/{liveKitEventId}/cover.jpg` in the `events` bucket.
   static Future<String> uploadCoverBytes({

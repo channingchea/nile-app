@@ -8,6 +8,7 @@ import '../services/post_service.dart';
 import '../services/profile_service.dart';
 import '../theme.dart';
 import 'post_detail_screen.dart';
+import 'settings_screen.dart';
 import 'create_event_screen.dart';
 import 'create_post_screen.dart';
 import 'edit_event_screen.dart';
@@ -239,6 +240,15 @@ class _ProfileScreenState extends State<ProfileScreen> {
     if (updated != null) setState(() => _profile = updated);
   }
 
+  Future<void> _openSettings() async {
+    if (_profile == null) return;
+    final updated = await Navigator.push<UserProfile>(
+      context,
+      MaterialPageRoute(builder: (_) => SettingsScreen(profile: _profile!)),
+    );
+    if (updated != null) setState(() => _profile = updated);
+  }
+
   Future<void> _toggleFollow() async {
     if (_profile == null || _followLoading) return;
     setState(() => _followLoading = true);
@@ -317,41 +327,12 @@ class _ProfileScreenState extends State<ProfileScreen> {
         backgroundColor: NileColors.bgPage,
         title: Text('@${p.username}', style: NileTextStyles.headingSm()),
         actions: [
-          if (_isOwnProfile) ...[
+          if (_isOwnProfile)
             IconButton(
-              icon: const Icon(Icons.edit_outlined),
-              onPressed: _openEdit,
-              tooltip: 'Edit profile',
+              icon: const Icon(Icons.settings_outlined),
+              tooltip: 'Settings',
+              onPressed: _openSettings,
             ),
-            IconButton(
-              icon: const Icon(Icons.logout),
-              tooltip: 'Sign out',
-              onPressed: () async {
-                final confirm = await showDialog<bool>(
-                  context: context,
-                  builder: (_) => AlertDialog(
-                    backgroundColor: NileColors.bgSurface,
-                    title: Text('Sign out?', style: NileTextStyles.headingSm()),
-                    actions: [
-                      TextButton(
-                        onPressed: () => Navigator.pop(context, false),
-                        child: const Text('Cancel'),
-                      ),
-                      TextButton(
-                        onPressed: () => Navigator.pop(context, true),
-                        style: TextButton.styleFrom(
-                            foregroundColor: NileColors.error),
-                        child: const Text('Sign out'),
-                      ),
-                    ],
-                  ),
-                );
-                if (confirm == true) {
-                  await Supabase.instance.client.auth.signOut();
-                }
-              },
-            ),
-          ],
         ],
       ),
       floatingActionButton: _isOwnProfile

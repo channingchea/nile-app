@@ -4,11 +4,14 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../services/event_service.dart';
 import '../services/follow_service.dart';
 import '../services/supabase_client.dart';
+import '../services/ticket_service.dart';
 import '../theme.dart';
+import 'attendee_list_screen.dart';
 import 'edit_event_screen.dart';
 import 'profile_screen.dart';
 import 'viewer_screen.dart';
@@ -30,7 +33,8 @@ class EventDetailScreen extends StatefulWidget {
   State<EventDetailScreen> createState() => _EventDetailScreenState();
 }
 
-class _EventDetailScreenState extends State<EventDetailScreen> {
+class _EventDetailScreenState extends State<EventDetailScreen>
+    with WidgetsBindingObserver {
   Event? _event;
   String? _error;
   bool _loading = true;
@@ -38,6 +42,11 @@ class _EventDetailScreenState extends State<EventDetailScreen> {
   // Follow state
   bool _isFollowing = false;
   bool _followBusy = false;
+
+  // Ticket state
+  bool _hasTicket = false;
+  bool _ticketBusy = false;
+  int? _ticketsRemaining; // null = unlimited
 
   // Countdown
   Timer? _ticker;
@@ -59,15 +68,44 @@ class _EventDetailScreenState extends State<EventDetailScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _event = widget.event;
     _load();
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _ticker?.cancel();
     _channel?.unsubscribe();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Returning from the Stripe browser flow — re-check ticket status.
+    if (state == AppLifecycleState.resumed) _refreshTicketStatus();
+  }
+
+  /// Poll ticket status a few times to absorb Stripe webhook latency.
+  Future<void> _refreshTicketStatus() async {
+    final event = _event;
+    if (event == null ||
+        _hasTicket ||
+        _isOwnEvent ||
+        event.price == null ||
+        event.price! <= 0) {
+      return;
+    }
+    for (var attempt = 0; attempt < 5; attempt++) {
+      final purchased = await TicketService.hasPurchased(event.id);
+      if (!mounted) return;
+      if (purchased) {
+        setState(() => _hasTicket = true);
+        return;
+      }
+      await Future.delayed(const Duration(seconds: 2));
+    }
   }
 
   // ── Data ────────────────────────────────────────────────────────────────────
@@ -87,9 +125,23 @@ class _EventDetailScreenState extends State<EventDetailScreen> {
         following = await FollowService.isFollowing(_event!.hostId);
       }
 
+      // Ticket state (only relevant for paid events)
+      bool hasTicket = false;
+      int? remaining;
+      if (_event!.price != null && _event!.price! > 0 && !_isOwnEvent) {
+        final results = await Future.wait([
+          TicketService.hasPurchased(_event!.id),
+          TicketService.ticketsRemaining(_event!.id),
+        ]);
+        hasTicket = results[0] as bool;
+        remaining = results[1] as int?;
+      }
+
       if (!mounted) return;
       setState(() {
         _isFollowing = following;
+        _hasTicket = hasTicket;
+        _ticketsRemaining = remaining;
         _loading = false;
       });
 
@@ -192,6 +244,39 @@ class _EventDetailScreenState extends State<EventDetailScreen> {
     );
   }
 
+  Future<void> _buyTicket() async {
+    if (_event == null || _event!.price == null) return;
+    setState(() => _ticketBusy = true);
+    try {
+      final url = await TicketService.createCheckoutUrl(
+        eventId: _event!.id,
+        eventTitle: _event!.title,
+        amountCents: _event!.price!,
+      );
+      final uri = Uri.parse(url);
+      if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
+        throw Exception('Could not open checkout');
+      }
+      // Poll for ticket confirmation after returning from browser
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Complete payment in your browser. Ticket status updates automatically.'),
+          duration: Duration(seconds: 5),
+        ),
+      );
+      // Poll for webhook confirmation (also re-checked on app resume).
+      await _refreshTicketStatus();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Couldn\'t start checkout: $e')),
+      );
+    } finally {
+      if (mounted) setState(() => _ticketBusy = false);
+    }
+  }
+
   void _watch() {
     if (_event == null || !_event!.isLive) return;
     Navigator.push(
@@ -222,6 +307,64 @@ class _EventDetailScreenState extends State<EventDetailScreen> {
     }
   }
 
+  Future<void> _delete() async {
+    if (_event == null || !_isOwnEvent) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: NileColors.bgSurface,
+        title: const Text('Delete event?'),
+        content: Text(
+          'This permanently deletes "${_event!.title}" and all its tickets. '
+          'This can\'t be undone.',
+          style: NileTextStyles.bodySm()
+              .copyWith(color: NileColors.txtSecondary),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style:
+                TextButton.styleFrom(foregroundColor: NileColors.coral),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    try {
+      await EventService.deleteEvent(_event!.id,
+          liveKitEventId: _event!.liveKitEventId);
+      if (!mounted) return;
+      Navigator.pop(context, true); // signal deletion to the previous screen
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Event deleted')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Couldn\'t delete: $e')),
+      );
+    }
+  }
+
+  void _openAttendees() {
+    if (_event == null || !_isOwnEvent) return;
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => AttendeeListScreen(
+          eventId: _event!.id,
+          eventTitle: _event!.title,
+        ),
+      ),
+    );
+  }
+
   // ── UI ──────────────────────────────────────────────────────────────────────
 
   @override
@@ -246,13 +389,26 @@ class _EventDetailScreenState extends State<EventDetailScreen> {
           backgroundColor: NileColors.bgPage,
           expandedHeight: 240,
           actions: [
-            if (_isOwnEvent)
+            if (_isOwnEvent) ...[
+              IconButton(
+                tooltip: 'Attendees',
+                icon: const Icon(Icons.people_outline,
+                    color: NileColors.txtPrimary),
+                onPressed: _openAttendees,
+              ),
               IconButton(
                 tooltip: 'Edit',
                 icon: const Icon(Icons.edit_outlined,
                     color: NileColors.txtPrimary),
                 onPressed: _edit,
               ),
+              IconButton(
+                tooltip: 'Delete',
+                icon: const Icon(Icons.delete_outline,
+                    color: NileColors.coral),
+                onPressed: _delete,
+              ),
+            ],
             IconButton(
               tooltip: 'Share',
               icon: const Icon(Icons.ios_share, color: NileColors.txtPrimary),
@@ -273,7 +429,19 @@ class _EventDetailScreenState extends State<EventDetailScreen> {
           padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
           sliver: SliverList.list(
             children: [
-              _StatusChip(event: _event!),
+              Row(
+                children: [
+                  _StatusChip(event: _event!),
+                  if (_event!.price != null && _event!.price! > 0) ...[
+                    const SizedBox(width: 8),
+                    _PriceChip(
+                      priceCents: _event!.price!,
+                      ticketsRemaining: _ticketsRemaining,
+                      hasTicket: _hasTicket,
+                    ),
+                  ],
+                ],
+              ),
               const SizedBox(height: 12),
               Text(_event!.title, style: NileTextStyles.headingLg()),
               const SizedBox(height: 16),
@@ -304,7 +472,12 @@ class _EventDetailScreenState extends State<EventDetailScreen> {
               _PrimaryCta(
                 event: _event!,
                 countdownExpired: _countdownExpired,
+                isOwn: _isOwnEvent,
+                hasTicket: _hasTicket,
+                ticketBusy: _ticketBusy,
+                ticketsRemaining: _ticketsRemaining,
                 onWatch: _watch,
+                onBuyTicket: _buyTicket,
               ),
             ],
           ),
@@ -596,20 +769,94 @@ class _CountUnit extends StatelessWidget {
   }
 }
 
-class _PrimaryCta extends StatelessWidget {
-  final Event event;
-  final bool countdownExpired;
-  final VoidCallback onWatch;
+class _PriceChip extends StatelessWidget {
+  final int priceCents;
+  final int? ticketsRemaining;
+  final bool hasTicket;
 
-  const _PrimaryCta({
-    required this.event,
-    required this.countdownExpired,
-    required this.onWatch,
+  const _PriceChip({
+    required this.priceCents,
+    required this.ticketsRemaining,
+    required this.hasTicket,
   });
 
   @override
   Widget build(BuildContext context) {
+    final soldOut = ticketsRemaining != null && ticketsRemaining == 0;
+    final label = hasTicket
+        ? '✓ Ticket'
+        : soldOut
+            ? 'Sold Out'
+            : '\$${(priceCents / 100).toStringAsFixed(priceCents % 100 == 0 ? 0 : 2)}';
+
+    final bg = hasTicket
+        ? NileColors.volt.withAlpha(30)
+        : soldOut
+            ? NileColors.bgRaised
+            : NileColors.bgRaised;
+    final fg = hasTicket
+        ? NileColors.volt
+        : soldOut
+            ? NileColors.txtSecondary
+            : NileColors.txtPrimary;
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(NileRadius.xs),
+        border: Border.all(
+          color: hasTicket ? NileColors.volt : NileColors.border,
+        ),
+      ),
+      child: Text(
+        label,
+        style: NileTextStyles.caption().copyWith(
+          color: fg,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+    );
+  }
+}
+
+class _PrimaryCta extends StatelessWidget {
+  final Event event;
+  final bool countdownExpired;
+  final bool isOwn;
+  final bool hasTicket;
+  final bool ticketBusy;
+  final int? ticketsRemaining;
+  final VoidCallback onWatch;
+  final VoidCallback onBuyTicket;
+
+  const _PrimaryCta({
+    required this.event,
+    required this.countdownExpired,
+    required this.isOwn,
+    required this.hasTicket,
+    required this.ticketBusy,
+    required this.ticketsRemaining,
+    required this.onWatch,
+    required this.onBuyTicket,
+  });
+
+  bool get _isPaid => event.price != null && event.price! > 0;
+  bool get _soldOut => ticketsRemaining != null && ticketsRemaining == 0;
+  bool get _canWatch => !_isPaid || isOwn || hasTicket;
+
+  @override
+  Widget build(BuildContext context) {
     if (event.isLive) {
+      // Paid event — user needs a ticket
+      if (_isPaid && !_canWatch) {
+        return _GetTicketButton(
+          priceCents: event.price!,
+          soldOut: _soldOut,
+          busy: ticketBusy,
+          onBuy: onBuyTicket,
+        );
+      }
       return SizedBox(
         width: double.infinity,
         child: FilledButton.icon(
@@ -626,21 +873,20 @@ class _PrimaryCta extends StatelessWidget {
               const Text('Watch Now'),
               const SizedBox(width: 8),
               Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                 decoration: BoxDecoration(
                   color: Colors.white24,
                   borderRadius: BorderRadius.circular(NileRadius.xs),
                 ),
                 child: Text('${event.viewerCount}',
-                    style: NileTextStyles.caption()
-                        .copyWith(color: Colors.white)),
+                    style: NileTextStyles.caption().copyWith(color: Colors.white)),
               ),
             ],
           ),
         ),
       );
     }
+
     if (event.isEnded) {
       return SizedBox(
         width: double.infinity,
@@ -654,7 +900,17 @@ class _PrimaryCta extends StatelessWidget {
         ),
       );
     }
-    // scheduled
+
+    // Scheduled — show Get Ticket CTA for paid events where user hasn't purchased
+    if (_isPaid && !_canWatch) {
+      return _GetTicketButton(
+        priceCents: event.price!,
+        soldOut: _soldOut,
+        busy: ticketBusy,
+        onBuy: onBuyTicket,
+      );
+    }
+
     return SizedBox(
       width: double.infinity,
       child: OutlinedButton.icon(
@@ -664,6 +920,45 @@ class _PrimaryCta extends StatelessWidget {
         style: OutlinedButton.styleFrom(
           padding: const EdgeInsets.symmetric(vertical: 16),
         ),
+      ),
+    );
+  }
+}
+
+class _GetTicketButton extends StatelessWidget {
+  final int priceCents;
+  final bool soldOut;
+  final bool busy;
+  final VoidCallback onBuy;
+
+  const _GetTicketButton({
+    required this.priceCents,
+    required this.soldOut,
+    required this.busy,
+    required this.onBuy,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final priceLabel = '\$${(priceCents / 100).toStringAsFixed(priceCents % 100 == 0 ? 0 : 2)}';
+    return SizedBox(
+      width: double.infinity,
+      child: FilledButton.icon(
+        onPressed: (soldOut || busy) ? null : onBuy,
+        style: FilledButton.styleFrom(
+          padding: const EdgeInsets.symmetric(vertical: 16),
+          backgroundColor: NileColors.volt,
+          foregroundColor: Colors.black,
+          disabledBackgroundColor: NileColors.bgRaised,
+        ),
+        icon: busy
+            ? const SizedBox(
+                width: 18,
+                height: 18,
+                child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black),
+              )
+            : const Icon(Icons.confirmation_number_outlined),
+        label: Text(soldOut ? 'Sold Out' : 'Get Ticket — $priceLabel'),
       ),
     );
   }
