@@ -24,7 +24,7 @@ class _EditPostScreenState extends State<EditPostScreen> {
   bool _saving = false;
   String? _error;
 
-  static const int _maxCaption = 2000;
+  static const int _maxCaption = 500;
 
   @override
   void initState() {
@@ -53,12 +53,16 @@ class _EditPostScreenState extends State<EditPostScreen> {
     setState(() => _pickingImage = true);
     try {
       final bytes =
-          await ProfileService.pickImageBytes(maxWidth: 1600, maxHeight: 1600);
+          await ProfileService.pickImageBytes(context, maxWidth: 1600, maxHeight: 1600);
       if (bytes != null && mounted) {
         setState(() {
           _newImageBytes = bytes;
           _imageCleared = false;
         });
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$e')));
       }
     } finally {
       if (mounted) setState(() => _pickingImage = false);
@@ -199,9 +203,9 @@ class _EditPostScreenState extends State<EditPostScreen> {
                   Container(
                     padding: const EdgeInsets.all(12),
                     decoration: BoxDecoration(
-                      color: NileColors.error.withOpacity(0.1),
+                      color: NileColors.error.withValues(alpha: 0.1),
                       borderRadius: BorderRadius.circular(NileRadius.sm),
-                      border: Border.all(color: NileColors.error.withOpacity(0.4)),
+                      border: Border.all(color: NileColors.error.withValues(alpha: 0.4)),
                     ),
                     child: Text(_error!,
                         style:

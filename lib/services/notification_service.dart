@@ -1,8 +1,16 @@
+import 'pagination.dart';
 import 'supabase_client.dart';
 
 // ── Model ─────────────────────────────────────────────────────────────────────
 
-enum NotificationType { postLike, postComment, follow }
+enum NotificationType {
+  postLike,
+  postComment,
+  follow,
+  eventStarting,
+  eventLive,
+  eventEnded,
+}
 
 class AppNotification {
   final String id;
@@ -11,7 +19,7 @@ class AppNotification {
   final String actorUsername;
   final String? actorAvatarUrl;
   final NotificationType type;
-  final String? entityId; // post_id for post_like / post_comment; null for follow
+  final String? entityId; // post_id for post_like / post_comment; event_id for event_starting; null for follow
   final DateTime? readAt;
   final DateTime createdAt;
 
@@ -49,6 +57,9 @@ class AppNotification {
   static NotificationType _parseType(String raw) => switch (raw) {
         'post_like' => NotificationType.postLike,
         'post_comment' => NotificationType.postComment,
+        'event_starting' => NotificationType.eventStarting,
+        'event_live' => NotificationType.eventLive,
+        'event_ended' => NotificationType.eventEnded,
         _ => NotificationType.follow,
       };
 }
@@ -59,18 +70,26 @@ class NotificationService {
   static const _select =
       '*, actor:profiles!actor_id(username, avatar_url)';
 
-  /// Newest [limit] notifications for the current user.
-  static Future<List<AppNotification>> list({int limit = 50}) async {
+  /// Notifications for the current user, newest first. Keyset-paged by
+  /// created_at via [cursor].
+  static Future<Paged<AppNotification>> list({String? cursor}) async {
     final uid = _requireUid();
-    final rows = await supabase
+    var b = supabase
         .from('notifications')
         .select(_select)
-        .eq('recipient_id', uid)
-        .order('created_at', ascending: false)
-        .limit(limit);
-    return (rows as List)
+        .eq('recipient_id', uid);
+    if (cursor != null) b = b.lt('created_at', cursor);
+    final rows =
+        await b.order('created_at', ascending: false).limit(kPageSize);
+    final items = (rows as List)
         .map((r) => AppNotification.fromJson(r as Map<String, dynamic>))
         .toList();
+    final hasMore = items.length == kPageSize;
+    return Paged(
+      items: items,
+      hasMore: hasMore,
+      nextCursor: hasMore ? items.last.createdAt.toIso8601String() : null,
+    );
   }
 
   /// Count of unread notifications for the current user.

@@ -1,12 +1,16 @@
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import '../services/block_service.dart';
 import '../services/event_service.dart';
 import '../services/follow_service.dart';
+import '../services/message_service.dart';
 import '../services/like_service.dart';
 import '../services/post_service.dart';
 import '../services/profile_service.dart';
+import '../services/report_service.dart';
 import '../theme.dart';
+import 'widgets/moderation_menu.dart';
 import 'post_detail_screen.dart';
 import 'settings_screen.dart';
 import 'create_event_screen.dart';
@@ -15,8 +19,11 @@ import 'edit_event_screen.dart';
 import 'edit_post_screen.dart';
 import 'edit_profile_screen.dart';
 import 'event_detail_screen.dart';
+import 'conversation_screen.dart';
 import 'follow_list_screen.dart';
 import 'viewer_screen.dart';
+import 'widgets/load_more_footer.dart';
+import '../services/pagination.dart' show Paged;
 
 class ProfileScreen extends StatefulWidget {
   /// Pass [userId] to view another user's profile.
@@ -29,6 +36,11 @@ class ProfileScreen extends StatefulWidget {
   State<ProfileScreen> createState() => _ProfileScreenState();
 }
 
+// Profile merges posts + events into one list, capped at 12 items per page.
+// Sources are fetched a page at a time and the merged list is revealed in
+// 12-item slices.
+const int _kProfilePageSize = 12;
+
 class _ProfileScreenState extends State<ProfileScreen> {
   UserProfile? _profile;
   bool _loading = true;
@@ -39,9 +51,32 @@ class _ProfileScreenState extends State<ProfileScreen> {
   List<Post>? _posts;
   String? _eventsError;
 
+  // Pagination — independent cursors per source, but a single combined
+  // display window. _visibleCount items of the merged list are shown; each
+  // Load More grows it by _kProfilePageSize, topping up sources as needed.
+  final _scroll = ScrollController();
+  String? _uid;
+  String? _postCursor;
+  String? _eventCursor;
+  bool _postsHasMore = false;
+  bool _eventsHasMore = false;
+  bool _loadingMore = false;
+  int _visibleCount = _kProfilePageSize;
+
+  // More to show if either a source has un-fetched rows, or the merged list
+  // already holds more than the current display window.
+  bool get _hasMore {
+    if (_postsHasMore || _eventsHasMore) return true;
+    final all = _allItems;
+    return all != null && all.length > _visibleCount;
+  }
+
   // ── Follow state ──────────────────────────────────────────────────────────
   bool _isFollowing = false;
   bool _followLoading = false;
+
+  // ── Block state ───────────────────────────────────────────────────────────
+  bool _isBlocked = false;
 
   static const double _coverHeight = 160;
   static const double _avatarRadius = 44;
@@ -54,7 +89,22 @@ class _ProfileScreenState extends State<ProfileScreen> {
   @override
   void initState() {
     super.initState();
+    _scroll.addListener(_onScroll);
     _load();
+  }
+
+  @override
+  void dispose() {
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  void _onScroll() {
+    if (!_scroll.hasClients) return;
+    if (_scroll.position.pixels < _scroll.position.maxScrollExtent - 400) {
+      return;
+    }
+    if (_hasMore && !_loadingMore && _events != null) _loadMore();
   }
 
   Future<void> _load() async {
@@ -70,15 +120,20 @@ class _ProfileScreenState extends State<ProfileScreen> {
       final profile = await ProfileService.fetchProfile(uid);
       if (profile == null) throw Exception('Profile not found');
 
-      // Load follow state for other people's profiles
+      // Load follow + block state for other people's profiles
       bool following = false;
+      bool blocked = false;
       if (!_isOwnProfileFor(profile)) {
-        following = await FollowService.isFollowing(profile.id);
+        (following, blocked) = await (
+          FollowService.isFollowing(profile.id),
+          BlockService.isBlocked(profile.id),
+        ).wait;
       }
 
       setState(() {
         _profile = profile;
         _isFollowing = following;
+        _isBlocked = blocked;
       });
 
       // Fire-and-forget events fetch — profile renders without it.
@@ -91,28 +146,83 @@ class _ProfileScreenState extends State<ProfileScreen> {
   }
 
   Future<void> _loadEvents(String userId) async {
+    _uid = userId;
     setState(() {
       _events = null;
       _posts = null;
       _eventsError = null;
+      _visibleCount = _kProfilePageSize;
     });
     try {
-      final (events, posts) = await (
-        EventService.getEventsByHost(userId),
-        PostService.getByAuthor(userId),
+      final (eventPage, postPage) = await (
+        EventService.getEventsByHost(userId, limit: _kProfilePageSize),
+        PostService.getByAuthor(userId, limit: _kProfilePageSize),
       ).wait;
       final (hEvents, hPosts) = await (
-        EventService.hydrateLikes(events),
-        PostService.hydrateLikes(posts),
+        EventService.hydrateLikes(eventPage.items),
+        PostService.hydrateLikes(postPage.items),
       ).wait;
       if (!mounted) return;
       setState(() {
         _events = hEvents;
         _posts = hPosts;
+        _eventCursor = eventPage.nextCursor;
+        _postCursor = postPage.nextCursor;
+        _eventsHasMore = eventPage.hasMore;
+        _postsHasMore = postPage.hasMore;
       });
     } catch (e) {
       if (!mounted) return;
       setState(() => _eventsError = e.toString());
+    }
+  }
+
+  Future<void> _loadMore() async {
+    final uid = _uid;
+    if (uid == null) return;
+    setState(() => _loadingMore = true);
+    try {
+      // Grow the combined window by one page.
+      final target = _visibleCount + _kProfilePageSize;
+
+      // Top up a source only if it has more rows AND its fetched count can't
+      // already fill the new window on its own — otherwise we have enough
+      // candidates to keep the merged sort correct up to `target`.
+      final fetchEvents = _eventsHasMore && (_events?.length ?? 0) < target;
+      final fetchPosts = _postsHasMore && (_posts?.length ?? 0) < target;
+
+      final (eventPage, postPage) = await (
+        fetchEvents
+            ? EventService.getEventsByHost(uid,
+                cursor: _eventCursor, limit: _kProfilePageSize)
+            : Future.value(Paged.empty<Event>()),
+        fetchPosts
+            ? PostService.getByAuthor(uid,
+                cursor: _postCursor, limit: _kProfilePageSize)
+            : Future.value(Paged.empty<Post>()),
+      ).wait;
+      final (hEvents, hPosts) = await (
+        EventService.hydrateLikes(eventPage.items),
+        PostService.hydrateLikes(postPage.items),
+      ).wait;
+      if (!mounted) return;
+      setState(() {
+        _visibleCount = target;
+        _events = [...?_events, ...hEvents];
+        _posts = [...?_posts, ...hPosts];
+        if (fetchEvents) {
+          _eventCursor = eventPage.nextCursor;
+          _eventsHasMore = eventPage.hasMore;
+        }
+        if (fetchPosts) {
+          _postCursor = postPage.nextCursor;
+          _postsHasMore = postPage.hasMore;
+        }
+      });
+    } catch (_) {
+      // Keep existing; scrolling retries.
+    } finally {
+      if (mounted) setState(() => _loadingMore = false);
     }
   }
 
@@ -149,7 +259,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
   }
 
   /// Combined post/event list sorted by recency. Live events pin to top.
-  List<_ProfileItem>? get _profileItems {
+  // Full merged + sorted list (live events first, then newest-first).
+  List<_ProfileItem>? get _allItems {
     if (_events == null || _posts == null) return null;
     final items = <_ProfileItem>[
       ..._events!.map(_ProfileEventItem.new),
@@ -162,6 +273,13 @@ class _ProfileScreenState extends State<ProfileScreen> {
       return b.sortKey.compareTo(a.sortKey);
     });
     return items;
+  }
+
+  // The visible slice — capped at _visibleCount (combined cap of 12 per page).
+  List<_ProfileItem>? get _profileItems {
+    final all = _allItems;
+    if (all == null) return null;
+    return all.length > _visibleCount ? all.sublist(0, _visibleCount) : all;
   }
 
   /// Helper used during load — before _profile is set, we can't use the
@@ -287,6 +405,52 @@ class _ProfileScreenState extends State<ProfileScreen> {
     }
   }
 
+  Future<void> _openDm() async {
+    final p = _profile;
+    if (p == null) return;
+    try {
+      final conv = await MessageService.getOrCreate(p.id);
+      if (!mounted) return;
+      await Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => ConversationScreen(conversation: conv),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not open conversation: $e')),
+      );
+    }
+  }
+
+  Future<void> _blockUser() async {
+    final p = _profile;
+    if (p == null) return;
+    final ok = await Moderation.confirmBlock(context,
+        userId: p.id, username: p.username);
+    if (ok && mounted) {
+      // Blocking severs the relationship — leave the now-hidden profile.
+      Navigator.of(context).pop();
+    }
+  }
+
+  Future<void> _unblockUser() async {
+    final p = _profile;
+    if (p == null) return;
+    final ok = await Moderation.confirmUnblock(context,
+        userId: p.id, username: p.username);
+    if (ok && mounted) setState(() => _isBlocked = false);
+  }
+
+  void _reportUser() {
+    final p = _profile;
+    if (p == null) return;
+    Moderation.showReportSheet(context,
+        targetType: ReportTargetType.user, targetId: p.id);
+  }
+
   // ─── Build ────────────────────────────────────────────────────────────────
 
   @override
@@ -332,6 +496,34 @@ class _ProfileScreenState extends State<ProfileScreen> {
               icon: const Icon(Icons.settings_outlined),
               tooltip: 'Settings',
               onPressed: _openSettings,
+            )
+          else
+            PopupMenuButton<String>(
+              icon: const Icon(Icons.more_vert),
+              color: NileColors.bgRaised,
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(NileRadius.sm)),
+              onSelected: (v) {
+                switch (v) {
+                  case 'report':
+                    _reportUser();
+                  case 'block':
+                    _blockUser();
+                  case 'unblock':
+                    _unblockUser();
+                }
+              },
+              itemBuilder: (_) => [
+                const PopupMenuItem(value: 'report', child: Text('Report')),
+                if (_isBlocked)
+                  const PopupMenuItem(value: 'unblock', child: Text('Unblock'))
+                else
+                  PopupMenuItem(
+                    value: 'block',
+                    child: Text('Block',
+                        style: TextStyle(color: NileColors.error)),
+                  ),
+              ],
             ),
         ],
       ),
@@ -347,6 +539,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
         color: NileColors.volt,
         onRefresh: _load,
         child: CustomScrollView(
+          controller: _scroll,
           slivers: [
             SliverToBoxAdapter(child: _buildHeader(p)),
             const SliverToBoxAdapter(
@@ -463,47 +656,66 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 Text(p.bio!, style: NileTextStyles.bodySm()),
               ],
               const SizedBox(height: 16),
-              SizedBox(
-                width: double.infinity,
-                child: _isOwnProfile
-                    ? OutlinedButton(
-                        onPressed: _openEdit,
-                        child: const Text('Edit Profile'),
-                      )
-                    : _isFollowing
-                        ? OutlinedButton(
-                            onPressed: _followLoading ? null : _toggleFollow,
-                            style: OutlinedButton.styleFrom(
-                              side: const BorderSide(color: NileColors.border),
-                              foregroundColor: NileColors.txtPrimary,
+              if (_isOwnProfile)
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton(
+                    onPressed: _openEdit,
+                    child: const Text('Edit Profile'),
+                  ),
+                )
+              else
+                Row(
+                  children: [
+                    Expanded(
+                      child: _isFollowing
+                          ? OutlinedButton(
+                              onPressed: _followLoading ? null : _toggleFollow,
+                              style: OutlinedButton.styleFrom(
+                                side: const BorderSide(
+                                    color: NileColors.border),
+                                foregroundColor: NileColors.txtPrimary,
+                              ),
+                              child: _followLoading
+                                  ? const SizedBox(
+                                      width: 14,
+                                      height: 14,
+                                      child: CircularProgressIndicator(
+                                          strokeWidth: 2,
+                                          color: NileColors.txtPrimary),
+                                    )
+                                  : const Text('Following'),
+                            )
+                          : FilledButton(
+                              onPressed: _followLoading ? null : _toggleFollow,
+                              style: FilledButton.styleFrom(
+                                backgroundColor: NileColors.volt,
+                                foregroundColor: NileColors.bgPage,
+                              ),
+                              child: _followLoading
+                                  ? const SizedBox(
+                                      width: 14,
+                                      height: 14,
+                                      child: CircularProgressIndicator(
+                                          strokeWidth: 2,
+                                          color: NileColors.bgPage),
+                                    )
+                                  : const Text('Follow'),
                             ),
-                            child: _followLoading
-                                ? const SizedBox(
-                                    width: 14,
-                                    height: 14,
-                                    child: CircularProgressIndicator(
-                                        strokeWidth: 2,
-                                        color: NileColors.txtPrimary),
-                                  )
-                                : const Text('Following'),
-                          )
-                        : FilledButton(
-                            onPressed: _followLoading ? null : _toggleFollow,
-                            style: FilledButton.styleFrom(
-                              backgroundColor: NileColors.volt,
-                              foregroundColor: NileColors.bgPage,
-                            ),
-                            child: _followLoading
-                                ? const SizedBox(
-                                    width: 14,
-                                    height: 14,
-                                    child: CircularProgressIndicator(
-                                        strokeWidth: 2,
-                                        color: NileColors.bgPage),
-                                  )
-                                : const Text('Follow'),
-                          ),
-              ),
+                    ),
+                    const SizedBox(width: 8),
+                    OutlinedButton(
+                      onPressed: _openDm,
+                      style: OutlinedButton.styleFrom(
+                        side: const BorderSide(color: NileColors.border),
+                        foregroundColor: NileColors.txtPrimary,
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 16, vertical: 12),
+                      ),
+                      child: const Icon(Icons.send_outlined, size: 18),
+                    ),
+                  ],
+                ),
             ],
           ),
         ),
@@ -570,9 +782,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
     return SliverPadding(
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
       sliver: SliverList.separated(
-        itemCount: items.length,
+        itemCount: items.length + (_hasMore ? 1 : 0),
         separatorBuilder: (_, __) => const SizedBox(height: 12),
         itemBuilder: (_, i) {
+          if (i >= items.length) return const LoadMoreFooter();
           final it = items[i];
           return switch (it) {
             _ProfileEventItem(:final event) => _ProfileEventCard(
@@ -608,6 +821,13 @@ class _ProfileScreenState extends State<ProfileScreen> {
       });
 
   void _openEvent(Event e) {
+    // Guard: never open a blocked host's stream, even from a stale card.
+    if (_isBlocked) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('You\'ve blocked this account.')),
+      );
+      return;
+    }
     final route = MaterialPageRoute(
       builder: (_) => e.isLive
           ? ViewerScreen(initialEventId: e.liveKitEventId)
@@ -679,7 +899,7 @@ class CoverPhoto extends StatelessWidget {
         gradient: LinearGradient(
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
-          colors: [Colors.transparent, NileColors.bgPage.withOpacity(0.4)],
+          colors: [Colors.transparent, NileColors.bgPage.withValues(alpha: 0.4)],
         ),
       ),
       child: buildCameraChip('Edit cover'),
@@ -692,7 +912,7 @@ Widget buildCameraChip(String label) {
   return Container(
     padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
     decoration: BoxDecoration(
-      color: NileColors.bgPage.withOpacity(0.6),
+      color: NileColors.bgPage.withValues(alpha: 0.6),
       borderRadius: BorderRadius.circular(NileRadius.pill),
     ),
     child: Row(
@@ -792,23 +1012,30 @@ class _ProfilePostCard extends StatelessWidget {
           children: [
             Row(
               children: [
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                  decoration: BoxDecoration(
-                    color: NileColors.bgRaised,
-                    borderRadius: BorderRadius.circular(NileRadius.xs),
-                  ),
+                CircleAvatar(
+                  radius: 14,
+                  backgroundColor: NileColors.bgRaised,
+                  backgroundImage: post.authorAvatarUrl != null
+                      ? NetworkImage(post.authorAvatarUrl!)
+                      : null,
+                  child: post.authorAvatarUrl == null
+                      ? Text(
+                          post.authorUsername[0].toUpperCase(),
+                          style: NileTextStyles.labelSm().copyWith(
+                            color: NileColors.txtPrimary,
+                            letterSpacing: 0,
+                          ),
+                        )
+                      : null,
+                ),
+                const SizedBox(width: 8),
+                Expanded(
                   child: Text(
-                    'POST',
-                    style: NileTextStyles.caption().copyWith(
-                      color: NileColors.txtSecondary,
-                      fontWeight: FontWeight.w700,
-                      letterSpacing: 1.0,
-                    ),
+                    '@${post.authorUsername}',
+                    style: NileTextStyles.bodySm(),
+                    overflow: TextOverflow.ellipsis,
                   ),
                 ),
-                const Spacer(),
                 Text(_timeAgo(post.createdAt),
                     style: NileTextStyles.caption()),
                 if (onEdited != null || onDeleted != null)
@@ -857,7 +1084,7 @@ class _ProfilePostCard extends StatelessWidget {
                   post.imageUrl!,
                   fit: BoxFit.cover,
                   errorBuilder: (_, __, ___) => Container(
-                    height: 180,
+                    height: 200,
                     color: NileColors.bgRaised,
                     child: const Center(
                       child:

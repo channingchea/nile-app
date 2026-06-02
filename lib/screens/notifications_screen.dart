@@ -1,9 +1,13 @@
 import 'package:flutter/material.dart';
+import '../services/event_service.dart';
 import '../services/notification_service.dart';
 import '../services/post_service.dart';
 import '../theme.dart';
+import 'event_detail_screen.dart';
 import 'post_detail_screen.dart';
 import 'profile_screen.dart';
+import 'viewer_screen.dart';
+import 'widgets/load_more_footer.dart';
 
 class NotificationsScreen extends StatefulWidget {
   const NotificationsScreen({super.key});
@@ -16,21 +20,63 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
   List<AppNotification>? _items;
   String? _error;
 
+  final _scroll = ScrollController();
+  String? _cursor;
+  bool _hasMore = false;
+  bool _loadingMore = false;
+
   @override
   void initState() {
     super.initState();
+    _scroll.addListener(_onScroll);
     _load();
+  }
+
+  @override
+  void dispose() {
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  void _onScroll() {
+    if (!_scroll.hasClients) return;
+    if (_scroll.position.pixels < _scroll.position.maxScrollExtent - 400) {
+      return;
+    }
+    if (_hasMore && !_loadingMore && _items != null) _loadMore();
   }
 
   Future<void> _load() async {
     setState(() { _items = null; _error = null; });
     try {
-      final items = await NotificationService.list();
-      setState(() => _items = items);
+      final page = await NotificationService.list();
+      setState(() {
+        _items = page.items;
+        _cursor = page.nextCursor;
+        _hasMore = page.hasMore;
+      });
       // Mark all read after listing — fire and forget.
       NotificationService.markAllRead();
     } catch (e) {
       setState(() => _error = e.toString());
+    }
+  }
+
+  Future<void> _loadMore() async {
+    if (_cursor == null) return;
+    setState(() => _loadingMore = true);
+    try {
+      final page = await NotificationService.list(cursor: _cursor);
+      if (!mounted) return;
+      setState(() {
+        _items = [...?_items, ...page.items];
+        _cursor = page.nextCursor;
+        _hasMore = page.hasMore;
+      });
+    } catch (_) {
+      // Keep existing; scrolling retries.
+    } finally {
+      if (mounted) setState(() => _loadingMore = false);
     }
   }
 
@@ -52,6 +98,20 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
             builder: (_) => ProfileScreen(userId: n.actorId),
           ),
         );
+      case NotificationType.eventStarting:
+      case NotificationType.eventLive:
+      case NotificationType.eventEnded:
+        if (n.entityId == null) return;
+        final event = await EventService.fetchById(n.entityId!);
+        if (!mounted || event == null) return;
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => event.isLive
+                ? ViewerScreen(initialEventId: event.liveKitEventId)
+                : EventDetailScreen(event: event),
+          ),
+        );
     }
   }
 
@@ -66,6 +126,7 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
             backgroundColor: NileColors.bgSurface,
             onRefresh: _load,
             child: CustomScrollView(
+              controller: _scroll,
               physics: const AlwaysScrollableScrollPhysics(),
               slivers: [
                 SliverAppBar(
@@ -117,16 +178,17 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
       SliverPadding(
         padding: const EdgeInsets.symmetric(vertical: 8),
         sliver: SliverList.separated(
-          itemCount: _items!.length,
-          separatorBuilder: (_, __) => const Divider(
-            height: 1,
-            color: NileColors.border,
-            indent: 56,
-          ),
-          itemBuilder: (_, i) => _NotificationTile(
-            notification: _items![i],
-            onTap: () => _tap(_items![i]),
-          ),
+          itemCount: _items!.length + (_hasMore ? 1 : 0),
+          separatorBuilder: (_, i) => i >= _items!.length - 1
+              ? const SizedBox.shrink()
+              : const Divider(height: 1, color: NileColors.border, indent: 56),
+          itemBuilder: (_, i) {
+            if (i >= _items!.length) return const LoadMoreFooter();
+            return _NotificationTile(
+              notification: _items![i],
+              onTap: () => _tap(_items![i]),
+            );
+          },
         ),
       ),
     ];
@@ -147,18 +209,30 @@ class _NotificationTile extends StatelessWidget {
           '@${notification.actorUsername} commented on your post',
         NotificationType.follow =>
           '@${notification.actorUsername} started following you',
+        NotificationType.eventStarting =>
+          '@${notification.actorUsername}’s event starts in 15 minutes',
+        NotificationType.eventLive =>
+          '@${notification.actorUsername} is live now',
+        NotificationType.eventEnded =>
+          '@${notification.actorUsername}’s event ended — replay is ready',
       };
 
   IconData _icon() => switch (notification.type) {
         NotificationType.postLike => Icons.favorite,
         NotificationType.postComment => Icons.mode_comment,
         NotificationType.follow => Icons.person_add,
+        NotificationType.eventStarting => Icons.live_tv,
+        NotificationType.eventLive => Icons.sensors,
+        NotificationType.eventEnded => Icons.replay,
       };
 
   Color _iconColor() => switch (notification.type) {
         NotificationType.postLike => NileColors.coral,
         NotificationType.postComment => NileColors.volt,
         NotificationType.follow => NileColors.volt,
+        NotificationType.eventStarting => NileColors.coral,
+        NotificationType.eventLive => NileColors.coral,
+        NotificationType.eventEnded => NileColors.volt,
       };
 
   String _timeAgo(DateTime dt) {
@@ -176,7 +250,7 @@ class _NotificationTile extends StatelessWidget {
       onTap: onTap,
       child: Container(
         color: unread
-            ? NileColors.volt.withOpacity(0.04)
+            ? NileColors.volt.withValues(alpha: 0.04)
             : Colors.transparent,
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
         child: Row(

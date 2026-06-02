@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../services/follow_service.dart';
+import '../services/pagination.dart' show Paged;
 import '../services/profile_service.dart';
 import '../theme.dart';
 import 'profile_screen.dart';
+import 'widgets/load_more_footer.dart';
 
 enum FollowListMode { followers, following }
 
@@ -27,6 +29,11 @@ class _FollowListScreenState extends State<FollowListScreen> {
   List<UserProfile>? _users;
   String? _error;
 
+  final _scroll = ScrollController();
+  String? _cursor;
+  bool _hasMore = false;
+  bool _loadingMore = false;
+
   final Map<String, bool> _followState = {};
   final Set<String> _followLoading = {};
 
@@ -35,21 +42,60 @@ class _FollowListScreenState extends State<FollowListScreen> {
   @override
   void initState() {
     super.initState();
+    _scroll.addListener(_onScroll);
     _load();
   }
+
+  @override
+  void dispose() {
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  void _onScroll() {
+    if (!_scroll.hasClients) return;
+    if (_scroll.position.pixels < _scroll.position.maxScrollExtent - 400) {
+      return;
+    }
+    if (_hasMore && !_loadingMore && _users != null) _loadMore();
+  }
+
+  Future<Paged<UserProfile>> _fetch(String? cursor) =>
+      widget.mode == FollowListMode.followers
+          ? FollowService.getFollowers(widget.userId, cursor: cursor)
+          : FollowService.getFollowing(widget.userId, cursor: cursor);
 
   Future<void> _load() async {
     setState(() { _users = null; _error = null; });
     try {
-      final rows = widget.mode == FollowListMode.followers
-          ? await FollowService.getFollowers(widget.userId)
-          : await FollowService.getFollowing(widget.userId);
-
-      final profiles = rows.map(UserProfile.fromMap).toList();
-      await _loadFollowStates(profiles);
-      setState(() => _users = profiles);
+      final page = await _fetch(null);
+      await _loadFollowStates(page.items);
+      setState(() {
+        _users = page.items;
+        _cursor = page.nextCursor;
+        _hasMore = page.hasMore;
+      });
     } catch (e) {
       setState(() => _error = e.toString());
+    }
+  }
+
+  Future<void> _loadMore() async {
+    if (_cursor == null) return;
+    setState(() => _loadingMore = true);
+    try {
+      final page = await _fetch(_cursor);
+      await _loadFollowStates(page.items);
+      if (!mounted) return;
+      setState(() {
+        _users = [...?_users, ...page.items];
+        _cursor = page.nextCursor;
+        _hasMore = page.hasMore;
+      });
+    } catch (_) {
+      // Keep existing; scrolling retries.
+    } finally {
+      if (mounted) setState(() => _loadingMore = false);
     }
   }
 
@@ -159,11 +205,14 @@ class _FollowListScreenState extends State<FollowListScreen> {
       backgroundColor: NileColors.bgSurface,
       onRefresh: _load,
       child: ListView.separated(
+        controller: _scroll,
         physics: const AlwaysScrollableScrollPhysics(),
-        itemCount: _users!.length,
-        separatorBuilder: (_, __) =>
-            const Divider(height: 1, indent: 72, color: NileColors.border),
+        itemCount: _users!.length + (_hasMore ? 1 : 0),
+        separatorBuilder: (_, i) => i >= _users!.length - 1
+            ? const SizedBox.shrink()
+            : const Divider(height: 1, indent: 72, color: NileColors.border),
         itemBuilder: (_, i) {
+          if (i >= _users!.length) return const LoadMoreFooter();
           final user = _users![i];
           final isMe = user.id == _myId;
           return _UserTile(

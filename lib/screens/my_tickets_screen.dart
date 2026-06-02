@@ -3,6 +3,7 @@ import '../services/event_service.dart';
 import '../services/ticket_service.dart';
 import '../theme.dart';
 import 'event_detail_screen.dart';
+import 'widgets/load_more_footer.dart';
 
 /// The current user's purchased tickets.
 class MyTicketsScreen extends StatefulWidget {
@@ -16,10 +17,30 @@ class _MyTicketsScreenState extends State<MyTicketsScreen> {
   List<MyTicket>? _tickets;
   String? _error;
 
+  final _scroll = ScrollController();
+  String? _cursor;
+  bool _hasMore = false;
+  bool _loadingMore = false;
+
   @override
   void initState() {
     super.initState();
+    _scroll.addListener(_onScroll);
     _load();
+  }
+
+  @override
+  void dispose() {
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  void _onScroll() {
+    if (!_scroll.hasClients) return;
+    if (_scroll.position.pixels < _scroll.position.maxScrollExtent - 400) {
+      return;
+    }
+    if (_hasMore && !_loadingMore && _tickets != null) _loadMore();
   }
 
   Future<void> _load() async {
@@ -28,10 +49,34 @@ class _MyTicketsScreenState extends State<MyTicketsScreen> {
       _error = null;
     });
     try {
-      final list = await TicketService.myTickets();
-      if (mounted) setState(() => _tickets = list);
+      final page = await TicketService.myTickets();
+      if (mounted) {
+        setState(() {
+          _tickets = page.items;
+          _cursor = page.nextCursor;
+          _hasMore = page.hasMore;
+        });
+      }
     } catch (e) {
       if (mounted) setState(() => _error = e.toString());
+    }
+  }
+
+  Future<void> _loadMore() async {
+    if (_cursor == null) return;
+    setState(() => _loadingMore = true);
+    try {
+      final page = await TicketService.myTickets(cursor: _cursor);
+      if (!mounted) return;
+      setState(() {
+        _tickets = [...?_tickets, ...page.items];
+        _cursor = page.nextCursor;
+        _hasMore = page.hasMore;
+      });
+    } catch (_) {
+      // Keep existing; scrolling retries.
+    } finally {
+      if (mounted) setState(() => _loadingMore = false);
     }
   }
 
@@ -93,10 +138,12 @@ class _MyTicketsScreenState extends State<MyTicketsScreen> {
     }
 
     return ListView.separated(
+      controller: _scroll,
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
-      itemCount: _tickets!.length,
+      itemCount: _tickets!.length + (_hasMore ? 1 : 0),
       separatorBuilder: (_, __) => const SizedBox(height: 10),
       itemBuilder: (_, i) {
+        if (i >= _tickets!.length) return const LoadMoreFooter();
         final t = _tickets![i];
         return _TicketCard(
           myTicket: t,
@@ -214,7 +261,7 @@ class _StatusBadge extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
       decoration: BoxDecoration(
-        color: color.withOpacity(0.15),
+        color: color.withValues(alpha: 0.15),
         borderRadius: BorderRadius.circular(NileRadius.pill),
       ),
       child: Text(label,

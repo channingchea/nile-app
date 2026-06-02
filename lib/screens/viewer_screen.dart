@@ -356,8 +356,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
     if (_cameras.any((c) => c.identity == participant.identity)) return;
 
     final cameraName = (meta['cameraName'] as String?)
-        ?? participant.name
-        ?? participant.identity;
+        ?? (participant.name.isNotEmpty ? participant.name : participant.identity);
 
     setState(() {
       _cameras.add(CameraFeed(
@@ -672,7 +671,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
             decoration: BoxDecoration(
-              color: NileColors.bgPage.withOpacity(0.7),
+              color: NileColors.bgPage.withValues(alpha: 0.7),
               borderRadius: BorderRadius.circular(NileRadius.sm),
             ),
             child: Text(focused.cameraName, style: NileTextStyles.bodyMd()),

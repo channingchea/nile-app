@@ -1,5 +1,3 @@
-import 'dart:typed_data';
-
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -76,12 +74,16 @@ class _EditEventScreenState extends State<EditEventScreen> {
     setState(() => _uploadingCover = true);
     try {
       final bytes =
-          await ProfileService.pickImageBytes(maxWidth: 1600, maxHeight: 900);
+          await ProfileService.pickImageBytes(context, maxWidth: 1600, maxHeight: 900);
       if (bytes != null && mounted) {
         setState(() {
           _coverBytes = bytes;
           _coverCleared = false;
         });
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$e')));
       }
     } finally {
       if (mounted) setState(() => _uploadingCover = false);
@@ -185,6 +187,7 @@ class _EditEventScreenState extends State<EditEventScreen> {
             ? (desc.isEmpty ? '' : desc)
             : null,
         coverImageUrl: newCoverUrl,
+        clearCoverImageUrl: _coverCleared && _coverBytes == null,
         scheduledAt:
             scheduledChanged && _scheduledAt != null ? _scheduledAt : null,
         clearScheduledAt: scheduledChanged && _scheduledAt == null,
@@ -250,6 +253,7 @@ class _EditEventScreenState extends State<EditEventScreen> {
                 TextFormField(
                   controller: _nameController,
                   textCapitalization: TextCapitalization.words,
+                  maxLength: 80,
                   validator: (v) =>
                       (v == null || v.trim().isEmpty) ? 'Required' : null,
                 ),
@@ -259,6 +263,7 @@ class _EditEventScreenState extends State<EditEventScreen> {
                 TextFormField(
                   controller: _descriptionController,
                   maxLines: 4,
+                  maxLength: 500,
                 ),
                 const SizedBox(height: 20),
                 _SectionLabel('Scheduled For'),
@@ -333,10 +338,10 @@ class _EditEventScreenState extends State<EditEventScreen> {
                   Container(
                     padding: const EdgeInsets.all(12),
                     decoration: BoxDecoration(
-                      color: NileColors.error.withOpacity(0.1),
+                      color: NileColors.error.withValues(alpha: 0.1),
                       borderRadius: BorderRadius.circular(NileRadius.sm),
                       border:
-                          Border.all(color: NileColors.error.withOpacity(0.4)),
+                          Border.all(color: NileColors.error.withValues(alpha: 0.4)),
                     ),
                     child: Text(
                       _error!,

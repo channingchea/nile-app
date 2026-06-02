@@ -1,3 +1,4 @@
+import 'pagination.dart';
 import 'supabase_client.dart';
 
 // ── Model ─────────────────────────────────────────────────────────────────────
@@ -44,18 +45,22 @@ class CommentService {
   static const _select =
       '*, profiles!post_comments_user_id_fkey(username, avatar_url)';
 
-  /// All comments on a post, newest first.
-  static Future<List<Comment>> listForPost(String postId,
-      {int limit = 200}) async {
-    final rows = await supabase
-        .from('post_comments')
-        .select(_select)
-        .eq('post_id', postId)
-        .order('created_at', ascending: false)
-        .limit(limit);
-    return (rows as List)
+  /// Comments on a post, newest first. Keyset-paged by created_at via [cursor].
+  static Future<Paged<Comment>> listForPost(String postId,
+      {String? cursor}) async {
+    var b = supabase.from('post_comments').select(_select).eq('post_id', postId);
+    if (cursor != null) b = b.lt('created_at', cursor);
+    final rows =
+        await b.order('created_at', ascending: false).limit(kPageSize);
+    final items = (rows as List)
         .map((r) => Comment.fromJson(r as Map<String, dynamic>))
         .toList();
+    final hasMore = items.length == kPageSize;
+    return Paged(
+      items: items,
+      hasMore: hasMore,
+      nextCursor: hasMore ? items.last.createdAt.toIso8601String() : null,
+    );
   }
 
   static Future<Comment> create({

@@ -1,5 +1,5 @@
-import 'package:supabase_flutter/supabase_flutter.dart';
 import 'event_service.dart';
+import 'pagination.dart';
 import 'supabase_client.dart';
 
 // ── Model ─────────────────────────────────────────────────────────────────────
@@ -106,35 +106,66 @@ class TicketService {
     return result as int?;
   }
 
-  /// All tickets for the current user (any status) with the full event joined,
-  /// newest first. RLS `tickets_select_own` scopes this to the current buyer.
-  static Future<List<MyTicket>> myTickets() async {
-    final rows = await supabase
-        .from('tickets')
-        .select('*, events!tickets_event_id_fkey('
-            '*, profiles!events_host_id_fkey(username, avatar_url))')
-        .order('created_at', ascending: false);
+  /// Tickets for the current user (any status) with the full event joined,
+  /// newest first. Keyset-paged by created_at via [cursor]. RLS
+  /// `tickets_select_own` scopes this to the current buyer.
+  static Future<Paged<MyTicket>> myTickets({String? cursor}) async {
+    var b = supabase.from('tickets').select(
+        '*, events!tickets_event_id_fkey('
+        '*, profiles!events_host_id_fkey(username, avatar_url))');
+    if (cursor != null) b = b.lt('created_at', cursor);
+    final rows =
+        await b.order('created_at', ascending: false).limit(kPageSize);
 
-    return (rows as List)
+    final raw = (rows as List)
         .map((r) => MyTicket.fromJson(r as Map<String, dynamic>))
-        .where((t) => t.event != null)
         .toList();
+    // hasMore / cursor based on the raw page so paging stays correct even
+    // when event-less tickets are filtered out.
+    final hasMore = raw.length == kPageSize;
+    final nextCursor =
+        hasMore ? raw.last.ticket.createdAt.toIso8601String() : null;
+    final items = raw.where((t) => t.event != null).toList();
+    return Paged(items: items, hasMore: hasMore, nextCursor: nextCursor);
   }
 
-  /// Paid attendees for [eventId] with buyer profiles joined, newest first.
-  /// RLS (`tickets_select_host`) restricts this to the event's host.
-  static Future<List<Attendee>> attendees(String eventId) async {
-    final rows = await supabase
+  /// Attendees for [eventId] with buyer profiles joined, newest first.
+  /// Keyset-paged by created_at via [cursor]. Includes paid and refunded
+  /// tickets (pending hidden). RLS (`tickets_select_host`) restricts to host.
+  static Future<Paged<Attendee>> attendees(String eventId,
+      {String? cursor}) async {
+    var b = supabase
         .from('tickets')
-        .select('id, amount_cents, created_at, '
+        .select('id, amount_cents, created_at, status, '
             'profiles!tickets_buyer_id_fkey(id, username, avatar_url)')
         .eq('event_id', eventId)
-        .eq('status', 'paid')
-        .order('created_at', ascending: false);
+        .inFilter('status', ['paid', 'refunded']);
+    if (cursor != null) b = b.lt('created_at', cursor);
+    final rows =
+        await b.order('created_at', ascending: false).limit(kPageSize);
 
-    return (rows as List)
+    final items = (rows as List)
         .map((r) => Attendee.fromJson(r as Map<String, dynamic>))
         .toList();
+    final hasMore = items.length == kPageSize;
+    return Paged(
+      items: items,
+      hasMore: hasMore,
+      nextCursor: hasMore ? items.last.purchasedAt.toIso8601String() : null,
+    );
+  }
+
+  /// Host-initiated refund of a single ticket. The Edge Function authorizes
+  /// the caller as the event host and issues the Stripe refund; the ticket
+  /// flips to 'refunded' (optimistically server-side, confirmed by webhook).
+  static Future<void> refund(String ticketId) async {
+    final response = await supabase.functions.invoke(
+      'refund-ticket',
+      body: {'ticket_id': ticketId},
+    );
+    if (response.status != 200) {
+      throw Exception((response.data as Map?)?['error'] ?? 'Refund failed');
+    }
   }
 }
 
@@ -146,6 +177,7 @@ class Attendee {
   final String username;
   final String? avatarUrl;
   final int amountCents;
+  final String status; // 'paid' | 'refunded'
   final DateTime purchasedAt;
 
   const Attendee({
@@ -154,8 +186,11 @@ class Attendee {
     required this.username,
     required this.avatarUrl,
     required this.amountCents,
+    required this.status,
     required this.purchasedAt,
   });
+
+  bool get isRefunded => status == 'refunded';
 
   factory Attendee.fromJson(Map<String, dynamic> j) {
     final p = (j['profiles'] as Map<String, dynamic>?) ?? const {};
@@ -165,6 +200,7 @@ class Attendee {
       username: p['username'] as String? ?? 'unknown',
       avatarUrl: p['avatar_url'] as String?,
       amountCents: (j['amount_cents'] as num).toInt(),
+      status: j['status'] as String? ?? 'paid',
       purchasedAt: DateTime.parse(j['created_at'] as String),
     );
   }

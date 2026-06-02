@@ -1,4 +1,5 @@
 import 'dart:typed_data';
+import 'package:croppy/croppy.dart';
 import 'package:flutter/material.dart';
 import '../services/profile_service.dart';
 import '../theme.dart';
@@ -56,7 +57,19 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
 
   Future<void> _pickAvatar() async {
     if (_uploadingAvatar) return;
-    final bytes = await ProfileService.pickImageBytes();
+    final Uint8List? bytes;
+    try {
+      bytes = await ProfileService.pickImageBytes(
+        context,
+        cropPathFn: ellipseCropShapeFn,
+        allowedAspectRatios: [const CropAspectRatio(width: 1, height: 1)],
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$e')));
+      }
+      return;
+    }
     if (bytes == null) return;
 
     setState(() {
@@ -79,7 +92,20 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
 
   Future<void> _pickCover() async {
     if (_uploadingCover) return;
-    final bytes = await ProfileService.pickImageBytes(maxWidth: 1200, maxHeight: 600);
+    final Uint8List? bytes;
+    try {
+      bytes = await ProfileService.pickImageBytes(
+        context,
+        maxWidth: 1200,
+        maxHeight: 600,
+        allowedAspectRatios: [const CropAspectRatio(width: 15, height: 4)],
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$e')));
+      }
+      return;
+    }
     if (bytes == null) return;
 
     setState(() {
@@ -178,7 +204,7 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
                   if (_uploadingCover)
                     Positioned.fill(
                       child: Container(
-                        color: NileColors.bgPage.withOpacity(0.5),
+                        color: NileColors.bgPage.withValues(alpha: 0.5),
                         child: const Center(
                           child: CircularProgressIndicator(
                               color: NileColors.volt),
@@ -317,7 +343,7 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
                       controller: _bioCtrl,
                       label: 'Bio',
                       maxLines: 3,
-                      maxLength: 160,
+                      maxLength: 200,
                       validator: null,
                     ),
                   ],

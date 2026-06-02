@@ -2,10 +2,13 @@ import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../services/profile_service.dart';
 import '../theme.dart';
+import 'blocked_accounts_screen.dart';
 import 'edit_profile_screen.dart';
 import 'my_tickets_screen.dart';
+import 'notification_preferences_screen.dart';
+import 'payouts_screen.dart';
 
-/// Own-profile settings hub: edit profile, my tickets, sign out.
+/// Own-profile settings hub: edit profile, my tickets, payouts, sign out.
 class SettingsScreen extends StatelessWidget {
   final UserProfile profile;
 
@@ -24,6 +27,27 @@ class SettingsScreen extends StatelessWidget {
     Navigator.push(
       context,
       MaterialPageRoute(builder: (_) => const MyTicketsScreen()),
+    );
+  }
+
+  void _payouts(BuildContext context) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const PayoutsScreen()),
+    );
+  }
+
+  void _notifications(BuildContext context) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const NotificationPreferencesScreen()),
+    );
+  }
+
+  void _blockedAccounts(BuildContext context) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const BlockedAccountsScreen()),
     );
   }
 
@@ -68,6 +92,24 @@ class SettingsScreen extends StatelessWidget {
             icon: Icons.confirmation_number_outlined,
             label: 'My tickets',
             onTap: () => _myTickets(context),
+          ),
+          const SizedBox(height: 10),
+          _SettingsTile(
+            icon: Icons.account_balance_outlined,
+            label: 'Payouts',
+            onTap: () => _payouts(context),
+          ),
+          const SizedBox(height: 10),
+          _SettingsTile(
+            icon: Icons.notifications_outlined,
+            label: 'Notifications',
+            onTap: () => _notifications(context),
+          ),
+          const SizedBox(height: 10),
+          _SettingsTile(
+            icon: Icons.block,
+            label: 'Blocked accounts',
+            onTap: () => _blockedAccounts(context),
           ),
           const SizedBox(height: 10),
           _SettingsTile(

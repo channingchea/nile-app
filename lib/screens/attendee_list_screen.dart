@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../services/ticket_service.dart';
 import '../theme.dart';
 import 'profile_screen.dart';
+import 'widgets/load_more_footer.dart';
 
 /// Host-only list of paid attendees for an event.
 class AttendeeListScreen extends StatefulWidget {
@@ -22,10 +23,30 @@ class _AttendeeListScreenState extends State<AttendeeListScreen> {
   List<Attendee>? _attendees;
   String? _error;
 
+  final _scroll = ScrollController();
+  String? _cursor;
+  bool _hasMore = false;
+  bool _loadingMore = false;
+
   @override
   void initState() {
     super.initState();
+    _scroll.addListener(_onScroll);
     _load();
+  }
+
+  @override
+  void dispose() {
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  void _onScroll() {
+    if (!_scroll.hasClients) return;
+    if (_scroll.position.pixels < _scroll.position.maxScrollExtent - 400) {
+      return;
+    }
+    if (_hasMore && !_loadingMore && _attendees != null) _loadMore();
   }
 
   Future<void> _load() async {
@@ -34,10 +55,35 @@ class _AttendeeListScreenState extends State<AttendeeListScreen> {
       _error = null;
     });
     try {
-      final list = await TicketService.attendees(widget.eventId);
-      if (mounted) setState(() => _attendees = list);
+      final page = await TicketService.attendees(widget.eventId);
+      if (mounted) {
+        setState(() {
+          _attendees = page.items;
+          _cursor = page.nextCursor;
+          _hasMore = page.hasMore;
+        });
+      }
     } catch (e) {
       if (mounted) setState(() => _error = e.toString());
+    }
+  }
+
+  Future<void> _loadMore() async {
+    if (_cursor == null) return;
+    setState(() => _loadingMore = true);
+    try {
+      final page =
+          await TicketService.attendees(widget.eventId, cursor: _cursor);
+      if (!mounted) return;
+      setState(() {
+        _attendees = [...?_attendees, ...page.items];
+        _cursor = page.nextCursor;
+        _hasMore = page.hasMore;
+      });
+    } catch (_) {
+      // Keep existing; scrolling retries.
+    } finally {
+      if (mounted) setState(() => _loadingMore = false);
     }
   }
 
@@ -47,6 +93,93 @@ class _AttendeeListScreenState extends State<AttendeeListScreen> {
       context,
       MaterialPageRoute(builder: (_) => ProfileScreen(userId: userId)),
     );
+  }
+
+  Future<void> _onTapAttendee(Attendee a) async {
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: NileColors.bgSurface,
+      shape: const RoundedRectangleBorder(
+        borderRadius:
+            BorderRadius.vertical(top: Radius.circular(NileRadius.lg)),
+      ),
+      builder: (_) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.person_outline,
+                  color: NileColors.txtSecondary),
+              title: Text('View profile', style: NileTextStyles.labelLg()),
+              onTap: () => Navigator.pop(context, 'profile'),
+            ),
+            if (!a.isRefunded)
+              ListTile(
+                leading:
+                    const Icon(Icons.undo, color: NileColors.coral),
+                title: Text('Refund ticket',
+                    style: NileTextStyles.labelLg()
+                        .copyWith(color: NileColors.coral)),
+                subtitle: Text(
+                    'Returns \$${(a.amountCents / 100).toStringAsFixed(2)} to @${a.username}',
+                    style: NileTextStyles.caption()
+                        .copyWith(color: NileColors.txtTertiary)),
+                onTap: () => Navigator.pop(context, 'refund'),
+              ),
+          ],
+        ),
+      ),
+    );
+
+    if (action == 'profile') {
+      _openProfile(a.buyerId);
+    } else if (action == 'refund') {
+      await _refund(a);
+    }
+  }
+
+  Future<void> _refund(Attendee a) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: NileColors.bgSurface,
+        title: Text('Refund ticket?', style: NileTextStyles.headingSm()),
+        content: Text(
+          'This refunds \$${(a.amountCents / 100).toStringAsFixed(2)} to '
+          '@${a.username} and revokes their access. This can\'t be undone.',
+          style:
+              NileTextStyles.bodySm().copyWith(color: NileColors.txtSecondary),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: TextButton.styleFrom(foregroundColor: NileColors.coral),
+            child: const Text('Refund'),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true) return;
+
+    try {
+      await TicketService.refund(a.ticketId);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Ticket refunded')),
+        );
+      }
+      await _load();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Refund failed: $e')),
+        );
+      }
+    }
   }
 
   @override
@@ -112,21 +245,24 @@ class _AttendeeListScreenState extends State<AttendeeListScreen> {
       );
     }
 
-    final total = _attendees!.fold<int>(0, (s, a) => s + a.amountCents);
+    // Revenue and head-count reflect active (paid) tickets only; refunded
+    // rows stay visible for history but don't count.
+    final paid = _attendees!.where((a) => !a.isRefunded);
+    final total = paid.fold<int>(0, (s, a) => s + a.amountCents);
 
     return ListView.separated(
+      controller: _scroll,
       padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
-      itemCount: _attendees!.length + 1,
+      itemCount: _attendees!.length + 1 + (_hasMore ? 1 : 0),
       separatorBuilder: (_, i) =>
           i == 0 ? const SizedBox(height: 12) : const SizedBox(height: 8),
       itemBuilder: (_, i) {
         if (i == 0) {
-          return _SummaryRow(count: _attendees!.length, totalCents: total);
+          return _SummaryRow(count: paid.length, totalCents: total);
         }
-        return _AttendeeTile(
-          attendee: _attendees![i - 1],
-          onTap: () => _openProfile(_attendees![i - 1].buyerId),
-        );
+        if (i > _attendees!.length) return const LoadMoreFooter();
+        final a = _attendees![i - 1];
+        return _AttendeeTile(attendee: a, onTap: () => _onTapAttendee(a));
       },
     );
   }
@@ -213,10 +349,20 @@ class _AttendeeTile extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('@${attendee.username}',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: NileTextStyles.labelLg()),
+                  Row(
+                    children: [
+                      Flexible(
+                        child: Text('@${attendee.username}',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: NileTextStyles.labelLg()),
+                      ),
+                      if (attendee.isRefunded) ...[
+                        const SizedBox(width: 8),
+                        const _RefundedBadge(),
+                      ],
+                    ],
+                  ),
                   const SizedBox(height: 2),
                   Text(_formatDate(attendee.purchasedAt),
                       style: NileTextStyles.caption()
@@ -225,8 +371,14 @@ class _AttendeeTile extends StatelessWidget {
               ),
             ),
             Text('\$${(attendee.amountCents / 100).toStringAsFixed(2)}',
-                style: NileTextStyles.labelMd()
-                    .copyWith(color: NileColors.volt)),
+                style: NileTextStyles.labelMd().copyWith(
+                  color: attendee.isRefunded
+                      ? NileColors.txtTertiary
+                      : NileColors.volt,
+                  decoration: attendee.isRefunded
+                      ? TextDecoration.lineThrough
+                      : null,
+                )),
           ],
         ),
       ),
@@ -240,6 +392,23 @@ class _AttendeeTile extends StatelessWidget {
     ];
     final l = d.toLocal();
     return '${m[l.month - 1]} ${l.day}, ${l.year}';
+  }
+}
+
+class _RefundedBadge extends StatelessWidget {
+  const _RefundedBadge();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+      decoration: BoxDecoration(
+        color: NileColors.coral.withValues(alpha: 0.15),
+        borderRadius: BorderRadius.circular(NileRadius.pill),
+      ),
+      child: Text('refunded',
+          style: NileTextStyles.caption().copyWith(color: NileColors.coral)),
+    );
   }
 }
 

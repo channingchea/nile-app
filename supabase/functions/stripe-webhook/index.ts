@@ -2,7 +2,14 @@
 //
 // Setup:
 //   supabase secrets set STRIPE_WEBHOOK_SECRET=whsec_...
-//   supabase functions deploy stripe-webhook
+//   supabase functions deploy stripe-webhook --no-verify-jwt
+//
+// IMPORTANT: deploy with --no-verify-jwt. Stripe signs with the webhook
+// secret, not a Supabase JWT — with JWT verification on, Supabase's gateway
+// rejects every delivery with 401 UNAUTHORIZED_NO_AUTH_HEADER before this
+// function runs. Auth is still enforced via constructEventAsync (the
+// signature check below). This applies ONLY to the webhook; stripe-connect
+// and refund-ticket DO need JWT verification (they read the user's session).
 //
 // In Stripe Dashboard → Webhooks → Add endpoint:
 //   URL: https://<project>.supabase.co/functions/v1/stripe-webhook

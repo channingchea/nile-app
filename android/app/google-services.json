@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "907048556625",
+    "project_id": "nile-35c48",
+    "storage_bucket": "nile-35c48.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:907048556625:android:af5e0961fedc513d664070",
+        "android_client_info": {
+          "package_name": "com.nilestreaming.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAceVRbDWXLLQCS0mxJH-iQ1bVo9Ucypok"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

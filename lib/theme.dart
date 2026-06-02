@@ -305,7 +305,7 @@ ThemeData nileTheme() {
       // AM / PM toggle
       dayPeriodColor: WidgetStateColor.resolveWith((states) =>
           states.contains(WidgetState.selected)
-              ? NileColors.volt.withOpacity(0.15)
+              ? NileColors.volt.withValues(alpha: 0.15)
               : Colors.transparent),
       dayPeriodTextColor: WidgetStateColor.resolveWith((states) =>
           states.contains(WidgetState.selected)

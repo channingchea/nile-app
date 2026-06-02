@@ -19,10 +19,12 @@ subprojects {
     project.evaluationDependsOn(":app")
 }
 
-// Force all plugin subprojects to compile against SDK 36
+// Bump any plugin module that targets an older SDK up to 36.
 subprojects {
     plugins.withId("com.android.library") {
-        extensions.findByType<com.android.build.gradle.LibraryExtension>()?.compileSdk = 36
+        extensions.findByType<com.android.build.gradle.LibraryExtension>()?.let {
+            if (it.compileSdk == null || it.compileSdk!! < 36) it.compileSdk = 36
+        }
     }
 }
 

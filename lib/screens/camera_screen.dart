@@ -382,7 +382,7 @@ class _CameraScreenState extends State<CameraScreen> {
                   ? Container(
                       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                       decoration: BoxDecoration(
-                        color: NileColors.amber.withOpacity(0.9),
+                        color: NileColors.amber.withValues(alpha: 0.9),
                         borderRadius: BorderRadius.circular(NileRadius.pill),
                       ),
                       child: Row(
@@ -429,7 +429,7 @@ class _CameraScreenState extends State<CameraScreen> {
                     style: NileTextStyles.bodySm().copyWith(color: NileColors.txtPrimary),
                   ),
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: NileColors.bgSurface.withOpacity(0.85),
+                    backgroundColor: NileColors.bgSurface.withValues(alpha: 0.85),
                     foregroundColor: NileColors.txtPrimary,
                     padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                     shape: RoundedRectangleBorder(
@@ -453,7 +453,7 @@ class _CameraScreenState extends State<CameraScreen> {
                   icon: const Icon(Icons.flip_camera_ios),
                   color: NileColors.txtPrimary,
                   style: IconButton.styleFrom(
-                    backgroundColor: NileColors.bgSurface.withOpacity(0.8),
+                    backgroundColor: NileColors.bgSurface.withValues(alpha: 0.8),
                     padding: const EdgeInsets.all(12),
                   ),
                 ),

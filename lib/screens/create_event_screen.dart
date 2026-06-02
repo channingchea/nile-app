@@ -1,5 +1,4 @@
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -77,8 +76,12 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
     setState(() => _uploadingCover = true);
     try {
       final bytes =
-          await ProfileService.pickImageBytes(maxWidth: 1600, maxHeight: 900);
+          await ProfileService.pickImageBytes(context, maxWidth: 1600, maxHeight: 900);
       if (bytes != null && mounted) setState(() => _coverBytes = bytes);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$e')));
+      }
     } finally {
       if (mounted) setState(() => _uploadingCover = false);
     }
@@ -251,6 +254,7 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
             TextFormField(
               controller: _nameController,
               textCapitalization: TextCapitalization.words,
+              maxLength: 80,
               decoration: const InputDecoration(
                 hintText: 'e.g. Spring Concert 2025',
               ),
@@ -263,6 +267,7 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
             TextFormField(
               controller: _descriptionController,
               maxLines: 4,
+              maxLength: 500,
               decoration: const InputDecoration(
                 hintText: 'Tell viewers what to expect…',
               ),
@@ -339,9 +344,9 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
               Container(
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
-                  color: NileColors.error.withOpacity(0.1),
+                  color: NileColors.error.withValues(alpha: 0.1),
                   borderRadius: BorderRadius.circular(NileRadius.sm),
-                  border: Border.all(color: NileColors.error.withOpacity(0.4)),
+                  border: Border.all(color: NileColors.error.withValues(alpha: 0.4)),
                 ),
                 child: Text(
                   _errorMessage!,
@@ -366,7 +371,7 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
               label: Text(isCreating ? 'Creating…' : 'Create Event'),
               style: FilledButton.styleFrom(
                 padding: const EdgeInsets.symmetric(vertical: 16),
-                textStyle: NileTextStyles.labelLg(),
+                textStyle: NileTextStyles.labelLg().copyWith(color: null),
               ),
             ),
           ],

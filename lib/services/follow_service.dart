@@ -1,4 +1,6 @@
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'pagination.dart';
+import 'profile_service.dart';
 import 'supabase_client.dart';
 
 /// Manages follow / unfollow operations and social-graph queries.
@@ -64,26 +66,50 @@ class FollowService {
 
   // ─── Lists ────────────────────────────────────────────────────────────────
 
-  /// Returns profiles of users who follow [userId].
-  static Future<List<Map<String, dynamic>>> getFollowers(String userId) async {
-    final rows = await supabase
-        .from('follows')
-        .select('profile:profiles!follower_id(*)')
-        .eq('following_id', userId);
-    return (rows as List)
-        .map((r) => r['profile'] as Map<String, dynamic>)
-        .toList();
-  }
+  /// Profiles of users who follow [userId], newest follow first.
+  /// Keyset-paged on follows.created_at via [cursor].
+  static Future<Paged<UserProfile>> getFollowers(String userId,
+          {String? cursor}) =>
+      _pagedFollows(
+        column: 'following_id',
+        value: userId,
+        profileJoin: 'profile:profiles!follower_id(*)',
+        cursor: cursor,
+      );
 
-  /// Returns profiles of users that [userId] follows.
-  static Future<List<Map<String, dynamic>>> getFollowing(String userId) async {
-    final rows = await supabase
+  /// Profiles of users that [userId] follows, newest follow first.
+  /// Keyset-paged on follows.created_at via [cursor].
+  static Future<Paged<UserProfile>> getFollowing(String userId,
+          {String? cursor}) =>
+      _pagedFollows(
+        column: 'follower_id',
+        value: userId,
+        profileJoin: 'profile:profiles!following_id(*)',
+        cursor: cursor,
+      );
+
+  static Future<Paged<UserProfile>> _pagedFollows({
+    required String column,
+    required String value,
+    required String profileJoin,
+    String? cursor,
+  }) async {
+    var b = supabase
         .from('follows')
-        .select('profile:profiles!following_id(*)')
-        .eq('follower_id', userId);
-    return (rows as List)
-        .map((r) => r['profile'] as Map<String, dynamic>)
+        .select('created_at, $profileJoin')
+        .eq(column, value);
+    if (cursor != null) b = b.lt('created_at', cursor);
+    final rows =
+        await b.order('created_at', ascending: false).limit(kPageSize);
+
+    final list = rows as List;
+    final items = list
+        .map((r) => UserProfile.fromMap(r['profile'] as Map<String, dynamic>))
         .toList();
+    final hasMore = list.length == kPageSize;
+    final nextCursor =
+        hasMore ? list.last['created_at'] as String : null;
+    return Paged(items: items, hasMore: hasMore, nextCursor: nextCursor);
   }
 
   // ─── Helpers ──────────────────────────────────────────────────────────────

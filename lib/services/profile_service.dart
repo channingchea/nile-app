@@ -1,7 +1,19 @@
 import 'dart:typed_data';
+import 'dart:ui' as ui;
+import 'package:croppy/croppy.dart';
+import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'supabase_client.dart';
+
+/// Maximum allowed size for any uploaded image (5 MB).
+const int kMaxImageBytes = 5 * 1024 * 1024;
+
+/// Thrown when a picked image exceeds [kMaxImageBytes].
+class ImageTooLargeException implements Exception {
+  @override
+  String toString() => 'Image is too large. Please choose one under 5 MB.';
+}
 
 // ── Model ─────────────────────────────────────────────────────────────────────
 
@@ -14,6 +26,7 @@ class UserProfile {
   final String? coverUrl;
   final int followerCount;
   final int followingCount;
+  final String? stripeAccountId;
   final DateTime createdAt;
 
   const UserProfile({
@@ -25,8 +38,14 @@ class UserProfile {
     this.coverUrl,
     required this.followerCount,
     required this.followingCount,
+    this.stripeAccountId,
     required this.createdAt,
   });
+
+  /// True once the host has begun Stripe Connect onboarding. Live
+  /// charges_enabled / payouts_enabled status is fetched from Stripe.
+  bool get hasStripeAccount =>
+      stripeAccountId != null && stripeAccountId!.isNotEmpty;
 
   factory UserProfile.fromMap(Map<String, dynamic> map) {
     return UserProfile(
@@ -38,6 +57,7 @@ class UserProfile {
       coverUrl: map['cover_url'] as String?,
       followerCount: (map['follower_count'] as num?)?.toInt() ?? 0,
       followingCount: (map['following_count'] as num?)?.toInt() ?? 0,
+      stripeAccountId: map['stripe_account_id'] as String?,
       createdAt: DateTime.parse(map['created_at'] as String),
     );
   }
@@ -50,6 +70,7 @@ class UserProfile {
     String? coverUrl,
     int? followerCount,
     int? followingCount,
+    String? stripeAccountId,
   }) {
     return UserProfile(
       id: id,
@@ -60,6 +81,7 @@ class UserProfile {
       coverUrl: coverUrl ?? this.coverUrl,
       followerCount: followerCount ?? this.followerCount,
       followingCount: followingCount ?? this.followingCount,
+      stripeAccountId: stripeAccountId ?? this.stripeAccountId,
       createdAt: createdAt,
     );
   }
@@ -133,8 +155,12 @@ class ProfileService {
   /// (for instant local preview) and the new public URL.
   /// Returns null if the user cancels.
   static Future<({Uint8List bytes, String url})?> pickAndUploadAvatar(
-      String userId) async {
-    final bytes = await pickImageBytes();
+      String userId, BuildContext context) async {
+    final bytes = await pickImageBytes(
+      context,
+      cropPathFn: ellipseCropShapeFn,
+      allowedAspectRatios: [const CropAspectRatio(width: 1, height: 1)],
+    );
     if (bytes == null) return null;
     final url = await uploadAvatarBytes(userId, bytes);
     return (bytes: bytes, url: url);
@@ -157,8 +183,13 @@ class ProfileService {
   /// both bytes (for instant preview) and the new public URL.
   /// Returns null if the user cancels.
   static Future<({Uint8List bytes, String url})?> pickAndUploadCover(
-      String userId) async {
-    final bytes = await pickImageBytes(maxWidth: 1200, maxHeight: 600);
+      String userId, BuildContext context) async {
+    final bytes = await pickImageBytes(
+      context,
+      maxWidth: 1200,
+      maxHeight: 600,
+      allowedAspectRatios: [const CropAspectRatio(width: 15, height: 4)],
+    );
     if (bytes == null) return null;
     final url = await uploadCoverBytes(userId, bytes);
     return (bytes: bytes, url: url);
@@ -177,12 +208,17 @@ class ProfileService {
 
   // ─── Shared helpers ───────────────────────────────────────────────────────
 
-  /// Opens the gallery picker and returns raw bytes, or null if cancelled.
-  /// Used by screens that need the bytes for an instant local preview before
-  /// uploading (e.g. [EditProfileScreen]).
-  static Future<Uint8List?> pickImageBytes({
+  /// Opens the gallery picker, optionally shows a crop UI, and returns the
+  /// final bytes, or null if the user cancels the picker.
+  ///
+  /// Cropping is optional — if the user dismisses the crop screen the original
+  /// (resized) bytes are returned.
+  static Future<Uint8List?> pickImageBytes(
+    BuildContext context, {
     double maxWidth = 512,
     double maxHeight = 512,
+    CropShapeFn? cropPathFn,
+    List<CropAspectRatio?>? allowedAspectRatios,
   }) async {
     final picker = ImagePicker();
     final picked = await picker.pickImage(
@@ -192,7 +228,29 @@ class ProfileService {
       imageQuality: 85,
     );
     if (picked == null) return null;
-    return picked.readAsBytes();
+
+    final pickedBytes = await picked.readAsBytes();
+
+    // Attempt crop — returns null if user cancels.
+    final result = await showMaterialImageCropper(
+      context,
+      imageProvider: MemoryImage(pickedBytes),
+      cropPathFn: cropPathFn,
+      allowedAspectRatios: allowedAspectRatios,
+    );
+
+    final Uint8List bytes;
+    if (result != null) {
+      final byteData = await result.uiImage.toByteData(
+        format: ui.ImageByteFormat.png,
+      );
+      bytes = byteData!.buffer.asUint8List();
+    } else {
+      bytes = pickedBytes;
+    }
+
+    if (bytes.length > kMaxImageBytes) throw ImageTooLargeException();
+    return bytes;
   }
 
   static Future<String> _uploadImage({

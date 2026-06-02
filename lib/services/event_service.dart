@@ -2,6 +2,7 @@ import 'dart:typed_data';
 
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'like_service.dart';
+import 'pagination.dart';
 import 'supabase_client.dart';
 
 // ── Required SQL (run once in Supabase SQL editor) ────────────────────────────
@@ -124,30 +125,38 @@ class EventService {
   /// "Passed" = status is `ended`, OR it was scheduled and the scheduled time
   /// is already in the past (host no-show). Events with no scheduled_at are
   /// treated as evergreen posts and remain visible until they end.
-  static Future<List<Event>> getFeed(List<String> followingIds) async {
-    if (followingIds.isEmpty) return [];
+  static Future<Paged<Event>> getFeed(List<String> followingIds,
+      {String? cursor}) async {
+    if (followingIds.isEmpty) return Paged.empty();
 
-    final rows = await supabase
+    var b = supabase
         .from('events')
         .select('*, profiles!events_host_id_fkey(username, avatar_url)')
         .inFilter('host_id', followingIds)
-        .neq('status', 'ended')
-        .order('created_at', ascending: false)
-        .limit(100);
+        .neq('status', 'ended');
+    if (cursor != null) b = b.lt('created_at', cursor);
+    final rows =
+        await b.order('created_at', ascending: false).limit(kPageSize);
+
+    final raw =
+        (rows as List).map((r) => Event.fromJson(r as Map<String, dynamic>));
+    // hasMore / cursor are based on the raw page (before no-show filtering) so
+    // paging stays correct even when items are dropped.
+    final fetched = raw.toList();
+    final hasMore = fetched.length == kPageSize;
+    final nextCursor =
+        hasMore ? fetched.last.createdAt.toIso8601String() : null;
 
     final now = DateTime.now();
-    final events = (rows as List)
-        .map((r) => Event.fromJson(r as Map<String, dynamic>))
-        .where((e) {
-          if (e.isEnded) return false;
-          if (e.isScheduled &&
-              e.scheduledAt != null &&
-              e.scheduledAt!.isBefore(now)) {
-            return false;
-          }
-          return true;
-        })
-        .toList();
+    final events = fetched.where((e) {
+      if (e.isEnded) return false;
+      if (e.isScheduled &&
+          e.scheduledAt != null &&
+          e.scheduledAt!.isBefore(now)) {
+        return false;
+      }
+      return true;
+    }).toList();
 
     // Live first, then upcoming-soonest scheduled, then evergreen by recency.
     events.sort((a, b) {
@@ -160,23 +169,29 @@ class EventService {
       return b.createdAt.compareTo(a.createdAt);
     });
 
-    return events;
+    return Paged(items: events, hasMore: hasMore, nextCursor: nextCursor);
   }
 
   /// All events from a single host (any status, newest first). Used by
-  /// profile pages so creators can see their own history.
-  static Future<List<Event>> getEventsByHost(String hostId,
-      {int limit = 100}) async {
-    final rows = await supabase
+  /// profile pages. Keyset-paged by created_at via [cursor].
+  static Future<Paged<Event>> getEventsByHost(String hostId,
+      {String? cursor, int limit = kPageSize}) async {
+    var b = supabase
         .from('events')
         .select('*, profiles!events_host_id_fkey(username, avatar_url)')
-        .eq('host_id', hostId)
-        .order('created_at', ascending: false)
-        .limit(limit);
+        .eq('host_id', hostId);
+    if (cursor != null) b = b.lt('created_at', cursor);
+    final rows =
+        await b.order('created_at', ascending: false).limit(limit);
 
-    return (rows as List)
-        .map((r) => Event.fromJson(r as Map<String, dynamic>))
-        .toList();
+    final items =
+        (rows as List).map((r) => Event.fromJson(r as Map<String, dynamic>)).toList();
+    final hasMore = items.length == limit;
+    return Paged(
+      items: items,
+      hasMore: hasMore,
+      nextCursor: hasMore ? items.last.createdAt.toIso8601String() : null,
+    );
   }
 
   /// Persist a newly created event to Supabase after the LiveKit backend call.
@@ -212,6 +227,7 @@ class EventService {
     String? title,
     String? description,
     String? coverImageUrl,
+    bool clearCoverImageUrl = false,
     DateTime? scheduledAt,
     bool clearScheduledAt = false,
     int? price,
@@ -223,6 +239,7 @@ class EventService {
       if (title != null) 'title': title,
       if (description != null) 'description': description,
       if (coverImageUrl != null) 'cover_image_url': coverImageUrl,
+      if (clearCoverImageUrl) 'cover_image_url': null,
       if (scheduledAt != null) 'scheduled_at': scheduledAt.toIso8601String(),
       if (clearScheduledAt) 'scheduled_at': null,
       if (price != null) 'price': price,
@@ -356,7 +373,7 @@ class EventService {
         .select('viewer_count, status')
         .eq('livekit_room', liveKitEventId)
         .limit(1);
-    return (rows as List).isNotEmpty ? rows.first as Map<String, dynamic> : null;
+    return rows.isNotEmpty ? rows.first : null;
   }
 
   /// Subscribe to realtime updates on an event row.

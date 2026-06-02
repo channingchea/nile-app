@@ -8,10 +8,12 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../services/event_service.dart';
 import '../services/follow_service.dart';
+import '../services/report_service.dart';
 import '../services/supabase_client.dart';
 import '../services/ticket_service.dart';
 import '../theme.dart';
 import 'attendee_list_screen.dart';
+import 'widgets/moderation_menu.dart';
 import 'edit_event_screen.dart';
 import 'profile_screen.dart';
 import 'viewer_screen.dart';
@@ -419,6 +421,17 @@ class _EventDetailScreenState extends State<EventDetailScreen>
               icon: const Icon(Icons.link, color: NileColors.txtPrimary),
               onPressed: _copyId,
             ),
+            if (!_isOwnEvent)
+              IconButton(
+                tooltip: 'Report event',
+                icon: const Icon(Icons.flag_outlined,
+                    color: NileColors.txtPrimary),
+                onPressed: () => Moderation.showReportSheet(
+                  context,
+                  targetType: ReportTargetType.event,
+                  targetId: _event!.id,
+                ),
+              ),
             const SizedBox(width: 4),
           ],
           flexibleSpace: FlexibleSpaceBar(
@@ -759,9 +772,18 @@ class _CountUnit extends StatelessWidget {
   Widget build(BuildContext context) {
     return Column(
       children: [
-        Text(
-          value.toString().padLeft(2, '0'),
-          style: NileTextStyles.displayMd().copyWith(color: NileColors.volt),
+        // Fixed width + tabular figures stop the two digits from reflowing
+        // each tick (the display font's glyphs are variable-width).
+        SizedBox(
+          width: 52,
+          child: Text(
+            value.toString().padLeft(2, '0'),
+            textAlign: TextAlign.center,
+            style: NileTextStyles.displayMd().copyWith(
+              color: NileColors.volt,
+              fontFeatures: const [FontFeature.tabularFigures()],
+            ),
+          ),
         ),
         Text(label, style: NileTextStyles.caption()),
       ],

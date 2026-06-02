@@ -1,30 +1,39 @@
-// This is a basic Flutter widget test.
+// Smoke test: the app builds and renders its first frame without throwing.
 //
-// To perform an interaction with a widget in your test, use the WidgetTester
-// utility in the flutter_test package. For example, you can send tap and scroll
-// gestures. You can also use WidgetTester to find child widgets in the widget
-// tree, read text, and verify that the values of widget properties are correct.
+// NileApp reads Supabase.instance during build, so the test initializes
+// Supabase with throwaway credentials first. Supabase persists its session via
+// shared_preferences, whose platform plugin isn't available in the test VM, so
+// we stub that method channel to return empty. We pump a single frame (not
+// pumpAndSettle) so the _AuthGate loading state renders without a live session.
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'package:nile_app/main.dart';
 
 void main() {
-  testWidgets('Counter increments smoke test', (WidgetTester tester) async {
-    // Build our app and trigger a frame.
-    await tester.pumpWidget(const MyApp());
+  setUpAll(() async {
+    TestWidgetsFlutterBinding.ensureInitialized();
 
-    // Verify that our counter starts at 0.
-    expect(find.text('0'), findsOneWidget);
-    expect(find.text('1'), findsNothing);
+    // Stub shared_preferences so Supabase's local storage init succeeds.
+    const channel = MethodChannel('plugins.flutter.io/shared_preferences');
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+      if (call.method == 'getAll') return <String, Object>{};
+      return null;
+    });
 
-    // Tap the '+' icon and trigger a frame.
-    await tester.tap(find.byIcon(Icons.add));
-    await tester.pump();
+    await Supabase.initialize(
+      url: 'https://test.supabase.co',
+      anonKey: 'test-anon-key',
+    );
+  });
 
-    // Verify that our counter has incremented.
-    expect(find.text('0'), findsNothing);
-    expect(find.text('1'), findsOneWidget);
+  testWidgets('NileApp builds its first frame', (tester) async {
+    await tester.pumpWidget(const NileApp());
+
+    expect(find.byType(MaterialApp), findsOneWidget);
   });
 }

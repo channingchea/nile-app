@@ -2,6 +2,7 @@ import 'dart:typed_data';
 
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'like_service.dart';
+import 'pagination.dart';
 import 'supabase_client.dart';
 
 // ── Model ─────────────────────────────────────────────────────────────────────
@@ -89,45 +90,49 @@ class PostService {
   static const _postSelect =
       '*, profiles!posts_user_id_fkey(username, avatar_url)';
 
-  /// Posts from followed authors, newest first.
-  static Future<List<Post>> getFeed(List<String> followingIds,
-      {int limit = 100}) async {
-    if (followingIds.isEmpty) return [];
-    final rows = await supabase
+  /// Posts from followed authors, newest first. Keyset-paged by created_at
+  /// via [cursor] (the previous page's last created_at).
+  static Future<Paged<Post>> getFeed(List<String> followingIds,
+      {String? cursor}) async {
+    if (followingIds.isEmpty) return Paged.empty();
+    var b = supabase
         .from('posts')
         .select(_postSelect)
-        .inFilter('user_id', followingIds)
-        .order('created_at', ascending: false)
-        .limit(limit);
-    return (rows as List)
-        .map((r) => Post.fromJson(r as Map<String, dynamic>))
-        .toList();
+        .inFilter('user_id', followingIds);
+    if (cursor != null) b = b.lt('created_at', cursor);
+    final rows =
+        await b.order('created_at', ascending: false).limit(kPageSize);
+    return _page(rows as List);
   }
 
-  /// All posts globally, newest first (for Discover).
-  static Future<List<Post>> getDiscover({int limit = 50}) async {
-    final rows = await supabase
-        .from('posts')
-        .select(_postSelect)
-        .order('created_at', ascending: false)
-        .limit(limit);
-    return (rows as List)
-        .map((r) => Post.fromJson(r as Map<String, dynamic>))
-        .toList();
+  /// All posts globally, newest first (for Discover). Keyset-paged.
+  static Future<Paged<Post>> getDiscover({String? cursor}) async {
+    var b = supabase.from('posts').select(_postSelect);
+    if (cursor != null) b = b.lt('created_at', cursor);
+    final rows =
+        await b.order('created_at', ascending: false).limit(kPageSize);
+    return _page(rows as List);
   }
 
-  /// All posts by one author, newest first (profile screen).
-  static Future<List<Post>> getByAuthor(String authorId,
-      {int limit = 100}) async {
-    final rows = await supabase
-        .from('posts')
-        .select(_postSelect)
-        .eq('user_id', authorId)
-        .order('created_at', ascending: false)
-        .limit(limit);
-    return (rows as List)
-        .map((r) => Post.fromJson(r as Map<String, dynamic>))
-        .toList();
+  /// All posts by one author, newest first (profile screen). Keyset-paged.
+  static Future<Paged<Post>> getByAuthor(String authorId,
+      {String? cursor, int limit = kPageSize}) async {
+    var b = supabase.from('posts').select(_postSelect).eq('user_id', authorId);
+    if (cursor != null) b = b.lt('created_at', cursor);
+    final rows =
+        await b.order('created_at', ascending: false).limit(limit);
+    return _page(rows as List, pageSize: limit);
+  }
+
+  static Paged<Post> _page(List rows, {int pageSize = kPageSize}) {
+    final items =
+        rows.map((r) => Post.fromJson(r as Map<String, dynamic>)).toList();
+    final hasMore = items.length == pageSize;
+    return Paged(
+      items: items,
+      hasMore: hasMore,
+      nextCursor: hasMore ? items.last.createdAt.toIso8601String() : null,
+    );
   }
 
   /// Insert a new post and return the hydrated row.
@@ -150,7 +155,7 @@ class PostService {
         .from('posts')
         .insert({
           'user_id': uid,
-          if (hasBody) 'content': body,
+          'content': body ?? '',
           if (hasImage) 'image_url': imageUrl,
           if (eventId != null) 'event_id': eventId,
         })

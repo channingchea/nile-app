@@ -1,4 +1,4 @@
-package com.example.nile_app
+package com.nilestreaming.app
 
 import io.flutter.embedding.android.FlutterActivity
 

@@ -4,6 +4,7 @@ import '../services/event_service.dart';
 import '../services/follow_service.dart';
 import '../services/like_service.dart';
 import '../services/notification_service.dart';
+import '../services/pagination.dart' show Paged;
 import '../services/post_service.dart';
 import '../theme.dart';
 import 'audio_screen.dart';
@@ -14,10 +15,12 @@ import 'discover_screen.dart';
 import 'edit_event_screen.dart';
 import 'edit_post_screen.dart';
 import 'event_detail_screen.dart';
+import 'messages_screen.dart';
 import 'notifications_screen.dart';
 import 'post_detail_screen.dart';
 import 'profile_screen.dart';
 import 'viewer_screen.dart';
+import 'widgets/load_more_footer.dart';
 
 // ── Shell ─────────────────────────────────────────────────────────────────────
 
@@ -35,6 +38,7 @@ class _HomeScreenState extends State<HomeScreen> {
   List<Widget> get _pages => [
     const _FeedTab(),
     const DiscoverScreen(),
+    const MessagesScreen(),
     ProfileScreen(key: ValueKey(_profileRefreshKey)),
   ];
 
@@ -66,7 +70,7 @@ class _HomeScreenState extends State<HomeScreen> {
           : null,
       bottomNavigationBar: NavigationBar(
         backgroundColor: NileColors.bgSurface,
-        indicatorColor: NileColors.volt.withOpacity(0.15),
+        indicatorColor: NileColors.volt.withValues(alpha: 0.15),
         selectedIndex: _selectedIndex,
         onDestinationSelected: (i) => setState(() => _selectedIndex = i),
         labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
@@ -80,6 +84,11 @@ class _HomeScreenState extends State<HomeScreen> {
             icon: Icon(Icons.search_outlined),
             selectedIcon: Icon(Icons.search, color: NileColors.volt),
             label: 'Discover',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.send_outlined),
+            selectedIcon: Icon(Icons.send, color: NileColors.volt),
+            label: 'Messages',
           ),
           NavigationDestination(
             icon: Icon(Icons.person_outline),
@@ -223,6 +232,17 @@ class _FeedTabState extends State<_FeedTab> {
   String? _error;
   int _unreadCount = 0;
 
+  // Pagination — independent cursors per source, merged into [_items].
+  final _scroll = ScrollController();
+  List<String> _followingIds = [];
+  String? _postCursor;
+  String? _eventCursor;
+  bool _postsHasMore = false;
+  bool _eventsHasMore = false;
+  bool _loadingMore = false;
+
+  bool get _hasMore => _postsHasMore || _eventsHasMore;
+
   void _replacePost(Post updated) {
     if (_items == null) return;
     setState(() {
@@ -294,8 +314,74 @@ class _FeedTabState extends State<_FeedTab> {
   @override
   void initState() {
     super.initState();
+    _scroll.addListener(_onScroll);
     _load();
     _loadUnread();
+  }
+
+  @override
+  void dispose() {
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  void _onScroll() {
+    if (!_scroll.hasClients) return;
+    if (_scroll.position.pixels <
+        _scroll.position.maxScrollExtent - 400) {
+      return;
+    }
+    if (_hasMore && !_loadingMore && _items != null) _loadMore();
+  }
+
+  /// Sorts the unified feed: live events pinned, then by recency.
+  void _sortItems(List<_FeedItem> items) {
+    items.sort((a, b) {
+      final aLive = a is _EventFeedItem && a.event.isLive;
+      final bLive = b is _EventFeedItem && b.event.isLive;
+      if (aLive != bLive) return aLive ? -1 : 1;
+      return b.sortKey.compareTo(a.sortKey);
+    });
+  }
+
+  Future<void> _loadMore() async {
+    setState(() => _loadingMore = true);
+    try {
+      final results = await (
+        _eventsHasMore
+            ? EventService.getFeed(_followingIds, cursor: _eventCursor)
+            : Future.value(Paged.empty<Event>()),
+        _postsHasMore
+            ? PostService.getFeed(_followingIds, cursor: _postCursor)
+            : Future.value(Paged.empty<Post>()),
+      ).wait;
+      final (eventPage, postPage) = results;
+      final (hEvents, hPosts) = await (
+        EventService.hydrateLikes(eventPage.items),
+        PostService.hydrateLikes(postPage.items),
+      ).wait;
+      if (!mounted) return;
+      setState(() {
+        _items = [
+          ...?_items,
+          ...hEvents.map(_EventFeedItem.new),
+          ...hPosts.map(_PostFeedItem.new),
+        ];
+        _sortItems(_items!);
+        if (_eventsHasMore) {
+          _eventCursor = eventPage.nextCursor;
+          _eventsHasMore = eventPage.hasMore;
+        }
+        if (_postsHasMore) {
+          _postCursor = postPage.nextCursor;
+          _postsHasMore = postPage.hasMore;
+        }
+      });
+    } catch (_) {
+      // Keep existing items; scrolling again retries.
+    } finally {
+      if (mounted) setState(() => _loadingMore = false);
+    }
   }
 
   Future<void> _loadUnread() async {
@@ -322,31 +408,32 @@ class _FeedTabState extends State<_FeedTab> {
     });
     try {
       final ids = await FollowService.getFollowingIds();
+      _followingIds = ids;
       if (ids.isEmpty) {
         setState(() => _noFollows = true);
         return;
       }
-      final (events, posts) = await (
+      final (eventPage, postPage) = await (
         EventService.getFeed(ids),
         PostService.getFeed(ids),
       ).wait;
       // Hydrate likedByMe flags in parallel (non-fatal if it fails).
       final (hEvents, hPosts) = await (
-        EventService.hydrateLikes(events),
-        PostService.hydrateLikes(posts),
+        EventService.hydrateLikes(eventPage.items),
+        PostService.hydrateLikes(postPage.items),
       ).wait;
       final items = <_FeedItem>[
         ...hEvents.map(_EventFeedItem.new),
         ...hPosts.map(_PostFeedItem.new),
       ];
-      // Live events pinned to top; everything else by recency.
-      items.sort((a, b) {
-        final aLive = a is _EventFeedItem && a.event.isLive;
-        final bLive = b is _EventFeedItem && b.event.isLive;
-        if (aLive != bLive) return aLive ? -1 : 1;
-        return b.sortKey.compareTo(a.sortKey);
+      _sortItems(items);
+      setState(() {
+        _items = items;
+        _eventCursor = eventPage.nextCursor;
+        _postCursor = postPage.nextCursor;
+        _eventsHasMore = eventPage.hasMore;
+        _postsHasMore = postPage.hasMore;
       });
-      setState(() => _items = items);
     } catch (e) {
       setState(() => _error = e.toString());
     }
@@ -360,6 +447,7 @@ class _FeedTabState extends State<_FeedTab> {
         backgroundColor: NileColors.bgSurface,
         onRefresh: _load,
         child: CustomScrollView(
+          controller: _scroll,
           physics: const AlwaysScrollableScrollPhysics(),
           slivers: [
             SliverAppBar(
@@ -398,9 +486,10 @@ class _FeedTabState extends State<_FeedTab> {
               SliverPadding(
                 padding: const EdgeInsets.fromLTRB(16, 8, 16, 96),
                 sliver: SliverList.separated(
-                  itemCount: _items!.length,
+                  itemCount: _items!.length + (_hasMore ? 1 : 0),
                   separatorBuilder: (_, __) => const SizedBox(height: 12),
                   itemBuilder: (_, i) {
+                    if (i >= _items!.length) return const LoadMoreFooter();
                     final it = _items![i];
                     final myId = Supabase.instance.client.auth.currentUser?.id;
                     return switch (it) {

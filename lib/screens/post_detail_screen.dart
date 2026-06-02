@@ -4,8 +4,11 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import '../services/comment_service.dart';
 import '../services/like_service.dart';
 import '../services/post_service.dart';
+import '../services/report_service.dart';
 import '../theme.dart';
 import 'profile_screen.dart';
+import 'widgets/load_more_footer.dart';
+import 'widgets/moderation_menu.dart';
 
 class PostDetailScreen extends StatefulWidget {
   final Post post;
@@ -22,13 +25,19 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
 
   final _commentController = TextEditingController();
   final _commentFocus = FocusNode();
+  final _scroll = ScrollController();
   bool _submitting = false;
   bool _liking = false;
+
+  String? _cursor;
+  bool _hasMore = false;
+  bool _loadingMore = false;
 
   @override
   void initState() {
     super.initState();
     _post = widget.post;
+    _scroll.addListener(_onScroll);
     _hydrate();
     _loadComments();
   }
@@ -37,7 +46,16 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
   void dispose() {
     _commentController.dispose();
     _commentFocus.dispose();
+    _scroll.dispose();
     super.dispose();
+  }
+
+  void _onScroll() {
+    if (!_scroll.hasClients) return;
+    if (_scroll.position.pixels < _scroll.position.maxScrollExtent - 400) {
+      return;
+    }
+    if (_hasMore && !_loadingMore && _comments != null) _loadMoreComments();
   }
 
   Future<void> _hydrate() async {
@@ -60,12 +78,34 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
       _commentsError = null;
     });
     try {
-      final list = await CommentService.listForPost(_post.id);
+      final page = await CommentService.listForPost(_post.id);
       if (!mounted) return;
-      setState(() => _comments = list);
+      setState(() {
+        _comments = page.items;
+        _cursor = page.nextCursor;
+        _hasMore = page.hasMore;
+      });
     } catch (e) {
       if (!mounted) return;
       setState(() => _commentsError = e.toString());
+    }
+  }
+
+  Future<void> _loadMoreComments() async {
+    if (_cursor == null) return;
+    setState(() => _loadingMore = true);
+    try {
+      final page = await CommentService.listForPost(_post.id, cursor: _cursor);
+      if (!mounted) return;
+      setState(() {
+        _comments = [...?_comments, ...page.items];
+        _cursor = page.nextCursor;
+        _hasMore = page.hasMore;
+      });
+    } catch (_) {
+      // Keep existing; scrolling retries.
+    } finally {
+      if (mounted) setState(() => _loadingMore = false);
     }
   }
 
@@ -161,6 +201,18 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
               AppBar(
                 backgroundColor: Colors.transparent,
                 title: Text('Post', style: NileTextStyles.headingMd()),
+                actions: [
+                  if (!_isMyPost)
+                    IconButton(
+                      icon: const Icon(Icons.flag_outlined),
+                      tooltip: 'Report post',
+                      onPressed: () => Moderation.showReportSheet(
+                        context,
+                        targetType: ReportTargetType.post,
+                        targetId: _post.id,
+                      ),
+                    ),
+                ],
               ),
               Expanded(
                 child: RefreshIndicator(
@@ -170,6 +222,7 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
                     await _loadComments();
                   },
                   child: ListView(
+                    controller: _scroll,
                     padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
                     children: [
                       _PostBody(post: _post),
@@ -208,12 +261,15 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
                                 style: NileTextStyles.bodySm()),
                           ),
                         )
-                      else
+                      else ...[
                         ..._comments!.map((c) => _CommentTile(
                               comment: c,
                               canDelete: c.authorId == _myId() || _isMyPost,
+                              isMine: c.authorId == _myId(),
                               onDelete: () => _deleteComment(c),
                             )),
+                        if (_hasMore) const LoadMoreFooter(),
+                      ],
                     ],
                   ),
                 ),
@@ -392,10 +448,12 @@ class _IconCount extends StatelessWidget {
 class _CommentTile extends StatelessWidget {
   final Comment comment;
   final bool canDelete;
+  final bool isMine;
   final VoidCallback onDelete;
   const _CommentTile({
     required this.comment,
     required this.canDelete,
+    required this.isMine,
     required this.onDelete,
   });
 
@@ -448,14 +506,15 @@ class _CommentTile extends StatelessWidget {
                     Text(_timeAgo(comment.createdAt),
                         style: NileTextStyles.caption()),
                     const Spacer(),
-                    if (canDelete)
-                      InkWell(
-                        onTap: onDelete,
-                        child: const Padding(
-                          padding: EdgeInsets.symmetric(
-                              horizontal: 4, vertical: 2),
-                          child: Icon(Icons.close,
-                              size: 16, color: NileColors.txtTertiary),
+                    if (canDelete || !isMine)
+                      _CommentMenu(
+                        canDelete: canDelete,
+                        canReport: !isMine,
+                        onDelete: onDelete,
+                        onReport: () => Moderation.showReportSheet(
+                          context,
+                          targetType: ReportTargetType.comment,
+                          targetId: comment.id,
                         ),
                       ),
                   ],
@@ -467,6 +526,45 @@ class _CommentTile extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+class _CommentMenu extends StatelessWidget {
+  final bool canDelete;
+  final bool canReport;
+  final VoidCallback onDelete;
+  final VoidCallback onReport;
+  const _CommentMenu({
+    required this.canDelete,
+    required this.canReport,
+    required this.onDelete,
+    required this.onReport,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return PopupMenuButton<String>(
+      padding: EdgeInsets.zero,
+      icon: const Icon(Icons.more_horiz,
+          size: 16, color: NileColors.txtTertiary),
+      color: NileColors.bgRaised,
+      shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(NileRadius.sm)),
+      onSelected: (v) {
+        if (v == 'delete') onDelete();
+        if (v == 'report') onReport();
+      },
+      itemBuilder: (_) => [
+        if (canReport)
+          const PopupMenuItem(value: 'report', child: Text('Report')),
+        if (canDelete)
+          PopupMenuItem(
+            value: 'delete',
+            child:
+                Text('Delete', style: TextStyle(color: NileColors.error)),
+          ),
+      ],
     );
   }
 }
@@ -503,6 +601,7 @@ class _CommentInput extends StatelessWidget {
                 focusNode: focusNode,
                 minLines: 1,
                 maxLines: 4,
+                maxLength: 500,
                 textCapitalization: TextCapitalization.sentences,
                 style: NileTextStyles.bodyMd(),
                 decoration: const InputDecoration(
@@ -511,6 +610,7 @@ class _CommentInput extends StatelessWidget {
                   border: InputBorder.none,
                   focusedBorder: InputBorder.none,
                   enabledBorder: InputBorder.none,
+                  counterText: '',
                 ),
                 onSubmitted: (_) => onSubmit(),
               ),
