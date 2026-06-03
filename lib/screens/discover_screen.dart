@@ -36,6 +36,10 @@ class _DiscoverScreenState extends State<DiscoverScreen>
   List<Event>? _events;
   List<UserProfile>? _people;
 
+  // "From your network" rails (follow-graph recs). Only shown when not searching.
+  List<Post> _recPosts = [];
+  List<Event> _recEvents = [];
+
   bool _isSearching = false;
   final Map<_Tab, bool> _loading = {_Tab.posts: false, _Tab.events: false, _Tab.people: false};
   final Map<_Tab, String?> _error = {};
@@ -135,11 +139,17 @@ class _DiscoverScreenState extends State<DiscoverScreen>
     final q = _controller.text.trim();
     setState(() { _loading[_Tab.posts] = true; _error[_Tab.posts] = null; });
     try {
-      final page = await _fetchPosts(q, null);
+      final results = await Future.wait([
+        _fetchPosts(q, null),
+        q.isEmpty ? SearchService.recommendedPosts() : Future.value(<Post>[]),
+      ]);
+      final page = results[0] as Paged<Post>;
       final posts = await PostService.hydrateLikes(page.items);
+      final recs = await PostService.hydrateLikes(results[1] as List<Post>);
       if (mounted) {
         setState(() {
           _posts = posts;
+          _recPosts = recs;
           _cursor[_Tab.posts] = page.nextCursor;
           _hasMore[_Tab.posts] = page.hasMore;
         });
@@ -155,11 +165,17 @@ class _DiscoverScreenState extends State<DiscoverScreen>
     final q = _controller.text.trim();
     setState(() { _loading[_Tab.events] = true; _error[_Tab.events] = null; });
     try {
-      final page = await _fetchEvents(q, null);
+      final results = await Future.wait([
+        _fetchEvents(q, null),
+        q.isEmpty ? SearchService.recommendedEvents() : Future.value(<Event>[]),
+      ]);
+      final page = results[0] as Paged<Event>;
       final events = await EventService.hydrateLikes(page.items);
+      final recs = await EventService.hydrateLikes(results[1] as List<Event>);
       if (mounted) {
         setState(() {
           _events = events;
+          _recEvents = recs;
           _cursor[_Tab.events] = page.nextCursor;
           _hasMore[_Tab.events] = page.hasMore;
         });
@@ -297,6 +313,23 @@ class _DiscoverScreenState extends State<DiscoverScreen>
     }
   }
 
+  void _openEvent(Event ev) => Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => ev.isLive
+              ? ViewerScreen(initialEventId: ev.liveKitEventId)
+              : EventDetailScreen(event: ev),
+        ),
+      );
+
+  Future<void> _openRecPost(int j) async {
+    final updated = await Navigator.push<Post>(
+      context,
+      MaterialPageRoute(builder: (_) => PostDetailScreen(post: _recPosts[j])),
+    );
+    if (updated != null && mounted) setState(() => _recPosts[j] = updated);
+  }
+
   void _clearSearch() {
     _controller.clear();
     _focusNode.unfocus();
@@ -379,6 +412,8 @@ class _DiscoverScreenState extends State<DiscoverScreen>
         subtitle: _isSearching ? 'Try a different search.' : 'Check back soon.',
       );
     }
+    final showRail = !_isSearching && _recPosts.isNotEmpty;
+    final header = showRail ? 1 : 0;
     return RefreshIndicator(
       color: NileColors.volt,
       backgroundColor: NileColors.bgSurface,
@@ -387,21 +422,34 @@ class _DiscoverScreenState extends State<DiscoverScreen>
         controller: _scroll[_Tab.posts],
         physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
-        itemCount: posts.length + (_hasMore[_Tab.posts]! ? 1 : 0),
-        separatorBuilder: (_, __) => const SizedBox(height: 12),
+        itemCount: header + posts.length + (_hasMore[_Tab.posts]! ? 1 : 0),
+        separatorBuilder: (_, i) =>
+            SizedBox(height: showRail && i == 0 ? 20 : 12),
         itemBuilder: (_, i) {
-          if (i >= posts.length) return const LoadMoreFooter();
+          if (showRail && i == 0) {
+            return _NetworkRail(
+              children: [
+                for (var j = 0; j < _recPosts.length; j++)
+                  _RecPostCard(
+                    post: _recPosts[j],
+                    onTap: () => _openRecPost(j),
+                  ),
+              ],
+            );
+          }
+          final idx = i - header;
+          if (idx >= posts.length) return const LoadMoreFooter();
           return _DiscoverPostCard(
-            post: posts[i],
-            onLikeToggle: () => _togglePostLike(i),
+            post: posts[idx],
+            onLikeToggle: () => _togglePostLike(idx),
             onTap: () async {
               final updated = await Navigator.push<Post>(
                 context,
                 MaterialPageRoute(
-                    builder: (_) => PostDetailScreen(post: posts[i])),
+                    builder: (_) => PostDetailScreen(post: posts[idx])),
               );
               if (updated != null && mounted) {
-                setState(() => _posts![i] = updated);
+                setState(() => _posts![idx] = updated);
               }
             },
           );
@@ -423,6 +471,8 @@ class _DiscoverScreenState extends State<DiscoverScreen>
         subtitle: _isSearching ? 'Try a different search.' : 'Be the first to go live.',
       );
     }
+    final showRail = !_isSearching && _recEvents.isNotEmpty;
+    final header = showRail ? 1 : 0;
     return RefreshIndicator(
       color: NileColors.volt,
       backgroundColor: NileColors.bgSurface,
@@ -431,21 +481,24 @@ class _DiscoverScreenState extends State<DiscoverScreen>
         controller: _scroll[_Tab.events],
         physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
-        itemCount: events.length + (_hasMore[_Tab.events]! ? 1 : 0),
-        separatorBuilder: (_, __) => const SizedBox(height: 12),
+        itemCount: header + events.length + (_hasMore[_Tab.events]! ? 1 : 0),
+        separatorBuilder: (_, i) =>
+            SizedBox(height: showRail && i == 0 ? 20 : 12),
         itemBuilder: (_, i) {
-          if (i >= events.length) return const LoadMoreFooter();
+          if (showRail && i == 0) {
+            return _NetworkRail(
+              children: [
+                for (final ev in _recEvents)
+                  _RecEventCard(event: ev, onTap: () => _openEvent(ev)),
+              ],
+            );
+          }
+          final idx = i - header;
+          if (idx >= events.length) return const LoadMoreFooter();
           return _DiscoverEventCard(
-            event: events[i],
-            onLikeToggle: () => _toggleEventLike(i),
-            onTap: () => Navigator.push(
-              context,
-              MaterialPageRoute(
-                builder: (_) => events[i].isLive
-                    ? ViewerScreen(initialEventId: events[i].liveKitEventId)
-                    : EventDetailScreen(event: events[i]),
-              ),
-            ),
+            event: events[idx],
+            onLikeToggle: () => _toggleEventLike(idx),
+            onTap: () => _openEvent(events[idx]),
           );
         },
       ),
@@ -889,6 +942,154 @@ class _LikeButton extends StatelessWidget {
             const SizedBox(width: 5),
             Text('$count',
                 style: NileTextStyles.bodySm().copyWith(color: color)),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ── "From your network" rail ──────────────────────────────────────────────────
+
+/// Horizontal carousel of follow-graph recommendations with a section header.
+class _NetworkRail extends StatelessWidget {
+  final List<Widget> children;
+  const _NetworkRail({required this.children});
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            const Icon(Icons.bolt, size: 16, color: NileColors.volt),
+            const SizedBox(width: 6),
+            Text('From your network', style: NileTextStyles.labelMd()),
+          ],
+        ),
+        const SizedBox(height: 4),
+        Text('Liked by people you follow',
+            style: NileTextStyles.caption()
+                .copyWith(color: NileColors.txtTertiary)),
+        const SizedBox(height: 12),
+        SizedBox(
+          height: 184,
+          child: ListView.separated(
+            scrollDirection: Axis.horizontal,
+            clipBehavior: Clip.none,
+            itemCount: children.length,
+            separatorBuilder: (_, __) => const SizedBox(width: 12),
+            itemBuilder: (_, i) => SizedBox(width: 220, child: children[i]),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _RecPostCard extends StatelessWidget {
+  final Post post;
+  final VoidCallback onTap;
+  const _RecPostCard({required this.post, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: NileColors.bgSurface,
+      borderRadius: BorderRadius.circular(NileRadius.md),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  CircleAvatar(
+                    radius: 11,
+                    backgroundColor: NileColors.bgRaised,
+                    backgroundImage: post.authorAvatarUrl != null
+                        ? NetworkImage(post.authorAvatarUrl!)
+                        : null,
+                    child: post.authorAvatarUrl == null
+                        ? Text(post.authorUsername[0].toUpperCase(),
+                            style: NileTextStyles.caption())
+                        : null,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text('@${post.authorUsername}',
+                        style: NileTextStyles.bodySm(),
+                        overflow: TextOverflow.ellipsis),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Expanded(
+                child: Text(
+                  post.hasCaption ? post.caption!.trim() : '',
+                  style: NileTextStyles.bodyMd(),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              const SizedBox(height: 6),
+              Row(
+                children: [
+                  Icon(post.likedByMe ? Icons.favorite : Icons.favorite_border,
+                      size: 16,
+                      color: post.likedByMe
+                          ? NileColors.coral
+                          : NileColors.txtSecondary),
+                  const SizedBox(width: 5),
+                  Text('${post.likeCount}',
+                      style: NileTextStyles.bodySm()
+                          .copyWith(color: NileColors.txtSecondary)),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _RecEventCard extends StatelessWidget {
+  final Event event;
+  final VoidCallback onTap;
+  const _RecEventCard({required this.event, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: NileColors.bgSurface,
+      borderRadius: BorderRadius.circular(NileRadius.md),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _EventThumbnail(event: event),
+            Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('@${event.hostUsername}',
+                      style: NileTextStyles.bodySm(),
+                      overflow: TextOverflow.ellipsis),
+                  const SizedBox(height: 4),
+                  Text(event.title,
+                      style: NileTextStyles.labelMd(),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis),
+                ],
+              ),
+            ),
           ],
         ),
       ),

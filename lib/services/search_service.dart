@@ -159,6 +159,57 @@ class SearchService {
     return _pageEvents(rows as List);
   }
 
+  // ── Recommendations ("From your network") ────────────────────────────────
+
+  /// Posts liked by people the current user follows, ranked by how many of
+  /// those followees liked each post (recency as tiebreak). Not paginated —
+  /// returns a single top-N rail. Empty when signed out or no signal yet.
+  static Future<List<Post>> recommendedPosts({int limit = 10}) async {
+    if (supabase.auth.currentUser == null) return [];
+    final ids = await _recommendedIds('recommend_posts_from_network', limit);
+    if (ids.isEmpty) return [];
+    final rows = await supabase
+        .from('posts')
+        .select('*, profiles!posts_user_id_fkey(username, avatar_url)')
+        .inFilter('id', ids);
+    final posts = (rows as List)
+        .map((r) => Post.fromJson(r as Map<String, dynamic>))
+        .toList();
+    _reorder(posts, ids, (p) => p.id);
+    return PostService.hydrateLikes(posts);
+  }
+
+  /// Events liked by people the current user follows, same ranking as posts.
+  static Future<List<Event>> recommendedEvents({int limit = 10}) async {
+    if (supabase.auth.currentUser == null) return [];
+    final ids = await _recommendedIds('recommend_events_from_network', limit);
+    if (ids.isEmpty) return [];
+    final rows = await supabase
+        .from('events')
+        .select('*, profiles!events_host_id_fkey(username, avatar_url)')
+        .inFilter('id', ids);
+    final events = (rows as List)
+        .map((r) => Event.fromJson(r as Map<String, dynamic>))
+        .toList();
+    _reorder(events, ids, (e) => e.id);
+    return EventService.hydrateLikes(events);
+  }
+
+  /// Calls a recommendation RPC and returns the ordered list of row ids.
+  static Future<List<String>> _recommendedIds(String fn, int limit) async {
+    final rows = await supabase.rpc(fn, params: {'page_limit': limit});
+    return (rows as List).map((r) => r['id'] as String).toList();
+  }
+
+  /// Reorders [items] in place to match the order of [orderedIds]. PostgREST
+  /// `in` filters don't preserve order, so the RPC ranking is reapplied here.
+  static void _reorder<T>(
+      List<T> items, List<String> orderedIds, String Function(T) idOf) {
+    final rank = {for (var i = 0; i < orderedIds.length; i++) orderedIds[i]: i};
+    items.sort((a, b) =>
+        (rank[idOf(a)] ?? 1 << 30).compareTo(rank[idOf(b)] ?? 1 << 30));
+  }
+
   static Paged<Event> _pageEvents(List rows) {
     final items =
         rows.map((r) => Event.fromJson(r as Map<String, dynamic>)).toList();

@@ -6,6 +6,7 @@ import '../services/like_service.dart';
 import '../services/notification_service.dart';
 import '../services/pagination.dart' show Paged;
 import '../services/post_service.dart';
+import '../services/search_service.dart';
 import '../theme.dart';
 import 'audio_screen.dart';
 import 'camera_screen.dart';
@@ -208,20 +209,27 @@ class _FeedTab extends StatefulWidget {
 }
 
 /// Unified feed entry — either an [Event] or a [Post].
+/// [fromNetwork] marks a follow-graph recommendation (liked by people you
+/// follow but not authored by someone you follow), surfaced with a tag.
 sealed class _FeedItem {
   DateTime get sortKey;
+  bool get fromNetwork;
 }
 
 class _EventFeedItem extends _FeedItem {
   final Event event;
-  _EventFeedItem(this.event);
+  @override
+  final bool fromNetwork;
+  _EventFeedItem(this.event, {this.fromNetwork = false});
   @override
   DateTime get sortKey => event.scheduledAt ?? event.createdAt;
 }
 
 class _PostFeedItem extends _FeedItem {
   final Post post;
-  _PostFeedItem(this.post);
+  @override
+  final bool fromNetwork;
+  _PostFeedItem(this.post, {this.fromNetwork = false});
   @override
   DateTime get sortKey => post.createdAt;
 }
@@ -231,6 +239,11 @@ class _FeedTabState extends State<_FeedTab> {
   bool _noFollows = false;
   String? _error;
   int _unreadCount = 0;
+
+  // Follow-graph recommendations, interleaved into the followed feed every
+  // [_recInterval] items. Loaded once per [_load]; not part of pagination.
+  List<_FeedItem> _recs = [];
+  static const _recInterval = 6;
 
   // Pagination — independent cursors per source, merged into [_items].
   final _scroll = ScrollController();
@@ -243,35 +256,42 @@ class _FeedTabState extends State<_FeedTab> {
 
   bool get _hasMore => _postsHasMore || _eventsHasMore;
 
-  void _replacePost(Post updated) {
-    if (_items == null) return;
+  /// Applies [update] to whichever list (followed [_items] or [_recs]) holds the
+  /// matching item, preserving its `fromNetwork` flag. Used by all mutations so
+  /// liking/editing an interleaved rec card works the same as a followed one.
+  void _mutate(bool Function(_FeedItem) match,
+      _FeedItem Function(_FeedItem) update) {
     setState(() {
-      final i = _items!.indexWhere(
-          (it) => it is _PostFeedItem && it.post.id == updated.id);
-      if (i >= 0) _items![i] = _PostFeedItem(updated);
+      for (final list in [_items, _recs]) {
+        if (list == null) continue;
+        final i = list.indexWhere(match);
+        if (i >= 0) list[i] = update(list[i]);
+      }
     });
   }
 
-  void _removePost(String postId) {
-    if (_items == null) return;
-    setState(() =>
-        _items!.removeWhere((it) => it is _PostFeedItem && it.post.id == postId));
-  }
-
-  void _replaceEvent(Event updated) {
-    if (_items == null) return;
+  void _remove(bool Function(_FeedItem) match) {
     setState(() {
-      final i = _items!.indexWhere(
-          (it) => it is _EventFeedItem && it.event.id == updated.id);
-      if (i >= 0) _items![i] = _EventFeedItem(updated);
+      _items?.removeWhere(match);
+      _recs.removeWhere(match);
     });
   }
 
-  void _removeEvent(String eventId) {
-    if (_items == null) return;
-    setState(() => _items!
-        .removeWhere((it) => it is _EventFeedItem && it.event.id == eventId));
-  }
+  void _replacePost(Post updated) => _mutate(
+        (it) => it is _PostFeedItem && it.post.id == updated.id,
+        (it) => _PostFeedItem(updated, fromNetwork: it.fromNetwork),
+      );
+
+  void _removePost(String postId) =>
+      _remove((it) => it is _PostFeedItem && it.post.id == postId);
+
+  void _replaceEvent(Event updated) => _mutate(
+        (it) => it is _EventFeedItem && it.event.id == updated.id,
+        (it) => _EventFeedItem(updated, fromNetwork: it.fromNetwork),
+      );
+
+  void _removeEvent(String eventId) =>
+      _remove((it) => it is _EventFeedItem && it.event.id == eventId);
 
   Future<void> _togglePostLike(Post post) async {
     final wasLiked = post.likedByMe;
@@ -334,6 +354,34 @@ class _FeedTabState extends State<_FeedTab> {
     if (_hasMore && !_loadingMore && _items != null) _loadMore();
   }
 
+  String _idOf(_FeedItem it) => switch (it) {
+        _EventFeedItem(:final event) => 'e:${event.id}',
+        _PostFeedItem(:final post) => 'p:${post.id}',
+      };
+
+  /// Interleaves [_recs] into the sorted [followed] feed: one rec after every
+  /// [_recInterval] followed items. Recs whose content already appears in the
+  /// followed feed are skipped. Recs keep their ranking order. Returns a new
+  /// list; followed ordering is untouched.
+  List<_FeedItem> _interleaveRecs(List<_FeedItem> followed) {
+    if (_recs.isEmpty) return followed;
+    final seen = followed.map(_idOf).toSet();
+    final recs = _recs.where((r) => seen.add(_idOf(r))).toList();
+    if (recs.isEmpty) return followed;
+
+    final out = <_FeedItem>[];
+    var r = 0;
+    for (var i = 0; i < followed.length; i++) {
+      out.add(followed[i]);
+      if ((i + 1) % _recInterval == 0 && r < recs.length) {
+        out.add(recs[r++]);
+      }
+    }
+    // Append any remaining recs (short feed) so they aren't lost.
+    out.addAll(recs.sublist(r));
+    return out;
+  }
+
   /// Sorts the unified feed: live events pinned, then by recency.
   void _sortItems(List<_FeedItem> items) {
     items.sort((a, b) {
@@ -364,8 +412,8 @@ class _FeedTabState extends State<_FeedTab> {
       setState(() {
         _items = [
           ...?_items,
-          ...hEvents.map(_EventFeedItem.new),
-          ...hPosts.map(_PostFeedItem.new),
+          ...hEvents.map((e) => _EventFeedItem(e)),
+          ...hPosts.map((p) => _PostFeedItem(p)),
         ];
         _sortItems(_items!);
         if (_eventsHasMore) {
@@ -423,12 +471,25 @@ class _FeedTabState extends State<_FeedTab> {
         PostService.hydrateLikes(postPage.items),
       ).wait;
       final items = <_FeedItem>[
-        ...hEvents.map(_EventFeedItem.new),
-        ...hPosts.map(_PostFeedItem.new),
+        ...hEvents.map((e) => _EventFeedItem(e)),
+        ...hPosts.map((p) => _PostFeedItem(p)),
       ];
       _sortItems(items);
+      // Recs are best-effort: a failure here must not break the feed.
+      List<_FeedItem> recs = [];
+      try {
+        final (rEvents, rPosts) = await (
+          SearchService.recommendedEvents(),
+          SearchService.recommendedPosts(),
+        ).wait;
+        recs = [
+          ...rEvents.map((e) => _EventFeedItem(e, fromNetwork: true)),
+          ...rPosts.map((p) => _PostFeedItem(p, fromNetwork: true)),
+        ];
+      } catch (_) {}
       setState(() {
         _items = items;
+        _recs = recs;
         _eventCursor = eventPage.nextCursor;
         _postCursor = postPage.nextCursor;
         _eventsHasMore = eventPage.hasMore;
@@ -483,41 +544,47 @@ class _FeedTabState extends State<_FeedTab> {
             else if (_items!.isEmpty)
               const SliverFillRemaining(child: _EmptyFeed())
             else
-              SliverPadding(
-                padding: const EdgeInsets.fromLTRB(16, 8, 16, 96),
-                sliver: SliverList.separated(
-                  itemCount: _items!.length + (_hasMore ? 1 : 0),
-                  separatorBuilder: (_, __) => const SizedBox(height: 12),
-                  itemBuilder: (_, i) {
-                    if (i >= _items!.length) return const LoadMoreFooter();
-                    final it = _items![i];
-                    final myId = Supabase.instance.client.auth.currentUser?.id;
-                    return switch (it) {
-                      _EventFeedItem(:final event) => _EventCard(
-                          event: event,
-                          onEdited: myId == event.hostId
-                              ? (e) => _replaceEvent(e)
-                              : null,
-                          onDeleted: myId == event.hostId
-                              ? () => _removeEvent(event.id)
-                              : null,
-                          onLikeToggle: () => _toggleEventLike(event),
-                        ),
-                      _PostFeedItem(:final post) => _PostCard(
-                          post: post,
-                          onEdited: myId == post.authorId
-                              ? (p) => _replacePost(p)
-                              : null,
-                          onDeleted: myId == post.authorId
-                              ? () => _removePost(post.id)
-                              : null,
-                          onLikeToggle: () => _togglePostLike(post),
-                          onUpdated: (updated) => _replacePost(updated),
-                        ),
-                    };
-                  },
-                ),
-              ),
+              Builder(builder: (_) {
+                final display = _interleaveRecs(_items!);
+                return SliverPadding(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 96),
+                  sliver: SliverList.separated(
+                    itemCount: display.length + (_hasMore ? 1 : 0),
+                    separatorBuilder: (_, __) => const SizedBox(height: 12),
+                    itemBuilder: (_, i) {
+                      if (i >= display.length) return const LoadMoreFooter();
+                      final it = display[i];
+                      final myId =
+                          Supabase.instance.client.auth.currentUser?.id;
+                      return switch (it) {
+                        _EventFeedItem(:final event) => _EventCard(
+                            event: event,
+                            fromNetwork: it.fromNetwork,
+                            onEdited: myId == event.hostId
+                                ? (e) => _replaceEvent(e)
+                                : null,
+                            onDeleted: myId == event.hostId
+                                ? () => _removeEvent(event.id)
+                                : null,
+                            onLikeToggle: () => _toggleEventLike(event),
+                          ),
+                        _PostFeedItem(:final post) => _PostCard(
+                            post: post,
+                            fromNetwork: it.fromNetwork,
+                            onEdited: myId == post.authorId
+                                ? (p) => _replacePost(p)
+                                : null,
+                            onDeleted: myId == post.authorId
+                                ? () => _removePost(post.id)
+                                : null,
+                            onLikeToggle: () => _togglePostLike(post),
+                            onUpdated: (updated) => _replacePost(updated),
+                          ),
+                      };
+                    },
+                  ),
+                );
+              }),
           ],
         ),
       ),
@@ -529,11 +596,13 @@ class _FeedTabState extends State<_FeedTab> {
 
 class _EventCard extends StatelessWidget {
   final Event event;
+  final bool fromNetwork;
   final void Function(Event)? onEdited;
   final VoidCallback? onDeleted;
   final VoidCallback? onLikeToggle;
   const _EventCard(
       {required this.event,
+      this.fromNetwork = false,
       this.onEdited,
       this.onDeleted,
       this.onLikeToggle});
@@ -567,6 +636,7 @@ class _EventCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            if (fromNetwork) const _NetworkTag(padded: true),
             _Thumbnail(event: event),
             Padding(
               padding: const EdgeInsets.all(12),
@@ -651,6 +721,35 @@ class _EventCard extends StatelessWidget {
   }
 }
 
+// ── "From your network" tag ──────────────────────────────────────────────────
+
+/// Small inline label marking a follow-graph recommendation in the feed.
+/// [padded] adds card padding for use above a full-bleed element (event
+/// thumbnail); omit it when already inside a padded column (post body).
+class _NetworkTag extends StatelessWidget {
+  final bool padded;
+  const _NetworkTag({this.padded = false});
+
+  @override
+  Widget build(BuildContext context) {
+    final row = Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        const Icon(Icons.bolt, size: 14, color: NileColors.volt),
+        const SizedBox(width: 4),
+        Text(
+          'From your network',
+          style:
+              NileTextStyles.caption().copyWith(color: NileColors.txtTertiary),
+        ),
+      ],
+    );
+    return padded
+        ? Padding(padding: const EdgeInsets.fromLTRB(12, 12, 12, 0), child: row)
+        : row;
+  }
+}
+
 // ── Like button (shared) ─────────────────────────────────────────────────────
 
 class _LikeButton extends StatelessWidget {
@@ -690,12 +789,14 @@ class _LikeButton extends StatelessWidget {
 
 class _PostCard extends StatelessWidget {
   final Post post;
+  final bool fromNetwork;
   final void Function(Post)? onEdited;
   final VoidCallback? onDeleted;
   final VoidCallback? onLikeToggle;
   final void Function(Post)? onUpdated;
   const _PostCard({
     required this.post,
+    this.fromNetwork = false,
     this.onEdited,
     this.onDeleted,
     this.onLikeToggle,
@@ -731,6 +832,10 @@ class _PostCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            if (fromNetwork) ...[
+              const _NetworkTag(),
+              const SizedBox(height: 8),
+            ],
             Row(
               children: [
                 CircleAvatar(
