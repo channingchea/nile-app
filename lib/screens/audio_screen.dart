@@ -1,8 +1,6 @@
-import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
 import 'package:livekit_client/livekit_client.dart';
-import '../config.dart';
+import '../services/livekit_service.dart';
 import '../theme.dart';
 
 class AudioScreen extends StatefulWidget {
@@ -42,22 +40,10 @@ class _AudioScreenState extends State<AudioScreen> {
     });
 
     try {
-      final response = await http.post(
-        Uri.parse('$backendUrl/api/audio-token'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'eventId': eventId}),
-      );
-
-      if (response.statusCode != 200) {
-        throw Exception('Server returned ${response.statusCode}');
-      }
-
-      final data = jsonDecode(response.body);
-      final token = data['token'] as String;
-      final wsUrl = data['wsUrl'] as String;
+      final conn = await LivekitService.audioToken(eventId: eventId);
 
       final room = Room();
-      await room.connect(wsUrl, token);
+      await room.connect(conn.wsUrl, conn.token);
       await room.localParticipant?.setMicrophoneEnabled(true);
 
       setState(() {

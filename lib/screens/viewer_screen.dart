@@ -1,10 +1,9 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
 import 'package:livekit_client/livekit_client.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import '../config.dart';
 import '../services/event_service.dart';
+import '../services/livekit_service.dart';
 import '../theme.dart';
 
 class ViewerScreen extends StatefulWidget {
@@ -104,6 +103,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
       _errorMessage = null;
     });
 
+    Room? room;
     try {
       // Fetch initial event state (viewer count + guard against already-ended)
       final eventState = await EventService.fetchEventState(eventId);
@@ -115,24 +115,19 @@ class _ViewerScreenState extends State<ViewerScreen> {
         return;
       }
 
-      final response = await http.post(
-        Uri.parse('$backendUrl/api/viewer-token'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({
-          'eventId': eventId,
-          'viewerId': DateTime.now().millisecondsSinceEpoch.toString(),
-        }),
-      );
+      // Viewer identity now comes from the signed-in user's JWT (the Edge
+      // Function reads it server-side) — we no longer send a viewerId.
+      final conn = await LivekitService.viewerToken(eventId: eventId);
 
-      if (response.statusCode != 200) {
-        throw Exception('Server returned ${response.statusCode}');
+      // The descriptor's mode is "webrtc" today; an "hls" mode is reserved for
+      // much higher scale and would connect differently here.
+      if (conn.mode != 'webrtc') {
+        throw Exception('Unsupported stream mode: ${conn.mode}');
       }
+      final token = conn.token;
+      final wsUrl = conn.wsUrl;
 
-      final data = jsonDecode(response.body);
-      final token = data['token'] as String;
-      final wsUrl = data['wsUrl'] as String;
-
-      final room = Room();
+      room = Room();
       final listener = room.createListener();
 
       listener
@@ -143,19 +138,29 @@ class _ViewerScreenState extends State<ViewerScreen> {
         ..on<ParticipantMetadataUpdatedEvent>(_onParticipantMetadataUpdated)
         ..on<RoomDisconnectedEvent>(_onRoomDisconnected);
 
-      await room.connect(wsUrl, token);
+      // Fail loudly instead of hanging on "Joining stream…" forever.
+      await room.connect(wsUrl, token).timeout(
+            const Duration(seconds: 15),
+            onTimeout: () => throw Exception('Connection timed out. Try again.'),
+          );
 
       for (final participant in room.remoteParticipants.values) {
         for (final publication in participant.videoTrackPublications) {
-          if (publication.subscribed &&
-              publication.track != null &&
-              publication.source == TrackSource.camera) {
+          // Don't gate on TrackSource — it can still be `unknown` at this point.
+          // _addCamera authoritatively checks the participant's role == 'camera'.
+          if (publication.subscribed && publication.track != null) {
             _addCamera(participant, publication.track as VideoTrack);
+          } else {
+            // Not yet subscribed — pull it; the track arrives via
+            // TrackSubscribedEvent. Covers autoSubscribe timing/off.
+            publication.subscribe();
           }
         }
         for (final publication in participant.audioTrackPublications) {
           if (publication.subscribed && publication.track != null) {
             _storeAudioPublication(participant, publication);
+          } else {
+            publication.subscribe();
           }
         }
       }
@@ -181,6 +186,8 @@ class _ViewerScreenState extends State<ViewerScreen> {
 
       _updateAudioRouting();
     } catch (e) {
+      await room?.disconnect();
+      if (!mounted) return;
       setState(() {
         _state = ViewerState.idle;
         _errorMessage = 'Failed to connect: ${e.toString()}';
@@ -191,8 +198,9 @@ class _ViewerScreenState extends State<ViewerScreen> {
   // ── LiveKit event handlers ────────────────────────────────────────────────
 
   void _onTrackSubscribed(TrackSubscribedEvent event) {
-    if (event.track is VideoTrack &&
-        event.publication.source == TrackSource.camera) {
+    // Don't gate on TrackSource (can be `unknown` at subscribe time) — _addCamera
+    // checks the participant's role == 'camera' authoritatively.
+    if (event.track is VideoTrack) {
       final idx = _cameras.indexWhere((c) => c.identity == event.participant.identity);
       if (idx != -1) {
         setState(() {

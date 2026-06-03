@@ -1,11 +1,8 @@
-import 'dart:convert';
-
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:http/http.dart' as http;
 
-import '../config.dart';
 import '../services/event_service.dart';
+import '../services/livekit_service.dart';
 import '../services/profile_service.dart';
 import '../theme.dart';
 import 'camera_screen.dart';
@@ -145,15 +142,8 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
     final eventId = _generateEventId(name);
 
     try {
-      // 1) Create LiveKit room via our backend.
-      final res = await http.post(
-        Uri.parse('$backendUrl/api/create-event'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'eventId': eventId, 'eventName': name}),
-      );
-      if (res.statusCode != 200) {
-        throw Exception('Server returned ${res.statusCode}');
-      }
+      // 1) Create the LiveKit room via the livekit Edge Function.
+      await LivekitService.createRoom(eventId: eventId, eventName: name);
 
       // 2) Upload cover photo if provided. Non-fatal — if the bucket isn't
       // configured or the upload fails, we still create the event row.

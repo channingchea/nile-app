@@ -1,10 +1,9 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
 import 'package:livekit_client/livekit_client.dart';
 import 'package:flutter/foundation.dart';
-import '../config.dart';
 import '../services/event_service.dart';
+import '../services/livekit_service.dart';
 import '../theme.dart';
 
 class CameraScreen extends StatefulWidget {
@@ -50,7 +49,6 @@ class _CameraScreenState extends State<CameraScreen> {
 
   @override
   void dispose() {
-    // If the screen is killed while live (e.g. back button), end the event.
     if (_state == CameraState.live && _eventId != null) {
       EventService.end(_eventId!).catchError((_) {});
     }
@@ -75,27 +73,23 @@ class _CameraScreenState extends State<CameraScreen> {
       _errorMessage = null;
     });
 
+    Room? room;
     try {
-      final response = await http.post(
-        Uri.parse('$backendUrl/api/camera-token'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({
-          'eventId': eventId,
-          'cameraId': DateTime.now().millisecondsSinceEpoch.toString(),
-          'cameraName': cameraName,
-        }),
+      final conn = await LivekitService.cameraToken(
+        eventId: eventId,
+        cameraId: DateTime.now().millisecondsSinceEpoch.toString(),
+        cameraName: cameraName,
       );
+      final token = conn.token;
+      final wsUrl = conn.wsUrl;
+      final isMasterAudio = conn.isMasterAudio;
 
-      if (response.statusCode != 200) {
-        throw Exception('Server returned ${response.statusCode}');
-      }
+      // Tear down any prior room first — a lingering connection holds the
+      // camera/mic and makes the next connect hang.
+      await _room?.disconnect();
+      _room = null;
 
-      final data = jsonDecode(response.body);
-      final token = data['token'] as String;
-      final wsUrl = data['wsUrl'] as String;
-      final isMasterAudio = data['isMasterAudio'] == true;
-
-      final room = Room();
+      room = Room();
       final listener = room.createListener();
 
       listener.on<ParticipantMetadataUpdatedEvent>((event) {
@@ -125,13 +119,21 @@ class _CameraScreenState extends State<CameraScreen> {
         } catch (_) {}
       });
 
-      await room.connect(wsUrl, token);
-      await room.localParticipant?.setCameraEnabled(
-        true,
-        cameraCaptureOptions: CameraCaptureOptions(
-          cameraPosition: _isFrontCamera ? CameraPosition.front : CameraPosition.back,
-        ),
-      );
+      // Fail loudly instead of hanging on "Connecting…" forever if the WebRTC
+      // connection or camera/mic acquisition stalls.
+      await room
+          .connect(wsUrl, token)
+          .timeout(const Duration(seconds: 15),
+              onTimeout: () => throw Exception('Connection timed out. Try again.'));
+      await room.localParticipant
+          ?.setCameraEnabled(
+            true,
+            cameraCaptureOptions: CameraCaptureOptions(
+              cameraPosition: _isFrontCamera ? CameraPosition.front : CameraPosition.back,
+            ),
+          )
+          .timeout(const Duration(seconds: 15),
+              onTimeout: () => throw Exception('Camera timed out. Check camera permissions.'));
       await room.localParticipant?.setMicrophoneEnabled(true);
 
       final publication = room.localParticipant?.videoTrackPublications.firstOrNull;
@@ -153,13 +155,17 @@ class _CameraScreenState extends State<CameraScreen> {
         _videoEnabled = true;
         _streamAudioActive = streamAudioActive;
         _eventId = eventId;
-        _cameraIdentity = room.localParticipant?.identity;
+        _cameraIdentity = room?.localParticipant?.identity;
         _state = CameraState.live;
       });
 
       // Mark event live in Supabase — best-effort, no-op if not in DB.
       EventService.goLive(eventId).catchError((_) {});
     } catch (e) {
+      // Tear down the half-connected room so it doesn't keep holding the
+      // camera/mic and hang the next attempt.
+      await room?.disconnect();
+      if (!mounted) return;
       setState(() {
         _state = CameraState.idle;
         _errorMessage = 'Failed to connect: ${e.toString()}';
@@ -170,13 +176,9 @@ class _CameraScreenState extends State<CameraScreen> {
   Future<void> _claimMasterAudio() async {
     if (_eventId == null || _cameraIdentity == null) return;
     try {
-      await http.post(
-        Uri.parse('$backendUrl/api/set-master-audio'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({
-          'eventId': _eventId,
-          'cameraIdentity': _cameraIdentity,
-        }),
+      await LivekitService.setMasterAudio(
+        eventId: _eventId!,
+        cameraIdentity: _cameraIdentity!,
       );
     } catch (_) {}
   }
@@ -208,6 +210,7 @@ class _CameraScreenState extends State<CameraScreen> {
     if (_room == null) return;
     final newFront = !_isFrontCamera;
     try {
+      await _room!.localParticipant?.setCameraEnabled(false);
       await _room!.localParticipant?.setCameraEnabled(
         true,
         cameraCaptureOptions: CameraCaptureOptions(

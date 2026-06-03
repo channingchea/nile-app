@@ -1,8 +1,9 @@
 /// Central configuration for the Nile app.
-/// Update [backendUrl] whenever you redeploy the backend.
 /// Replace the Supabase placeholders with your project values from:
 ///   Supabase Dashboard → Settings → API
-const String backendUrl = 'https://nile-backend-production.up.railway.app';
+///
+/// (LiveKit room/token management now runs in the `livekit` Edge Function,
+/// reached via supabase.functions.invoke — there is no standalone backend URL.)
 
 // ── Supabase ──────────────────────────────────────────────────────────────────
 const String supabaseUrl =
