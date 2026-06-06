@@ -117,6 +117,17 @@ class ProfileService {
     return UserProfile.fromMap(data);
   }
 
+  /// Resolve a profile id from its @username (case-insensitive). Used by
+  /// inbound share links of the form `/u/<username>`.
+  static Future<String?> idForUsername(String username) async {
+    final row = await supabase
+        .from('profiles')
+        .select('id')
+        .ilike('username', username)
+        .maybeSingle();
+    return row?['id'] as String?;
+  }
+
   /// Fetch the currently signed-in user's profile.
   static Future<UserProfile?> fetchCurrentProfile() async {
     final uid = supabase.auth.currentUser?.id;
@@ -134,9 +145,9 @@ class ProfileService {
     String? bio,
   }) async {
     final updates = <String, dynamic>{
-      if (displayName != null) 'display_name': displayName,
-      if (username != null) 'username': username,
-      if (bio != null) 'bio': bio,
+      'display_name': ?displayName,
+      'username': ?username,
+      'bio': ?bio,
     };
 
     final data = await supabase
@@ -186,8 +197,8 @@ class ProfileService {
       String userId, BuildContext context) async {
     final bytes = await pickImageBytes(
       context,
-      maxWidth: 1200,
-      maxHeight: 600,
+      maxWidth: 600,
+      maxHeight: 160,
       allowedAspectRatios: [const CropAspectRatio(width: 15, height: 4)],
     );
     if (bytes == null) return null;
@@ -232,9 +243,43 @@ class ProfileService {
     final pickedBytes = await picked.readAsBytes();
 
     // Attempt crop — returns null if user cancels.
-    final result = await showMaterialImageCropper(
+    if (!context.mounted) return null;
+
+    // If exactly one aspect ratio is specified, build initialData with the
+    // crop rect pre-set to that ratio so the crop is locked from the start.
+    CroppableImageData? initialData;
+    if (allowedAspectRatios != null &&
+        allowedAspectRatios.length == 1 &&
+        allowedAspectRatios.first != null) {
+      final ratio = allowedAspectRatios.first!;
+      final base = await CroppableImageData.fromImageProvider(
+        MemoryImage(pickedBytes),
+        cropPathFn: cropPathFn ?? aabbCropShapeFn,
+      );
+      final imgW = base.imageSize.width;
+      final imgH = base.imageSize.height;
+      final targetRatio = ratio.width / ratio.height;
+      double cropW, cropH;
+      if (imgW / imgH > targetRatio) {
+        cropH = imgH;
+        cropW = imgH * targetRatio;
+      } else {
+        cropW = imgW;
+        cropH = imgW / targetRatio;
+      }
+      final left = (imgW - cropW) / 2;
+      final top = (imgH - cropH) / 2;
+      initialData = base.copyWith(
+        cropRect: Rect.fromLTWH(left, top, cropW, cropH),
+      );
+    }
+
+    if (!context.mounted) return null;
+
+    final result = await showNileImageCropper(
       context,
       imageProvider: MemoryImage(pickedBytes),
+      initialData: initialData,
       cropPathFn: cropPathFn,
       allowedAspectRatios: allowedAspectRatios,
     );
@@ -278,4 +323,95 @@ class ProfileService {
 
     return bustUrl;
   }
+}
+
+class NileCropperLayoutSnapper extends StatefulWidget {
+  final CroppableImageController controller;
+  final Widget child;
+
+  const NileCropperLayoutSnapper({
+    super.key,
+    required this.controller,
+    required this.child,
+  });
+
+  @override
+  State<NileCropperLayoutSnapper> createState() => _NileCropperLayoutSnapperState();
+}
+
+class _NileCropperLayoutSnapperState extends State<NileCropperLayoutSnapper> {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (widget.controller is CroppableImageControllerWithMixins) {
+        (widget.controller as CroppableImageControllerWithMixins).setViewportScale();
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
+}
+
+Future<CropImageResult?> showNileImageCropper(
+  BuildContext context, {
+  required ImageProvider imageProvider,
+  CroppableImageData? initialData,
+  CroppableImagePostProcessFn? postProcessFn,
+  CropShapeFn? cropPathFn,
+  List<CropAspectRatio?>? allowedAspectRatios,
+  List<Transformation>? enabledTransformations,
+  Object? heroTag,
+  bool shouldPopAfterCrop = true,
+  Locale? locale,
+  ThemeData? themeData,
+  bool showLoadingIndicatorOnSubmit = false,
+  List<CropShapeType> showGestureHandlesOn = const [CropShapeType.aabb],
+}) async {
+  late final CroppableImageData resolvedInitialData;
+
+  if (initialData != null) {
+    resolvedInitialData = initialData;
+  } else {
+    resolvedInitialData = await CroppableImageData.fromImageProvider(
+      imageProvider,
+      cropPathFn: cropPathFn ?? aabbCropShapeFn,
+    );
+  }
+
+  Widget builder(context) {
+    return CroppyLocalizationProvider(
+      locale: locale,
+      child: DefaultMaterialCroppableImageController(
+        imageProvider: imageProvider,
+        initialData: resolvedInitialData,
+        postProcessFn: postProcessFn,
+        cropShapeFn: cropPathFn,
+        allowedAspectRatios: allowedAspectRatios,
+        enabledTransformations: enabledTransformations,
+        builder: (context, controller) => NileCropperLayoutSnapper(
+          controller: controller,
+          child: MaterialImageCropperPage(
+            heroTag: heroTag,
+            controller: controller,
+            shouldPopAfterCrop: shouldPopAfterCrop,
+            showLoadingIndicatorOnSubmit: showLoadingIndicatorOnSubmit,
+            themeData: themeData,
+            showGestureHandlesOn: showGestureHandlesOn,
+          ),
+        ),
+      ),
+    );
+  }
+
+  if (context.mounted) {
+    return Navigator.of(context).push<CropImageResult?>(
+      heroTag != null
+          ? CupertinoImageCropperWithHeroRoute(builder: builder)
+          : MaterialPageRoute(builder: builder),
+    );
+  }
+
+  return null;
 }

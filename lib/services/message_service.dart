@@ -1,5 +1,7 @@
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'event_service.dart';
 import 'pagination.dart';
+import 'post_service.dart';
 import 'supabase_client.dart';
 
 // ── Models ────────────────────────────────────────────────────────────────────
@@ -66,6 +68,16 @@ class Message {
   final String content;
   final DateTime? readAt;
   final DateTime createdAt;
+  /// Set when this message shares a post (rich card). Null for plain messages.
+  final String? sharedPostId;
+  /// Hydrated original post for [sharedPostId], when joined. May be null even
+  /// if [sharedPostId] is set (e.g. realtime payload before hydration, or the
+  /// original post was deleted).
+  final Post? sharedPost;
+  /// Set when this message shares an event (rich card).
+  final String? sharedEventId;
+  /// Hydrated event for [sharedEventId], when joined (see [sharedPost] notes).
+  final Event? sharedEvent;
 
   const Message({
     required this.id,
@@ -74,20 +86,47 @@ class Message {
     required this.content,
     this.readAt,
     required this.createdAt,
+    this.sharedPostId,
+    this.sharedPost,
+    this.sharedEventId,
+    this.sharedEvent,
   });
 
   bool get isRead => readAt != null;
+  bool get isSharedPost => sharedPostId != null;
+  bool get isSharedEvent => sharedEventId != null;
 
-  factory Message.fromJson(Map<String, dynamic> json) => Message(
-        id: json['id'] as String,
-        conversationId: json['conversation_id'] as String,
-        senderId: json['sender_id'] as String,
-        content: json['content'] as String,
-        readAt: json['read_at'] != null
-            ? DateTime.parse(json['read_at'] as String)
-            : null,
-        createdAt: DateTime.parse(json['created_at'] as String),
+  Message copyWith({Post? sharedPost, Event? sharedEvent}) => Message(
+        id: id,
+        conversationId: conversationId,
+        senderId: senderId,
+        content: content,
+        readAt: readAt,
+        createdAt: createdAt,
+        sharedPostId: sharedPostId,
+        sharedPost: sharedPost ?? this.sharedPost,
+        sharedEventId: sharedEventId,
+        sharedEvent: sharedEvent ?? this.sharedEvent,
       );
+
+  factory Message.fromJson(Map<String, dynamic> json) {
+    final sp = json['shared_post'] as Map<String, dynamic>?;
+    final se = json['shared_event'] as Map<String, dynamic>?;
+    return Message(
+      id: json['id'] as String,
+      conversationId: json['conversation_id'] as String,
+      senderId: json['sender_id'] as String,
+      content: json['content'] as String,
+      readAt: json['read_at'] != null
+          ? DateTime.parse(json['read_at'] as String)
+          : null,
+      createdAt: DateTime.parse(json['created_at'] as String),
+      sharedPostId: json['shared_post_id'] as String?,
+      sharedPost: sp != null ? Post.fromJson(sp) : null,
+      sharedEventId: json['shared_event_id'] as String?,
+      sharedEvent: se != null ? Event.fromJson(se) : null,
+    );
+  }
 }
 
 // ── Service ───────────────────────────────────────────────────────────────────
@@ -96,6 +135,13 @@ class MessageService {
   static const _convSelect =
       '*, profile_a:profiles!participant_a(username, avatar_url), '
       'profile_b:profiles!participant_b(username, avatar_url)';
+
+  // Joins the shared post/event (+ author/host) for rich card rendering.
+  static const _msgSelect =
+      '*, shared_post:posts!messages_shared_post_id_fkey('
+      '*, profiles!posts_user_id_fkey(username, avatar_url)), '
+      'shared_event:events!messages_shared_event_id_fkey('
+      '*, profiles!events_host_id_fkey(username, avatar_url))';
 
   static String _requireUid() {
     final uid = supabase.auth.currentUser?.id;
@@ -190,7 +236,7 @@ class MessageService {
         .eq('participant_b', b)
         .single();
 
-    return Conversation.fromJson(row as Map<String, dynamic>, myId);
+    return Conversation.fromJson(row, myId);
   }
 
   /// Paged message history for a conversation, newest first.
@@ -200,7 +246,7 @@ class MessageService {
   }) async {
     var q = supabase
         .from('messages')
-        .select()
+        .select(_msgSelect)
         .eq('conversation_id', conversationId);
     if (cursor != null) q = q.lt('created_at', cursor);
     final rows =
@@ -227,9 +273,64 @@ class MessageService {
           'sender_id': myId,
           'content': content.trim(),
         })
-        .select()
+        .select(_msgSelect)
         .single();
-    return Message.fromJson(row as Map<String, dynamic>);
+    return Message.fromJson(row);
+  }
+
+  /// Shares [postId] into [conversationId] as a rich post-card message.
+  /// [caption] is the message body (the content CHECK requires 1..1000 chars),
+  /// defaulting to a short label so the row is always valid.
+  static Future<Message> sendSharedPost(
+    String conversationId,
+    String postId, {
+    String caption = 'Shared a post',
+  }) async {
+    final myId = _requireUid();
+    final body = caption.trim().isEmpty ? 'Shared a post' : caption.trim();
+    final row = await supabase
+        .from('messages')
+        .insert({
+          'conversation_id': conversationId,
+          'sender_id': myId,
+          'content': body,
+          'shared_post_id': postId,
+        })
+        .select(_msgSelect)
+        .single();
+    return Message.fromJson(row);
+  }
+
+  /// Convenience: open (or create) the conversation with [otherUserId] and
+  /// share [postId] into it in one call. Returns the sent message.
+  static Future<Message> sharePostToUser(
+    String otherUserId,
+    String postId, {
+    String caption = 'Shared a post',
+  }) async {
+    final conv = await getOrCreate(otherUserId);
+    return sendSharedPost(conv.id, postId, caption: caption);
+  }
+
+  /// Shares [eventId] into [conversationId] as a rich event-card message.
+  static Future<Message> sendSharedEvent(
+    String conversationId,
+    String eventId, {
+    String caption = 'Shared an event',
+  }) async {
+    final myId = _requireUid();
+    final body = caption.trim().isEmpty ? 'Shared an event' : caption.trim();
+    final row = await supabase
+        .from('messages')
+        .insert({
+          'conversation_id': conversationId,
+          'sender_id': myId,
+          'content': body,
+          'shared_event_id': eventId,
+        })
+        .select(_msgSelect)
+        .single();
+    return Message.fromJson(row);
   }
 
   /// Marks all unread messages from others in [conversationId] as read.
@@ -260,10 +361,19 @@ class MessageService {
             column: 'conversation_id',
             value: conversationId,
           ),
-          callback: (payload) {
+          callback: (payload) async {
             try {
-              final msg = Message.fromJson(
-                  payload.newRecord as Map<String, dynamic>);
+              var msg = Message.fromJson(payload.newRecord);
+              // Realtime payloads carry no joins; hydrate shared post/event on
+              // the fly so the rich card renders for live-arriving messages.
+              if (msg.isSharedPost && msg.sharedPost == null) {
+                final post = await PostService.fetchById(msg.sharedPostId!);
+                if (post != null) msg = msg.copyWith(sharedPost: post);
+              }
+              if (msg.isSharedEvent && msg.sharedEvent == null) {
+                final event = await EventService.fetchById(msg.sharedEventId!);
+                if (event != null) msg = msg.copyWith(sharedEvent: event);
+              }
               onMessage(msg);
             } catch (_) {}
           },

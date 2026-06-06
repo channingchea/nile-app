@@ -1,9 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import '../services/event_service.dart';
 import '../services/message_service.dart';
+import '../services/post_service.dart';
 import '../theme.dart';
+import 'event_detail_screen.dart';
 import 'messages_screen.dart' show NileAvatar;
+import 'post_detail_screen.dart';
 import 'profile_screen.dart';
+import 'viewer_screen.dart';
 
 class ConversationScreen extends StatefulWidget {
   final Conversation conversation;
@@ -71,7 +76,7 @@ class _ConversationScreenState extends State<ConversationScreen> {
       if (!mounted) return;
       setState(() {
         // Prepend older messages.
-        _messages = [...page.items.reversed.toList(), ..._messages];
+        _messages = [...page.items.reversed, ..._messages];
         _hasMore = page.hasMore;
         _cursor = page.nextCursor;
       });
@@ -309,31 +314,202 @@ class _MessageBubble extends StatelessWidget {
                 constraints: BoxConstraints(
                   maxWidth: MediaQuery.of(context).size.width * 0.65,
                 ),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 14, vertical: 10),
-                  decoration: BoxDecoration(
-                    color: isMe ? NileColors.volt : NileColors.bgSurface,
-                    borderRadius: BorderRadius.only(
-                      topLeft: const Radius.circular(NileRadius.lg),
-                      topRight: const Radius.circular(NileRadius.lg),
-                      bottomLeft: Radius.circular(
-                          isMe ? NileRadius.lg : NileRadius.xs),
-                      bottomRight: Radius.circular(
-                          isMe ? NileRadius.xs : NileRadius.lg),
-                    ),
-                  ),
-                  child: Text(
-                    message.content,
-                    style: NileTextStyles.bodyMd().copyWith(
-                      color: isMe ? NileColors.bgPage : NileColors.txtPrimary,
-                    ),
-                  ),
-                ),
+                child: message.isSharedPost
+                    ? _SharedPostBubble(post: message.sharedPost)
+                    : message.isSharedEvent
+                    ? _SharedEventBubble(event: message.sharedEvent)
+                    : Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 14, vertical: 10),
+                        decoration: BoxDecoration(
+                          color:
+                              isMe ? NileColors.volt : NileColors.bgSurface,
+                          borderRadius: BorderRadius.only(
+                            topLeft: const Radius.circular(NileRadius.lg),
+                            topRight: const Radius.circular(NileRadius.lg),
+                            bottomLeft: Radius.circular(
+                                isMe ? NileRadius.lg : NileRadius.xs),
+                            bottomRight: Radius.circular(
+                                isMe ? NileRadius.xs : NileRadius.lg),
+                          ),
+                        ),
+                        child: Text(
+                          message.content,
+                          style: NileTextStyles.bodyMd().copyWith(
+                            color: isMe
+                                ? NileColors.bgPage
+                                : NileColors.txtPrimary,
+                          ),
+                        ),
+                      ),
               ),
             ],
           ),
         ],
+      ),
+    );
+  }
+}
+
+// ── Shared post card (rich DM attachment) ──────────────────────────────────────
+
+class _SharedPostBubble extends StatelessWidget {
+  final Post? post;
+  const _SharedPostBubble({required this.post});
+
+  @override
+  Widget build(BuildContext context) {
+    final p = post;
+    if (p == null) {
+      // Original post deleted or not yet hydrated.
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        decoration: BoxDecoration(
+          color: NileColors.bgSurface,
+          borderRadius: BorderRadius.circular(NileRadius.lg),
+        ),
+        child: Text('Post unavailable', style: NileTextStyles.caption()),
+      );
+    }
+    return GestureDetector(
+      onTap: () => Navigator.push(
+        context,
+        MaterialPageRoute(builder: (_) => PostDetailScreen(post: p)),
+      ),
+      child: Container(
+        decoration: BoxDecoration(
+          color: NileColors.bgSurface,
+          borderRadius: BorderRadius.circular(NileRadius.lg),
+          border: Border.all(color: NileColors.bgRaised),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (p.hasImage)
+              AspectRatio(
+                aspectRatio: 1,
+                child: Image.network(p.imageUrl!, fit: BoxFit.cover),
+              ),
+            Padding(
+              padding: const EdgeInsets.all(10),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Row(
+                    children: [
+                      NileAvatar(
+                        username: p.authorUsername,
+                        avatarUrl: p.authorAvatarUrl,
+                        radius: 10,
+                      ),
+                      const SizedBox(width: 6),
+                      Flexible(
+                        child: Text('@${p.authorUsername}',
+                            style: NileTextStyles.caption(),
+                            overflow: TextOverflow.ellipsis),
+                      ),
+                    ],
+                  ),
+                  if (p.hasCaption) ...[
+                    const SizedBox(height: 6),
+                    Text(
+                      p.content!,
+                      maxLines: 3,
+                      overflow: TextOverflow.ellipsis,
+                      style: NileTextStyles.bodyMd(),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ── Shared event card (rich DM attachment) ─────────────────────────────────────
+
+class _SharedEventBubble extends StatelessWidget {
+  final Event? event;
+  const _SharedEventBubble({required this.event});
+
+  @override
+  Widget build(BuildContext context) {
+    final e = event;
+    if (e == null) {
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        decoration: BoxDecoration(
+          color: NileColors.bgSurface,
+          borderRadius: BorderRadius.circular(NileRadius.lg),
+        ),
+        child: Text('Event unavailable', style: NileTextStyles.caption()),
+      );
+    }
+    return GestureDetector(
+      onTap: () => Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => e.isLive
+              ? ViewerScreen(initialEventId: e.liveKitEventId)
+              : EventDetailScreen(event: e),
+        ),
+      ),
+      child: Container(
+        decoration: BoxDecoration(
+          color: NileColors.bgSurface,
+          borderRadius: BorderRadius.circular(NileRadius.lg),
+          border: Border.all(color: NileColors.bgRaised),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (e.coverImageUrl != null)
+              AspectRatio(
+                aspectRatio: 16 / 9,
+                child: Image.network(e.coverImageUrl!, fit: BoxFit.cover),
+              ),
+            Padding(
+              padding: const EdgeInsets.all(10),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Row(
+                    children: [
+                      const Icon(Icons.live_tv,
+                          size: 13, color: NileColors.volt),
+                      const SizedBox(width: 6),
+                      Flexible(
+                        child: Text(
+                          e.isLive ? 'LIVE now' : 'Event',
+                          style: NileTextStyles.caption(),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    e.title,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: NileTextStyles.bodyMd(),
+                  ),
+                  const SizedBox(height: 2),
+                  Text('@${e.hostUsername}', style: NileTextStyles.caption()),
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

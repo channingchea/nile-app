@@ -6,6 +6,8 @@ import 'package:share_plus/share_plus.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../services/crew_service.dart';
+import '../services/share_urls.dart';
 import '../services/event_service.dart';
 import '../services/follow_service.dart';
 import '../services/report_service.dart';
@@ -13,6 +15,9 @@ import '../services/supabase_client.dart';
 import '../services/ticket_service.dart';
 import '../theme.dart';
 import 'attendee_list_screen.dart';
+import 'audio_screen.dart';
+import 'camera_screen.dart';
+import 'crew_setup_screen.dart';
 import 'widgets/moderation_menu.dart';
 import 'edit_event_screen.dart';
 import 'profile_screen.dart';
@@ -49,6 +54,10 @@ class _EventDetailScreenState extends State<EventDetailScreen>
   bool _hasTicket = false;
   bool _ticketBusy = false;
   int? _ticketsRemaining; // null = unlimited
+
+  // Crew: assigned camera operators get free access to the event.
+  bool _isOperator = false;
+  MyOperatorAssignment? _assignment;
 
   // Countdown
   Timer? _ticker;
@@ -127,10 +136,18 @@ class _EventDetailScreenState extends State<EventDetailScreen>
         following = await FollowService.isFollowing(_event!.hostId);
       }
 
-      // Ticket state (only relevant for paid events)
+      // Crew assignment: free access for assigned operators, and (for the host)
+      // the slot/audio role they assigned themselves so routing is correct.
+      final assignment = await CrewService.myAssignment(_event!.id);
+
+      // Ticket state (only relevant for paid events the user can't already
+      // access as host or operator).
       bool hasTicket = false;
       int? remaining;
-      if (_event!.price != null && _event!.price! > 0 && !_isOwnEvent) {
+      if (_event!.price != null &&
+          _event!.price! > 0 &&
+          !_isOwnEvent &&
+          assignment == null) {
         final results = await Future.wait([
           TicketService.hasPurchased(_event!.id),
           TicketService.ticketsRemaining(_event!.id),
@@ -144,6 +161,8 @@ class _EventDetailScreenState extends State<EventDetailScreen>
         _isFollowing = following;
         _hasTicket = hasTicket;
         _ticketsRemaining = remaining;
+        _isOperator = assignment != null;
+        _assignment = assignment;
         _loading = false;
       });
 
@@ -232,8 +251,11 @@ class _EventDetailScreenState extends State<EventDetailScreen>
 
   Future<void> _share() async {
     if (_event == null) return;
-    final text =
-        '${_event!.title} on Nile — @${_event!.hostUsername}\nnile://event/${_event!.id}';
+    final text = ShareUrls.eventCaption(
+      id: _event!.id,
+      title: _event!.title,
+      hostUsername: _event!.hostUsername,
+    );
     await Share.share(text, subject: _event!.title);
   }
 
@@ -280,12 +302,64 @@ class _EventDetailScreenState extends State<EventDetailScreen>
   }
 
   void _watch() {
-    if (_event == null || !_event!.isLive) return;
+    // Allow entry once the show is live OR while the host is in Sound Check
+    // (the viewer lands in the Lobby until Start Show).
+    if (_event == null || !(_event!.isLive || _event!.isSoundCheck)) return;
     Navigator.push(
       context,
       MaterialPageRoute(
         builder: (_) => ViewerScreen(initialEventId: _event!.liveKitEventId),
       ),
+    );
+  }
+
+  /// Host/operator entry. The host kicking off a not-yet-started show first
+  /// passes through the Sound Check screen to assign crew → cameras and the
+  /// stream audio device; Continue there hands off to the streaming flow.
+  /// Operators (and the host re-entering a show already in Sound Check or live)
+  /// go straight to streaming.
+  void _enterAsCamera() {
+    if (_event == null || !(_isOwnEvent || _isOperator)) return;
+    final needsSetup =
+        _isOwnEvent && !_event!.isSoundCheck && !_event!.isLive;
+    if (needsSetup) {
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => CrewSetupScreen(
+            eventId: _event!.id,
+            onContinue: () {
+              if (!mounted) return;
+              // Replace the setup screen with the streaming screen so Back
+              // from streaming returns to event detail, not the setup list.
+              Navigator.pushReplacement(
+                context,
+                MaterialPageRoute(builder: (_) => _streamScreen()),
+              );
+            },
+          ),
+        ),
+      );
+      return;
+    }
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => _streamScreen()),
+    );
+  }
+
+  /// The streaming screen for this user on this event: audio operators run the
+  /// audio feed; everyone else runs a camera. Operators get their assigned slot
+  /// label pre-filled; the host defaults to their own handle.
+  Widget _streamScreen() {
+    if (_assignment?.isAudioOperator == true) {
+      return AudioScreen(initialEventId: _event!.liveKitEventId);
+    }
+    final cameraName = _assignment?.cameraLabel ??
+        (_isOwnEvent ? '@${_event!.hostUsername}' : null);
+    return CameraScreen(
+      initialEventId: _event!.liveKitEventId,
+      initialCameraName: cameraName,
     );
   }
 
@@ -451,6 +525,7 @@ class _EventDetailScreenState extends State<EventDetailScreen>
                       priceCents: _event!.price!,
                       ticketsRemaining: _ticketsRemaining,
                       hasTicket: _hasTicket,
+                      isOperator: _isOperator,
                     ),
                   ],
                 ],
@@ -487,10 +562,13 @@ class _EventDetailScreenState extends State<EventDetailScreen>
                 countdownExpired: _countdownExpired,
                 isOwn: _isOwnEvent,
                 hasTicket: _hasTicket,
+                isOperator: _isOperator,
+                isAudioOperator: _assignment?.isAudioOperator ?? false,
                 ticketBusy: _ticketBusy,
                 ticketsRemaining: _ticketsRemaining,
                 onWatch: _watch,
                 onBuyTicket: _buyTicket,
+                onEnterAsCamera: _enterAsCamera,
               ),
             ],
           ),
@@ -528,7 +606,7 @@ class _CoverImage extends StatelessWidget {
           Image.network(
             event.thumbnailUrl!,
             fit: BoxFit.cover,
-            errorBuilder: (_, __, ___) => placeholder,
+            errorBuilder: (_, _, _) => placeholder,
           )
         else
           placeholder,
@@ -560,6 +638,10 @@ class _StatusChip extends StatelessWidget {
       bg = NileColors.coral;
       fg = Colors.white;
       label = 'LIVE NOW';
+    } else if (event.isSoundCheck) {
+      bg = NileColors.bgRaised;
+      fg = NileColors.volt;
+      label = 'STARTING SOON';
     } else if (event.isEnded) {
       bg = NileColors.bgRaised;
       fg = NileColors.txtSecondary;
@@ -795,28 +877,30 @@ class _PriceChip extends StatelessWidget {
   final int priceCents;
   final int? ticketsRemaining;
   final bool hasTicket;
+  final bool isOperator;
 
   const _PriceChip({
     required this.priceCents,
     required this.ticketsRemaining,
     required this.hasTicket,
+    this.isOperator = false,
   });
 
   @override
   Widget build(BuildContext context) {
     final soldOut = ticketsRemaining != null && ticketsRemaining == 0;
-    final label = hasTicket
-        ? '✓ Ticket'
-        : soldOut
-            ? 'Sold Out'
-            : '\$${(priceCents / 100).toStringAsFixed(priceCents % 100 == 0 ? 0 : 2)}';
+    // Operators have free access; show a crew badge instead of a price.
+    final hasAccess = hasTicket || isOperator;
+    final label = isOperator
+        ? '✓ Crew'
+        : hasTicket
+            ? '✓ Ticket'
+            : soldOut
+                ? 'Sold Out'
+                : '\$${(priceCents / 100).toStringAsFixed(priceCents % 100 == 0 ? 0 : 2)}';
 
-    final bg = hasTicket
-        ? NileColors.volt.withAlpha(30)
-        : soldOut
-            ? NileColors.bgRaised
-            : NileColors.bgRaised;
-    final fg = hasTicket
+    final bg = hasAccess ? NileColors.volt.withAlpha(30) : NileColors.bgRaised;
+    final fg = hasAccess
         ? NileColors.volt
         : soldOut
             ? NileColors.txtSecondary
@@ -828,7 +912,7 @@ class _PriceChip extends StatelessWidget {
         color: bg,
         borderRadius: BorderRadius.circular(NileRadius.xs),
         border: Border.all(
-          color: hasTicket ? NileColors.volt : NileColors.border,
+          color: hasAccess ? NileColors.volt : NileColors.border,
         ),
       ),
       child: Text(
@@ -847,36 +931,101 @@ class _PrimaryCta extends StatelessWidget {
   final bool countdownExpired;
   final bool isOwn;
   final bool hasTicket;
+  final bool isOperator;
+  final bool isAudioOperator;
   final bool ticketBusy;
   final int? ticketsRemaining;
   final VoidCallback onWatch;
   final VoidCallback onBuyTicket;
+  final VoidCallback onEnterAsCamera;
 
   const _PrimaryCta({
     required this.event,
     required this.countdownExpired,
     required this.isOwn,
     required this.hasTicket,
+    required this.isOperator,
+    this.isAudioOperator = false,
     required this.ticketBusy,
     required this.ticketsRemaining,
     required this.onWatch,
     required this.onBuyTicket,
+    required this.onEnterAsCamera,
   });
 
   bool get _isPaid => event.price != null && event.price! > 0;
   bool get _soldOut => ticketsRemaining != null && ticketsRemaining == 0;
-  bool get _canWatch => !_isPaid || isOwn || hasTicket;
+  // Operators have free access just like the host and ticket holders.
+  bool get _canWatch => !_isPaid || isOwn || hasTicket || isOperator;
 
   @override
   Widget build(BuildContext context) {
-    if (event.isLive) {
-      // Paid event — user needs a ticket
+    // The host and assigned operators get a dedicated entry that streams their
+    // camera, available on scheduled/soundcheck/live events (so they can enter
+    // Sound Check, set up, and press Start Show). The host runs the show, so the
+    // host always gets this entry even without an event_operators row.
+    if ((isOwn || isOperator) && !event.isEnded) {
+      return Column(
+        children: [
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton.icon(
+              onPressed: onEnterAsCamera,
+              style: FilledButton.styleFrom(
+                padding: const EdgeInsets.symmetric(vertical: 16),
+                backgroundColor: NileColors.coral,
+                foregroundColor: Colors.white,
+              ),
+              icon: Icon(isAudioOperator ? Icons.graphic_eq : Icons.videocam),
+              label: Text(
+                event.isSoundCheck || event.isLive
+                    ? (isAudioOperator ? 'Enter as Audio' : 'Enter as Camera')
+                    : 'Start Sound Check',
+              ),
+            ),
+          ),
+          if (event.isLive || event.isSoundCheck) ...[
+            const SizedBox(height: 10),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                onPressed: onWatch,
+                icon: const Icon(Icons.play_arrow),
+                label: Text(event.isLive ? 'Watch instead' : 'View Lobby'),
+                style: OutlinedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 16),
+                ),
+              ),
+            ),
+          ],
+        ],
+      );
+    }
+
+    if (event.isLive || event.isSoundCheck) {
+      // Paid event — user needs a ticket (gate applies in the Lobby too)
       if (_isPaid && !_canWatch) {
         return _GetTicketButton(
           priceCents: event.price!,
           soldOut: _soldOut,
           busy: ticketBusy,
           onBuy: onBuyTicket,
+        );
+      }
+      // Sound Check → "Join Lobby" (volt), no viewer count yet.
+      if (event.isSoundCheck) {
+        return SizedBox(
+          width: double.infinity,
+          child: FilledButton.icon(
+            onPressed: onWatch,
+            style: FilledButton.styleFrom(
+              padding: const EdgeInsets.symmetric(vertical: 16),
+              backgroundColor: NileColors.volt,
+              foregroundColor: NileColors.bgPage,
+            ),
+            icon: const Icon(Icons.meeting_room_outlined),
+            label: const Text('Join Lobby'),
+          ),
         );
       }
       return SizedBox(

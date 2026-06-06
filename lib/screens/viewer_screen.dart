@@ -1,9 +1,12 @@
 import 'dart:convert';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
-import 'package:livekit_client/livekit_client.dart';
+import 'package:livekit_client/livekit_client.dart' hide ChatMessage;
 import 'package:supabase_flutter/supabase_flutter.dart';
+import '../services/chat_service.dart';
 import '../services/event_service.dart';
 import '../services/livekit_service.dart';
+import '../services/profile_service.dart';
 import '../theme.dart';
 
 class ViewerScreen extends StatefulWidget {
@@ -40,12 +43,38 @@ class _ViewerScreenState extends State<ViewerScreen> {
   bool _audioEnabled = true;
   String? _masterAudioIdentity;
 
+  // Camera sync. Stream Audio is the zero reference: each camera's video
+  // subscribe is held back by (audioJoinedAt - cameraJoinedAt), clamped to
+  // [0, 2000]ms, so switchable angles align with the audio timeline. Both
+  // anchors are server-stamped (no device clock skew). The room's showStartedAt
+  // isn't needed for the math — offsets derive purely from joinedAt deltas.
+  static const int _maxSyncDelayMs = 2000;
+  int? _audioJoinedAt;
+
   // Phase 7: viewer count + realtime
   int _viewerCount = 0;
   String? _streamEventId; // liveKitEventId for cleanup
   bool _streamEnded = false;
+  // True while the room dropped (e.g. all cameras left) but the show is still
+  // live in the DB — we hold a "reconnecting" overlay and retry rather than
+  // ending. Only an `ended` DB status actually ends the show.
+  bool _reconnecting = false;
+  int _reconnectAttempt = 0;
+  // Event status drives the Lobby: 'soundcheck' → Lobby, 'live' → stream.
+  String? _eventStatus;
   RealtimeChannel? _realtimeChannel;
   bool _hasIncrementedViewerCount = false;
+
+  // Live chat (ephemeral broadcast). Capped in-memory buffer so a session feels
+  // populated without persisting anything server-side.
+  static const int _maxChatMessages = 200;
+  RealtimeChannel? _chatChannel;
+  final List<ChatMessage> _chatMessages = [];
+  final _chatController = TextEditingController();
+  final _chatScrollController = ScrollController();
+  String? _myUsername;
+  bool _chatOpen = false;
+  bool _hasUnreadChat = false;
 
   @override
   void initState() {
@@ -61,6 +90,8 @@ class _ViewerScreenState extends State<ViewerScreen> {
   void dispose() {
     _decrementAndCleanup();
     _eventIdController.dispose();
+    _chatController.dispose();
+    _chatScrollController.dispose();
     _listener?.dispose();
     _room?.disconnect();
     super.dispose();
@@ -73,6 +104,52 @@ class _ViewerScreenState extends State<ViewerScreen> {
     }
     _realtimeChannel?.unsubscribe();
     _realtimeChannel = null;
+    _chatChannel?.unsubscribe();
+    _chatChannel = null;
+  }
+
+  // ── Chat ──────────────────────────────────────────────────────────────────
+
+  void _onChatMessage(ChatMessage msg) {
+    if (!mounted) return;
+    setState(() {
+      _chatMessages.add(msg);
+      if (_chatMessages.length > _maxChatMessages) {
+        _chatMessages.removeRange(0, _chatMessages.length - _maxChatMessages);
+      }
+      if (!_chatOpen && !msg.isMine) _hasUnreadChat = true;
+    });
+    if (_chatOpen) _scrollChatToBottom();
+  }
+
+  void _scrollChatToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_chatScrollController.hasClients) {
+        _chatScrollController.jumpTo(
+          _chatScrollController.position.maxScrollExtent,
+        );
+      }
+    });
+  }
+
+  void _toggleChat() {
+    setState(() {
+      _chatOpen = !_chatOpen;
+      if (_chatOpen) _hasUnreadChat = false;
+    });
+    if (_chatOpen) _scrollChatToBottom();
+  }
+
+  Future<void> _sendChat() async {
+    final raw = _chatController.text.trim();
+    if (raw.isEmpty || _chatChannel == null) return;
+    final text = raw.length > 250 ? raw.substring(0, 250) : raw;
+    _chatController.clear();
+    await ChatService.send(
+      _chatChannel!,
+      username: _myUsername ?? 'viewer',
+      content: text,
+    );
   }
 
   // ── Realtime callback ─────────────────────────────────────────────────────
@@ -82,6 +159,11 @@ class _ViewerScreenState extends State<ViewerScreen> {
     setState(() {
       if (record['viewer_count'] != null) {
         _viewerCount = record['viewer_count'] as int;
+      }
+      // Status flips drive the Lobby → stream transition. When Start Show is
+      // pressed, status becomes 'live' and the build switches automatically.
+      if (record['status'] is String) {
+        _eventStatus = record['status'] as String;
       }
       if (record['status'] == 'ended') {
         _streamEnded = true;
@@ -144,6 +226,10 @@ class _ViewerScreenState extends State<ViewerScreen> {
             onTimeout: () => throw Exception('Connection timed out. Try again.'),
           );
 
+      // Read the master-audio participant's joinedAt before touching any
+      // camera — it's the zero reference every camera offset is measured against.
+      _audioJoinedAt = _findAudioJoinedAt(room);
+
       for (final participant in room.remoteParticipants.values) {
         for (final publication in participant.videoTrackPublications) {
           // Don't gate on TrackSource — it can still be `unknown` at this point.
@@ -151,9 +237,9 @@ class _ViewerScreenState extends State<ViewerScreen> {
           if (publication.subscribed && publication.track != null) {
             _addCamera(participant, publication.track as VideoTrack);
           } else {
-            // Not yet subscribed — pull it; the track arrives via
-            // TrackSubscribedEvent. Covers autoSubscribe timing/off.
-            publication.subscribe();
+            // Hold the video back until it aligns with the audio timeline; the
+            // track arrives via TrackSubscribedEvent. Covers autoSubscribe off.
+            _delayedSubscribeVideo(participant, publication);
           }
         }
         for (final publication in participant.audioTrackPublications) {
@@ -173,14 +259,23 @@ class _ViewerScreenState extends State<ViewerScreen> {
         onUpdate: _onRealtimeUpdate,
       );
 
+      // Open the ephemeral chat channel and resolve our username once for
+      // outgoing messages (broadcast carries no profile join).
+      final chatChannel = ChatService.subscribe(eventId, _onChatMessage);
+      ProfileService.fetchCurrentProfile()
+          .then((p) => _myUsername = p?.username)
+          .catchError((_) => null);
+
       setState(() {
         _room = room;
         _listener = listener;
         _masterAudioIdentity = _findMasterAudioIdentity(room);
         _streamEventId = eventId;
         _viewerCount = eventState?['viewer_count'] as int? ?? 0;
+        _eventStatus = eventState?['status'] as String?;
         _hasIncrementedViewerCount = true;
         _realtimeChannel = channel;
+        _chatChannel = chatChannel;
         _state = ViewerState.watching;
       });
 
@@ -257,6 +352,76 @@ class _ViewerScreenState extends State<ViewerScreen> {
       setState(() => _masterAudioIdentity = newIdentity);
       _updateAudioRouting();
     }
+
+    // Camera sync on (re)join: a fresh token carries a fresh server-stamped
+    // joinedAt. If the master-audio participant (re)joined, refresh the zero
+    // reference so every subsequent camera offset is measured against it.
+    final meta = _parseMeta(event.participant.metadata);
+    final role = meta['role'];
+    if (role == 'master-audio' ||
+        (role == 'camera' && meta['isMasterAudio'] == true)) {
+      final ja = (meta['joinedAt'] as num?)?.toInt();
+      if (ja != null) _audioJoinedAt = ja;
+    }
+    // Subscribe this participant's video held back to the audio timeline. Same
+    // path as initial join — no special-casing.
+    for (final publication in event.participant.videoTrackPublications) {
+      if (!publication.subscribed) {
+        _delayedSubscribeVideo(event.participant, publication);
+      }
+    }
+  }
+
+  // ── Camera sync ───────────────────────────────────────────────────────────
+
+  Map<String, dynamic> _parseMeta(String? raw) {
+    try {
+      final m = jsonDecode(raw ?? '{}');
+      return m is Map<String, dynamic> ? m : <String, dynamic>{};
+    } catch (_) {
+      return <String, dynamic>{};
+    }
+  }
+
+  /// joinedAt of the master-audio source — the zero reference for offsets.
+  int? _findAudioJoinedAt(Room? room) {
+    if (room == null) return null;
+    for (final p in room.remoteParticipants.values) {
+      final meta = _parseMeta(p.metadata);
+      if (meta['role'] == 'master-audio') {
+        return (meta['joinedAt'] as num?)?.toInt();
+      }
+    }
+    for (final p in room.remoteParticipants.values) {
+      final meta = _parseMeta(p.metadata);
+      if (meta['role'] == 'camera' && meta['isMasterAudio'] == true) {
+        return (meta['joinedAt'] as num?)?.toInt();
+      }
+    }
+    return null;
+  }
+
+  /// Subscribe a camera's video held back so it aligns with the audio timeline.
+  /// A camera that joined before audio is delayed by (audioJoinedAt -
+  /// cameraJoinedAt), clamped to [0, _maxSyncDelayMs]; one that joined after
+  /// (or any case with missing data) subscribes immediately.
+  void _delayedSubscribeVideo(
+    RemoteParticipant participant,
+    RemoteTrackPublication publication,
+  ) {
+    final cameraJoinedAt = (_parseMeta(participant.metadata)['joinedAt'] as num?)?.toInt();
+    int delayMs = 0;
+    if (_audioJoinedAt != null && cameraJoinedAt != null) {
+      delayMs = (_audioJoinedAt! - cameraJoinedAt).clamp(0, _maxSyncDelayMs);
+    }
+    if (delayMs == 0) {
+      publication.subscribe();
+      return;
+    }
+    Future.delayed(Duration(milliseconds: delayMs), () {
+      if (!mounted || _room == null) return;
+      if (!publication.subscribed) publication.subscribe();
+    });
   }
 
   void _onParticipantMetadataUpdated(ParticipantMetadataUpdatedEvent event) {
@@ -268,10 +433,111 @@ class _ViewerScreenState extends State<ViewerScreen> {
   }
 
   void _onRoomDisconnected(RoomDisconnectedEvent event) {
-    // LiveKit room dropped — treat as stream ended if we're still watching
-    if (mounted && _state == ViewerState.watching && !_streamEnded) {
-      setState(() => _streamEnded = true);
+    // The LiveKit room dropped. This is NOT the same as the show ending — the
+    // room also closes when the last camera leaves (app backgrounded, network
+    // blip, crash) while the host hasn't pressed End Stream. The DB `status`
+    // column is the single source of truth for "is this show over". So instead
+    // of ending here, attempt to reconnect; only `status == 'ended'` (handled
+    // in _onRealtimeUpdate / the poll below) actually ends the show.
+    if (!mounted ||
+        _state != ViewerState.watching ||
+        _streamEnded ||
+        _reconnecting) {
+      return;
     }
+    _reconnecting = true;
+    _reconnectAttempt = 0;
+    _attemptReconnect();
+  }
+
+  /// Poll the DB status and re-join the room with a fresh token. Retries with
+  /// backoff while the show is still live/soundcheck; stops (and ends) only if
+  /// the DB says `ended`. The realtime channel stays subscribed throughout, so
+  /// a host pressing End Stream mid-reconnect flips _streamEnded immediately.
+  Future<void> _attemptReconnect() async {
+    final eventId = _streamEventId;
+    if (!mounted || eventId == null || _streamEnded) {
+      if (mounted) setState(() => _reconnecting = false);
+      return;
+    }
+
+    final state = await EventService.fetchEventState(eventId);
+    if (!mounted) return;
+    if (state?['status'] == 'ended') {
+      setState(() {
+        _reconnecting = false;
+        _streamEnded = true;
+      });
+      return;
+    }
+
+    try {
+      await _rejoinRoom(eventId);
+      if (mounted) setState(() => _reconnecting = false);
+    } catch (_) {
+      _reconnectAttempt++;
+      // Back off: 2s, 4s, 6s … capped at 10s. Keep trying until the host ends.
+      final delay = Duration(seconds: (2 * _reconnectAttempt).clamp(2, 10));
+      Future.delayed(delay, () {
+        if (mounted && _reconnecting && !_streamEnded) _attemptReconnect();
+      });
+    }
+  }
+
+  /// Tear down the dead room and connect a fresh one for [eventId], re-wiring
+  /// listeners and re-subscribing to existing tracks. Throws on failure so the
+  /// caller can back off and retry.
+  Future<void> _rejoinRoom(String eventId) async {
+    await _listener?.dispose();
+    await _room?.disconnect();
+
+    final conn = await LivekitService.viewerToken(eventId: eventId);
+    if (conn.mode != 'webrtc') {
+      throw Exception('Unsupported stream mode: ${conn.mode}');
+    }
+
+    final room = Room();
+    final listener = room.createListener();
+    listener
+      ..on<TrackSubscribedEvent>(_onTrackSubscribed)
+      ..on<TrackUnsubscribedEvent>(_onTrackUnsubscribed)
+      ..on<ParticipantConnectedEvent>(_onParticipantConnected)
+      ..on<ParticipantDisconnectedEvent>(_onParticipantDisconnected)
+      ..on<ParticipantMetadataUpdatedEvent>(_onParticipantMetadataUpdated)
+      ..on<RoomDisconnectedEvent>(_onRoomDisconnected);
+
+    await room.connect(conn.wsUrl, conn.token).timeout(
+          const Duration(seconds: 15),
+          onTimeout: () => throw Exception('Reconnect timed out.'),
+        );
+
+    _audioJoinedAt = _findAudioJoinedAt(room);
+    setState(() {
+      _cameras.clear();
+      _audioPublications.clear();
+      _focusedIndex = 0;
+      _room = room;
+      _listener = listener;
+      _masterAudioIdentity = _findMasterAudioIdentity(room);
+    });
+
+    for (final participant in room.remoteParticipants.values) {
+      for (final publication in participant.videoTrackPublications) {
+        if (publication.subscribed && publication.track != null) {
+          _addCamera(participant, publication.track as VideoTrack);
+        } else {
+          _delayedSubscribeVideo(participant, publication);
+        }
+      }
+      for (final publication in participant.audioTrackPublications) {
+        if (publication.subscribed && publication.track != null) {
+          _storeAudioPublication(participant, publication);
+        } else {
+          publication.subscribe();
+        }
+      }
+    }
+    _updateAudioRouting();
   }
 
   // ── Audio management ──────────────────────────────────────────────────────
@@ -393,6 +659,12 @@ class _ViewerScreenState extends State<ViewerScreen> {
       _viewerCount = 0;
       _streamEventId = null;
       _streamEnded = false;
+      _eventStatus = null;
+      _chatMessages.clear();
+      _chatController.clear();
+      _chatOpen = false;
+      _hasUnreadChat = false;
+      _myUsername = null;
       _state = ViewerState.idle;
     });
   }
@@ -473,6 +745,44 @@ class _ViewerScreenState extends State<ViewerScreen> {
     );
   }
 
+  // ── Lobby (host in Sound Check) ───────────────────────────────────────────
+
+  Widget _buildLobby() {
+    return Column(
+      children: [
+        _buildTopBar(),
+        Expanded(
+          child: Center(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 32),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Icon(Icons.tune, size: 56, color: NileColors.volt),
+                  const SizedBox(height: 24),
+                  Text(
+                    'Your host is in Sound Check.',
+                    style: NileTextStyles.headingMd(),
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'The show will begin soon.',
+                    style: NileTextStyles.bodyMd()
+                        .copyWith(color: NileColors.txtSecondary),
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 28),
+                  const CircularProgressIndicator(color: NileColors.volt),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
   Widget _buildCameraOffPlaceholder({required bool large}) {
     return Container(
       color: NileColors.bgSurface,
@@ -499,6 +809,11 @@ class _ViewerScreenState extends State<ViewerScreen> {
   }
 
   Widget _buildWatching() {
+    // Lobby: the host is in Sound Check — hold viewers here until Start Show
+    // flips status to 'live' (handled by realtime in _onRealtimeUpdate).
+    if (_eventStatus == 'soundcheck' && !_streamEnded) {
+      return _buildLobby();
+    }
     return Stack(
       children: [
         Column(
@@ -542,9 +857,39 @@ class _ViewerScreenState extends State<ViewerScreen> {
           ],
         ),
 
+        // Collapsible live chat — sits above the video, slides off when closed
+        if (!_streamEnded) _buildChatOverlay(),
+
+        // Reconnecting overlay — room dropped but the show is still live.
+        if (_reconnecting && !_streamEnded) _buildReconnectingOverlay(),
+
         // Stream ended overlay
         if (_streamEnded) _buildStreamEndedOverlay(),
       ],
+    );
+  }
+
+  Widget _buildReconnectingOverlay() {
+    return Positioned.fill(
+      child: ColoredBox(
+        color: NileColors.bgPage.withValues(alpha: 0.85),
+        child: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const CircularProgressIndicator(color: NileColors.volt),
+              const SizedBox(height: 16),
+              Text('Reconnecting…', style: NileTextStyles.headingMd()),
+              const SizedBox(height: 8),
+              Text(
+                'The stream dropped briefly. Hang tight.',
+                style: NileTextStyles.bodyMd()
+                    .copyWith(color: NileColors.txtSecondary),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 
@@ -561,22 +906,25 @@ class _ViewerScreenState extends State<ViewerScreen> {
       color: NileColors.bgPage,
       child: Row(
         children: [
-          // LIVE badge
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-            decoration: BoxDecoration(
-              color: NileColors.coral,
-              borderRadius: BorderRadius.circular(NileRadius.xs),
-            ),
-            child: Text(
-              'LIVE',
-              style: NileTextStyles.caption().copyWith(
-                color: Colors.white,
-                fontWeight: FontWeight.w700,
-                letterSpacing: 1.2,
+          // Status badge — SOUND CHECK (volt) in the Lobby, LIVE (coral) once live
+          Builder(builder: (_) {
+            final inLobby = _eventStatus == 'soundcheck' && !_streamEnded;
+            return Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(
+                color: inLobby ? NileColors.volt : NileColors.coral,
+                borderRadius: BorderRadius.circular(NileRadius.xs),
               ),
-            ),
-          ),
+              child: Text(
+                inLobby ? 'SOUND CHECK' : 'LIVE',
+                style: NileTextStyles.caption().copyWith(
+                  color: inLobby ? NileColors.bgPage : Colors.white,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 1.2,
+                ),
+              ),
+            );
+          }),
           const SizedBox(width: 10),
           // Viewer count
           const Icon(Icons.visibility, size: 14, color: NileColors.txtTertiary),
@@ -586,6 +934,32 @@ class _ViewerScreenState extends State<ViewerScreen> {
             style: NileTextStyles.bodySm().copyWith(color: NileColors.txtSecondary),
           ),
           const Spacer(),
+          // Chat toggle (hidden in the Lobby — no live chat before the show)
+          if (_eventStatus != 'soundcheck' && !_streamEnded)
+            Stack(
+              clipBehavior: Clip.none,
+              children: [
+                IconButton(
+                  icon: Icon(
+                    _chatOpen
+                        ? Icons.chat_bubble
+                        : Icons.chat_bubble_outline,
+                  ),
+                  color: _chatOpen ? NileColors.volt : NileColors.txtSecondary,
+                  iconSize: 20,
+                  onPressed: _toggleChat,
+                ),
+                if (_hasUnreadChat && !_chatOpen)
+                  const Positioned(
+                    top: 8,
+                    right: 8,
+                    child: CircleAvatar(
+                      radius: 4,
+                      backgroundColor: NileColors.coral,
+                    ),
+                  ),
+              ],
+            ),
           // Leave button
           TextButton(
             onPressed: _leave,
@@ -593,6 +967,131 @@ class _ViewerScreenState extends State<ViewerScreen> {
               'Leave',
               style: NileTextStyles.bodyMd().copyWith(color: NileColors.error),
             ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ── Chat overlay ──────────────────────────────────────────────────────────
+
+  Widget _buildChatOverlay() {
+    final media = MediaQuery.of(context);
+    // Panel covers the lower ~42% of the screen; slides fully off-screen when
+    // collapsed so it never blocks the video.
+    final panelHeight = media.size.height * 0.42;
+    // On desktop/web (width > 600) pin the panel to the right at 25% width.
+    final isWide = kIsWeb || media.size.width > 600;
+    final panelWidth = isWide ? media.size.width * 0.25 : null;
+    return AnimatedPositioned(
+      duration: const Duration(milliseconds: 220),
+      curve: Curves.easeOutCubic,
+      left: isWide ? null : 0,
+      right: 0,
+      bottom: _chatOpen ? 0 : -panelHeight,
+      height: panelHeight,
+      width: panelWidth,
+      child: Container(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [
+              NileColors.bgPage.withValues(alpha: 0.0),
+              NileColors.bgPage.withValues(alpha: 0.75),
+              NileColors.bgPage.withValues(alpha: 0.92),
+            ],
+            stops: const [0.0, 0.35, 1.0],
+          ),
+        ),
+        child: Column(
+          children: [
+            Expanded(child: _buildChatList()),
+            _buildChatInput(media.padding.bottom),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildChatList() {
+    if (_chatMessages.isEmpty) {
+      return Center(
+        child: Text(
+          'No messages yet. Say hi 👋',
+          style: NileTextStyles.bodySm().copyWith(color: NileColors.txtTertiary),
+        ),
+      );
+    }
+    return ListView.builder(
+      controller: _chatScrollController,
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+      itemCount: _chatMessages.length,
+      itemBuilder: (context, i) {
+        final m = _chatMessages[i];
+        return Padding(
+          padding: const EdgeInsets.symmetric(vertical: 3),
+          child: RichText(
+            text: TextSpan(
+              children: [
+                TextSpan(
+                  text: '${m.username}  ',
+                  style: NileTextStyles.bodySm().copyWith(
+                    color: m.isMine ? NileColors.volt : NileColors.azure,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                TextSpan(
+                  text: m.content,
+                  style: NileTextStyles.bodyMd(),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildChatInput(double bottomInset) {
+    return Padding(
+      padding: EdgeInsets.fromLTRB(12, 8, 12, 8 + bottomInset),
+      child: Row(
+        children: [
+          Expanded(
+            child: TextField(
+              controller: _chatController,
+              style: NileTextStyles.bodyMd(),
+              textInputAction: TextInputAction.send,
+              onSubmitted: (_) => _sendChat(),
+              maxLength: 250,
+              buildCounter: (_,
+                      {required currentLength,
+                      required isFocused,
+                      maxLength}) =>
+                  null,
+              decoration: InputDecoration(
+                isDense: true,
+                hintText: 'Chat…',
+                fillColor: NileColors.bgRaised,
+                contentPadding:
+                    const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(NileRadius.pill),
+                  borderSide: BorderSide.none,
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(NileRadius.pill),
+                  borderSide: BorderSide.none,
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          IconButton(
+            icon: const Icon(Icons.send),
+            color: NileColors.volt,
+            onPressed: _sendChat,
           ),
         ],
       ),

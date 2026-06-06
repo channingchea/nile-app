@@ -2,6 +2,8 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../services/block_service.dart';
+import '../services/share_urls.dart';
+import '../services/event_repost_service.dart';
 import '../services/event_service.dart';
 import '../services/follow_service.dart';
 import '../services/message_service.dart';
@@ -9,11 +11,14 @@ import '../services/like_service.dart';
 import '../services/post_service.dart';
 import '../services/profile_service.dart';
 import '../services/report_service.dart';
+import '../services/repost_service.dart';
 import '../theme.dart';
+import '../widgets/event_link_card.dart';
+import '../widgets/share_to_sheet.dart';
 import 'widgets/moderation_menu.dart';
 import 'post_detail_screen.dart';
 import 'settings_screen.dart';
-import 'create_event_screen.dart';
+import 'create_event_flow.dart';
 import 'create_post_screen.dart';
 import 'edit_event_screen.dart';
 import 'edit_post_screen.dart';
@@ -49,7 +54,18 @@ class _ProfileScreenState extends State<ProfileScreen> {
   // ── Events + posts created by this profile ────────────────────────────────
   List<Event>? _events;
   List<Post>? _posts;
+  // Reposts made by this profile (post/event + repost time), loaded once.
+  List<({Post post, DateTime repostedAt})> _reposts = [];
+  List<({Event event, DateTime repostedAt})> _eventReposts = [];
   String? _eventsError;
+
+  // ── Drafts (owner-only second tab) ────────────────────────────────────────
+  bool _showDrafts = false;
+  List<Event>? _drafts;
+  String? _draftsError;
+  String? _draftsCursor;
+  bool _draftsHasMore = false;
+  bool _draftsLoading = false;
 
   // Pagination — independent cursors per source, but a single combined
   // display window. _visibleCount items of the merged list are shown; each
@@ -104,7 +120,11 @@ class _ProfileScreenState extends State<ProfileScreen> {
     if (_scroll.position.pixels < _scroll.position.maxScrollExtent - 400) {
       return;
     }
-    if (_hasMore && !_loadingMore && _events != null) _loadMore();
+    if (_showDrafts) {
+      _loadMoreDrafts();
+    } else if (_hasMore && !_loadingMore && _events != null) {
+      _loadMore();
+    }
   }
 
   Future<void> _load() async {
@@ -138,6 +158,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
       // Fire-and-forget events fetch — profile renders without it.
       _loadEvents(uid);
+      // Refresh drafts too if the owner has the tab open / loaded.
+      if (_isOwnProfileFor(profile) && (_showDrafts || _drafts != null)) {
+        _loadDrafts();
+      }
     } catch (e) {
       setState(() => _error = e.toString());
     } finally {
@@ -150,6 +174,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
     setState(() {
       _events = null;
       _posts = null;
+      _reposts = [];
+      _eventReposts = [];
       _eventsError = null;
       _visibleCount = _kProfilePageSize;
     });
@@ -158,14 +184,43 @@ class _ProfileScreenState extends State<ProfileScreen> {
         EventService.getEventsByHost(userId, limit: _kProfilePageSize),
         PostService.getByAuthor(userId, limit: _kProfilePageSize),
       ).wait;
-      final (hEvents, hPosts) = await (
+      // This profile's reposts (posts + events) — best-effort, loaded once.
+      List<({Post post, DateTime repostedAt})> repostRows = [];
+      List<({Event event, DateTime repostedAt})> eventRepostRows = [];
+      try {
+        (repostRows, eventRepostRows) = await (
+          PostService.getRepostsFeed([userId]),
+          EventService.getRepostsFeed([userId]),
+        ).wait;
+      } catch (_) {}
+      final (hEvents, lPosts, lReposts, lEventReposts) = await (
         EventService.hydrateLikes(eventPage.items),
         PostService.hydrateLikes(postPage.items),
+        PostService.hydrateLikes(repostRows.map((r) => r.post).toList()),
+        EventService.hydrateLikes(
+            eventRepostRows.map((r) => r.event).toList()),
       ).wait;
+      final (hPosts, hReposts, hEventReposts) = await (
+        PostService.hydrateReposts(lPosts),
+        PostService.hydrateReposts(lReposts),
+        EventService.hydrateReposts(lEventReposts),
+      ).wait;
+      final repostAt = {for (final r in repostRows) r.post.id: r.repostedAt};
+      final eventRepostAt = {
+        for (final r in eventRepostRows) r.event.id: r.repostedAt
+      };
       if (!mounted) return;
       setState(() {
         _events = hEvents;
         _posts = hPosts;
+        _reposts = [
+          for (final p in hReposts)
+            (post: p, repostedAt: repostAt[p.id] ?? p.createdAt)
+        ];
+        _eventReposts = [
+          for (final e in hEventReposts)
+            (event: e, repostedAt: eventRepostAt[e.id] ?? e.createdAt)
+        ];
         _eventCursor = eventPage.nextCursor;
         _postCursor = postPage.nextCursor;
         _eventsHasMore = eventPage.hasMore;
@@ -175,6 +230,67 @@ class _ProfileScreenState extends State<ProfileScreen> {
       if (!mounted) return;
       setState(() => _eventsError = e.toString());
     }
+  }
+
+  /// Load the owner's drafts on first switch to the Drafts tab (and on refresh).
+  Future<void> _loadDrafts() async {
+    setState(() {
+      _draftsLoading = true;
+      _draftsError = null;
+    });
+    try {
+      final page = await EventService.getDrafts(limit: _kProfilePageSize);
+      if (!mounted) return;
+      setState(() {
+        _drafts = page.items;
+        _draftsCursor = page.nextCursor;
+        _draftsHasMore = page.hasMore;
+        _draftsLoading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _draftsError = e.toString();
+        _draftsLoading = false;
+      });
+    }
+  }
+
+  Future<void> _loadMoreDrafts() async {
+    if (!_draftsHasMore || _draftsLoading) return;
+    setState(() => _draftsLoading = true);
+    try {
+      final page = await EventService.getDrafts(
+          cursor: _draftsCursor, limit: _kProfilePageSize);
+      if (!mounted) return;
+      setState(() {
+        _drafts = [...?_drafts, ...page.items];
+        _draftsCursor = page.nextCursor;
+        _draftsHasMore = page.hasMore;
+        _draftsLoading = false;
+      });
+    } catch (_) {
+      if (mounted) setState(() => _draftsLoading = false);
+    }
+  }
+
+  /// Open a draft in the editor. Saving there publishes it, so on return we
+  /// drop it from the drafts list and refresh the public events list.
+  Future<void> _openDraft(Event draft) async {
+    final published = await Navigator.push<Event>(
+      context,
+      MaterialPageRoute(builder: (_) => EditEventScreen(event: draft)),
+    );
+    if (published != null && !published.isDraft) {
+      setState(() => _drafts?.removeWhere((d) => d.id == draft.id));
+      if (_profile != null) _loadEvents(_profile!.id);
+    }
+  }
+
+  void _selectTab(bool drafts) {
+    if (_showDrafts == drafts) return;
+    setState(() => _showDrafts = drafts);
+    if (drafts && _drafts == null && !_draftsLoading) _loadDrafts();
   }
 
   Future<void> _loadMore() async {
@@ -201,10 +317,11 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 cursor: _postCursor, limit: _kProfilePageSize)
             : Future.value(Paged.empty<Post>()),
       ).wait;
-      final (hEvents, hPosts) = await (
+      final (hEvents, lPosts) = await (
         EventService.hydrateLikes(eventPage.items),
         PostService.hydrateLikes(postPage.items),
       ).wait;
+      final hPosts = await PostService.hydrateReposts(lPosts);
       if (!mounted) return;
       setState(() {
         _visibleCount = target;
@@ -242,6 +359,36 @@ class _ProfileScreenState extends State<ProfileScreen> {
     }
   }
 
+  Future<void> _togglePostRepost(Post post) async {
+    final was = post.repostedByMe;
+    final delta = was ? -1 : 1;
+    _replacePost(post.copyWith(
+      repostedByMe: !was,
+      repostCount: (post.repostCount + delta).clamp(0, 1 << 30),
+    ));
+    try {
+      was
+          ? await RepostService.unrepost(post.id)
+          : await RepostService.repost(post.id);
+      // The reposted item itself appears/disappears in this profile's list;
+      // reload so it shows up immediately rather than on next manual refresh.
+      if (_isOwnProfile && _profile != null) _loadEvents(_profile!.id);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(was ? 'Removed repost' : 'Reposted to your profile'),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    } catch (_) {
+      _replacePost(post);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Failed to repost')),
+      );
+    }
+  }
+
   Future<void> _toggleEventLike(Event event) async {
     final wasLiked = event.likedByMe;
     final delta = wasLiked ? -1 : 1;
@@ -258,6 +405,34 @@ class _ProfileScreenState extends State<ProfileScreen> {
     }
   }
 
+  Future<void> _toggleEventRepost(Event event) async {
+    final was = event.repostedByMe;
+    final delta = was ? -1 : 1;
+    _replaceEvent(event.copyWith(
+      repostedByMe: !was,
+      repostCount: (event.repostCount + delta).clamp(0, 1 << 30),
+    ));
+    try {
+      was
+          ? await EventRepostService.unrepost(event.id)
+          : await EventRepostService.repost(event.id);
+      if (_isOwnProfile && _profile != null) _loadEvents(_profile!.id);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(was ? 'Removed repost' : 'Reposted to your profile'),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    } catch (_) {
+      _replaceEvent(event);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Failed to repost')),
+      );
+    }
+  }
+
   /// Combined post/event list sorted by recency. Live events pin to top.
   // Full merged + sorted list (live events first, then newest-first).
   List<_ProfileItem>? get _allItems {
@@ -265,6 +440,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
     final items = <_ProfileItem>[
       ..._events!.map(_ProfileEventItem.new),
       ..._posts!.map(_ProfilePostItem.new),
+      ..._reposts.map(
+          (r) => _ProfilePostItem(r.post, sortOverride: r.repostedAt)),
+      ..._eventReposts.map(
+          (r) => _ProfileEventItem(r.event, sortOverride: r.repostedAt)),
     ];
     items.sort((a, b) {
       final aLive = a is _ProfileEventItem && a.event.isLive;
@@ -333,9 +512,11 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 onPressed: () {
                   Navigator.pop(context);
                   Navigator.push(context,
-                      MaterialPageRoute(builder: (_) => const CreateEventScreen()))
+                      MaterialPageRoute(builder: (_) => const CreateEventFlow()))
                     .then((_) {
                       if (_profile != null) _loadEvents(_profile!.id);
+                      // A new event may have been saved as a draft.
+                      if (_drafts != null) _loadDrafts();
                     });
                 },
                 icon: const Icon(Icons.add_circle_outline),
@@ -491,6 +672,11 @@ class _ProfileScreenState extends State<ProfileScreen> {
         backgroundColor: NileColors.bgPage,
         title: Text('@${p.username}', style: NileTextStyles.headingSm()),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            tooltip: 'Refresh',
+            onPressed: _load,
+          ),
           if (_isOwnProfile)
             IconButton(
               icon: const Icon(Icons.settings_outlined),
@@ -545,7 +731,12 @@ class _ProfileScreenState extends State<ProfileScreen> {
             const SliverToBoxAdapter(
               child: Divider(color: NileColors.border, height: 1),
             ),
-            _buildEventsFeed(),
+            if (_isOwnProfile)
+              SliverToBoxAdapter(child: _buildTabToggle()),
+            if (_isOwnProfile && _showDrafts)
+              _buildDraftsFeed()
+            else
+              _buildEventsFeed(),
           ],
         ),
       )),
@@ -723,6 +914,122 @@ class _ProfileScreenState extends State<ProfileScreen> {
     );
   }
 
+  // ─── Tab toggle (owner-only) ──────────────────────────────────────────────
+
+  Widget _buildTabToggle() {
+    Widget seg(String label, bool selected, VoidCallback onTap) {
+      return Expanded(
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(NileRadius.sm),
+          child: Container(
+            alignment: Alignment.center,
+            padding: const EdgeInsets.symmetric(vertical: 12),
+            decoration: BoxDecoration(
+              color: selected ? NileColors.volt : Colors.transparent,
+              borderRadius: BorderRadius.circular(NileRadius.sm),
+            ),
+            child: Text(
+              label,
+              style: NileTextStyles.labelMd().copyWith(
+                color: selected ? NileColors.bgPage : NileColors.txtSecondary,
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    final draftCount = _drafts?.length;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+      child: Container(
+        decoration: BoxDecoration(
+          color: NileColors.bgSurface,
+          border: Border.all(color: NileColors.border),
+          borderRadius: BorderRadius.circular(NileRadius.sm),
+        ),
+        child: Row(
+          children: [
+            seg('Posts & Events', !_showDrafts, () => _selectTab(false)),
+            seg(
+              draftCount != null && draftCount > 0
+                  ? 'Drafts ($draftCount)'
+                  : 'Drafts',
+              _showDrafts,
+              () => _selectTab(true),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ─── Drafts feed (owner-only) ─────────────────────────────────────────────
+
+  Widget _buildDraftsFeed() {
+    if (_draftsError != null) {
+      return SliverToBoxAdapter(
+        child: Padding(
+          padding: const EdgeInsets.all(32),
+          child: Center(
+            child: Text(
+              'Couldn\'t load drafts: $_draftsError',
+              textAlign: TextAlign.center,
+              style: NileTextStyles.bodySm().copyWith(color: NileColors.error),
+            ),
+          ),
+        ),
+      );
+    }
+    final drafts = _drafts;
+    if (drafts == null) {
+      return const SliverToBoxAdapter(
+        child: Padding(
+          padding: EdgeInsets.all(40),
+          child: Center(child: CircularProgressIndicator(color: NileColors.volt)),
+        ),
+      );
+    }
+    if (drafts.isEmpty) {
+      return SliverToBoxAdapter(
+        child: Padding(
+          padding: const EdgeInsets.all(40),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.drafts_outlined,
+                  size: 48, color: NileColors.border),
+              const SizedBox(height: 12),
+              Text('No drafts', style: NileTextStyles.headingSm()),
+              const SizedBox(height: 4),
+              Text(
+                'Events you save as drafts will appear here until you publish them.',
+                textAlign: TextAlign.center,
+                style: NileTextStyles.bodySm(),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+    return SliverPadding(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
+      sliver: SliverList.separated(
+        itemCount: drafts.length + (_draftsHasMore ? 1 : 0),
+        separatorBuilder: (_, _) => const SizedBox(height: 12),
+        itemBuilder: (_, i) {
+          if (i >= drafts.length) return const LoadMoreFooter();
+          final draft = drafts[i];
+          return _ProfileEventCard(
+            event: draft,
+            onTap: () => _openDraft(draft),
+          );
+        },
+      ),
+    );
+  }
+
   // ─── Events feed ──────────────────────────────────────────────────────────
 
   Widget _buildEventsFeed() {
@@ -783,7 +1090,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
       sliver: SliverList.separated(
         itemCount: items.length + (_hasMore ? 1 : 0),
-        separatorBuilder: (_, __) => const SizedBox(height: 12),
+        separatorBuilder: (_, _) => const SizedBox(height: 12),
         itemBuilder: (_, i) {
           if (i >= items.length) return const LoadMoreFooter();
           final it = items[i];
@@ -793,12 +1100,14 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 onTap: () => _openEvent(event),
                 onEdited: _isOwnProfile ? (e) => _replaceEvent(e) : null,
                 onLikeToggle: () => _toggleEventLike(event),
+                onRepostToggle: () => _toggleEventRepost(event),
               ),
             _ProfilePostItem(:final post) => _ProfilePostCard(
                 post: post,
                 onEdited: _isOwnProfile ? (p) => _replacePost(p) : null,
                 onDeleted: _isOwnProfile ? () => _removePost(post.id) : null,
                 onLikeToggle: () => _togglePostLike(post),
+                onRepostToggle: () => _togglePostRepost(post),
                 onUpdated: _replacePost,
               ),
           };
@@ -810,14 +1119,28 @@ class _ProfileScreenState extends State<ProfileScreen> {
   void _replacePost(Post updated) => setState(() {
         final i = _posts?.indexWhere((p) => p.id == updated.id) ?? -1;
         if (i >= 0) _posts![i] = updated;
+        // Reposted cards live in [_reposts]; keep them in sync too.
+        for (var j = 0; j < _reposts.length; j++) {
+          if (_reposts[j].post.id == updated.id) {
+            _reposts[j] = (post: updated, repostedAt: _reposts[j].repostedAt);
+          }
+        }
       });
 
-  void _removePost(String postId) =>
-      setState(() => _posts?.removeWhere((p) => p.id == postId));
+  void _removePost(String postId) => setState(() {
+        _posts?.removeWhere((p) => p.id == postId);
+        _reposts.removeWhere((r) => r.post.id == postId);
+      });
 
   void _replaceEvent(Event updated) => setState(() {
         final i = _events?.indexWhere((e) => e.id == updated.id) ?? -1;
         if (i >= 0) _events![i] = updated;
+        for (var j = 0; j < _eventReposts.length; j++) {
+          if (_eventReposts[j].event.id == updated.id) {
+            _eventReposts[j] =
+                (event: updated, repostedAt: _eventReposts[j].repostedAt);
+          }
+        }
       });
 
   void _openEvent(Event e) {
@@ -953,16 +1276,20 @@ sealed class _ProfileItem {
 
 class _ProfileEventItem extends _ProfileItem {
   final Event event;
-  _ProfileEventItem(this.event);
+  /// Set for reposts — sorts by repost time.
+  final DateTime? sortOverride;
+  _ProfileEventItem(this.event, {this.sortOverride});
   @override
-  DateTime get sortKey => event.scheduledAt ?? event.createdAt;
+  DateTime get sortKey => sortOverride ?? event.scheduledAt ?? event.createdAt;
 }
 
 class _ProfilePostItem extends _ProfileItem {
   final Post post;
-  _ProfilePostItem(this.post);
+  /// Set for reposts — sorts by repost time instead of the post's createdAt.
+  final DateTime? sortOverride;
+  _ProfilePostItem(this.post, {this.sortOverride});
   @override
-  DateTime get sortKey => post.createdAt;
+  DateTime get sortKey => sortOverride ?? post.createdAt;
 }
 
 // ─── Post card (profile feed) ────────────────────────────────────────────────
@@ -972,14 +1299,19 @@ class _ProfilePostCard extends StatelessWidget {
   final void Function(Post)? onEdited;
   final VoidCallback? onDeleted;
   final VoidCallback? onLikeToggle;
+  final VoidCallback? onRepostToggle;
   final void Function(Post)? onUpdated;
   const _ProfilePostCard({
     required this.post,
     this.onEdited,
     this.onDeleted,
     this.onLikeToggle,
+    this.onRepostToggle,
     this.onUpdated,
   });
+
+  String _shareText() =>
+      ShareUrls.postCaption(id: post.id, authorUsername: post.authorUsername);
 
   Future<void> _openDetail(BuildContext context) async {
     final updated = await Navigator.push<Post>(
@@ -1010,6 +1342,10 @@ class _ProfilePostCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            if (post.repostedByUsername != null) ...[
+              _ProfileRepostHeader(username: post.repostedByUsername!),
+              const SizedBox(height: 8),
+            ],
             Row(
               children: [
                 CircleAvatar(
@@ -1083,7 +1419,7 @@ class _ProfilePostCard extends StatelessWidget {
                 child: Image.network(
                   post.imageUrl!,
                   fit: BoxFit.cover,
-                  errorBuilder: (_, __, ___) => Container(
+                  errorBuilder: (_, _, _) => Container(
                     height: 200,
                     color: NileColors.bgRaised,
                     child: const Center(
@@ -1093,6 +1429,10 @@ class _ProfilePostCard extends StatelessWidget {
                   ),
                 ),
               ),
+            ],
+            if (post.eventId != null) ...[
+              const SizedBox(height: 10),
+              EventLinkCard(eventId: post.eventId!),
             ],
             const SizedBox(height: 8),
             Row(
@@ -1123,11 +1463,81 @@ class _ProfilePostCard extends StatelessWidget {
                     ),
                   ),
                 ),
+                if (onRepostToggle != null) ...[
+                  const SizedBox(width: 16),
+                  _RepostRow(
+                    reposted: post.repostedByMe,
+                    count: post.repostCount,
+                    onTap: onRepostToggle!,
+                  ),
+                ],
+                const Spacer(),
+                InkWell(
+                  onTap: () => ShareToSheet.show(context,
+                      postId: post.id, shareText: _shareText()),
+                  borderRadius: BorderRadius.circular(NileRadius.sm),
+                  child: const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+                    child: Icon(Icons.send_outlined,
+                        size: 18, color: NileColors.txtSecondary),
+                  ),
+                ),
               ],
             ),
           ],
         ),
       ),
+      ),
+    );
+  }
+}
+
+// ─── Repost header + row (profile) ───────────────────────────────────────────
+
+class _ProfileRepostHeader extends StatelessWidget {
+  final String username;
+  const _ProfileRepostHeader({required this.username});
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        const Icon(Icons.repeat, size: 14, color: NileColors.txtTertiary),
+        const SizedBox(width: 6),
+        Flexible(
+          child: Text('reposted by @$username',
+              style: NileTextStyles.caption(),
+              overflow: TextOverflow.ellipsis),
+        ),
+      ],
+    );
+  }
+}
+
+class _RepostRow extends StatelessWidget {
+  final bool reposted;
+  final int count;
+  final VoidCallback onTap;
+  const _RepostRow(
+      {required this.reposted, required this.count, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final color = reposted ? NileColors.volt : NileColors.txtSecondary;
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(NileRadius.sm),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.repeat, size: 18, color: color),
+            const SizedBox(width: 5),
+            Text('$count',
+                style: NileTextStyles.bodySm().copyWith(color: color)),
+          ],
+        ),
       ),
     );
   }
@@ -1172,13 +1582,21 @@ class _ProfileEventCard extends StatelessWidget {
   final VoidCallback onTap;
   final void Function(Event)? onEdited;
   final VoidCallback? onLikeToggle;
+  final VoidCallback? onRepostToggle;
 
   const _ProfileEventCard({
     required this.event,
     required this.onTap,
     this.onEdited,
     this.onLikeToggle,
+    this.onRepostToggle,
   });
+
+  String _shareText() => ShareUrls.eventCaption(
+        id: event.id,
+        title: event.title,
+        hostUsername: event.hostUsername,
+      );
 
   String _timeAgo(DateTime dt) {
     final d = DateTime.now().difference(dt);
@@ -1223,7 +1641,7 @@ class _ProfileEventCard extends StatelessWidget {
                       Image.network(
                         cover,
                         fit: BoxFit.cover,
-                        errorBuilder: (_, __, ___) => const ColoredBox(
+                        errorBuilder: (_, _, _) => const ColoredBox(
                           color: NileColors.bgRaised,
                           child: Icon(Icons.live_tv,
                               color: NileColors.border),
@@ -1252,6 +1670,11 @@ class _ProfileEventCard extends StatelessWidget {
                     Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
+                        if (event.repostedByUsername != null) ...[
+                          _ProfileRepostHeader(
+                              username: event.repostedByUsername!),
+                          const SizedBox(height: 4),
+                        ],
                         Text(
                           event.title,
                           style: NileTextStyles.headingSm(),
@@ -1296,6 +1719,26 @@ class _ProfileEventCard extends StatelessWidget {
                             onTap: onLikeToggle!,
                           ),
                         ],
+                        if (onRepostToggle != null) ...[
+                          const SizedBox(width: 12),
+                          _RepostRow(
+                            reposted: event.repostedByMe,
+                            count: event.repostCount,
+                            onTap: onRepostToggle!,
+                          ),
+                        ],
+                        const SizedBox(width: 12),
+                        InkWell(
+                          onTap: () => ShareToSheet.showEvent(context,
+                              eventId: event.id, shareText: _shareText()),
+                          borderRadius: BorderRadius.circular(NileRadius.sm),
+                          child: const Padding(
+                            padding: EdgeInsets.symmetric(
+                                horizontal: 4, vertical: 4),
+                            child: Icon(Icons.send_outlined,
+                                size: 18, color: NileColors.txtSecondary),
+                          ),
+                        ),
                         const Spacer(),
                         if (event.price != null && event.price! > 0)
                           Text(
@@ -1342,6 +1785,10 @@ class _StatusPill extends StatelessWidget {
       bg = NileColors.coral;
       fg = Colors.white;
       label = 'LIVE';
+    } else if (event.isDraft) {
+      bg = Colors.black54;
+      fg = NileColors.txtSecondary;
+      label = 'DRAFT';
     } else if (event.isEnded) {
       bg = Colors.black54;
       fg = Colors.white;

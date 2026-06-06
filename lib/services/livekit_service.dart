@@ -67,6 +67,11 @@ class LivekitService {
         'cameraIdentity': cameraIdentity,
       });
 
+  /// Host: stamp the show's wall-clock anchor (showStartedAt) into room metadata.
+  /// Call alongside EventService.goLive when Start Show is pressed.
+  static Future<void> startShow({required String eventId}) =>
+      _invoke<Map>({'action': 'start-show', 'eventId': eventId});
+
   /// Viewer: ticket-gated connection descriptor. Identity comes from the JWT.
   /// Today `mode` is always "webrtc"; the seam allows "hls" at much higher scale.
   static Future<ViewerConnection> viewerToken({required String eventId}) async {

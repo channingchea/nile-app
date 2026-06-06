@@ -1,5 +1,6 @@
 import 'dart:typed_data';
 
+import 'package:croppy/croppy.dart';
 import 'package:flutter/material.dart';
 
 import '../services/post_service.dart';
@@ -52,8 +53,12 @@ class _EditPostScreenState extends State<EditPostScreen> {
   Future<void> _pickImage() async {
     setState(() => _pickingImage = true);
     try {
-      final bytes =
-          await ProfileService.pickImageBytes(context, maxWidth: 1600, maxHeight: 1600);
+      final bytes = await ProfileService.pickImageBytes(
+        context,
+        maxWidth: 1600,
+        maxHeight: 1200,
+        allowedAspectRatios: [const CropAspectRatio(width: 4, height: 3)],
+      );
       if (bytes != null && mounted) {
         setState(() {
           _newImageBytes = bytes;

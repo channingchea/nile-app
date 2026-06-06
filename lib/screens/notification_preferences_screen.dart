@@ -102,6 +102,9 @@ class _NotificationPreferencesScreenState
             (v) => _set(p.copyWith(eventLive: v), p)),
         _toggle('Ended', 'When an event you attended ends', p.eventEnded,
             (v) => _set(p.copyWith(eventEnded: v), p)),
+        _toggle('Crew invites', 'When a host adds you as a camera operator',
+            p.operatorAssigned,
+            (v) => _set(p.copyWith(operatorAssigned: v), p)),
       ],
     );
   }

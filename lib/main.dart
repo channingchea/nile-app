@@ -3,12 +3,14 @@ import 'dart:async';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/foundation.dart'
     show kIsWeb, defaultTargetPlatform, TargetPlatform;
+import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'config.dart';
 import 'screens/auth/login_screen.dart';
 import 'screens/home_screen.dart';
 import 'screens/splash_screen.dart';
+import 'services/deep_link_service.dart';
 import 'services/push_service.dart';
 import 'theme.dart';
 
@@ -48,6 +50,20 @@ void main() async {
   runApp(const NileApp());
 }
 
+/// Adds mouse + trackpad to the drag devices so drag-scroll (and pull-to-
+/// refresh) works on web and desktop, not just touch.
+class _NileScrollBehavior extends MaterialScrollBehavior {
+  const _NileScrollBehavior();
+
+  @override
+  Set<PointerDeviceKind> get dragDevices => {
+        PointerDeviceKind.touch,
+        PointerDeviceKind.mouse,
+        PointerDeviceKind.trackpad,
+        PointerDeviceKind.stylus,
+      };
+}
+
 class NileApp extends StatefulWidget {
   const NileApp({super.key});
 
@@ -64,6 +80,7 @@ class _NileAppState extends State<NileApp> {
     // Initialize FCM after first frame so the navigator is mounted for routing.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_firebaseSupported) PushService.init(_navigatorKey);
+      DeepLinkService.init(_navigatorKey);
     });
   }
 
@@ -73,6 +90,9 @@ class _NileAppState extends State<NileApp> {
       title: 'Nile',
       debugShowCheckedModeBanner: false,
       theme: nileTheme(),
+      // Allow mouse + trackpad drag to scroll (and so drive RefreshIndicator)
+      // on web/desktop, where only touch is enabled by default.
+      scrollBehavior: const _NileScrollBehavior(),
       navigatorKey: _navigatorKey,
       home: _AuthGate(navigatorKey: _navigatorKey),
     );
@@ -96,6 +116,8 @@ class _AuthGate extends StatefulWidget {
 class _AuthGateState extends State<_AuthGate> {
   // Minimum time the splash stays visible on cold start, so it doesn't flash
   // past (or get skipped entirely) when a session is restored synchronously.
+  // On web, skip the splash entirely when a session already exists — a page
+  // refresh shouldn't replay the intro screen.
   static const _minSplash = Duration(milliseconds: 1500);
 
   late final StreamSubscription<AuthState> _sub;
@@ -110,9 +132,17 @@ class _AuthGateState extends State<_AuthGate> {
     // A synchronously-restored session won't necessarily re-emit on the auth
     // stream, so treat its presence as already-resolved.
     _initialized = _session != null;
-    Future.delayed(_minSplash, () {
-      if (mounted) setState(() => _splashDone = true);
-    });
+    // On web, skip the splash entirely — the session is restored asynchronously
+    // via the auth stream (currentSession is always null at initState on web),
+    // so the minimum-duration guard never fires correctly. Web has no native
+    // launch screen, so just show a bare loading indicator until auth resolves.
+    if (kIsWeb) {
+      _splashDone = true;
+    } else {
+      Future.delayed(_minSplash, () {
+        if (mounted) setState(() => _splashDone = true);
+      });
+    }
     _sub = Supabase.instance.client.auth.onAuthStateChange.listen((state) {
       // Pop any routes pushed on top of the gate before swapping the root,
       // otherwise a pushed screen (e.g. Settings) stays visible after sign-out.

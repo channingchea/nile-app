@@ -101,6 +101,7 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
       case NotificationType.eventStarting:
       case NotificationType.eventLive:
       case NotificationType.eventEnded:
+      case NotificationType.operatorAssigned:
         if (n.entityId == null) return;
         final event = await EventService.fetchById(n.entityId!);
         if (!mounted || event == null) return;
@@ -215,6 +216,8 @@ class _NotificationTile extends StatelessWidget {
           '@${notification.actorUsername} is live now',
         NotificationType.eventEnded =>
           '@${notification.actorUsername}’s event ended — replay is ready',
+        NotificationType.operatorAssigned =>
+          '@${notification.actorUsername} added you as a camera operator',
       };
 
   IconData _icon() => switch (notification.type) {
@@ -224,6 +227,7 @@ class _NotificationTile extends StatelessWidget {
         NotificationType.eventStarting => Icons.live_tv,
         NotificationType.eventLive => Icons.sensors,
         NotificationType.eventEnded => Icons.replay,
+        NotificationType.operatorAssigned => Icons.videocam,
       };
 
   Color _iconColor() => switch (notification.type) {
@@ -233,6 +237,7 @@ class _NotificationTile extends StatelessWidget {
         NotificationType.eventStarting => NileColors.coral,
         NotificationType.eventLive => NileColors.coral,
         NotificationType.eventEnded => NileColors.volt,
+        NotificationType.operatorAssigned => NileColors.azure,
       };
 
   String _timeAgo(DateTime dt) {

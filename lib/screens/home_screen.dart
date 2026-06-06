@@ -1,16 +1,21 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import '../services/event_repost_service.dart';
+import '../services/share_urls.dart';
 import '../services/event_service.dart';
 import '../services/follow_service.dart';
 import '../services/like_service.dart';
 import '../services/notification_service.dart';
 import '../services/pagination.dart' show Paged;
 import '../services/post_service.dart';
+import '../services/repost_service.dart';
 import '../services/search_service.dart';
 import '../theme.dart';
+import '../widgets/event_link_card.dart';
+import '../widgets/share_to_sheet.dart';
 import 'audio_screen.dart';
 import 'camera_screen.dart';
-import 'create_event_screen.dart';
+import 'create_event_flow.dart';
 import 'create_post_screen.dart';
 import 'discover_screen.dart';
 import 'edit_event_screen.dart';
@@ -34,16 +39,28 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   int _selectedIndex = 0;
-  int _profileRefreshKey = 0;
+  int _feedKey = 0;
+  int _profileKey = 0;
 
   List<Widget> get _pages => [
-    const _FeedTab(),
+    _FeedTab(key: ValueKey(_feedKey), onContentChanged: _onContentChanged),
     const DiscoverScreen(),
     const MessagesScreen(),
-    ProfileScreen(key: ValueKey(_profileRefreshKey)),
+    ProfileScreen(key: ValueKey(_profileKey)),
   ];
 
-  void _onContentCreated() => setState(() => _profileRefreshKey++);
+  // A repost happened inside the feed. The feed already updated its own card
+  // optimistically, so leave it (and its scroll position) untouched — only
+  // remount the profile tab so it re-fetches and shows the new reposted item.
+  void _onContentChanged() => setState(() => _profileKey++);
+
+  // New post/event created via the FAB. Remount both tabs so each reloads from
+  // scratch, and snap to the feed so the user sees their content land.
+  void _onContentCreated() => setState(() {
+        _feedKey++;
+        _profileKey++;
+        _selectedIndex = 0;
+      });
 
   void _showActionSheet() {
     showModalBottomSheet(
@@ -145,7 +162,7 @@ class _ActionSheet extends StatelessWidget {
               onPressed: () {
                 Navigator.pop(context);
                 Navigator.push(context,
-                    MaterialPageRoute(builder: (_) => const CreateEventScreen()))
+                    MaterialPageRoute(builder: (_) => const CreateEventFlow()))
                   .then((_) => onCreated());
               },
               icon: const Icon(Icons.add_circle_outline),
@@ -202,7 +219,11 @@ class _ActionSheet extends StatelessWidget {
 // ── Feed tab ──────────────────────────────────────────────────────────────────
 
 class _FeedTab extends StatefulWidget {
-  const _FeedTab();
+  const _FeedTab({super.key, this.onContentChanged});
+
+  /// Called after a repost/unrepost succeeds so the host can refresh the
+  /// profile tab (where the reposted item appears).
+  final VoidCallback? onContentChanged;
 
   @override
   State<_FeedTab> createState() => _FeedTabState();
@@ -220,18 +241,23 @@ class _EventFeedItem extends _FeedItem {
   final Event event;
   @override
   final bool fromNetwork;
-  _EventFeedItem(this.event, {this.fromNetwork = false});
+  /// When set (reposts), sorts by repost time instead of scheduled/created.
+  final DateTime? sortOverride;
+  _EventFeedItem(this.event, {this.fromNetwork = false, this.sortOverride});
   @override
-  DateTime get sortKey => event.scheduledAt ?? event.createdAt;
+  DateTime get sortKey => sortOverride ?? event.scheduledAt ?? event.createdAt;
 }
 
 class _PostFeedItem extends _FeedItem {
   final Post post;
   @override
   final bool fromNetwork;
-  _PostFeedItem(this.post, {this.fromNetwork = false});
+  /// When set (reposts), the item sorts by repost time instead of the original
+  /// post's createdAt, so a fresh repost surfaces near the top of the feed.
+  final DateTime? sortOverride;
+  _PostFeedItem(this.post, {this.fromNetwork = false, this.sortOverride});
   @override
-  DateTime get sortKey => post.createdAt;
+  DateTime get sortKey => sortOverride ?? post.createdAt;
 }
 
 class _FeedTabState extends State<_FeedTab> {
@@ -309,6 +335,66 @@ class _FeedTabState extends State<_FeedTab> {
       }
     } catch (_) {
       _replacePost(post); // Revert.
+    }
+  }
+
+  Future<void> _togglePostRepost(Post post) async {
+    final was = post.repostedByMe;
+    final delta = was ? -1 : 1;
+    _replacePost(post.copyWith(
+      repostedByMe: !was,
+      repostCount: (post.repostCount + delta).clamp(0, 1 << 30),
+    ));
+    try {
+      if (was) {
+        await RepostService.unrepost(post.id);
+      } else {
+        await RepostService.repost(post.id);
+      }
+      widget.onContentChanged?.call();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(was ? 'Removed repost' : 'Reposted to your profile'),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    } catch (_) {
+      _replacePost(post); // Revert.
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Failed to repost')),
+      );
+    }
+  }
+
+  Future<void> _toggleEventRepost(Event event) async {
+    final was = event.repostedByMe;
+    final delta = was ? -1 : 1;
+    _replaceEvent(event.copyWith(
+      repostedByMe: !was,
+      repostCount: (event.repostCount + delta).clamp(0, 1 << 30),
+    ));
+    try {
+      if (was) {
+        await EventRepostService.unrepost(event.id);
+      } else {
+        await EventRepostService.repost(event.id);
+      }
+      widget.onContentChanged?.call();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(was ? 'Removed repost' : 'Reposted to your profile'),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    } catch (_) {
+      _replaceEvent(event);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Failed to repost')),
+      );
     }
   }
 
@@ -465,14 +551,44 @@ class _FeedTabState extends State<_FeedTab> {
         EventService.getFeed(ids),
         PostService.getFeed(ids),
       ).wait;
-      // Hydrate likedByMe flags in parallel (non-fatal if it fails).
-      final (hEvents, hPosts) = await (
+      // Reposts by followed users + your own — best-effort, loaded once
+      // (not paged). Including self so you see your repost land in-feed.
+      final myId = Supabase.instance.client.auth.currentUser?.id;
+      final reposterIds = [...ids, ?myId];
+      List<({Post post, DateTime repostedAt})> repostRows = [];
+      List<({Event event, DateTime repostedAt})> eventRepostRows = [];
+      try {
+        (repostRows, eventRepostRows) = await (
+          PostService.getRepostsFeed(reposterIds),
+          EventService.getRepostsFeed(reposterIds),
+        ).wait;
+      } catch (_) {}
+      // Hydrate likedByMe + repostedByMe flags in parallel (non-fatal).
+      final (hEvents, lPosts, lReposts, lEventReposts) = await (
         EventService.hydrateLikes(eventPage.items),
         PostService.hydrateLikes(postPage.items),
+        PostService.hydrateLikes(repostRows.map((r) => r.post).toList()),
+        EventService.hydrateLikes(
+            eventRepostRows.map((r) => r.event).toList()),
       ).wait;
+      final (hPosts, hReposts, hEventReposts) = await (
+        PostService.hydrateReposts(lPosts),
+        PostService.hydrateReposts(lReposts),
+        EventService.hydrateReposts(lEventReposts),
+      ).wait;
+      // A repost is its own distinct feed entry (shown with a "reposted by"
+      // header), sorted by repost time — not deduped against the original.
+      final repostAt = {for (final r in repostRows) r.post.id: r.repostedAt};
+      final eventRepostAt = {
+        for (final r in eventRepostRows) r.event.id: r.repostedAt
+      };
       final items = <_FeedItem>[
         ...hEvents.map((e) => _EventFeedItem(e)),
         ...hPosts.map((p) => _PostFeedItem(p)),
+        ...hReposts.map((p) =>
+            _PostFeedItem(p, sortOverride: repostAt[p.id])),
+        ...hEventReposts.map((e) =>
+            _EventFeedItem(e, sortOverride: eventRepostAt[e.id])),
       ];
       _sortItems(items);
       // Recs are best-effort: a failure here must not break the feed.
@@ -514,8 +630,13 @@ class _FeedTabState extends State<_FeedTab> {
             SliverAppBar(
               pinned: true,
               backgroundColor: NileColors.bgPage,
-              title: Text('Nile', style: NileTextStyles.headingLg()),
+              title: Text('Nile', style: NileTextStyles.displayLg().copyWith(fontSize: 32, color: NileColors.volt)),
               actions: [
+                IconButton(
+                  onPressed: _load,
+                  tooltip: 'Refresh',
+                  icon: const Icon(Icons.refresh),
+                ),
                 IconButton(
                   onPressed: _openNotifications,
                   icon: Badge(
@@ -550,7 +671,7 @@ class _FeedTabState extends State<_FeedTab> {
                   padding: const EdgeInsets.fromLTRB(16, 8, 16, 96),
                   sliver: SliverList.separated(
                     itemCount: display.length + (_hasMore ? 1 : 0),
-                    separatorBuilder: (_, __) => const SizedBox(height: 12),
+                    separatorBuilder: (_, _) => const SizedBox(height: 12),
                     itemBuilder: (_, i) {
                       if (i >= display.length) return const LoadMoreFooter();
                       final it = display[i];
@@ -567,6 +688,7 @@ class _FeedTabState extends State<_FeedTab> {
                                 ? () => _removeEvent(event.id)
                                 : null,
                             onLikeToggle: () => _toggleEventLike(event),
+                            onRepostToggle: () => _toggleEventRepost(event),
                           ),
                         _PostFeedItem(:final post) => _PostCard(
                             post: post,
@@ -578,6 +700,7 @@ class _FeedTabState extends State<_FeedTab> {
                                 ? () => _removePost(post.id)
                                 : null,
                             onLikeToggle: () => _togglePostLike(post),
+                            onRepostToggle: () => _togglePostRepost(post),
                             onUpdated: (updated) => _replacePost(updated),
                           ),
                       };
@@ -600,12 +723,20 @@ class _EventCard extends StatelessWidget {
   final void Function(Event)? onEdited;
   final VoidCallback? onDeleted;
   final VoidCallback? onLikeToggle;
+  final VoidCallback? onRepostToggle;
   const _EventCard(
       {required this.event,
       this.fromNetwork = false,
       this.onEdited,
       this.onDeleted,
-      this.onLikeToggle});
+      this.onLikeToggle,
+      this.onRepostToggle});
+
+  String _shareText() => ShareUrls.eventCaption(
+        id: event.id,
+        title: event.title,
+        hostUsername: event.hostUsername,
+      );
 
   String _timeAgo(DateTime dt) {
     final d = DateTime.now().difference(dt);
@@ -637,6 +768,11 @@ class _EventCard extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             if (fromNetwork) const _NetworkTag(padded: true),
+            if (event.repostedByUsername != null)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 10, 12, 0),
+                child: _RepostHeader(username: event.repostedByUsername!),
+              ),
             _Thumbnail(event: event),
             Padding(
               padding: const EdgeInsets.all(12),
@@ -703,14 +839,37 @@ class _EventCard extends StatelessWidget {
                     const SizedBox(height: 4),
                     Text('Scheduled', style: NileTextStyles.caption()),
                   ],
-                  if (onLikeToggle != null) ...[
-                    const SizedBox(height: 8),
-                    _LikeButton(
-                      liked: event.likedByMe,
-                      count: event.likeCount,
-                      onTap: onLikeToggle!,
-                    ),
-                  ],
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      if (onLikeToggle != null)
+                        _LikeButton(
+                          liked: event.likedByMe,
+                          count: event.likeCount,
+                          onTap: onLikeToggle!,
+                        ),
+                      if (onRepostToggle != null) ...[
+                        const SizedBox(width: 16),
+                        _RepostButton(
+                          reposted: event.repostedByMe,
+                          count: event.repostCount,
+                          onTap: onRepostToggle!,
+                        ),
+                      ],
+                      const Spacer(),
+                      InkWell(
+                        onTap: () => ShareToSheet.showEvent(context,
+                            eventId: event.id, shareText: _shareText()),
+                        borderRadius: BorderRadius.circular(NileRadius.sm),
+                        child: const Padding(
+                          padding: EdgeInsets.symmetric(
+                              horizontal: 4, vertical: 4),
+                          child: Icon(Icons.send_outlined,
+                              size: 18, color: NileColors.txtSecondary),
+                        ),
+                      ),
+                    ],
+                  ),
                 ],
               ),
             ),
@@ -793,6 +952,7 @@ class _PostCard extends StatelessWidget {
   final void Function(Post)? onEdited;
   final VoidCallback? onDeleted;
   final VoidCallback? onLikeToggle;
+  final VoidCallback? onRepostToggle;
   final void Function(Post)? onUpdated;
   const _PostCard({
     required this.post,
@@ -800,8 +960,12 @@ class _PostCard extends StatelessWidget {
     this.onEdited,
     this.onDeleted,
     this.onLikeToggle,
+    this.onRepostToggle,
     this.onUpdated,
   });
+
+  String _shareText() =>
+      ShareUrls.postCaption(id: post.id, authorUsername: post.authorUsername);
 
   Future<void> _openDetail(BuildContext context) async {
     final updated = await Navigator.push<Post>(
@@ -834,6 +998,10 @@ class _PostCard extends StatelessWidget {
           children: [
             if (fromNetwork) ...[
               const _NetworkTag(),
+              const SizedBox(height: 8),
+            ],
+            if (post.repostedByUsername != null) ...[
+              _RepostHeader(username: post.repostedByUsername!),
               const SizedBox(height: 8),
             ],
             Row(
@@ -910,7 +1078,7 @@ class _PostCard extends StatelessWidget {
                 child: Image.network(
                   post.imageUrl!,
                   fit: BoxFit.cover,
-                  errorBuilder: (_, __, ___) => Container(
+                  errorBuilder: (_, _, _) => Container(
                     height: 200,
                     color: NileColors.bgRaised,
                     child: const Center(
@@ -920,6 +1088,10 @@ class _PostCard extends StatelessWidget {
                   ),
                 ),
               ),
+            ],
+            if (post.eventId != null) ...[
+              const SizedBox(height: 10),
+              EventLinkCard(eventId: post.eventId!),
             ],
             const SizedBox(height: 8),
             Row(
@@ -950,11 +1122,84 @@ class _PostCard extends StatelessWidget {
                     ),
                   ),
                 ),
+                if (onRepostToggle != null) ...[
+                  const SizedBox(width: 16),
+                  _RepostButton(
+                    reposted: post.repostedByMe,
+                    count: post.repostCount,
+                    onTap: onRepostToggle!,
+                  ),
+                ],
+                const Spacer(),
+                InkWell(
+                  onTap: () => ShareToSheet.show(context,
+                      postId: post.id, shareText: _shareText()),
+                  borderRadius: BorderRadius.circular(NileRadius.sm),
+                  child: const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+                    child: Icon(Icons.send_outlined,
+                        size: 18, color: NileColors.txtSecondary),
+                  ),
+                ),
               ],
             ),
           ],
         ),
       ),
+      ),
+    );
+  }
+}
+
+// ── Repost header + button ──────────────────────────────────────────────────────
+
+class _RepostHeader extends StatelessWidget {
+  final String username;
+  const _RepostHeader({required this.username});
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        const Icon(Icons.repeat, size: 14, color: NileColors.txtTertiary),
+        const SizedBox(width: 6),
+        Flexible(
+          child: Text('reposted by @$username',
+              style: NileTextStyles.caption(),
+              overflow: TextOverflow.ellipsis),
+        ),
+      ],
+    );
+  }
+}
+
+class _RepostButton extends StatelessWidget {
+  final bool reposted;
+  final int count;
+  final VoidCallback onTap;
+  const _RepostButton({
+    required this.reposted,
+    required this.count,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final color = reposted ? NileColors.volt : NileColors.txtSecondary;
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(NileRadius.sm),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.repeat, size: 18, color: color),
+            const SizedBox(width: 5),
+            Text('$count',
+                style: NileTextStyles.bodySm().copyWith(color: color)),
+          ],
+        ),
       ),
     );
   }
@@ -990,7 +1235,7 @@ class _Thumbnail extends StatelessWidget {
             Image.network(
               event.thumbnailUrl!,
               fit: BoxFit.cover,
-              errorBuilder: (_, __, ___) => _placeholder(),
+              errorBuilder: (_, _, _) => _placeholder(),
             )
           else
             _placeholder(),
@@ -1046,7 +1291,7 @@ class _LiveBadgeState extends State<_LiveBadge>
         children: [
           AnimatedBuilder(
             animation: _pulse,
-            builder: (_, __) => Opacity(
+            builder: (_, _) => Opacity(
               opacity: _pulse.value,
               child: const CircleAvatar(radius: 3.5, backgroundColor: Colors.white),
             ),

@@ -1,3 +1,4 @@
+import 'package:croppy/croppy.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -72,8 +73,12 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
   Future<void> _pickCover() async {
     setState(() => _uploadingCover = true);
     try {
-      final bytes =
-          await ProfileService.pickImageBytes(context, maxWidth: 1600, maxHeight: 900);
+      final bytes = await ProfileService.pickImageBytes(
+        context,
+        maxWidth: 1600,
+        maxHeight: 900,
+        allowedAspectRatios: [const CropAspectRatio(width: 16, height: 9)],
+      );
       if (bytes != null && mounted) setState(() => _coverBytes = bytes);
     } catch (e) {
       if (mounted) {

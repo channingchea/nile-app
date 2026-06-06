@@ -132,7 +132,8 @@ class SearchService {
         .from('events')
         .select('*, profiles!events_host_id_fkey(username, avatar_url)')
         .or('title.ilike.$pattern,description.ilike.$pattern')
-        .neq('status', 'ended');
+        .neq('status', 'ended')
+        .neq('status', 'draft');
     final myId = supabase.auth.currentUser?.id;
     if (myId != null) b = b.neq('host_id', myId);
     final blocked = _notInList(await BlockService.blockedIds());
@@ -143,12 +144,13 @@ class SearchService {
     return _pageEvents(rows as List);
   }
 
-  /// Discoverable events (all non-ended), keyset-paged by created_at.
+  /// Discoverable events (all non-ended, non-draft), keyset-paged by created_at.
   static Future<Paged<Event>> discoverEvents({String? cursor}) async {
     var b = supabase
         .from('events')
         .select('*, profiles!events_host_id_fkey(username, avatar_url)')
-        .neq('status', 'ended');
+        .neq('status', 'ended')
+        .neq('status', 'draft');
     final myId = supabase.auth.currentUser?.id;
     if (myId != null) b = b.neq('host_id', myId);
     final blocked = _notInList(await BlockService.blockedIds());
@@ -187,7 +189,8 @@ class SearchService {
     final rows = await supabase
         .from('events')
         .select('*, profiles!events_host_id_fkey(username, avatar_url)')
-        .inFilter('id', ids);
+        .inFilter('id', ids)
+        .neq('status', 'draft');
     final events = (rows as List)
         .map((r) => Event.fromJson(r as Map<String, dynamic>))
         .toList();

@@ -6,6 +6,7 @@ import '../services/like_service.dart';
 import '../services/post_service.dart';
 import '../services/report_service.dart';
 import '../theme.dart';
+import '../widgets/event_link_card.dart';
 import 'profile_screen.dart';
 import 'widgets/load_more_footer.dart';
 import 'widgets/moderation_menu.dart';
@@ -357,7 +358,7 @@ class _PostBody extends StatelessWidget {
                 child: Image.network(
                   post.imageUrl!,
                   fit: BoxFit.cover,
-                  errorBuilder: (_, __, ___) => Container(
+                  errorBuilder: (_, _, _) => Container(
                     height: 200,
                     color: NileColors.bgRaised,
                     child: const Center(
@@ -367,6 +368,10 @@ class _PostBody extends StatelessWidget {
                   ),
                 ),
               ),
+            ],
+            if (post.eventId != null) ...[
+              const SizedBox(height: 10),
+              EventLinkCard(eventId: post.eventId!),
             ],
           ],
         ),

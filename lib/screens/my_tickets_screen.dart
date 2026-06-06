@@ -141,7 +141,7 @@ class _MyTicketsScreenState extends State<MyTicketsScreen> {
       controller: _scroll,
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
       itemCount: _tickets!.length + (_hasMore ? 1 : 0),
-      separatorBuilder: (_, __) => const SizedBox(height: 10),
+      separatorBuilder: (_, _) => const SizedBox(height: 10),
       itemBuilder: (_, i) {
         if (i >= _tickets!.length) return const LoadMoreFooter();
         final t = _tickets![i];

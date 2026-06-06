@@ -1,5 +1,6 @@
 import 'dart:typed_data';
 
+import 'package:croppy/croppy.dart';
 import 'package:flutter/material.dart';
 
 import '../services/post_service.dart';
@@ -7,7 +8,13 @@ import '../services/profile_service.dart';
 import '../theme.dart';
 
 class CreatePostScreen extends StatefulWidget {
-  const CreatePostScreen({super.key});
+  /// Optional pre-filled caption (e.g. when posting about a new event).
+  final String? initialText;
+
+  /// Optional event to attach; renders as a thumbnail card on the post.
+  final String? eventId;
+
+  const CreatePostScreen({super.key, this.initialText, this.eventId});
 
   @override
   State<CreatePostScreen> createState() => _CreatePostScreenState();
@@ -25,6 +32,9 @@ class _CreatePostScreenState extends State<CreatePostScreen> {
   @override
   void initState() {
     super.initState();
+    if (widget.initialText != null) {
+      _captionController.text = widget.initialText!;
+    }
     _captionController.addListener(() => setState(() {}));
   }
 
@@ -42,8 +52,12 @@ class _CreatePostScreenState extends State<CreatePostScreen> {
   Future<void> _pickImage() async {
     setState(() => _pickingImage = true);
     try {
-      final bytes =
-          await ProfileService.pickImageBytes(context, maxWidth: 1600, maxHeight: 1600);
+      final bytes = await ProfileService.pickImageBytes(
+        context,
+        maxWidth: 1600,
+        maxHeight: 1200,
+        allowedAspectRatios: [const CropAspectRatio(width: 4, height: 3)],
+      );
       if (bytes != null && mounted) setState(() => _imageBytes = bytes);
     } catch (e) {
       if (mounted) {
@@ -82,6 +96,7 @@ class _CreatePostScreenState extends State<CreatePostScreen> {
       final post = await PostService.create(
         content: _captionController.text,
         imageUrl: imageUrl,
+        eventId: widget.eventId,
       );
 
       if (!mounted) return;

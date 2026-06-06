@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:livekit_client/livekit_client.dart';
@@ -8,14 +9,17 @@ import '../theme.dart';
 
 class CameraScreen extends StatefulWidget {
   final String? initialEventId;
+  /// Pre-fills the camera name — used when an assigned operator enters an event
+  /// so they auto-land on their designated camera slot.
+  final String? initialCameraName;
 
-  const CameraScreen({super.key, this.initialEventId});
+  const CameraScreen({super.key, this.initialEventId, this.initialCameraName});
 
   @override
   State<CameraScreen> createState() => _CameraScreenState();
 }
 
-enum CameraState { idle, connecting, live }
+enum CameraState { idle, connecting, soundCheck, live }
 
 class _CameraScreenState extends State<CameraScreen> {
   final _eventIdController = TextEditingController();
@@ -26,6 +30,92 @@ class _CameraScreenState extends State<CameraScreen> {
     super.initState();
     if (widget.initialEventId != null) {
       _eventIdController.text = widget.initialEventId!;
+    }
+    if (widget.initialCameraName != null) {
+      _cameraNameController.text = widget.initialCameraName!;
+    }
+    _refreshMicDetection();
+    _deviceChangeSub =
+        Hardware.instance.onDeviceChange.stream.listen((_) => _refreshMicDetection());
+  }
+
+  /// Inspect audio inputs; flag when a non-builtin mic is present so we can
+  /// suggest external-mic mode. Detection is best-effort and varies by platform,
+  /// so it only ever drives a suggestion — never forces the setting.
+  Future<void> _refreshMicDetection() async {
+    try {
+      final devices = await Hardware.instance.enumerateDevices(type: 'audioinput');
+      final hasExternal = devices.any((d) {
+        final label = d.label.toLowerCase();
+        // Built-in mics report as "built-in"/"default"/"iphone"/"android" etc.
+        // Anything else is almost certainly an attached USB-C or wireless mic.
+        return label.isNotEmpty &&
+            !label.contains('built-in') &&
+            !label.contains('builtin') &&
+            !label.contains('default') &&
+            !label.contains('internal') &&
+            !label.contains('iphone') &&
+            !label.contains('ipad') &&
+            !label.contains('android') &&
+            !label.contains('phone');
+      });
+      if (!mounted) return;
+      if (hasExternal != _externalMicConnected) {
+        setState(() {
+          _externalMicConnected = hasExternal;
+          if (!hasExternal) _externalMicPromptDismissed = false;
+        });
+      }
+    } catch (_) {
+      // Enumeration unsupported/empty on this platform — silently skip.
+    }
+  }
+
+  /// (Re)publish the local mic to match [_disableAgc]. When off, uses the default
+  /// mic path (WebRTC AGC/denoise/echo-cancel on). When on, publishes a track
+  /// with that processing disabled so an external mic's own tuning passes
+  /// through. Called at connect and whenever the setting changes mid-session;
+  /// the unpublish→publish swap causes a brief (sub-second) audio gap.
+  Future<void> _applyMicProcessing(LocalParticipant? participant) async {
+    if (participant == null) return;
+
+    // Drop any current mic publication first.
+    final existing = participant.audioTrackPublications.firstOrNull;
+    if (existing != null) {
+      await participant.removePublishedTrack(existing.sid);
+    }
+
+    if (_disableAgc) {
+      final audioTrack = await LocalAudioTrack.create(const AudioCaptureOptions(
+        autoGainControl: false,
+        noiseSuppression: false,
+        echoCancellation: false,
+      ));
+      await participant.publishAudioTrack(audioTrack);
+    } else {
+      await participant.setMicrophoneEnabled(true);
+    }
+  }
+
+  /// Update the external-mic setting. If a session is live, republish the mic
+  /// immediately so the change takes effect now; otherwise it applies at the
+  /// next connect. [onDone] lets a modal refresh its own local state.
+  Future<void> _setExternalMicMode(bool enabled, {VoidCallback? onDone}) async {
+    if (_switchingMic) return;
+    setState(() {
+      _disableAgc = enabled;
+      _externalMicPromptDismissed = true;
+    });
+    onDone?.call();
+
+    if (_state == CameraState.idle || _room?.localParticipant == null) return;
+    setState(() => _switchingMic = true);
+    try {
+      await _applyMicProcessing(_room!.localParticipant);
+    } catch (_) {
+      // Swap failed — leave the (now-unpublished) mic; operator can retry.
+    } finally {
+      if (mounted) setState(() => _switchingMic = false);
     }
   }
 
@@ -43,15 +133,34 @@ class _CameraScreenState extends State<CameraScreen> {
   // Camera position (mobile only)
   bool _isFrontCamera = false;
 
+  // Disable WebRTC AGC/denoise/echo-cancel for this camera's mic. Default off —
+  // matches prior behavior. Turning it on lets a third-party mic's own
+  // processing pass through untouched (see settings modal).
+  bool _disableAgc = false;
+
+  // External-mic detection. We watch the input devices and, when a non-builtin
+  // mic appears, suggest (not force) external-mic mode.
+  StreamSubscription? _deviceChangeSub;
+  bool _externalMicConnected = false;
+  bool _externalMicPromptDismissed = false;
+  bool _switchingMic = false;
+
   // Stored for API calls
   String? _eventId;
   String? _cameraIdentity;
 
   @override
   void dispose() {
-    if (_state == CameraState.live && _eventId != null) {
-      EventService.end(_eventId!).catchError((_) {});
+    // Leaving a live show ends it; leaving during Sound Check (show never
+    // started) reverts the event to scheduled so it can be re-entered later.
+    if (_eventId != null) {
+      if (_state == CameraState.live) {
+        EventService.end(_eventId!).catchError((_) {});
+      } else if (_state == CameraState.soundCheck) {
+        EventService.revertToScheduled(_eventId!).catchError((_) {});
+      }
     }
+    _deviceChangeSub?.cancel();
     _eventIdController.dispose();
     _cameraNameController.dispose();
     _listener?.dispose();
@@ -59,13 +168,36 @@ class _CameraScreenState extends State<CameraScreen> {
     super.dispose();
   }
 
-  Future<void> _goLive() async {
+  /// Connect the camera/mic and enter Sound Check — the host/operator can now
+  /// test devices, but viewers stay in the Lobby until [_startShow] is pressed.
+  Future<void> _enterSoundCheck() async {
     final eventId = _eventIdController.text.trim();
     final cameraName = _cameraNameController.text.trim();
 
     if (eventId.isEmpty || cameraName.isEmpty) {
       setState(() => _errorMessage = 'Please fill in all fields.');
       return;
+    }
+
+    // Sound check opens 5 minutes before the scheduled start. Only gate an
+    // event that hasn't begun (still 'scheduled'); a host re-entering one that's
+    // already soundcheck/live isn't blocked. Unknown scheduled_at → allow.
+    try {
+      final state = await EventService.fetchEventState(eventId);
+      final schedRaw = state?['scheduled_at'] as String?;
+      if (state?['status'] == 'scheduled' && schedRaw != null) {
+        final opensAt =
+            DateTime.parse(schedRaw).subtract(const Duration(minutes: 5));
+        if (DateTime.now().isBefore(opensAt)) {
+          final mins = opensAt.difference(DateTime.now()).inMinutes + 1;
+          setState(() => _errorMessage =
+              'Sound check opens 5 minutes before showtime. Try again in '
+              '$mins min.');
+          return;
+        }
+      }
+    } catch (_) {
+      // Best-effort gate — a lookup failure shouldn't block the host.
     }
 
     setState(() {
@@ -134,7 +266,7 @@ class _CameraScreenState extends State<CameraScreen> {
           )
           .timeout(const Duration(seconds: 15),
               onTimeout: () => throw Exception('Camera timed out. Check camera permissions.'));
-      await room.localParticipant?.setMicrophoneEnabled(true);
+      await _applyMicProcessing(room.localParticipant);
 
       final publication = room.localParticipant?.videoTrackPublications.firstOrNull;
       final track = publication?.track;
@@ -156,11 +288,12 @@ class _CameraScreenState extends State<CameraScreen> {
         _streamAudioActive = streamAudioActive;
         _eventId = eventId;
         _cameraIdentity = room?.localParticipant?.identity;
-        _state = CameraState.live;
+        _state = CameraState.soundCheck;
       });
 
-      // Mark event live in Supabase — best-effort, no-op if not in DB.
-      EventService.goLive(eventId).catchError((_) {});
+      // Enter Sound Check in Supabase — best-effort, no-op if not in DB.
+      // The show only goes live when Start Show is pressed (_startShow).
+      EventService.enterSoundCheck(eventId).catchError((_) {});
     } catch (e) {
       // Tear down the half-connected room so it doesn't keep holding the
       // camera/mic and hang the next attempt.
@@ -171,6 +304,16 @@ class _CameraScreenState extends State<CameraScreen> {
         _errorMessage = 'Failed to connect: ${e.toString()}';
       });
     }
+  }
+
+  /// Host/operator presses "Start Show" — flip the event to live, which lets the
+  /// waiting Lobby viewers into the stream (they auto-transition via realtime).
+  Future<void> _startShow() async {
+    if (_eventId == null) return;
+    setState(() => _state = CameraState.live);
+    EventService.goLive(_eventId!).catchError((_) {});
+    // Stamp the camera-sync anchor (showStartedAt) into the room metadata.
+    LivekitService.startShow(eventId: _eventId!).catchError((_) {});
   }
 
   Future<void> _claimMasterAudio() async {
@@ -227,10 +370,32 @@ class _CameraScreenState extends State<CameraScreen> {
     } catch (_) {}
   }
 
-  Future<void> _stopStreaming() async {
-    if (_eventId != null) EventService.end(_eventId!).catchError((_) {});
+  /// Leave the stream WITHOUT ending it. During a live show this just drops
+  /// this camera — the show stays open (status stays 'live') so the host/other
+  /// cameras and viewers can stay or rejoin. Ending the show is now an explicit,
+  /// separate action ([_endStream]) tucked in Settings. During Sound Check,
+  /// leaving reverts the event to 'scheduled' (no one was watching yet).
+  Future<void> _leaveStream() async {
+    if (_eventId != null && _state == CameraState.soundCheck) {
+      EventService.revertToScheduled(_eventId!).catchError((_) {});
+    }
+    await _teardownRoom();
+  }
+
+  /// Explicitly end the live show: flip the DB status to 'ended' (the single
+  /// source of truth viewers watch) then disconnect. This is the only path that
+  /// ends a show; it lives at the bottom of the Settings sheet behind a confirm.
+  Future<void> _endStream() async {
+    if (_eventId != null) {
+      EventService.end(_eventId!).catchError((_) {});
+    }
+    await _teardownRoom();
+  }
+
+  Future<void> _teardownRoom() async {
     await _listener?.dispose();
     await _room?.disconnect();
+    if (!mounted) return;
     setState(() {
       _room = null;
       _listener = null;
@@ -241,6 +406,144 @@ class _CameraScreenState extends State<CameraScreen> {
     });
   }
 
+  void _openAudioSettings() {
+    final connected = _state != CameraState.idle;
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: NileColors.bgSurface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(NileRadius.lg)),
+      ),
+      builder: (sheetCtx) {
+        return StatefulBuilder(
+          builder: (sheetCtx, setSheetState) {
+            return Padding(
+              padding: const EdgeInsets.fromLTRB(24, 24, 24, 32),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Settings', style: NileTextStyles.headingMd()),
+                  const SizedBox(height: 24),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(
+                        child: Text(
+                          'Use external mic processing',
+                          style: NileTextStyles.bodyLg(),
+                        ),
+                      ),
+                      Switch(
+                        value: _disableAgc,
+                        activeThumbColor: NileColors.volt,
+                        onChanged: _switchingMic
+                            ? null
+                            : (v) => _setExternalMicMode(
+                                  v,
+                                  onDone: () => setSheetState(() {}),
+                                ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Off by default, this leaves automatic gain control, noise '
+                    'reduction, and echo cancellation on — best for your phone\'s '
+                    'built-in mic. Turn it on when a compatible USB-C or wireless '
+                    'mic is connected: the phone\'s processing steps aside so the '
+                    'mic\'s own tuning comes through cleanly, usually improving '
+                    'audio quality.',
+                    style: NileTextStyles.bodyMd().copyWith(color: NileColors.txtSecondary),
+                  ),
+                  if (_externalMicConnected && !_disableAgc) ...[
+                    const SizedBox(height: 12),
+                    Text(
+                      'External mic detected — turning this on is recommended.',
+                      style: NileTextStyles.bodySm().copyWith(color: NileColors.volt),
+                    ),
+                  ],
+                  if (connected) ...[
+                    const SizedBox(height: 12),
+                    Text(
+                      _switchingMic
+                          ? 'Switching mic…'
+                          : 'Changes apply immediately (brief audio gap while switching).',
+                      style: NileTextStyles.bodySm().copyWith(color: NileColors.amber),
+                    ),
+                  ],
+                  // End Stream lives here, at the bottom of Settings — clearly
+                  // labelled but out of the way so it can't be hit by accident.
+                  // Only shown for a live show; it's the sole path that ends it.
+                  if (_state == CameraState.live) ...[
+                    const SizedBox(height: 24),
+                    const Divider(color: NileColors.border, height: 1),
+                    const SizedBox(height: 16),
+                    SizedBox(
+                      width: double.infinity,
+                      child: OutlinedButton.icon(
+                        onPressed: () => _confirmEndStream(sheetCtx),
+                        icon: const Icon(Icons.stop_circle_outlined),
+                        label: const Text('End Stream'),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: NileColors.error,
+                          side: const BorderSide(color: NileColors.error),
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                          textStyle: NileTextStyles.labelMd(),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(NileRadius.sm),
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      'Ends the show for everyone. Viewers see the stream as '
+                      'ended. This can\'t be undone.',
+                      style: NileTextStyles.bodySm()
+                          .copyWith(color: NileColors.txtSecondary),
+                    ),
+                  ],
+                ],
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  /// Confirm before ending. Closes the settings sheet, asks once, then ends.
+  Future<void> _confirmEndStream(BuildContext sheetCtx) async {
+    Navigator.of(sheetCtx).pop(); // close the settings sheet first
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: NileColors.bgSurface,
+        title: Text('End stream?', style: NileTextStyles.headingMd()),
+        content: Text(
+          'This ends the show for everyone watching. It can\'t be undone.',
+          style: NileTextStyles.bodyMd().copyWith(color: NileColors.txtSecondary),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: Text('Cancel',
+                style: NileTextStyles.labelMd()
+                    .copyWith(color: NileColors.txtSecondary)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: Text('End Stream',
+                style: NileTextStyles.labelMd()
+                    .copyWith(color: NileColors.error)),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) await _endStream();
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -248,12 +551,62 @@ class _CameraScreenState extends State<CameraScreen> {
       appBar: AppBar(
         title: Text('Camera', style: NileTextStyles.headingMd()),
         backgroundColor: Colors.transparent,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.settings),
+            color: NileColors.txtPrimary,
+            tooltip: 'Audio settings',
+            onPressed: _openAudioSettings,
+          ),
+        ],
       ),
-      body: switch (_state) {
-        CameraState.idle => _buildForm(),
-        CameraState.connecting => _buildConnecting(),
-        CameraState.live => _buildLive(),
-      },
+      body: Column(
+        children: [
+          if (_externalMicConnected && !_disableAgc && !_externalMicPromptDismissed)
+            _buildExternalMicBanner(),
+          Expanded(
+            child: switch (_state) {
+              CameraState.idle => _buildForm(),
+              CameraState.connecting => _buildConnecting(),
+              CameraState.soundCheck || CameraState.live => _buildLive(),
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildExternalMicBanner() {
+    return Material(
+      color: NileColors.bgRaised,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 10, 8, 10),
+        child: Row(
+          children: [
+            const Icon(Icons.mic_external_on, color: NileColors.volt, size: 20),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                'External mic detected. Use its processing for better audio?',
+                style: NileTextStyles.bodySm().copyWith(color: NileColors.txtPrimary),
+              ),
+            ),
+            TextButton(
+              onPressed: _switchingMic ? null : () => _setExternalMicMode(true),
+              child: Text(
+                'Use it',
+                style: NileTextStyles.labelMd().copyWith(color: NileColors.volt),
+              ),
+            ),
+            IconButton(
+              icon: const Icon(Icons.close, size: 18, color: NileColors.txtSecondary),
+              tooltip: 'Dismiss',
+              onPressed: () =>
+                  setState(() => _externalMicPromptDismissed = true),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -263,7 +616,13 @@ class _CameraScreenState extends State<CameraScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Text('Set up your camera', style: NileTextStyles.headingLg()),
+          Text('Sound Check', style: NileTextStyles.headingLg()),
+          const SizedBox(height: 8),
+          Text(
+            'Set up and test your camera and mic. Viewers wait in the Lobby '
+            'until you press Start Show.',
+            style: NileTextStyles.bodyMd().copyWith(color: NileColors.txtSecondary),
+          ),
           const SizedBox(height: 32),
           TextField(
             controller: _eventIdController,
@@ -290,11 +649,11 @@ class _CameraScreenState extends State<CameraScreen> {
             ),
           ],
           const SizedBox(height: 32),
-          // Go Live — coral CTA for live/go-live action
+          // Enter Sound Check — connects devices without going live yet
           FilledButton.icon(
-            onPressed: _goLive,
+            onPressed: _enterSoundCheck,
             icon: const Icon(Icons.videocam),
-            label: const Text('Go Live'),
+            label: const Text('Enter Sound Check'),
             style: FilledButton.styleFrom(
               backgroundColor: NileColors.coral,
               foregroundColor: Colors.white,
@@ -349,25 +708,30 @@ class _CameraScreenState extends State<CameraScreen> {
             ),
           ),
 
-        // ── LIVE badge — top left (coral) ──────────────────────────────
+        // ── Status badge — top left ─────────────────────────────────────
+        // SOUND CHECK (volt) before the show starts, LIVE (coral) after.
         Positioned(
           top: 16,
           left: 16,
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
             decoration: BoxDecoration(
-              color: NileColors.coral,
+              color: _state == CameraState.live ? NileColors.coral : NileColors.volt,
               borderRadius: BorderRadius.circular(NileRadius.pill),
             ),
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Icon(Icons.circle, size: 8, color: Colors.white),
+                Icon(
+                  _state == CameraState.live ? Icons.circle : Icons.tune,
+                  size: 8,
+                  color: _state == CameraState.live ? Colors.white : NileColors.bgPage,
+                ),
                 const SizedBox(width: 6),
                 Text(
-                  'LIVE',
+                  _state == CameraState.live ? 'LIVE' : 'SOUND CHECK',
                   style: NileTextStyles.labelSm().copyWith(
-                    color: Colors.white,
+                    color: _state == CameraState.live ? Colors.white : NileColors.bgPage,
                     letterSpacing: 1.5,
                   ),
                 ),
@@ -447,8 +811,33 @@ class _CameraScreenState extends State<CameraScreen> {
           bottom: 32,
           left: 32,
           right: 32,
-          child: Row(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
             children: [
+              // Start Show — only during Sound Check; flips the event live and
+              // lets waiting Lobby viewers in.
+              if (_state == CameraState.soundCheck) ...[
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton.icon(
+                    onPressed: _startShow,
+                    icon: const Icon(Icons.play_arrow),
+                    label: const Text('Start Show'),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: NileColors.coral,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 16),
+                      textStyle: NileTextStyles.labelLg(),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(NileRadius.sm),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+              ],
+              Row(
+                children: [
               // Flip camera — mobile only, video must be on
               if (!kIsWeb && _videoEnabled) ...[
                 IconButton(
@@ -481,15 +870,17 @@ class _CameraScreenState extends State<CameraScreen> {
                 ),
                 const SizedBox(width: 12),
               ],
-              // Stop streaming — error/destructive color
+              // Leave — neutral, NOT destructive. Leaving a live show no longer
+              // ends it (the show stays open); ending is an explicit action in
+              // Settings. During Sound Check this reverts to scheduled.
               Expanded(
-                child: FilledButton.icon(
-                  onPressed: _stopStreaming,
-                  icon: const Icon(Icons.stop),
-                  label: const Text('Stop Streaming'),
-                  style: FilledButton.styleFrom(
-                    backgroundColor: NileColors.error,
-                    foregroundColor: Colors.white,
+                child: OutlinedButton.icon(
+                  onPressed: _leaveStream,
+                  icon: const Icon(Icons.logout),
+                  label: const Text('Leave'),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: NileColors.txtPrimary,
+                    side: const BorderSide(color: NileColors.border),
                     padding: const EdgeInsets.symmetric(vertical: 14),
                     textStyle: NileTextStyles.labelMd(),
                     shape: RoundedRectangleBorder(
@@ -497,6 +888,8 @@ class _CameraScreenState extends State<CameraScreen> {
                     ),
                   ),
                 ),
+              ),
+                ],
               ),
             ],
           ),

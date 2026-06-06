@@ -103,6 +103,7 @@ class PushService {
       case 'event_starting':
       case 'event_live':
       case 'event_ended':
+      case 'operator_assigned':
         if (entityId == null) return;
         final event = await EventService.fetchById(entityId);
         if (event == null) return;

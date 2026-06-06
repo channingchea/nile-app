@@ -9,6 +9,7 @@ import '../services/post_service.dart';
 import '../services/profile_service.dart';
 import '../services/search_service.dart';
 import '../theme.dart';
+import '../widgets/event_link_card.dart';
 import 'event_detail_screen.dart';
 import 'post_detail_screen.dart';
 import 'profile_screen.dart';
@@ -753,7 +754,7 @@ class _DiscoverPostCard extends StatelessWidget {
                     child: Image.network(
                       post.imageUrl!,
                       fit: BoxFit.cover,
-                      errorBuilder: (_, __, ___) => Container(
+                      errorBuilder: (_, _, _) => Container(
                         color: NileColors.bgRaised,
                         child: const Center(
                             child: Icon(Icons.broken_image,
@@ -762,6 +763,10 @@ class _DiscoverPostCard extends StatelessWidget {
                     ),
                   ),
                 ),
+              ],
+              if (post.eventId != null) ...[
+                const SizedBox(height: 8),
+                EventLinkCard(eventId: post.eventId!),
               ],
               if (onLikeToggle != null) ...[
                 const SizedBox(height: 6),
@@ -886,7 +891,7 @@ class _EventThumbnail extends StatelessWidget {
             Image.network(
               event.coverImageUrl!,
               fit: BoxFit.cover,
-              errorBuilder: (_, __, ___) => Container(color: NileColors.bgRaised),
+              errorBuilder: (_, _, _) => Container(color: NileColors.bgRaised),
             )
           else
             Container(
@@ -979,7 +984,7 @@ class _NetworkRail extends StatelessWidget {
             scrollDirection: Axis.horizontal,
             clipBehavior: Clip.none,
             itemCount: children.length,
-            separatorBuilder: (_, __) => const SizedBox(width: 12),
+            separatorBuilder: (_, _) => const SizedBox(width: 12),
             itemBuilder: (_, i) => SizedBox(width: 220, child: children[i]),
           ),
         ),

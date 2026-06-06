@@ -11,6 +11,7 @@
 //   audio-token       host    → { token, wsUrl }
 //   list-cameras      host    → { cameras: [{ identity, name, cameraName, cameraId }] }
 //   set-master-audio  host    → { success: true }
+//   start-show        host    → { success: true }   ← stamps showStartedAt anchor
 //   viewer-token      viewer  → { mode: "webrtc", token, wsUrl }   ← typed descriptor (3.2)
 //
 // Auth (section 3.3): verify-jwt is ON at the gateway. Every action requires a
@@ -128,6 +129,8 @@ serve(async (req) => {
         return await listCameras(body, user.id, admin);
       case "set-master-audio":
         return await setMasterAudio(body, user.id, admin);
+      case "start-show":
+        return await startShow(body, user.id, admin);
       case "viewer-token":
         return await viewerToken(body, user.id, admin);
       default:
@@ -171,20 +174,21 @@ async function requireOperator(
   return { event };
 }
 
-/** True if `userId` may operate the event. TODAY: host only. */
+/** True if `userId` may operate the event: the host, or an assigned operator. */
 async function isAuthorizedOperator(
-  event: { host_id: string },
+  event: { id: string; host_id: string },
   userId: string,
-  _admin: ReturnType<typeof createClient>,
+  admin: ReturnType<typeof createClient>,
 ): Promise<boolean> {
   if (event.host_id === userId) return true;
-  // TODO(operator-invites): when camera-operator invites ship, also allow
-  //   accepted operators here, e.g.:
-  //   const { data } = await _admin.from("event_operators")
-  //     .select("user_id").eq("event_id", event.id).eq("user_id", userId)
-  //     .eq("status", "accepted").maybeSingle();
-  //   return !!data;
-  return false;
+  // Assigned camera operators (event_operators row) may publish too.
+  const { data } = await admin
+    .from("event_operators")
+    .select("id")
+    .eq("event_id", event.id)
+    .eq("operator_id", userId)
+    .maybeSingle();
+  return !!data;
 }
 
 // ── Actions ───────────────────────────────────────────────────────────────────
@@ -244,7 +248,10 @@ async function cameraToken(body: any, userId: string, admin: any): Promise<Respo
     roomName,
     canPublish: true,
     canSubscribe: false,
-    metadata: JSON.stringify({ role: "camera", cameraId, cameraName, isMasterAudio }),
+    // joinedAt is server-stamped (no device clock skew) so the viewer can align
+    // this camera against the master-audio timeline. A fresh token on rejoin =
+    // a fresh joinedAt automatically.
+    metadata: JSON.stringify({ role: "camera", cameraId, cameraName, isMasterAudio, joinedAt: Date.now() }),
   });
 
   return json({ token, wsUrl: LIVEKIT_URL, isMasterAudio });
@@ -265,7 +272,8 @@ async function audioToken(body: any, userId: string, admin: any): Promise<Respon
     roomName,
     canPublish: true,
     canSubscribe: false,
-    metadata: JSON.stringify({ role: "master-audio" }),
+    // joinedAt is the zero reference for camera-sync offsets (see viewer side).
+    metadata: JSON.stringify({ role: "master-audio", joinedAt: Date.now() }),
   });
 
   return json({ token, wsUrl: LIVEKIT_URL });
@@ -328,6 +336,36 @@ async function setMasterAudio(body: any, userId: string, admin: any): Promise<Re
   return json({ success: true });
 }
 
+// start-show — stamp a single, stable wall-clock anchor for the whole show.
+//
+// When the host presses Start Show, write showStartedAt into the LiveKit room
+// metadata. The viewer reads this anchor plus each publisher's joinedAt to
+// align switchable camera angles against the master-audio timeline. Existing
+// room metadata (eventName, eventId) is preserved.
+async function startShow(body: any, userId: string, admin: any): Promise<Response> {
+  const { eventId } = body;
+  if (!eventId) return json({ error: "eventId is required" }, 400);
+
+  const gate = await requireOperator(eventId, userId, admin);
+  if (gate instanceof Response) return gate;
+
+  const roomName = roomNameFor(eventId);
+  let meta: Record<string, unknown> = {};
+  try {
+    const rooms = await roomService.listRooms([roomName]);
+    if (rooms[0]) meta = parseMeta(rooms[0].metadata);
+  } catch {
+    // Room metadata unreadable — fall back to a bare anchor.
+  }
+
+  await roomService.updateRoomMetadata(
+    roomName,
+    JSON.stringify({ ...meta, showStartedAt: Date.now() }),
+  );
+
+  return json({ success: true });
+}
+
 // viewer-token (was POST /api/viewer-token) — JWT-derived identity + mode seam
 async function viewerToken(body: any, userId: string, admin: any): Promise<Response> {
   const { eventId } = body;
@@ -337,25 +375,38 @@ async function viewerToken(body: any, userId: string, admin: any): Promise<Respo
   // hole (3.3). `eventId` is the LiveKit slug (events.livekit_room), not the PK.
   const { data: event, error } = await admin
     .from("events")
-    .select("id, status, livekit_room, price")
+    .select("id, host_id, status, livekit_room, price")
     .eq("livekit_room", eventId)
     .maybeSingle();
 
   if (error || !event) return json({ error: "Event not found" }, 404);
-  if (event.status !== "live") return json({ error: "Event is not currently live" }, 403);
+  // Viewers may connect once the show is live OR while the host is in Sound Check
+  // (they wait in the Lobby until status flips to 'live'). 'scheduled'/'ended'
+  // still reject. The same paid-ticket gate below applies in both phases.
+  if (event.status !== "live" && event.status !== "soundcheck") {
+    return json({ error: "Event is not currently live" }, 403);
+  }
 
-  // Paid events require a paid ticket. Look it up separately so a missing ticket
-  // never nulls out the event row (an embedded left-join filter on tickets.user_id
-  // did exactly that for free events with no tickets).
+  // Paid events require a paid ticket — unless the viewer is the host or an
+  // assigned camera operator, who both get free access. Look the ticket up
+  // separately so a missing ticket never nulls out the event row (an embedded
+  // left-join filter on tickets.user_id did exactly that for free events).
   if (event.price && event.price > 0) {
-    const { data: ticket } = await admin
-      .from("tickets")
-      .select("status")
-      .eq("event_id", event.id)
-      .eq("user_id", userId)
-      .maybeSingle();
-    if (!ticket || ticket.status !== "paid") {
-      return json({ error: "A valid ticket is required to join this event" }, 403);
+    const isCrew = await isAuthorizedOperator(
+      { id: event.id, host_id: event.host_id },
+      userId,
+      admin,
+    );
+    if (!isCrew) {
+      const { data: ticket } = await admin
+        .from("tickets")
+        .select("status")
+        .eq("event_id", event.id)
+        .eq("buyer_id", userId)
+        .maybeSingle();
+      if (!ticket || ticket.status !== "paid") {
+        return json({ error: "A valid ticket is required to join this event" }, 403);
+      }
     }
   }
 

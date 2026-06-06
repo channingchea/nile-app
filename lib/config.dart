@@ -4,6 +4,7 @@
 ///
 /// (LiveKit room/token management now runs in the `livekit` Edge Function,
 /// reached via supabase.functions.invoke — there is no standalone backend URL.)
+library;
 
 // ── Supabase ──────────────────────────────────────────────────────────────────
 const String supabaseUrl =

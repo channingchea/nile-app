@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'like_service.dart';
 import 'pagination.dart';
+import 'repost_service.dart';
 import 'supabase_client.dart';
 
 // ── Model ─────────────────────────────────────────────────────────────────────
@@ -16,11 +17,16 @@ class Post {
   final String? imageUrl;
   final int likeCount;
   final int commentCount;
+  final int repostCount;
   final String? eventId;         // optional link to an event
   final DateTime createdAt;
   final DateTime? updatedAt;
   /// Transient — populated client-side by [PostService] after a feed fetch.
   final bool likedByMe;
+  final bool repostedByMe;
+  /// Transient — set when this row entered the feed via someone's repost,
+  /// so the card can render a "↻ reposted by @user" header.
+  final String? repostedByUsername;
 
   const Post({
     required this.id,
@@ -31,10 +37,13 @@ class Post {
     this.imageUrl,
     this.likeCount = 0,
     this.commentCount = 0,
+    this.repostCount = 0,
     this.eventId,
     required this.createdAt,
     this.updatedAt,
     this.likedByMe = false,
+    this.repostedByMe = false,
+    this.repostedByUsername,
   });
 
   /// Convenience getter — caller-friendly alias for `content`.
@@ -46,7 +55,10 @@ class Post {
   Post copyWith({
     int? likeCount,
     int? commentCount,
+    int? repostCount,
     bool? likedByMe,
+    bool? repostedByMe,
+    String? repostedByUsername,
   }) {
     return Post(
       id: id,
@@ -57,14 +69,18 @@ class Post {
       imageUrl: imageUrl,
       likeCount: likeCount ?? this.likeCount,
       commentCount: commentCount ?? this.commentCount,
+      repostCount: repostCount ?? this.repostCount,
       eventId: eventId,
       createdAt: createdAt,
       updatedAt: updatedAt,
       likedByMe: likedByMe ?? this.likedByMe,
+      repostedByMe: repostedByMe ?? this.repostedByMe,
+      repostedByUsername: repostedByUsername ?? this.repostedByUsername,
     );
   }
 
-  factory Post.fromJson(Map<String, dynamic> json) {
+  factory Post.fromJson(Map<String, dynamic> json,
+      {String? repostedByUsername}) {
     final profile = (json['profiles'] as Map<String, dynamic>?) ?? {};
     return Post(
       id: json['id'] as String,
@@ -75,11 +91,13 @@ class Post {
       imageUrl: json['image_url'] as String?,
       likeCount: (json['like_count'] as num?)?.toInt() ?? 0,
       commentCount: (json['comment_count'] as num?)?.toInt() ?? 0,
+      repostCount: (json['repost_count'] as num?)?.toInt() ?? 0,
       eventId: json['event_id'] as String?,
       createdAt: DateTime.parse(json['created_at'] as String),
       updatedAt: json['updated_at'] != null
           ? DateTime.parse(json['updated_at'] as String)
           : null,
+      repostedByUsername: repostedByUsername,
     );
   }
 }
@@ -103,6 +121,44 @@ class PostService {
     final rows =
         await b.order('created_at', ascending: false).limit(kPageSize);
     return _page(rows as List);
+  }
+
+  /// Reposts made by [reposterIds] (e.g. the people the current user follows),
+  /// newest-repost-first, each hydrated as the original [Post] with
+  /// [Post.repostedByUsername] set. Loaded once per feed load and interleaved
+  /// client-side (like recommendations) — not part of the post keyset, since a
+  /// repost sorts by its own time, not the original post's created_at.
+  static Future<List<({Post post, DateTime repostedAt})>> getRepostsFeed(
+      List<String> reposterIds,
+      {int limit = kPageSize}) async {
+    if (reposterIds.isEmpty) return const [];
+    final rows = await supabase
+        .from('reposts')
+        .select(
+            'created_at, reposter:profiles!reposts_user_id_fkey(username), '
+            'post:posts!reposts_post_id_fkey($_postSelect)')
+        .inFilter('user_id', reposterIds)
+        .order('created_at', ascending: false)
+        .limit(limit);
+    return _fromReposts(rows as List);
+  }
+
+  /// Maps repost rows (with joined post + reposter) to (post, repostedAt) pairs.
+  /// Skips rows whose original post was deleted (join yields null).
+  static List<({Post post, DateTime repostedAt})> _fromReposts(List rows) {
+    final out = <({Post post, DateTime repostedAt})>[];
+    for (final r in rows) {
+      final m = r as Map<String, dynamic>;
+      final post = m['post'] as Map<String, dynamic>?;
+      if (post == null) continue;
+      final reposter = (m['reposter'] as Map<String, dynamic>?) ?? {};
+      out.add((
+        post: Post.fromJson(post,
+            repostedByUsername: reposter['username'] as String?),
+        repostedAt: DateTime.parse(m['created_at'] as String),
+      ));
+    }
+    return out;
   }
 
   /// All posts globally, newest first (for Discover). Keyset-paged.
@@ -157,7 +213,7 @@ class PostService {
           'user_id': uid,
           'content': body ?? '',
           if (hasImage) 'image_url': imageUrl,
-          if (eventId != null) 'event_id': eventId,
+          'event_id': ?eventId,
         })
         .select(_postSelect)
         .single();
@@ -173,8 +229,8 @@ class PostService {
     bool clearImage = false,
   }) async {
     final updates = <String, dynamic>{
-      if (content != null) 'content': content,
-      if (imageUrl != null) 'image_url': imageUrl,
+      'content': ?content,
+      'image_url': ?imageUrl,
       if (clearImage) 'image_url': null,
     };
     final row = await supabase
@@ -212,6 +268,16 @@ class PostService {
         await LikeService.getLikedPostIds(posts.map((p) => p.id).toList());
     return posts
         .map((p) => p.copyWith(likedByMe: liked.contains(p.id)))
+        .toList();
+  }
+
+  /// Sets [Post.repostedByMe] for every post in one round-trip.
+  static Future<List<Post>> hydrateReposts(List<Post> posts) async {
+    if (posts.isEmpty) return posts;
+    final reposted = await RepostService.getRepostedPostIds(
+        posts.map((p) => p.id).toList());
+    return posts
+        .map((p) => p.copyWith(repostedByMe: reposted.contains(p.id)))
         .toList();
   }
 

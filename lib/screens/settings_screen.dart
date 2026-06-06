@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import '../services/account_service.dart';
 import '../services/profile_service.dart';
 import '../theme.dart';
 import 'blocked_accounts_screen.dart';
@@ -73,6 +74,34 @@ class SettingsScreen extends StatelessWidget {
     if (confirm == true) await Supabase.instance.client.auth.signOut();
   }
 
+  Future<void> _deleteAccount(BuildContext context) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (_) => const _DeleteAccountDialog(),
+    );
+    if (confirm != true || !context.mounted) return;
+
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const Center(child: CircularProgressIndicator()),
+    );
+    try {
+      await AccountService.deleteAccount();
+      // Sign-out triggers _AuthGate to route back to login; just pop dialogs.
+      if (context.mounted) Navigator.popUntil(context, (r) => r.isFirst);
+    } catch (e) {
+      if (!context.mounted) return;
+      Navigator.pop(context); // dismiss the spinner
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(e.toString().replaceFirst('Exception: ', '')),
+          backgroundColor: NileColors.error,
+        ),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -118,9 +147,75 @@ class SettingsScreen extends StatelessWidget {
             color: NileColors.error,
             onTap: () => _signOut(context),
           ),
+          const SizedBox(height: 10),
+          _SettingsTile(
+            icon: Icons.delete_forever_outlined,
+            label: 'Delete account',
+            color: NileColors.error,
+            onTap: () => _deleteAccount(context),
+          ),
         ],
         ),
       ),
+    );
+  }
+}
+
+/// Two-step confirmation: the user must type DELETE to enable the button.
+class _DeleteAccountDialog extends StatefulWidget {
+  const _DeleteAccountDialog();
+
+  @override
+  State<_DeleteAccountDialog> createState() => _DeleteAccountDialogState();
+}
+
+class _DeleteAccountDialogState extends State<_DeleteAccountDialog> {
+  final _controller = TextEditingController();
+  bool get _confirmed => _controller.text.trim().toUpperCase() == 'DELETE';
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      backgroundColor: NileColors.bgSurface,
+      title: Text('Delete account?', style: NileTextStyles.headingSm()),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'This permanently deletes your profile, posts, events, messages, '
+            'and tickets. This cannot be undone.',
+            style: NileTextStyles.bodySm(),
+          ),
+          const SizedBox(height: 16),
+          TextField(
+            controller: _controller,
+            autocorrect: false,
+            onChanged: (_) => setState(() {}),
+            style: NileTextStyles.bodyMd(),
+            decoration: const InputDecoration(
+              hintText: 'Type DELETE to confirm',
+            ),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context, false),
+          child: const Text('Cancel'),
+        ),
+        TextButton(
+          onPressed: _confirmed ? () => Navigator.pop(context, true) : null,
+          style: TextButton.styleFrom(foregroundColor: NileColors.error),
+          child: const Text('Delete'),
+        ),
+      ],
     );
   }
 }

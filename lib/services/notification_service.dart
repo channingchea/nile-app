@@ -10,6 +10,7 @@ enum NotificationType {
   eventStarting,
   eventLive,
   eventEnded,
+  operatorAssigned,
 }
 
 class AppNotification {
@@ -60,6 +61,7 @@ class AppNotification {
         'event_starting' => NotificationType.eventStarting,
         'event_live' => NotificationType.eventLive,
         'event_ended' => NotificationType.eventEnded,
+        'operator_assigned' => NotificationType.operatorAssigned,
         _ => NotificationType.follow,
       };
 }

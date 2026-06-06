@@ -93,7 +93,7 @@ class _MessagesScreenState extends State<MessagesScreen> {
                 else
                   SliverList.separated(
                     itemCount: _convs!.length,
-                    separatorBuilder: (_, __) => const Divider(
+                    separatorBuilder: (_, _) => const Divider(
                       height: 1,
                       indent: 72,
                       color: NileColors.border,
@@ -227,7 +227,7 @@ class _Avatar extends StatelessWidget {
   final String username;
   final String? avatarUrl;
   final double radius;
-  const _Avatar({required this.username, this.avatarUrl, this.radius = 24});
+  const _Avatar({required this.username, this.avatarUrl}) : radius = 24;
 
   @override
   Widget build(BuildContext context) {
