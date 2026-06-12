@@ -71,8 +71,7 @@ class _ConversationScreenState extends State<ConversationScreen> {
   Future<void> _loadMore() async {
     if (!_hasMore || _cursor == null) return;
     try {
-      final page =
-          await MessageService.getMessages(_conv.id, cursor: _cursor);
+      final page = await MessageService.getMessages(_conv.id, cursor: _cursor);
       if (!mounted) return;
       setState(() {
         // Prepend older messages.
@@ -93,8 +92,9 @@ class _ConversationScreenState extends State<ConversationScreen> {
       if (msg.senderId != _myId) {
         MessageService.markRead(_conv.id);
       }
-      WidgetsBinding.instance
-          .addPostFrameCallback((_) => _scrollToBottom(animate: true));
+      WidgetsBinding.instance.addPostFrameCallback(
+        (_) => _scrollToBottom(animate: true),
+      );
     });
   }
 
@@ -128,8 +128,9 @@ class _ConversationScreenState extends State<ConversationScreen> {
       _sending = true;
     });
     _input.clear();
-    WidgetsBinding.instance
-        .addPostFrameCallback((_) => _scrollToBottom(animate: true));
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => _scrollToBottom(animate: true),
+    );
 
     try {
       final sent = await MessageService.sendMessage(_conv.id, text);
@@ -142,9 +143,9 @@ class _ConversationScreenState extends State<ConversationScreen> {
     } catch (_) {
       if (!mounted) return;
       setState(() => _messages.remove(optimistic));
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Failed to send message')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Failed to send message')));
     } finally {
       if (mounted) setState(() => _sending = false);
     }
@@ -162,7 +163,10 @@ class _ConversationScreenState extends State<ConversationScreen> {
               Expanded(
                 child: _loadingHistory
                     ? const Center(
-                        child: CircularProgressIndicator(color: NileColors.volt))
+                        child: CircularProgressIndicator(
+                          color: NileColors.volt,
+                        ),
+                      )
                     : NotificationListener<ScrollNotification>(
                         onNotification: (n) {
                           if (n is ScrollStartNotification &&
@@ -174,19 +178,22 @@ class _ConversationScreenState extends State<ConversationScreen> {
                         child: ListView.builder(
                           controller: _scroll,
                           padding: const EdgeInsets.symmetric(
-                              horizontal: 16, vertical: 8),
+                            horizontal: NileSpacing.s16,
+                            vertical: NileSpacing.s8,
+                          ),
                           itemCount: _messages.length + (_hasMore ? 1 : 0),
                           itemBuilder: (_, i) {
                             if (i == 0 && _hasMore) {
                               return const Padding(
-                                padding: EdgeInsets.only(bottom: 8),
+                                padding: EdgeInsets.only(bottom: NileSpacing.s8),
                                 child: Center(
                                   child: SizedBox(
                                     width: 20,
                                     height: 20,
                                     child: CircularProgressIndicator(
-                                        strokeWidth: 2,
-                                        color: NileColors.txtTertiary),
+                                      strokeWidth: 2,
+                                      color: NileColors.txtTertiary,
+                                    ),
                                   ),
                                 ),
                               );
@@ -194,10 +201,12 @@ class _ConversationScreenState extends State<ConversationScreen> {
                             final msgIndex = _hasMore ? i - 1 : i;
                             final msg = _messages[msgIndex];
                             final isMe = msg.senderId == _myId;
-                            final showTimestamp = msgIndex == 0 ||
+                            final showTimestamp =
+                                msgIndex == 0 ||
                                 msg.createdAt
                                         .difference(
-                                            _messages[msgIndex - 1].createdAt)
+                                          _messages[msgIndex - 1].createdAt,
+                                        )
                                         .inMinutes
                                         .abs() >
                                     10;
@@ -234,12 +243,15 @@ class _AppBar extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       color: NileColors.bgPage,
-      padding: const EdgeInsets.fromLTRB(4, 4, 16, 4),
+      padding: const EdgeInsets.fromLTRB(NileSpacing.s4, NileSpacing.s4, NileSpacing.s16, NileSpacing.s4),
       child: Row(
         children: [
           IconButton(
-            icon: const Icon(Icons.arrow_back_ios_new,
-                size: 18, color: NileColors.txtPrimary),
+            icon: const Icon(
+              Icons.arrow_back_ios_new,
+              size: 18,
+              color: NileColors.txtPrimary,
+            ),
             onPressed: () => Navigator.pop(context),
           ),
           NileAvatar(
@@ -291,14 +303,15 @@ class _MessageBubble extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.only(bottom: 4),
+      padding: const EdgeInsets.only(bottom: NileSpacing.s4),
       child: Column(
-        crossAxisAlignment:
-            isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+        crossAxisAlignment: isMe
+            ? CrossAxisAlignment.end
+            : CrossAxisAlignment.start,
         children: [
           if (showTimestamp)
             Padding(
-              padding: const EdgeInsets.symmetric(vertical: 8),
+              padding: const EdgeInsets.symmetric(vertical: NileSpacing.s8),
               child: Center(
                 child: Text(
                   _formatTime(message.createdAt),
@@ -307,8 +320,9 @@ class _MessageBubble extends StatelessWidget {
               ),
             ),
           Row(
-            mainAxisAlignment:
-                isMe ? MainAxisAlignment.end : MainAxisAlignment.start,
+            mainAxisAlignment: isMe
+                ? MainAxisAlignment.end
+                : MainAxisAlignment.start,
             children: [
               ConstrainedBox(
                 constraints: BoxConstraints(
@@ -320,17 +334,20 @@ class _MessageBubble extends StatelessWidget {
                     ? _SharedEventBubble(event: message.sharedEvent)
                     : Container(
                         padding: const EdgeInsets.symmetric(
-                            horizontal: 14, vertical: 10),
+                          horizontal: NileSpacing.s12,
+                          vertical: NileSpacing.s8,
+                        ),
                         decoration: BoxDecoration(
-                          color:
-                              isMe ? NileColors.volt : NileColors.bgSurface,
+                          color: isMe ? NileColors.volt : NileColors.bgSurface,
                           borderRadius: BorderRadius.only(
                             topLeft: const Radius.circular(NileRadius.lg),
                             topRight: const Radius.circular(NileRadius.lg),
                             bottomLeft: Radius.circular(
-                                isMe ? NileRadius.lg : NileRadius.xs),
+                              isMe ? NileRadius.lg : NileRadius.xs,
+                            ),
                             bottomRight: Radius.circular(
-                                isMe ? NileRadius.xs : NileRadius.lg),
+                              isMe ? NileRadius.xs : NileRadius.lg,
+                            ),
                           ),
                         ),
                         child: Text(
@@ -363,7 +380,7 @@ class _SharedPostBubble extends StatelessWidget {
     if (p == null) {
       // Original post deleted or not yet hydrated.
       return Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s12, vertical: NileSpacing.s8),
         decoration: BoxDecoration(
           color: NileColors.bgSurface,
           borderRadius: BorderRadius.circular(NileRadius.lg),
@@ -389,11 +406,11 @@ class _SharedPostBubble extends StatelessWidget {
           children: [
             if (p.hasImage)
               AspectRatio(
-                aspectRatio: 1,
-                child: Image.network(p.imageUrl!, fit: BoxFit.cover),
+                aspectRatio: 4 / 3,
+                child: Image.network(p.imageUrl!, fit: BoxFit.cover, cacheWidth: nileDecodeWidth(600)),
               ),
             Padding(
-              padding: const EdgeInsets.all(10),
+              padding: const EdgeInsets.all(NileSpacing.s8),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisSize: MainAxisSize.min,
@@ -407,9 +424,11 @@ class _SharedPostBubble extends StatelessWidget {
                       ),
                       const SizedBox(width: 6),
                       Flexible(
-                        child: Text('@${p.authorUsername}',
-                            style: NileTextStyles.caption(),
-                            overflow: TextOverflow.ellipsis),
+                        child: Text(
+                          '@${p.authorUsername}',
+                          style: NileTextStyles.caption(),
+                          overflow: TextOverflow.ellipsis,
+                        ),
                       ),
                     ],
                   ),
@@ -443,7 +462,7 @@ class _SharedEventBubble extends StatelessWidget {
     final e = event;
     if (e == null) {
       return Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s12, vertical: NileSpacing.s8),
         decoration: BoxDecoration(
           color: NileColors.bgSurface,
           borderRadius: BorderRadius.circular(NileRadius.lg),
@@ -474,18 +493,21 @@ class _SharedEventBubble extends StatelessWidget {
             if (e.coverImageUrl != null)
               AspectRatio(
                 aspectRatio: 16 / 9,
-                child: Image.network(e.coverImageUrl!, fit: BoxFit.cover),
+                child: Image.network(e.coverImageUrl!, fit: BoxFit.cover, cacheWidth: nileDecodeWidth(600)),
               ),
             Padding(
-              padding: const EdgeInsets.all(10),
+              padding: const EdgeInsets.all(NileSpacing.s8),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Row(
                     children: [
-                      const Icon(Icons.live_tv,
-                          size: 13, color: NileColors.volt),
+                      const Icon(
+                        Icons.live_tv,
+                        size: 13,
+                        color: NileColors.volt,
+                      ),
                       const SizedBox(width: 6),
                       Flexible(
                         child: Text(
@@ -553,8 +575,10 @@ class _InputBar extends StatelessWidget {
               decoration: InputDecoration(
                 hintText: 'Message…',
                 counterText: '',
-                contentPadding:
-                    const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: NileSpacing.s12,
+                  vertical: NileSpacing.s8,
+                ),
                 border: OutlineInputBorder(
                   borderSide: BorderSide.none,
                   borderRadius: BorderRadius.circular(NileRadius.pill),
@@ -600,9 +624,7 @@ class _SendButtonState extends State<_SendButton> {
         width: 40,
         height: 40,
         decoration: BoxDecoration(
-          color: widget.sending
-              ? NileColors.bgRaised
-              : NileColors.volt,
+          color: widget.sending ? NileColors.bgRaised : NileColors.volt,
           shape: BoxShape.circle,
         ),
         child: widget.sending

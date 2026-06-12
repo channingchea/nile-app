@@ -62,9 +62,9 @@ class _EventLinkCardState extends State<EventLinkCard> {
 
     final thumb = ev.thumbnailUrl;
     return InkWell(
-      onTap: () => Navigator.of(context).push(
-        MaterialPageRoute(builder: (_) => EventDetailScreen(event: ev)),
-      ),
+      onTap: () => Navigator.of(
+        context,
+      ).push(MaterialPageRoute(builder: (_) => EventDetailScreen(event: ev))),
       borderRadius: BorderRadius.circular(NileRadius.sm),
       child: Container(
         clipBehavior: Clip.antiAlias,
@@ -76,50 +76,62 @@ class _EventLinkCardState extends State<EventLinkCard> {
         child: Row(
           children: [
             SizedBox(
-              width: 96,
+              width: 128,
               height: 72,
               child: (thumb != null && thumb.isNotEmpty)
-                  ? Image.network(thumb,
+                  ? Image.network(
+                      thumb,
+                      cacheWidth: nileDecodeWidth(128),
                       fit: BoxFit.cover,
-                      errorBuilder: (_, _, _) => _placeholder())
+                      errorBuilder: (_, _, _) => _placeholder(),
+                    )
                   : _placeholder(),
             ),
             Expanded(
               child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 12),
+                padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s12),
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Row(
                       children: [
-                        Icon(ev.isLive ? Icons.sensors : Icons.event,
-                            size: 13,
+                        Icon(
+                          ev.isLive ? Icons.sensors : Icons.event,
+                          size: 13,
+                          color: ev.isLive
+                              ? NileColors.coral
+                              : NileColors.txtTertiary,
+                        ),
+                        const SizedBox(width: 5),
+                        Text(
+                          ev.isLive ? 'LIVE NOW' : 'EVENT',
+                          style: NileTextStyles.labelSm().copyWith(
                             color: ev.isLive
                                 ? NileColors.coral
-                                : NileColors.txtTertiary),
-                        const SizedBox(width: 5),
-                        Text(ev.isLive ? 'LIVE NOW' : 'EVENT',
-                            style: NileTextStyles.labelSm().copyWith(
-                              color: ev.isLive
-                                  ? NileColors.coral
-                                  : NileColors.txtTertiary,
-                            )),
+                                : NileColors.txtTertiary,
+                          ),
+                        ),
                       ],
                     ),
                     const SizedBox(height: 4),
-                    Text(ev.title,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: NileTextStyles.labelMd()),
+                    Text(
+                      ev.title,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: NileTextStyles.labelMd(),
+                    ),
                   ],
                 ),
               ),
             ),
             const Padding(
-              padding: EdgeInsets.only(right: 8),
-              child: Icon(Icons.chevron_right,
-                  size: 20, color: NileColors.txtTertiary),
+              padding: EdgeInsets.only(right: NileSpacing.s8),
+              child: Icon(
+                Icons.chevron_right,
+                size: 20,
+                color: NileColors.txtTertiary,
+              ),
             ),
           ],
         ),
@@ -128,9 +140,9 @@ class _EventLinkCardState extends State<EventLinkCard> {
   }
 
   Widget _placeholder() => const DecoratedBox(
-        decoration: BoxDecoration(color: NileColors.bgSurface),
-        child: Center(
-          child: Icon(Icons.live_tv, size: 24, color: NileColors.border),
-        ),
-      );
+    decoration: BoxDecoration(color: NileColors.bgSurface),
+    child: Center(
+      child: Icon(Icons.live_tv, size: 24, color: NileColors.border),
+    ),
+  );
 }

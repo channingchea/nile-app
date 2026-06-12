@@ -12,9 +12,13 @@ import '../services/repost_service.dart';
 import '../services/search_service.dart';
 import '../theme.dart';
 import '../widgets/event_link_card.dart';
+import '../widgets/like_button.dart';
+import '../widgets/live_badge.dart';
+import '../widgets/nile_skeleton.dart';
+import '../widgets/pressable.dart';
 import '../widgets/share_to_sheet.dart';
-import 'audio_screen.dart';
-import 'camera_screen.dart';
+import '../widgets/empty_state.dart';
+import '../widgets/staggered_fade_in.dart';
 import 'create_event_flow.dart';
 import 'create_post_screen.dart';
 import 'discover_screen.dart';
@@ -57,17 +61,19 @@ class _HomeScreenState extends State<HomeScreen> {
   // New post/event created via the FAB. Remount both tabs so each reloads from
   // scratch, and snap to the feed so the user sees their content land.
   void _onContentCreated() => setState(() {
-        _feedKey++;
-        _profileKey++;
-        _selectedIndex = 0;
-      });
+    _feedKey++;
+    _profileKey++;
+    _selectedIndex = 0;
+  });
 
   void _showActionSheet() {
     showModalBottomSheet(
       context: context,
       backgroundColor: NileColors.bgSurface,
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(NileRadius.lg)),
+        borderRadius: BorderRadius.vertical(
+          top: Radius.circular(NileRadius.lg),
+        ),
       ),
       builder: (_) => _ActionSheet(onCreated: _onContentCreated),
     );
@@ -77,7 +83,18 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: NileColors.bgPage,
-      body: NileMaxWidth(child: IndexedStack(index: _selectedIndex, children: _pages)),
+      body: NileMaxWidth(
+        // IndexedStack keeps every tab built, so the same event can hold a
+        // live Hero on two tabs at once — duplicate tags abort ALL hero
+        // flights. HeroMode keeps only the visible tab's heroes active.
+        child: IndexedStack(
+          index: _selectedIndex,
+          children: [
+            for (final (i, page) in _pages.indexed)
+              HeroMode(enabled: i == _selectedIndex, child: page),
+          ],
+        ),
+      ),
       floatingActionButton: _selectedIndex == 0
           ? FloatingActionButton(
               onPressed: _showActionSheet,
@@ -129,7 +146,7 @@ class _ActionSheet extends StatelessWidget {
   Widget build(BuildContext context) {
     return SafeArea(
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(24, 16, 24, 24),
+        padding: const EdgeInsets.fromLTRB(NileSpacing.s24, NileSpacing.s16, NileSpacing.s24, NileSpacing.s24),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -150,9 +167,10 @@ class _ActionSheet extends StatelessWidget {
             FilledButton.icon(
               onPressed: () {
                 Navigator.pop(context);
-                Navigator.push(context,
-                    MaterialPageRoute(builder: (_) => const CreatePostScreen()))
-                  .then((_) => onCreated());
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => const CreatePostScreen()),
+                ).then((_) => onCreated());
               },
               icon: const Icon(Icons.edit_outlined),
               label: const Text('Create Post'),
@@ -161,53 +179,28 @@ class _ActionSheet extends StatelessWidget {
             OutlinedButton.icon(
               onPressed: () {
                 Navigator.pop(context);
-                Navigator.push(context,
-                    MaterialPageRoute(builder: (_) => const CreateEventFlow()))
-                  .then((_) => onCreated());
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => const CreateEventFlow()),
+                ).then((_) => onCreated());
               },
               icon: const Icon(Icons.add_circle_outline),
               label: const Text('Create Event'),
             ),
             const SizedBox(height: 12),
+            // Camera/audio quick-entry tiles removed: streaming is entered from
+            // the event detail screen, which knows whether you're the host (and
+            // therefore whether you get Start Show / End Stream).
             OutlinedButton.icon(
               onPressed: () {
                 Navigator.pop(context);
-                Navigator.push(context,
-                    MaterialPageRoute(builder: (_) => const CameraScreen()));
-              },
-              icon: const Icon(Icons.videocam),
-              label: const Text('Stream as Camera'),
-            ),
-            const SizedBox(height: 12),
-            OutlinedButton.icon(
-              onPressed: () {
-                Navigator.pop(context);
-                Navigator.push(context,
-                    MaterialPageRoute(builder: (_) => const ViewerScreen()));
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => const ViewerScreen()),
+                );
               },
               icon: const Icon(Icons.tv),
               label: const Text('Watch as Viewer'),
-            ),
-            const SizedBox(height: 12),
-            OutlinedButton.icon(
-              onPressed: () {
-                Navigator.pop(context);
-                Navigator.push(context,
-                    MaterialPageRoute(builder: (_) => const AudioScreen()));
-              },
-              icon: const Icon(Icons.album, color: NileColors.volt),
-              label: Text(
-                'Stream Audio',
-                style: NileTextStyles.labelLg().copyWith(color: NileColors.volt),
-              ),
-              style: OutlinedButton.styleFrom(
-                foregroundColor: NileColors.volt,
-                side: const BorderSide(color: NileColors.volt),
-                padding: const EdgeInsets.symmetric(vertical: 16),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(NileRadius.sm),
-                ),
-              ),
             ),
           ],
         ),
@@ -241,6 +234,7 @@ class _EventFeedItem extends _FeedItem {
   final Event event;
   @override
   final bool fromNetwork;
+
   /// When set (reposts), sorts by repost time instead of scheduled/created.
   final DateTime? sortOverride;
   _EventFeedItem(this.event, {this.fromNetwork = false, this.sortOverride});
@@ -252,6 +246,7 @@ class _PostFeedItem extends _FeedItem {
   final Post post;
   @override
   final bool fromNetwork;
+
   /// When set (reposts), the item sorts by repost time instead of the original
   /// post's createdAt, so a fresh repost surfaces near the top of the feed.
   final DateTime? sortOverride;
@@ -285,8 +280,10 @@ class _FeedTabState extends State<_FeedTab> {
   /// Applies [update] to whichever list (followed [_items] or [_recs]) holds the
   /// matching item, preserving its `fromNetwork` flag. Used by all mutations so
   /// liking/editing an interleaved rec card works the same as a followed one.
-  void _mutate(bool Function(_FeedItem) match,
-      _FeedItem Function(_FeedItem) update) {
+  void _mutate(
+    bool Function(_FeedItem) match,
+    _FeedItem Function(_FeedItem) update,
+  ) {
     setState(() {
       for (final list in [_items, _recs]) {
         if (list == null) continue;
@@ -304,17 +301,17 @@ class _FeedTabState extends State<_FeedTab> {
   }
 
   void _replacePost(Post updated) => _mutate(
-        (it) => it is _PostFeedItem && it.post.id == updated.id,
-        (it) => _PostFeedItem(updated, fromNetwork: it.fromNetwork),
-      );
+    (it) => it is _PostFeedItem && it.post.id == updated.id,
+    (it) => _PostFeedItem(updated, fromNetwork: it.fromNetwork),
+  );
 
   void _removePost(String postId) =>
       _remove((it) => it is _PostFeedItem && it.post.id == postId);
 
   void _replaceEvent(Event updated) => _mutate(
-        (it) => it is _EventFeedItem && it.event.id == updated.id,
-        (it) => _EventFeedItem(updated, fromNetwork: it.fromNetwork),
-      );
+    (it) => it is _EventFeedItem && it.event.id == updated.id,
+    (it) => _EventFeedItem(updated, fromNetwork: it.fromNetwork),
+  );
 
   void _removeEvent(String eventId) =>
       _remove((it) => it is _EventFeedItem && it.event.id == eventId);
@@ -341,10 +338,12 @@ class _FeedTabState extends State<_FeedTab> {
   Future<void> _togglePostRepost(Post post) async {
     final was = post.repostedByMe;
     final delta = was ? -1 : 1;
-    _replacePost(post.copyWith(
-      repostedByMe: !was,
-      repostCount: (post.repostCount + delta).clamp(0, 1 << 30),
-    ));
+    _replacePost(
+      post.copyWith(
+        repostedByMe: !was,
+        repostCount: (post.repostCount + delta).clamp(0, 1 << 30),
+      ),
+    );
     try {
       if (was) {
         await RepostService.unrepost(post.id);
@@ -362,19 +361,21 @@ class _FeedTabState extends State<_FeedTab> {
     } catch (_) {
       _replacePost(post); // Revert.
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Failed to repost')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Failed to repost')));
     }
   }
 
   Future<void> _toggleEventRepost(Event event) async {
     final was = event.repostedByMe;
     final delta = was ? -1 : 1;
-    _replaceEvent(event.copyWith(
-      repostedByMe: !was,
-      repostCount: (event.repostCount + delta).clamp(0, 1 << 30),
-    ));
+    _replaceEvent(
+      event.copyWith(
+        repostedByMe: !was,
+        repostCount: (event.repostCount + delta).clamp(0, 1 << 30),
+      ),
+    );
     try {
       if (was) {
         await EventRepostService.unrepost(event.id);
@@ -392,9 +393,9 @@ class _FeedTabState extends State<_FeedTab> {
     } catch (_) {
       _replaceEvent(event);
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Failed to repost')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Failed to repost')));
     }
   }
 
@@ -433,17 +434,16 @@ class _FeedTabState extends State<_FeedTab> {
 
   void _onScroll() {
     if (!_scroll.hasClients) return;
-    if (_scroll.position.pixels <
-        _scroll.position.maxScrollExtent - 400) {
+    if (_scroll.position.pixels < _scroll.position.maxScrollExtent - 400) {
       return;
     }
     if (_hasMore && !_loadingMore && _items != null) _loadMore();
   }
 
   String _idOf(_FeedItem it) => switch (it) {
-        _EventFeedItem(:final event) => 'e:${event.id}',
-        _PostFeedItem(:final post) => 'p:${post.id}',
-      };
+    _EventFeedItem(:final event) => 'e:${event.id}',
+    _PostFeedItem(:final post) => 'p:${post.id}',
+  };
 
   /// Interleaves [_recs] into the sorted [followed] feed: one rec after every
   /// [_recInterval] followed items. Recs whose content already appears in the
@@ -568,8 +568,7 @@ class _FeedTabState extends State<_FeedTab> {
         EventService.hydrateLikes(eventPage.items),
         PostService.hydrateLikes(postPage.items),
         PostService.hydrateLikes(repostRows.map((r) => r.post).toList()),
-        EventService.hydrateLikes(
-            eventRepostRows.map((r) => r.event).toList()),
+        EventService.hydrateLikes(eventRepostRows.map((r) => r.event).toList()),
       ).wait;
       final (hPosts, hReposts, hEventReposts) = await (
         PostService.hydrateReposts(lPosts),
@@ -580,15 +579,15 @@ class _FeedTabState extends State<_FeedTab> {
       // header), sorted by repost time — not deduped against the original.
       final repostAt = {for (final r in repostRows) r.post.id: r.repostedAt};
       final eventRepostAt = {
-        for (final r in eventRepostRows) r.event.id: r.repostedAt
+        for (final r in eventRepostRows) r.event.id: r.repostedAt,
       };
       final items = <_FeedItem>[
         ...hEvents.map((e) => _EventFeedItem(e)),
         ...hPosts.map((p) => _PostFeedItem(p)),
-        ...hReposts.map((p) =>
-            _PostFeedItem(p, sortOverride: repostAt[p.id])),
-        ...hEventReposts.map((e) =>
-            _EventFeedItem(e, sortOverride: eventRepostAt[e.id])),
+        ...hReposts.map((p) => _PostFeedItem(p, sortOverride: repostAt[p.id])),
+        ...hEventReposts.map(
+          (e) => _EventFeedItem(e, sortOverride: eventRepostAt[e.id]),
+        ),
       ];
       _sortItems(items);
       // Recs are best-effort: a failure here must not break the feed.
@@ -630,7 +629,13 @@ class _FeedTabState extends State<_FeedTab> {
             SliverAppBar(
               pinned: true,
               backgroundColor: NileColors.bgPage,
-              title: Text('Nile', style: NileTextStyles.displayLg().copyWith(fontSize: 32, color: NileColors.volt)),
+              title: Text(
+                'Nile',
+                style: NileTextStyles.displayLg().copyWith(
+                  fontSize: 32,
+                  color: NileColors.volt,
+                ),
+              ),
               actions: [
                 IconButton(
                   onPressed: _load,
@@ -657,28 +662,25 @@ class _FeedTabState extends State<_FeedTab> {
             else if (_noFollows)
               const SliverFillRemaining(child: _EmptyFollows())
             else if (_items == null)
-              const SliverFillRemaining(
-                child: Center(
-                  child: CircularProgressIndicator(color: NileColors.volt),
-                ),
-              )
+              const SliverToBoxAdapter(child: NileSkeletonList())
             else if (_items!.isEmpty)
               const SliverFillRemaining(child: _EmptyFeed())
             else
-              Builder(builder: (_) {
-                final display = _interleaveRecs(_items!);
-                return SliverPadding(
-                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 96),
-                  sliver: SliverList.separated(
-                    itemCount: display.length + (_hasMore ? 1 : 0),
-                    separatorBuilder: (_, _) => const SizedBox(height: 12),
-                    itemBuilder: (_, i) {
-                      if (i >= display.length) return const LoadMoreFooter();
-                      final it = display[i];
-                      final myId =
-                          Supabase.instance.client.auth.currentUser?.id;
-                      return switch (it) {
-                        _EventFeedItem(:final event) => _EventCard(
+              Builder(
+                builder: (_) {
+                  final display = _interleaveRecs(_items!);
+                  return SliverPadding(
+                    padding: const EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s8, NileSpacing.s16, 96),
+                    sliver: SliverList.separated(
+                      itemCount: display.length + (_hasMore ? 1 : 0),
+                      separatorBuilder: (_, _) => const SizedBox(height: 12),
+                      itemBuilder: (_, i) {
+                        if (i >= display.length) return const LoadMoreFooter();
+                        final it = display[i];
+                        final myId =
+                            Supabase.instance.client.auth.currentUser?.id;
+                        final card = switch (it) {
+                          _EventFeedItem(:final event) => _EventCard(
                             event: event,
                             fromNetwork: it.fromNetwork,
                             onEdited: myId == event.hostId
@@ -690,7 +692,7 @@ class _FeedTabState extends State<_FeedTab> {
                             onLikeToggle: () => _toggleEventLike(event),
                             onRepostToggle: () => _toggleEventRepost(event),
                           ),
-                        _PostFeedItem(:final post) => _PostCard(
+                          _PostFeedItem(:final post) => _PostCard(
                             post: post,
                             fromNetwork: it.fromNetwork,
                             onEdited: myId == post.authorId
@@ -703,11 +705,13 @@ class _FeedTabState extends State<_FeedTab> {
                             onRepostToggle: () => _togglePostRepost(post),
                             onUpdated: (updated) => _replacePost(updated),
                           ),
-                      };
-                    },
-                  ),
-                );
-              }),
+                        };
+                        return NileStaggeredFadeIn(index: i, child: card);
+                      },
+                    ),
+                  );
+                },
+              ),
           ],
         ),
       ),
@@ -724,19 +728,20 @@ class _EventCard extends StatelessWidget {
   final VoidCallback? onDeleted;
   final VoidCallback? onLikeToggle;
   final VoidCallback? onRepostToggle;
-  const _EventCard(
-      {required this.event,
-      this.fromNetwork = false,
-      this.onEdited,
-      this.onDeleted,
-      this.onLikeToggle,
-      this.onRepostToggle});
+  const _EventCard({
+    required this.event,
+    this.fromNetwork = false,
+    this.onEdited,
+    this.onDeleted,
+    this.onLikeToggle,
+    this.onRepostToggle,
+  });
 
   String _shareText() => ShareUrls.eventCaption(
-        id: event.id,
-        title: event.title,
-        hostUsername: event.hostUsername,
-      );
+    id: event.id,
+    title: event.title,
+    hostUsername: event.hostUsername,
+  );
 
   String _timeAgo(DateTime dt) {
     final d = DateTime.now().difference(dt);
@@ -748,132 +753,149 @@ class _EventCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Material(
-      color: NileColors.bgSurface,
-      borderRadius: BorderRadius.circular(NileRadius.md),
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: () async {
-          final result = await Navigator.push(
-            context,
-            MaterialPageRoute(
-              builder: (_) => event.isLive
-                  ? ViewerScreen(initialEventId: event.liveKitEventId)
-                  : EventDetailScreen(event: event),
-            ),
-          );
-          if (result == true) onDeleted?.call();
-        },
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            if (fromNetwork) const _NetworkTag(padded: true),
-            if (event.repostedByUsername != null)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(12, 10, 12, 0),
-                child: _RepostHeader(username: event.repostedByUsername!),
+    return NilePressable(
+      child: Material(
+        color: NileColors.bgSurface,
+        borderRadius: BorderRadius.circular(NileRadius.lg),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: () async {
+            final result = await Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => event.isLive
+                    ? ViewerScreen(initialEventId: event.liveKitEventId)
+                    : EventDetailScreen(event: event),
               ),
-            _Thumbnail(event: event),
-            Padding(
-              padding: const EdgeInsets.all(12),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      CircleAvatar(
-                        radius: 14,
-                        backgroundColor: NileColors.bgRaised,
-                        backgroundImage: event.hostAvatarUrl != null
-                            ? NetworkImage(event.hostAvatarUrl!)
-                            : null,
-                        child: event.hostAvatarUrl == null
-                            ? Text(
-                                event.hostUsername[0].toUpperCase(),
-                                style: NileTextStyles.labelSm().copyWith(
-                                  color: NileColors.txtPrimary,
-                                  letterSpacing: 0,
+            );
+            if (result == true) onDeleted?.call();
+          },
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (fromNetwork) const _NetworkTag(padded: true),
+              if (event.repostedByUsername != null)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(NileSpacing.s12, NileSpacing.s8, NileSpacing.s12, 0),
+                  child: _RepostHeader(username: event.repostedByUsername!),
+                ),
+              _Thumbnail(event: event, hero: event.repostedByUsername == null),
+              Padding(
+                padding: const EdgeInsets.all(NileSpacing.s12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        CircleAvatar(
+                          radius: 14,
+                          backgroundColor: NileColors.bgRaised,
+                          backgroundImage: event.hostAvatarUrl != null
+                              ? nileAvatarImage(event.hostAvatarUrl!, 14)
+                              : null,
+                          child: event.hostAvatarUrl == null
+                              ? Text(
+                                  event.hostUsername[0].toUpperCase(),
+                                  style: NileTextStyles.labelSm().copyWith(
+                                    color: NileColors.txtPrimary,
+                                    letterSpacing: 0,
+                                  ),
+                                )
+                              : null,
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            '@${event.hostUsername}',
+                            style: NileTextStyles.bodySm(),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        if (event.isLive) ...[
+                          const Icon(
+                            Icons.visibility,
+                            size: 13,
+                            color: NileColors.txtTertiary,
+                          ),
+                          const SizedBox(width: 4),
+                          Text(
+                            '${event.viewerCount}',
+                            style: NileTextStyles.caption(),
+                          ),
+                        ] else
+                          Text(
+                            _timeAgo(event.createdAt),
+                            style: NileTextStyles.caption(),
+                          ),
+                        if (onEdited != null)
+                          _ContentMenu(
+                            onEdit: () async {
+                              final updated = await Navigator.push<Event>(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (_) => EditEventScreen(event: event),
                                 ),
-                              )
-                            : null,
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(
-                          '@${event.hostUsername}',
-                          style: NileTextStyles.bodySm(),
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                      if (event.isLive) ...[
-                        const Icon(Icons.visibility,
-                            size: 13, color: NileColors.txtTertiary),
-                        const SizedBox(width: 4),
-                        Text('${event.viewerCount}',
-                            style: NileTextStyles.caption()),
-                      ] else
-                        Text(_timeAgo(event.createdAt),
-                            style: NileTextStyles.caption()),
-                      if (onEdited != null)
-                        _ContentMenu(
-                          onEdit: () async {
-                            final updated = await Navigator.push<Event>(
-                              context,
-                              MaterialPageRoute(
-                                  builder: (_) =>
-                                      EditEventScreen(event: event)),
-                            );
-                            if (updated != null) onEdited!(updated);
-                          },
-                        ),
+                              );
+                              if (updated != null) onEdited!(updated);
+                            },
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      event.title,
+                      style: NileTextStyles.headingSm(),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    if (event.isScheduled) ...[
+                      const SizedBox(height: 4),
+                      Text('Scheduled', style: NileTextStyles.caption()),
                     ],
-                  ),
-                  const SizedBox(height: 6),
-                  Text(
-                    event.title,
-                    style: NileTextStyles.headingSm(),
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  if (event.isScheduled) ...[
-                    const SizedBox(height: 4),
-                    Text('Scheduled', style: NileTextStyles.caption()),
-                  ],
-                  const SizedBox(height: 8),
-                  Row(
-                    children: [
-                      if (onLikeToggle != null)
-                        _LikeButton(
-                          liked: event.likedByMe,
-                          count: event.likeCount,
-                          onTap: onLikeToggle!,
-                        ),
-                      if (onRepostToggle != null) ...[
-                        const SizedBox(width: 16),
-                        _RepostButton(
-                          reposted: event.repostedByMe,
-                          count: event.repostCount,
-                          onTap: onRepostToggle!,
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        if (onLikeToggle != null)
+                          LikeButton(
+                            liked: event.likedByMe,
+                            count: event.likeCount,
+                            onTap: onLikeToggle!,
+                          ),
+                        if (onRepostToggle != null) ...[
+                          const SizedBox(width: 16),
+                          _RepostButton(
+                            reposted: event.repostedByMe,
+                            count: event.repostCount,
+                            onTap: onRepostToggle!,
+                          ),
+                        ],
+                        const Spacer(),
+                        InkWell(
+                          onTap: () => ShareToSheet.showEvent(
+                            context,
+                            eventId: event.id,
+                            shareText: _shareText(),
+                          ),
+                          borderRadius: BorderRadius.circular(NileRadius.sm),
+                          child: const Padding(
+                            padding: EdgeInsets.symmetric(
+                              horizontal: NileSpacing.s4,
+                              vertical: NileSpacing.s4,
+                            ),
+                            child: Icon(
+                              Icons.send_outlined,
+                              size: 18,
+                              color: NileColors.txtSecondary,
+                            ),
+                          ),
                         ),
                       ],
-                      const Spacer(),
-                      InkWell(
-                        onTap: () => ShareToSheet.showEvent(context,
-                            eventId: event.id, shareText: _shareText()),
-                        borderRadius: BorderRadius.circular(NileRadius.sm),
-                        child: const Padding(
-                          padding: EdgeInsets.symmetric(
-                              horizontal: 4, vertical: 4),
-                          child: Icon(Icons.send_outlined,
-                              size: 18, color: NileColors.txtSecondary),
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
+                    ),
+                  ],
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -898,49 +920,15 @@ class _NetworkTag extends StatelessWidget {
         const SizedBox(width: 4),
         Text(
           'From your network',
-          style:
-              NileTextStyles.caption().copyWith(color: NileColors.txtTertiary),
+          style: NileTextStyles.caption().copyWith(
+            color: NileColors.txtTertiary,
+          ),
         ),
       ],
     );
     return padded
-        ? Padding(padding: const EdgeInsets.fromLTRB(12, 12, 12, 0), child: row)
+        ? Padding(padding: const EdgeInsets.fromLTRB(NileSpacing.s12, NileSpacing.s12, NileSpacing.s12, 0), child: row)
         : row;
-  }
-}
-
-// ── Like button (shared) ─────────────────────────────────────────────────────
-
-class _LikeButton extends StatelessWidget {
-  final bool liked;
-  final int count;
-  final VoidCallback onTap;
-  const _LikeButton({
-    required this.liked,
-    required this.count,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final color = liked ? NileColors.coral : NileColors.txtSecondary;
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(NileRadius.sm),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(liked ? Icons.favorite : Icons.favorite_border,
-                size: 18, color: color),
-            const SizedBox(width: 5),
-            Text('$count',
-                style: NileTextStyles.bodySm().copyWith(color: color)),
-          ],
-        ),
-      ),
-    );
   }
 }
 
@@ -985,167 +973,198 @@ class _PostCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Material(
-      color: NileColors.bgSurface,
-      borderRadius: BorderRadius.circular(NileRadius.md),
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: () => _openDetail(context),
-        child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            if (fromNetwork) ...[
-              const _NetworkTag(),
-              const SizedBox(height: 8),
-            ],
-            if (post.repostedByUsername != null) ...[
-              _RepostHeader(username: post.repostedByUsername!),
-              const SizedBox(height: 8),
-            ],
-            Row(
+    return NilePressable(
+      child: Material(
+        color: NileColors.bgSurface,
+        borderRadius: BorderRadius.circular(NileRadius.lg),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: () => _openDetail(context),
+          child: Padding(
+            padding: const EdgeInsets.all(NileSpacing.s12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                CircleAvatar(
-                  radius: 14,
-                  backgroundColor: NileColors.bgRaised,
-                  backgroundImage: post.authorAvatarUrl != null
-                      ? NetworkImage(post.authorAvatarUrl!)
-                      : null,
-                  child: post.authorAvatarUrl == null
-                      ? Text(
-                          post.authorUsername[0].toUpperCase(),
-                          style: NileTextStyles.labelSm().copyWith(
-                            color: NileColors.txtPrimary,
-                            letterSpacing: 0,
-                          ),
-                        )
-                      : null,
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    '@${post.authorUsername}',
-                    style: NileTextStyles.bodySm(),
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-                Text(_timeAgo(post.createdAt), style: NileTextStyles.caption()),
-                if (onEdited != null || onDeleted != null)
-                  _ContentMenu(
-                    onEdit: onEdited == null
-                        ? null
-                        : () async {
-                            final updated = await Navigator.push<Post>(
-                              context,
-                              MaterialPageRoute(
-                                  builder: (_) => EditPostScreen(post: post)),
-                            );
-                            if (updated != null) onEdited!(updated);
-                          },
-                    onDelete: onDeleted == null
-                        ? null
-                        : () async {
-                            final ok = await _confirmDelete(context, 'post');
-                            if (ok) {
-                              try {
-                                await PostService.delete(post.id);
-                                onDeleted!();
-                              } catch (e) {
-                                if (context.mounted) {
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    SnackBar(
-                                        content: Text('Failed to delete: $e')),
-                                  );
+                if (fromNetwork) ...[
+                  const _NetworkTag(),
+                  const SizedBox(height: 8),
+                ],
+                if (post.repostedByUsername != null) ...[
+                  _RepostHeader(username: post.repostedByUsername!),
+                  const SizedBox(height: 8),
+                ],
+                Row(
+                  children: [
+                    CircleAvatar(
+                      radius: 14,
+                      backgroundColor: NileColors.bgRaised,
+                      backgroundImage: post.authorAvatarUrl != null
+                          ? nileAvatarImage(post.authorAvatarUrl!, 14)
+                          : null,
+                      child: post.authorAvatarUrl == null
+                          ? Text(
+                              post.authorUsername[0].toUpperCase(),
+                              style: NileTextStyles.labelSm().copyWith(
+                                color: NileColors.txtPrimary,
+                                letterSpacing: 0,
+                              ),
+                            )
+                          : null,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        '@${post.authorUsername}',
+                        style: NileTextStyles.bodySm(),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    Text(
+                      _timeAgo(post.createdAt),
+                      style: NileTextStyles.caption(),
+                    ),
+                    if (onEdited != null || onDeleted != null)
+                      _ContentMenu(
+                        onEdit: onEdited == null
+                            ? null
+                            : () async {
+                                final updated = await Navigator.push<Post>(
+                                  context,
+                                  MaterialPageRoute(
+                                    builder: (_) => EditPostScreen(post: post),
+                                  ),
+                                );
+                                if (updated != null) onEdited!(updated);
+                              },
+                        onDelete: onDeleted == null
+                            ? null
+                            : () async {
+                                final ok = await _confirmDelete(
+                                  context,
+                                  'post',
+                                );
+                                if (ok) {
+                                  try {
+                                    await PostService.delete(post.id);
+                                    onDeleted!();
+                                  } catch (e) {
+                                    if (context.mounted) {
+                                      ScaffoldMessenger.of(
+                                        context,
+                                      ).showSnackBar(
+                                        SnackBar(
+                                          content: Text('Failed to delete: $e'),
+                                        ),
+                                      );
+                                    }
+                                  }
                                 }
-                              }
-                            }
-                          },
-                  ),
-              ],
-            ),
-            if (post.hasCaption) ...[
-              const SizedBox(height: 10),
-              Text(
-                post.caption!.trim(),
-                style: NileTextStyles.bodyMd(),
-              ),
-            ],
-            if (post.hasImage) ...[
-              const SizedBox(height: 10),
-              ClipRRect(
-                borderRadius: BorderRadius.circular(NileRadius.sm),
-                child: Image.network(
-                  post.imageUrl!,
-                  fit: BoxFit.cover,
-                  errorBuilder: (_, _, _) => Container(
-                    height: 200,
-                    color: NileColors.bgRaised,
-                    child: const Center(
-                      child: Icon(Icons.broken_image,
-                          color: NileColors.border),
-                    ),
-                  ),
+                              },
+                      ),
+                  ],
                 ),
-              ),
-            ],
-            if (post.eventId != null) ...[
-              const SizedBox(height: 10),
-              EventLinkCard(eventId: post.eventId!),
-            ],
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                if (onLikeToggle != null)
-                  _LikeButton(
-                    liked: post.likedByMe,
-                    count: post.likeCount,
-                    onTap: onLikeToggle!,
-                  ),
-                const SizedBox(width: 16),
-                InkWell(
-                  onTap: () => _openDetail(context),
-                  borderRadius: BorderRadius.circular(NileRadius.sm),
-                  child: Padding(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const Icon(Icons.mode_comment_outlined,
-                            size: 18, color: NileColors.txtSecondary),
-                        const SizedBox(width: 5),
-                        Text('${post.commentCount}',
-                            style: NileTextStyles.bodySm().copyWith(
-                                color: NileColors.txtSecondary)),
-                      ],
+                if (post.hasCaption) ...[
+                  const SizedBox(height: 10),
+                  Text(post.caption!.trim(), style: NileTextStyles.bodyMd()),
+                ],
+                if (post.hasImage) ...[
+                  const SizedBox(height: 10),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(NileRadius.sm),
+                    child: AspectRatio(
+                      aspectRatio: 4 / 3,
+                      child: Image.network(
+                        post.imageUrl!,
+                        cacheWidth: nileDecodeWidth(600),
+                        fit: BoxFit.cover,
+                        errorBuilder: (_, _, _) => Container(
+                          color: NileColors.bgRaised,
+                          child: const Center(
+                            child: Icon(
+                              Icons.broken_image,
+                              color: NileColors.border,
+                            ),
+                          ),
+                        ),
+                      ),
                     ),
-                  ),
-                ),
-                if (onRepostToggle != null) ...[
-                  const SizedBox(width: 16),
-                  _RepostButton(
-                    reposted: post.repostedByMe,
-                    count: post.repostCount,
-                    onTap: onRepostToggle!,
                   ),
                 ],
-                const Spacer(),
-                InkWell(
-                  onTap: () => ShareToSheet.show(context,
-                      postId: post.id, shareText: _shareText()),
-                  borderRadius: BorderRadius.circular(NileRadius.sm),
-                  child: const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 4, vertical: 4),
-                    child: Icon(Icons.send_outlined,
-                        size: 18, color: NileColors.txtSecondary),
-                  ),
+                if (post.eventId != null) ...[
+                  const SizedBox(height: 10),
+                  EventLinkCard(eventId: post.eventId!),
+                ],
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    if (onLikeToggle != null)
+                      LikeButton(
+                        liked: post.likedByMe,
+                        count: post.likeCount,
+                        onTap: onLikeToggle!,
+                      ),
+                    const SizedBox(width: 16),
+                    InkWell(
+                      onTap: () => _openDetail(context),
+                      borderRadius: BorderRadius.circular(NileRadius.sm),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: NileSpacing.s4,
+                          vertical: NileSpacing.s4,
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(
+                              Icons.mode_comment_outlined,
+                              size: 18,
+                              color: NileColors.txtSecondary,
+                            ),
+                            const SizedBox(width: 5),
+                            Text(
+                              '${post.commentCount}',
+                              style: NileTextStyles.bodySm().copyWith(
+                                color: NileColors.txtSecondary,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    if (onRepostToggle != null) ...[
+                      const SizedBox(width: 16),
+                      _RepostButton(
+                        reposted: post.repostedByMe,
+                        count: post.repostCount,
+                        onTap: onRepostToggle!,
+                      ),
+                    ],
+                    const Spacer(),
+                    InkWell(
+                      onTap: () => ShareToSheet.show(
+                        context,
+                        postId: post.id,
+                        shareText: _shareText(),
+                      ),
+                      borderRadius: BorderRadius.circular(NileRadius.sm),
+                      child: const Padding(
+                        padding: EdgeInsets.symmetric(
+                          horizontal: NileSpacing.s4,
+                          vertical: NileSpacing.s4,
+                        ),
+                        child: Icon(
+                          Icons.send_outlined,
+                          size: 18,
+                          color: NileColors.txtSecondary,
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ],
             ),
-          ],
+          ),
         ),
-      ),
       ),
     );
   }
@@ -1164,9 +1183,11 @@ class _RepostHeader extends StatelessWidget {
         const Icon(Icons.repeat, size: 14, color: NileColors.txtTertiary),
         const SizedBox(width: 6),
         Flexible(
-          child: Text('reposted by @$username',
-              style: NileTextStyles.caption(),
-              overflow: TextOverflow.ellipsis),
+          child: Text(
+            'reposted by @$username',
+            style: NileTextStyles.caption(),
+            overflow: TextOverflow.ellipsis,
+          ),
         ),
       ],
     );
@@ -1190,14 +1211,16 @@ class _RepostButton extends StatelessWidget {
       onTap: onTap,
       borderRadius: BorderRadius.circular(NileRadius.sm),
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+        padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s4, vertical: NileSpacing.s4),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
             Icon(Icons.repeat, size: 18, color: color),
             const SizedBox(width: 5),
-            Text('$count',
-                style: NileTextStyles.bodySm().copyWith(color: color)),
+            Text(
+              '$count',
+              style: NileTextStyles.bodySm().copyWith(color: color),
+            ),
           ],
         ),
       ),
@@ -1209,102 +1232,47 @@ class _RepostButton extends StatelessWidget {
 
 class _Thumbnail extends StatelessWidget {
   final Event event;
-  const _Thumbnail({required this.event});
+
+  /// Disabled on repost cards: the original card owns this event's Hero, and
+  /// two live Heroes with one tag abort every flight in the route.
+  final bool hero;
+  const _Thumbnail({required this.event, this.hero = true});
 
   Widget _placeholder() => const DecoratedBox(
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [NileColors.bgRaised, NileColors.bgSurface],
-          ),
-        ),
-        child: Center(
-          child: Icon(Icons.live_tv, size: 40, color: NileColors.border),
-        ),
-      );
+    decoration: BoxDecoration(
+      gradient: LinearGradient(
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+        colors: [NileColors.bgRaised, NileColors.bgSurface],
+      ),
+    ),
+    child: Center(
+      child: Icon(Icons.live_tv, size: 40, color: NileColors.border),
+    ),
+  );
 
   @override
   Widget build(BuildContext context) {
+    final image = event.thumbnailUrl != null
+        ? Image.network(
+            event.thumbnailUrl!,
+            cacheWidth: nileDecodeWidth(600),
+            fit: BoxFit.cover,
+            errorBuilder: (_, _, _) => _placeholder(),
+          )
+        : _placeholder();
     return AspectRatio(
       aspectRatio: 16 / 9,
       child: Stack(
         fit: StackFit.expand,
         children: [
-          if (event.thumbnailUrl != null)
-            Image.network(
-              event.thumbnailUrl!,
-              fit: BoxFit.cover,
-              errorBuilder: (_, _, _) => _placeholder(),
-            )
+          if (hero)
+            Hero(tag: 'event-cover-${event.id}', child: image)
           else
-            _placeholder(),
+            image,
+          const DecoratedBox(decoration: NileEffects.coverScrim),
           if (event.isLive)
-            const Positioned(top: 10, right: 10, child: _LiveBadge()),
-        ],
-      ),
-    );
-  }
-}
-
-// ── LIVE badge (pulsing dot) ──────────────────────────────────────────────────
-
-class _LiveBadge extends StatefulWidget {
-  const _LiveBadge();
-
-  @override
-  State<_LiveBadge> createState() => _LiveBadgeState();
-}
-
-class _LiveBadgeState extends State<_LiveBadge>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _ctrl;
-  late final Animation<double> _pulse;
-
-  @override
-  void initState() {
-    super.initState();
-    _ctrl = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 900),
-    )..repeat(reverse: true);
-    _pulse = Tween<double>(begin: 0.35, end: 1.0)
-        .animate(CurvedAnimation(parent: _ctrl, curve: Curves.easeInOut));
-  }
-
-  @override
-  void dispose() {
-    _ctrl.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      decoration: BoxDecoration(
-        color: NileColors.coral,
-        borderRadius: BorderRadius.circular(NileRadius.xs),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          AnimatedBuilder(
-            animation: _pulse,
-            builder: (_, _) => Opacity(
-              opacity: _pulse.value,
-              child: const CircleAvatar(radius: 3.5, backgroundColor: Colors.white),
-            ),
-          ),
-          const SizedBox(width: 5),
-          Text(
-            'LIVE',
-            style: NileTextStyles.caption().copyWith(
-              color: Colors.white,
-              fontWeight: FontWeight.w700,
-              letterSpacing: 1.2,
-            ),
-          ),
+            const Positioned(top: 8, right: 8, child: LiveBadge()),
         ],
       ),
     );
@@ -1317,29 +1285,15 @@ class _StateView extends StatelessWidget {
   final IconData icon;
   final String title;
   final String body;
-  const _StateView({required this.icon, required this.title, required this.body});
+  const _StateView({
+    required this.icon,
+    required this.title,
+    required this.body,
+  });
 
   @override
   Widget build(BuildContext context) {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(40),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 56, color: NileColors.border),
-            const SizedBox(height: 16),
-            Text(title, style: NileTextStyles.headingMd()),
-            const SizedBox(height: 8),
-            Text(
-              body,
-              textAlign: TextAlign.center,
-              style: NileTextStyles.bodyMd().copyWith(color: NileColors.txtSecondary),
-            ),
-          ],
-        ),
-      ),
-    );
+    return NileEmptyState(icon: icon, title: title, body: body);
   }
 }
 
@@ -1348,10 +1302,10 @@ class _EmptyFollows extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => const _StateView(
-        icon: Icons.person_add_outlined,
-        title: 'Follow creators',
-        body: 'Events from people you follow will appear here.',
-      );
+    icon: Icons.person_add_outlined,
+    title: 'Follow creators',
+    body: 'Events from people you follow will appear here.',
+  );
 }
 
 class _EmptyFeed extends StatelessWidget {
@@ -1359,10 +1313,10 @@ class _EmptyFeed extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => const _StateView(
-        icon: Icons.live_tv,
-        title: 'No events right now',
-        body: 'Check back later when the people you follow go live.',
-      );
+    icon: Icons.live_tv,
+    title: 'No events right now',
+    body: 'Check back later when the people you follow go live.',
+  );
 }
 
 // ── Shared edit/delete helpers ────────────────────────────────────────────────
@@ -1373,17 +1327,20 @@ Future<bool> _confirmDelete(BuildContext context, String itemType) async {
         builder: (_) => AlertDialog(
           backgroundColor: NileColors.bgSurface,
           title: Text('Delete $itemType?', style: NileTextStyles.headingSm()),
-          content: Text('This cannot be undone.',
-              style: NileTextStyles.bodyMd()
-                  .copyWith(color: NileColors.txtSecondary)),
+          content: Text(
+            'This cannot be undone.',
+            style: NileTextStyles.bodyMd().copyWith(
+              color: NileColors.txtSecondary,
+            ),
+          ),
           actions: [
             TextButton(
-                onPressed: () => Navigator.pop(context, false),
-                child: const Text('Cancel')),
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel'),
+            ),
             TextButton(
               onPressed: () => Navigator.pop(context, true),
-              child: Text('Delete',
-                  style: TextStyle(color: NileColors.error)),
+              child: Text('Delete', style: TextStyle(color: NileColors.error)),
             ),
           ],
         ),
@@ -1401,10 +1358,15 @@ class _ContentMenu extends StatelessWidget {
   Widget build(BuildContext context) {
     return PopupMenuButton<String>(
       padding: EdgeInsets.zero,
-      icon: const Icon(Icons.more_horiz, size: 18, color: NileColors.txtTertiary),
+      icon: const Icon(
+        Icons.more_horiz,
+        size: 18,
+        color: NileColors.txtTertiary,
+      ),
       color: NileColors.bgRaised,
       shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(NileRadius.sm)),
+        borderRadius: BorderRadius.circular(NileRadius.sm),
+      ),
       onSelected: (v) {
         if (v == 'edit') onEdit?.call();
         if (v == 'delete') onDelete?.call();
@@ -1415,8 +1377,7 @@ class _ContentMenu extends StatelessWidget {
         if (onDelete != null)
           PopupMenuItem(
             value: 'delete',
-            child: Text('Delete',
-                style: TextStyle(color: NileColors.error)),
+            child: Text('Delete', style: TextStyle(color: NileColors.error)),
           ),
       ],
     );
@@ -1432,7 +1393,7 @@ class _ErrorState extends StatelessWidget {
   Widget build(BuildContext context) {
     return Center(
       child: Padding(
-        padding: const EdgeInsets.all(40),
+        padding: const EdgeInsets.all(NileSpacing.s40),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -1443,7 +1404,9 @@ class _ErrorState extends StatelessWidget {
             Text(
               message,
               textAlign: TextAlign.center,
-              style: NileTextStyles.bodyMd().copyWith(color: NileColors.txtSecondary),
+              style: NileTextStyles.bodyMd().copyWith(
+                color: NileColors.txtSecondary,
+              ),
             ),
             const SizedBox(height: 24),
             FilledButton(onPressed: onRetry, child: const Text('Retry')),

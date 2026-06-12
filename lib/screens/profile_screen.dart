@@ -14,6 +14,7 @@ import '../services/report_service.dart';
 import '../services/repost_service.dart';
 import '../theme.dart';
 import '../widgets/event_link_card.dart';
+import '../widgets/nile_skeleton.dart';
 import '../widgets/share_to_sheet.dart';
 import 'widgets/moderation_menu.dart';
 import 'post_detail_screen.dart';
@@ -46,6 +47,8 @@ class ProfileScreen extends StatefulWidget {
 // 12-item slices.
 const int _kProfilePageSize = 12;
 
+enum _ProfileTab { posts, events, drafts }
+
 class _ProfileScreenState extends State<ProfileScreen> {
   UserProfile? _profile;
   bool _loading = true;
@@ -59,8 +62,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
   List<({Event event, DateTime repostedAt})> _eventReposts = [];
   String? _eventsError;
 
-  // ── Drafts (owner-only second tab) ────────────────────────────────────────
-  bool _showDrafts = false;
+  // ── Active tab (Posts / Events for everyone; Drafts owner-only) ───────────
+  _ProfileTab _tab = _ProfileTab.posts;
+
+  // ── Drafts (owner-only third tab) ─────────────────────────────────────────
   List<Event>? _drafts;
   String? _draftsError;
   String? _draftsCursor;
@@ -79,10 +84,11 @@ class _ProfileScreenState extends State<ProfileScreen> {
   bool _loadingMore = false;
   int _visibleCount = _kProfilePageSize;
 
-  // More to show if either a source has un-fetched rows, or the merged list
-  // already holds more than the current display window.
+  // More to show if the active tab's source has un-fetched rows, or its
+  // filtered list already holds more than the current display window.
   bool get _hasMore {
-    if (_postsHasMore || _eventsHasMore) return true;
+    if (_tab == _ProfileTab.posts && _postsHasMore) return true;
+    if (_tab == _ProfileTab.events && _eventsHasMore) return true;
     final all = _allItems;
     return all != null && all.length > _visibleCount;
   }
@@ -120,7 +126,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
     if (_scroll.position.pixels < _scroll.position.maxScrollExtent - 400) {
       return;
     }
-    if (_showDrafts) {
+    if (_tab == _ProfileTab.drafts) {
       _loadMoreDrafts();
     } else if (_hasMore && !_loadingMore && _events != null) {
       _loadMore();
@@ -159,7 +165,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
       // Fire-and-forget events fetch — profile renders without it.
       _loadEvents(uid);
       // Refresh drafts too if the owner has the tab open / loaded.
-      if (_isOwnProfileFor(profile) && (_showDrafts || _drafts != null)) {
+      if (_isOwnProfileFor(profile) &&
+          (_tab == _ProfileTab.drafts || _drafts != null)) {
         _loadDrafts();
       }
     } catch (e) {
@@ -197,8 +204,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
         EventService.hydrateLikes(eventPage.items),
         PostService.hydrateLikes(postPage.items),
         PostService.hydrateLikes(repostRows.map((r) => r.post).toList()),
-        EventService.hydrateLikes(
-            eventRepostRows.map((r) => r.event).toList()),
+        EventService.hydrateLikes(eventRepostRows.map((r) => r.event).toList()),
       ).wait;
       final (hPosts, hReposts, hEventReposts) = await (
         PostService.hydrateReposts(lPosts),
@@ -207,7 +213,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
       ).wait;
       final repostAt = {for (final r in repostRows) r.post.id: r.repostedAt};
       final eventRepostAt = {
-        for (final r in eventRepostRows) r.event.id: r.repostedAt
+        for (final r in eventRepostRows) r.event.id: r.repostedAt,
       };
       if (!mounted) return;
       setState(() {
@@ -215,11 +221,11 @@ class _ProfileScreenState extends State<ProfileScreen> {
         _posts = hPosts;
         _reposts = [
           for (final p in hReposts)
-            (post: p, repostedAt: repostAt[p.id] ?? p.createdAt)
+            (post: p, repostedAt: repostAt[p.id] ?? p.createdAt),
         ];
         _eventReposts = [
           for (final e in hEventReposts)
-            (event: e, repostedAt: eventRepostAt[e.id] ?? e.createdAt)
+            (event: e, repostedAt: eventRepostAt[e.id] ?? e.createdAt),
         ];
         _eventCursor = eventPage.nextCursor;
         _postCursor = postPage.nextCursor;
@@ -261,7 +267,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
     setState(() => _draftsLoading = true);
     try {
       final page = await EventService.getDrafts(
-          cursor: _draftsCursor, limit: _kProfilePageSize);
+        cursor: _draftsCursor,
+        limit: _kProfilePageSize,
+      );
       if (!mounted) return;
       setState(() {
         _drafts = [...?_drafts, ...page.items];
@@ -287,10 +295,15 @@ class _ProfileScreenState extends State<ProfileScreen> {
     }
   }
 
-  void _selectTab(bool drafts) {
-    if (_showDrafts == drafts) return;
-    setState(() => _showDrafts = drafts);
-    if (drafts && _drafts == null && !_draftsLoading) _loadDrafts();
+  void _selectTab(_ProfileTab tab) {
+    if (_tab == tab) return;
+    setState(() {
+      _tab = tab;
+      _visibleCount = _kProfilePageSize;
+    });
+    if (tab == _ProfileTab.drafts && _drafts == null && !_draftsLoading) {
+      _loadDrafts();
+    }
   }
 
   Future<void> _loadMore() async {
@@ -301,20 +314,29 @@ class _ProfileScreenState extends State<ProfileScreen> {
       // Grow the combined window by one page.
       final target = _visibleCount + _kProfilePageSize;
 
-      // Top up a source only if it has more rows AND its fetched count can't
-      // already fill the new window on its own — otherwise we have enough
-      // candidates to keep the merged sort correct up to `target`.
-      final fetchEvents = _eventsHasMore && (_events?.length ?? 0) < target;
-      final fetchPosts = _postsHasMore && (_posts?.length ?? 0) < target;
+      // Top up only the active tab's source, and only if it has more rows AND
+      // its fetched count can't already fill the new window on its own.
+      final fetchEvents = _tab == _ProfileTab.events &&
+          _eventsHasMore &&
+          (_events?.length ?? 0) < target;
+      final fetchPosts = _tab == _ProfileTab.posts &&
+          _postsHasMore &&
+          (_posts?.length ?? 0) < target;
 
       final (eventPage, postPage) = await (
         fetchEvents
-            ? EventService.getEventsByHost(uid,
-                cursor: _eventCursor, limit: _kProfilePageSize)
+            ? EventService.getEventsByHost(
+                uid,
+                cursor: _eventCursor,
+                limit: _kProfilePageSize,
+              )
             : Future.value(Paged.empty<Event>()),
         fetchPosts
-            ? PostService.getByAuthor(uid,
-                cursor: _postCursor, limit: _kProfilePageSize)
+            ? PostService.getByAuthor(
+                uid,
+                cursor: _postCursor,
+                limit: _kProfilePageSize,
+              )
             : Future.value(Paged.empty<Post>()),
       ).wait;
       final (hEvents, lPosts) = await (
@@ -346,10 +368,12 @@ class _ProfileScreenState extends State<ProfileScreen> {
   Future<void> _togglePostLike(Post post) async {
     final wasLiked = post.likedByMe;
     final delta = wasLiked ? -1 : 1;
-    _replacePost(post.copyWith(
-      likedByMe: !wasLiked,
-      likeCount: (post.likeCount + delta).clamp(0, 1 << 30),
-    ));
+    _replacePost(
+      post.copyWith(
+        likedByMe: !wasLiked,
+        likeCount: (post.likeCount + delta).clamp(0, 1 << 30),
+      ),
+    );
     try {
       wasLiked
           ? await LikeService.unlikePost(post.id)
@@ -362,10 +386,12 @@ class _ProfileScreenState extends State<ProfileScreen> {
   Future<void> _togglePostRepost(Post post) async {
     final was = post.repostedByMe;
     final delta = was ? -1 : 1;
-    _replacePost(post.copyWith(
-      repostedByMe: !was,
-      repostCount: (post.repostCount + delta).clamp(0, 1 << 30),
-    ));
+    _replacePost(
+      post.copyWith(
+        repostedByMe: !was,
+        repostCount: (post.repostCount + delta).clamp(0, 1 << 30),
+      ),
+    );
     try {
       was
           ? await RepostService.unrepost(post.id)
@@ -383,19 +409,21 @@ class _ProfileScreenState extends State<ProfileScreen> {
     } catch (_) {
       _replacePost(post);
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Failed to repost')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Failed to repost')));
     }
   }
 
   Future<void> _toggleEventLike(Event event) async {
     final wasLiked = event.likedByMe;
     final delta = wasLiked ? -1 : 1;
-    _replaceEvent(event.copyWith(
-      likedByMe: !wasLiked,
-      likeCount: (event.likeCount + delta).clamp(0, 1 << 30),
-    ));
+    _replaceEvent(
+      event.copyWith(
+        likedByMe: !wasLiked,
+        likeCount: (event.likeCount + delta).clamp(0, 1 << 30),
+      ),
+    );
     try {
       wasLiked
           ? await LikeService.unlikeEvent(event.id)
@@ -408,10 +436,12 @@ class _ProfileScreenState extends State<ProfileScreen> {
   Future<void> _toggleEventRepost(Event event) async {
     final was = event.repostedByMe;
     final delta = was ? -1 : 1;
-    _replaceEvent(event.copyWith(
-      repostedByMe: !was,
-      repostCount: (event.repostCount + delta).clamp(0, 1 << 30),
-    ));
+    _replaceEvent(
+      event.copyWith(
+        repostedByMe: !was,
+        repostCount: (event.repostCount + delta).clamp(0, 1 << 30),
+      ),
+    );
     try {
       was
           ? await EventRepostService.unrepost(event.id)
@@ -427,24 +457,29 @@ class _ProfileScreenState extends State<ProfileScreen> {
     } catch (_) {
       _replaceEvent(event);
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Failed to repost')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Failed to repost')));
     }
   }
 
-  /// Combined post/event list sorted by recency. Live events pin to top.
-  // Full merged + sorted list (live events first, then newest-first).
+  /// The active tab's list sorted by recency (Posts incl. post reposts;
+  /// Events incl. event reposts). Live events pin to top.
   List<_ProfileItem>? get _allItems {
     if (_events == null || _posts == null) return null;
-    final items = <_ProfileItem>[
-      ..._events!.map(_ProfileEventItem.new),
-      ..._posts!.map(_ProfilePostItem.new),
-      ..._reposts.map(
-          (r) => _ProfilePostItem(r.post, sortOverride: r.repostedAt)),
-      ..._eventReposts.map(
-          (r) => _ProfileEventItem(r.event, sortOverride: r.repostedAt)),
-    ];
+    final items = _tab == _ProfileTab.events
+        ? <_ProfileItem>[
+            ..._events!.map(_ProfileEventItem.new),
+            ..._eventReposts.map(
+              (r) => _ProfileEventItem(r.event, sortOverride: r.repostedAt),
+            ),
+          ]
+        : <_ProfileItem>[
+            ..._posts!.map(_ProfilePostItem.new),
+            ..._reposts.map(
+              (r) => _ProfilePostItem(r.post, sortOverride: r.repostedAt),
+            ),
+          ];
     items.sort((a, b) {
       final aLive = a is _ProfileEventItem && a.event.isLive;
       final bLive = b is _ProfileEventItem && b.event.isLive;
@@ -473,11 +508,13 @@ class _ProfileScreenState extends State<ProfileScreen> {
       context: context,
       backgroundColor: NileColors.bgSurface,
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(NileRadius.lg)),
+        borderRadius: BorderRadius.vertical(
+          top: Radius.circular(NileRadius.lg),
+        ),
       ),
       builder: (_) => SafeArea(
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(24, 16, 24, 24),
+          padding: const EdgeInsets.fromLTRB(NileSpacing.s24, NileSpacing.s16, NileSpacing.s24, NileSpacing.s24),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -498,11 +535,12 @@ class _ProfileScreenState extends State<ProfileScreen> {
               FilledButton.icon(
                 onPressed: () {
                   Navigator.pop(context);
-                  Navigator.push(context,
-                      MaterialPageRoute(builder: (_) => const CreatePostScreen()))
-                    .then((_) {
-                      if (_profile != null) _loadEvents(_profile!.id);
-                    });
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (_) => const CreatePostScreen()),
+                  ).then((_) {
+                    if (_profile != null) _loadEvents(_profile!.id);
+                  });
                 },
                 icon: const Icon(Icons.edit_outlined),
                 label: const Text('Create Post'),
@@ -511,13 +549,14 @@ class _ProfileScreenState extends State<ProfileScreen> {
               OutlinedButton.icon(
                 onPressed: () {
                   Navigator.pop(context);
-                  Navigator.push(context,
-                      MaterialPageRoute(builder: (_) => const CreateEventFlow()))
-                    .then((_) {
-                      if (_profile != null) _loadEvents(_profile!.id);
-                      // A new event may have been saved as a draft.
-                      if (_drafts != null) _loadDrafts();
-                    });
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (_) => const CreateEventFlow()),
+                  ).then((_) {
+                    if (_profile != null) _loadEvents(_profile!.id);
+                    // A new event may have been saved as a draft.
+                    if (_drafts != null) _loadDrafts();
+                  });
                 },
                 icon: const Icon(Icons.add_circle_outline),
                 label: const Text('Create Event'),
@@ -532,9 +571,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
   Future<void> _openEdit() async {
     if (_profile == null) return;
     final updated = await Navigator.of(context).push<UserProfile>(
-      MaterialPageRoute(
-        builder: (_) => EditProfileScreen(profile: _profile!),
-      ),
+      MaterialPageRoute(builder: (_) => EditProfileScreen(profile: _profile!)),
     );
     if (updated != null) setState(() => _profile = updated);
   }
@@ -577,9 +614,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
         );
       });
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Something went wrong: $e')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Something went wrong: $e')));
       }
     } finally {
       if (mounted) setState(() => _followLoading = false);
@@ -609,8 +646,11 @@ class _ProfileScreenState extends State<ProfileScreen> {
   Future<void> _blockUser() async {
     final p = _profile;
     if (p == null) return;
-    final ok = await Moderation.confirmBlock(context,
-        userId: p.id, username: p.username);
+    final ok = await Moderation.confirmBlock(
+      context,
+      userId: p.id,
+      username: p.username,
+    );
     if (ok && mounted) {
       // Blocking severs the relationship — leave the now-hidden profile.
       Navigator.of(context).pop();
@@ -620,16 +660,22 @@ class _ProfileScreenState extends State<ProfileScreen> {
   Future<void> _unblockUser() async {
     final p = _profile;
     if (p == null) return;
-    final ok = await Moderation.confirmUnblock(context,
-        userId: p.id, username: p.username);
+    final ok = await Moderation.confirmUnblock(
+      context,
+      userId: p.id,
+      username: p.username,
+    );
     if (ok && mounted) setState(() => _isBlocked = false);
   }
 
   void _reportUser() {
     final p = _profile;
     if (p == null) return;
-    Moderation.showReportSheet(context,
-        targetType: ReportTargetType.user, targetId: p.id);
+    Moderation.showReportSheet(
+      context,
+      targetType: ReportTargetType.user,
+      targetId: p.id,
+    );
   }
 
   // ─── Build ────────────────────────────────────────────────────────────────
@@ -639,8 +685,33 @@ class _ProfileScreenState extends State<ProfileScreen> {
     if (_loading) {
       return const Scaffold(
         backgroundColor: NileColors.bgPage,
-        body: Center(
-          child: CircularProgressIndicator(color: NileColors.volt),
+        body: NileMaxWidth(
+          child: SingleChildScrollView(
+            child: NileSkeletonPulse(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // Cover strip
+                  NileSkeleton(width: double.infinity, height: 120, radius: 0),
+                  Padding(
+                    padding: EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s16, NileSpacing.s16, 0),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        NileSkeleton.circle(size: 72),
+                        SizedBox(height: 12),
+                        NileSkeleton(width: 160, height: 16),
+                        SizedBox(height: 8),
+                        NileSkeleton(width: 100),
+                      ],
+                    ),
+                  ),
+                  SizedBox(height: 20),
+                  NileSkeletonList(count: 2),
+                ],
+              ),
+            ),
+          ),
         ),
       );
     }
@@ -652,9 +723,12 @@ class _ProfileScreenState extends State<ProfileScreen> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Text(_error!,
-                  style:
-                      NileTextStyles.bodyMd().copyWith(color: NileColors.error)),
+              Text(
+                _error!,
+                style: NileTextStyles.bodyMd().copyWith(
+                  color: NileColors.error,
+                ),
+              ),
               const SizedBox(height: 12),
               FilledButton(onPressed: _load, child: const Text('Retry')),
             ],
@@ -688,7 +762,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
               icon: const Icon(Icons.more_vert),
               color: NileColors.bgRaised,
               shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(NileRadius.sm)),
+                borderRadius: BorderRadius.circular(NileRadius.sm),
+              ),
               onSelected: (v) {
                 switch (v) {
                   case 'report':
@@ -706,8 +781,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 else
                   PopupMenuItem(
                     value: 'block',
-                    child: Text('Block',
-                        style: TextStyle(color: NileColors.error)),
+                    child: Text(
+                      'Block',
+                      style: TextStyle(color: NileColors.error),
+                    ),
                   ),
               ],
             ),
@@ -721,25 +798,26 @@ class _ProfileScreenState extends State<ProfileScreen> {
               child: const Icon(Icons.add),
             )
           : null,
-      body: NileMaxWidth(child: RefreshIndicator(
-        color: NileColors.volt,
-        onRefresh: _load,
-        child: CustomScrollView(
-          controller: _scroll,
-          slivers: [
-            SliverToBoxAdapter(child: _buildHeader(p)),
-            const SliverToBoxAdapter(
-              child: Divider(color: NileColors.border, height: 1),
-            ),
-            if (_isOwnProfile)
+      body: NileMaxWidth(
+        child: RefreshIndicator(
+          color: NileColors.volt,
+          onRefresh: _load,
+          child: CustomScrollView(
+            controller: _scroll,
+            slivers: [
+              SliverToBoxAdapter(child: _buildHeader(p)),
+              const SliverToBoxAdapter(
+                child: Divider(color: NileColors.border, height: 1),
+              ),
               SliverToBoxAdapter(child: _buildTabToggle()),
-            if (_isOwnProfile && _showDrafts)
-              _buildDraftsFeed()
-            else
-              _buildEventsFeed(),
-          ],
+              if (_isOwnProfile && _tab == _ProfileTab.drafts)
+                _buildDraftsFeed()
+              else
+                _buildEventsFeed(),
+            ],
+          ),
         ),
-      )),
+      ),
     );
   }
 
@@ -761,7 +839,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
               bottom: -_avatarRadius,
               left: 20,
               child: Container(
-                padding: const EdgeInsets.all(3),
+                padding: const EdgeInsets.all(NileSpacing.s2),
                 decoration: const BoxDecoration(
                   color: NileColors.bgPage,
                   shape: BoxShape.circle,
@@ -770,11 +848,14 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   radius: _avatarRadius,
                   backgroundColor: NileColors.bgRaised,
                   backgroundImage: p.avatarUrl != null
-                      ? NetworkImage(p.avatarUrl!) as ImageProvider
+                      ? nileAvatarImage(p.avatarUrl!, _avatarRadius)
                       : null,
                   child: p.avatarUrl == null
-                      ? Icon(Icons.person,
-                          size: _avatarRadius, color: NileColors.txtTertiary)
+                      ? Icon(
+                          Icons.person,
+                          size: _avatarRadius,
+                          color: NileColors.txtTertiary,
+                        )
                       : null,
                 ),
               ),
@@ -784,7 +865,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
         // ── Stats row (right-aligned to leave room for avatar) ──────────────
         Padding(
-          padding: const EdgeInsets.fromLTRB(20, 0, 20, 0),
+          padding: const EdgeInsets.fromLTRB(NileSpacing.s16, 0, NileSpacing.s16, 0),
           child: SizedBox(
             height: _avatarRadius + 12, // fill the avatar overhang space
             child: Row(
@@ -796,9 +877,11 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                     children: [
                       _StatCol(
-                          label: 'Posts',
-                          value: _fmt(
-                              (_events?.length ?? 0) + (_posts?.length ?? 0))),
+                        label: 'Posts',
+                        value: _fmt(
+                          (_events?.length ?? 0) + (_posts?.length ?? 0),
+                        ),
+                      ),
                       _StatCol(
                         label: 'Followers',
                         value: _fmt(p.followerCount),
@@ -837,7 +920,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
         // ── Name, bio, action button ────────────────────────────────────────
         Padding(
-          padding: const EdgeInsets.fromLTRB(20, 8, 20, 16),
+          padding: const EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s8, NileSpacing.s16, NileSpacing.s16),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -864,7 +947,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
                               onPressed: _followLoading ? null : _toggleFollow,
                               style: OutlinedButton.styleFrom(
                                 side: const BorderSide(
-                                    color: NileColors.border),
+                                  color: NileColors.border,
+                                ),
                                 foregroundColor: NileColors.txtPrimary,
                               ),
                               child: _followLoading
@@ -872,8 +956,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
                                       width: 14,
                                       height: 14,
                                       child: CircularProgressIndicator(
-                                          strokeWidth: 2,
-                                          color: NileColors.txtPrimary),
+                                        strokeWidth: 2,
+                                        color: NileColors.txtPrimary,
+                                      ),
                                     )
                                   : const Text('Following'),
                             )
@@ -888,8 +973,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
                                       width: 14,
                                       height: 14,
                                       child: CircularProgressIndicator(
-                                          strokeWidth: 2,
-                                          color: NileColors.bgPage),
+                                        strokeWidth: 2,
+                                        color: NileColors.bgPage,
+                                      ),
                                     )
                                   : const Text('Follow'),
                             ),
@@ -901,7 +987,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
                         side: const BorderSide(color: NileColors.border),
                         foregroundColor: NileColors.txtPrimary,
                         padding: const EdgeInsets.symmetric(
-                            horizontal: 16, vertical: 12),
+                          horizontal: NileSpacing.s16,
+                          vertical: NileSpacing.s12,
+                        ),
                       ),
                       child: const Icon(Icons.send_outlined, size: 18),
                     ),
@@ -914,7 +1002,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
     );
   }
 
-  // ─── Tab toggle (owner-only) ──────────────────────────────────────────────
+  // ─── Tab toggle (Posts / Events for all; Drafts owner-only) ───────────────
 
   Widget _buildTabToggle() {
     Widget seg(String label, bool selected, VoidCallback onTap) {
@@ -924,7 +1012,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
           borderRadius: BorderRadius.circular(NileRadius.sm),
           child: Container(
             alignment: Alignment.center,
-            padding: const EdgeInsets.symmetric(vertical: 12),
+            padding: const EdgeInsets.symmetric(vertical: NileSpacing.s12),
             decoration: BoxDecoration(
               color: selected ? NileColors.volt : Colors.transparent,
               borderRadius: BorderRadius.circular(NileRadius.sm),
@@ -942,7 +1030,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
     final draftCount = _drafts?.length;
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+      padding: const EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s16, NileSpacing.s16, 0),
       child: Container(
         decoration: BoxDecoration(
           color: NileColors.bgSurface,
@@ -951,14 +1039,24 @@ class _ProfileScreenState extends State<ProfileScreen> {
         ),
         child: Row(
           children: [
-            seg('Posts & Events', !_showDrafts, () => _selectTab(false)),
             seg(
-              draftCount != null && draftCount > 0
-                  ? 'Drafts ($draftCount)'
-                  : 'Drafts',
-              _showDrafts,
-              () => _selectTab(true),
+              'Posts',
+              _tab == _ProfileTab.posts,
+              () => _selectTab(_ProfileTab.posts),
             ),
+            seg(
+              'Events',
+              _tab == _ProfileTab.events,
+              () => _selectTab(_ProfileTab.events),
+            ),
+            if (_isOwnProfile)
+              seg(
+                draftCount != null && draftCount > 0
+                    ? 'Drafts ($draftCount)'
+                    : 'Drafts',
+                _tab == _ProfileTab.drafts,
+                () => _selectTab(_ProfileTab.drafts),
+              ),
           ],
         ),
       ),
@@ -971,7 +1069,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
     if (_draftsError != null) {
       return SliverToBoxAdapter(
         child: Padding(
-          padding: const EdgeInsets.all(32),
+          padding: const EdgeInsets.all(NileSpacing.s32),
           child: Center(
             child: Text(
               'Couldn\'t load drafts: $_draftsError',
@@ -986,20 +1084,25 @@ class _ProfileScreenState extends State<ProfileScreen> {
     if (drafts == null) {
       return const SliverToBoxAdapter(
         child: Padding(
-          padding: EdgeInsets.all(40),
-          child: Center(child: CircularProgressIndicator(color: NileColors.volt)),
+          padding: EdgeInsets.all(NileSpacing.s40),
+          child: Center(
+            child: CircularProgressIndicator(color: NileColors.volt),
+          ),
         ),
       );
     }
     if (drafts.isEmpty) {
       return SliverToBoxAdapter(
         child: Padding(
-          padding: const EdgeInsets.all(40),
+          padding: const EdgeInsets.all(NileSpacing.s40),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(Icons.drafts_outlined,
-                  size: 48, color: NileColors.border),
+              const Icon(
+                Icons.drafts_outlined,
+                size: 48,
+                color: NileColors.border,
+              ),
               const SizedBox(height: 12),
               Text('No drafts', style: NileTextStyles.headingSm()),
               const SizedBox(height: 4),
@@ -1014,7 +1117,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
       );
     }
     return SliverPadding(
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
+      padding: const EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s16, NileSpacing.s16, NileSpacing.s32),
       sliver: SliverList.separated(
         itemCount: drafts.length + (_draftsHasMore ? 1 : 0),
         separatorBuilder: (_, _) => const SizedBox(height: 12),
@@ -1036,13 +1139,12 @@ class _ProfileScreenState extends State<ProfileScreen> {
     if (_eventsError != null) {
       return SliverToBoxAdapter(
         child: Padding(
-          padding: const EdgeInsets.all(32),
+          padding: const EdgeInsets.all(NileSpacing.s32),
           child: Center(
             child: Text(
               'Couldn\'t load posts: $_eventsError',
               textAlign: TextAlign.center,
-              style:
-                  NileTextStyles.bodySm().copyWith(color: NileColors.error),
+              style: NileTextStyles.bodySm().copyWith(color: NileColors.error),
             ),
           ),
         ),
@@ -1052,7 +1154,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
     if (items == null) {
       return const SliverToBoxAdapter(
         child: Padding(
-          padding: EdgeInsets.all(40),
+          padding: EdgeInsets.all(NileSpacing.s40),
           child: Center(
             child: CircularProgressIndicator(color: NileColors.volt),
           ),
@@ -1060,23 +1162,29 @@ class _ProfileScreenState extends State<ProfileScreen> {
       );
     }
     if (items.isEmpty) {
+      final isEvents = _tab == _ProfileTab.events;
       return SliverToBoxAdapter(
         child: Padding(
-          padding: const EdgeInsets.all(40),
+          padding: const EdgeInsets.all(NileSpacing.s40),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(Icons.event_note,
-                  size: 48, color: NileColors.border),
+              Icon(
+                isEvents ? Icons.event_note : Icons.edit_note,
+                size: 48,
+                color: NileColors.border,
+              ),
               const SizedBox(height: 12),
               Text(
-                _isOwnProfile ? 'No posts yet' : 'Nothing posted yet',
+                isEvents ? 'No events yet' : 'No posts yet',
                 style: NileTextStyles.headingSm(),
               ),
               const SizedBox(height: 4),
               Text(
                 _isOwnProfile
-                    ? 'Posts and events you create will appear here.'
+                    ? (isEvents
+                          ? 'Events you create will appear here.'
+                          : 'Posts you create will appear here.')
                     : 'Check back later.',
                 textAlign: TextAlign.center,
                 style: NileTextStyles.bodySm(),
@@ -1087,7 +1195,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
       );
     }
     return SliverPadding(
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
+      padding: const EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s16, NileSpacing.s16, NileSpacing.s32),
       sliver: SliverList.separated(
         itemCount: items.length + (_hasMore ? 1 : 0),
         separatorBuilder: (_, _) => const SizedBox(height: 12),
@@ -1096,20 +1204,21 @@ class _ProfileScreenState extends State<ProfileScreen> {
           final it = items[i];
           return switch (it) {
             _ProfileEventItem(:final event) => _ProfileEventCard(
-                event: event,
-                onTap: () => _openEvent(event),
-                onEdited: _isOwnProfile ? (e) => _replaceEvent(e) : null,
-                onLikeToggle: () => _toggleEventLike(event),
-                onRepostToggle: () => _toggleEventRepost(event),
-              ),
+              event: event,
+              onTap: () => _openEvent(event),
+              onEdited: _isOwnProfile ? (e) => _replaceEvent(e) : null,
+              onLikeToggle: () => _toggleEventLike(event),
+              onRepostToggle: () => _toggleEventRepost(event),
+            ),
             _ProfilePostItem(:final post) => _ProfilePostCard(
-                post: post,
-                onEdited: _isOwnProfile ? (p) => _replacePost(p) : null,
-                onDeleted: _isOwnProfile ? () => _removePost(post.id) : null,
-                onLikeToggle: () => _togglePostLike(post),
-                onRepostToggle: () => _togglePostRepost(post),
-                onUpdated: _replacePost,
-              ),
+              post: post,
+              onEdited: _isOwnProfile ? (p) => _replacePost(p) : null,
+              onDeleted: _isOwnProfile ? () => _removePost(post.id) : null,
+              onLikeToggle: () => _togglePostLike(post),
+              onRepostToggle: () => _togglePostRepost(post),
+              onUpdated: _replacePost,
+              profileId: _profile?.id,
+            ),
           };
         },
       ),
@@ -1117,31 +1226,33 @@ class _ProfileScreenState extends State<ProfileScreen> {
   }
 
   void _replacePost(Post updated) => setState(() {
-        final i = _posts?.indexWhere((p) => p.id == updated.id) ?? -1;
-        if (i >= 0) _posts![i] = updated;
-        // Reposted cards live in [_reposts]; keep them in sync too.
-        for (var j = 0; j < _reposts.length; j++) {
-          if (_reposts[j].post.id == updated.id) {
-            _reposts[j] = (post: updated, repostedAt: _reposts[j].repostedAt);
-          }
-        }
-      });
+    final i = _posts?.indexWhere((p) => p.id == updated.id) ?? -1;
+    if (i >= 0) _posts![i] = updated;
+    // Reposted cards live in [_reposts]; keep them in sync too.
+    for (var j = 0; j < _reposts.length; j++) {
+      if (_reposts[j].post.id == updated.id) {
+        _reposts[j] = (post: updated, repostedAt: _reposts[j].repostedAt);
+      }
+    }
+  });
 
   void _removePost(String postId) => setState(() {
-        _posts?.removeWhere((p) => p.id == postId);
-        _reposts.removeWhere((r) => r.post.id == postId);
-      });
+    _posts?.removeWhere((p) => p.id == postId);
+    _reposts.removeWhere((r) => r.post.id == postId);
+  });
 
   void _replaceEvent(Event updated) => setState(() {
-        final i = _events?.indexWhere((e) => e.id == updated.id) ?? -1;
-        if (i >= 0) _events![i] = updated;
-        for (var j = 0; j < _eventReposts.length; j++) {
-          if (_eventReposts[j].event.id == updated.id) {
-            _eventReposts[j] =
-                (event: updated, repostedAt: _eventReposts[j].repostedAt);
-          }
-        }
-      });
+    final i = _events?.indexWhere((e) => e.id == updated.id) ?? -1;
+    if (i >= 0) _events![i] = updated;
+    for (var j = 0; j < _eventReposts.length; j++) {
+      if (_eventReposts[j].event.id == updated.id) {
+        _eventReposts[j] = (
+          event: updated,
+          repostedAt: _eventReposts[j].repostedAt,
+        );
+      }
+    }
+  });
 
   void _openEvent(Event e) {
     // Guard: never open a blocked host's stream, even from a stale card.
@@ -1154,7 +1265,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
     final route = MaterialPageRoute(
       builder: (_) => e.isLive
           ? ViewerScreen(initialEventId: e.liveKitEventId)
-          : EventDetailScreen(event: e),
+          : EventDetailScreen(event: e, fromProfileId: _profile?.id),
     );
     Navigator.push(context, route).then((_) {
       // Refresh on return in case the host edited or ended the event.
@@ -1191,7 +1302,7 @@ class CoverPhoto extends StatelessWidget {
     if (localBytes != null) {
       image = MemoryImage(localBytes!);
     } else if (url != null) {
-      image = NetworkImage(url!);
+      image = ResizeImage(NetworkImage(url!), width: nileDecodeWidth(600));
     }
 
     return GestureDetector(
@@ -1208,8 +1319,8 @@ class CoverPhoto extends StatelessWidget {
         child: image == null
             ? const _CoverPlaceholder()
             : onTap != null
-                ? _editOverlay()
-                : null,
+            ? _editOverlay()
+            : null,
       ),
     );
   }
@@ -1217,12 +1328,15 @@ class CoverPhoto extends StatelessWidget {
   Widget _editOverlay() {
     return Container(
       alignment: Alignment.bottomRight,
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.all(NileSpacing.s12),
       decoration: BoxDecoration(
         gradient: LinearGradient(
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
-          colors: [Colors.transparent, NileColors.bgPage.withValues(alpha: 0.4)],
+          colors: [
+            Colors.transparent,
+            NileColors.bgPage.withValues(alpha: 0.4),
+          ],
         ),
       ),
       child: buildCameraChip('Edit cover'),
@@ -1233,7 +1347,7 @@ class CoverPhoto extends StatelessWidget {
 /// Public helper — renders the pill-shaped camera chip used on cover photos.
 Widget buildCameraChip(String label) {
   return Container(
-    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+    padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s8, vertical: NileSpacing.s4),
     decoration: BoxDecoration(
       color: NileColors.bgPage.withValues(alpha: 0.6),
       borderRadius: BorderRadius.circular(NileRadius.pill),
@@ -1243,9 +1357,13 @@ Widget buildCameraChip(String label) {
       children: [
         const Icon(Icons.camera_alt, size: 14, color: Colors.white),
         const SizedBox(width: 4),
-        Text(label,
-            style: NileTextStyles.caption()
-                .copyWith(color: Colors.white, letterSpacing: 0)),
+        Text(
+          label,
+          style: NileTextStyles.caption().copyWith(
+            color: Colors.white,
+            letterSpacing: 0,
+          ),
+        ),
       ],
     ),
   );
@@ -1276,6 +1394,7 @@ sealed class _ProfileItem {
 
 class _ProfileEventItem extends _ProfileItem {
   final Event event;
+
   /// Set for reposts — sorts by repost time.
   final DateTime? sortOverride;
   _ProfileEventItem(this.event, {this.sortOverride});
@@ -1285,6 +1404,7 @@ class _ProfileEventItem extends _ProfileItem {
 
 class _ProfilePostItem extends _ProfileItem {
   final Post post;
+
   /// Set for reposts — sorts by repost time instead of the post's createdAt.
   final DateTime? sortOverride;
   _ProfilePostItem(this.post, {this.sortOverride});
@@ -1301,6 +1421,11 @@ class _ProfilePostCard extends StatelessWidget {
   final VoidCallback? onLikeToggle;
   final VoidCallback? onRepostToggle;
   final void Function(Post)? onUpdated;
+
+  /// Id of the profile being viewed — lets the detail screen pop back here
+  /// instead of pushing a duplicate profile when its author row is tapped.
+  final String? profileId;
+
   const _ProfilePostCard({
     required this.post,
     this.onEdited,
@@ -1308,6 +1433,7 @@ class _ProfilePostCard extends StatelessWidget {
     this.onLikeToggle,
     this.onRepostToggle,
     this.onUpdated,
+    this.profileId,
   });
 
   String _shareText() =>
@@ -1316,7 +1442,9 @@ class _ProfilePostCard extends StatelessWidget {
   Future<void> _openDetail(BuildContext context) async {
     final updated = await Navigator.push<Post>(
       context,
-      MaterialPageRoute(builder: (_) => PostDetailScreen(post: post)),
+      MaterialPageRoute(
+        builder: (_) => PostDetailScreen(post: post, fromProfileId: profileId),
+      ),
     );
     if (updated != null) onUpdated?.call(updated);
   }
@@ -1333,160 +1461,185 @@ class _ProfilePostCard extends StatelessWidget {
   Widget build(BuildContext context) {
     return Material(
       color: NileColors.bgSurface,
-      borderRadius: BorderRadius.circular(NileRadius.md),
+      borderRadius: BorderRadius.circular(NileRadius.lg),
       clipBehavior: Clip.antiAlias,
       child: InkWell(
         onTap: () => _openDetail(context),
         child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            if (post.repostedByUsername != null) ...[
-              _ProfileRepostHeader(username: post.repostedByUsername!),
-              const SizedBox(height: 8),
-            ],
-            Row(
-              children: [
-                CircleAvatar(
-                  radius: 14,
-                  backgroundColor: NileColors.bgRaised,
-                  backgroundImage: post.authorAvatarUrl != null
-                      ? NetworkImage(post.authorAvatarUrl!)
-                      : null,
-                  child: post.authorAvatarUrl == null
-                      ? Text(
-                          post.authorUsername[0].toUpperCase(),
-                          style: NileTextStyles.labelSm().copyWith(
-                            color: NileColors.txtPrimary,
-                            letterSpacing: 0,
-                          ),
-                        )
-                      : null,
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    '@${post.authorUsername}',
-                    style: NileTextStyles.bodySm(),
-                    overflow: TextOverflow.ellipsis,
+          padding: const EdgeInsets.all(NileSpacing.s12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (post.repostedByUsername != null) ...[
+                _ProfileRepostHeader(username: post.repostedByUsername!),
+                const SizedBox(height: 8),
+              ],
+              Row(
+                children: [
+                  CircleAvatar(
+                    radius: 14,
+                    backgroundColor: NileColors.bgRaised,
+                    backgroundImage: post.authorAvatarUrl != null
+                        ? nileAvatarImage(post.authorAvatarUrl!, 14)
+                        : null,
+                    child: post.authorAvatarUrl == null
+                        ? Text(
+                            post.authorUsername[0].toUpperCase(),
+                            style: NileTextStyles.labelSm().copyWith(
+                              color: NileColors.txtPrimary,
+                              letterSpacing: 0,
+                            ),
+                          )
+                        : null,
                   ),
-                ),
-                Text(_timeAgo(post.createdAt),
-                    style: NileTextStyles.caption()),
-                if (onEdited != null || onDeleted != null)
-                  _ProfileContentMenu(
-                    onEdit: onEdited == null
-                        ? null
-                        : () async {
-                            final updated = await Navigator.push<Post>(
-                              context,
-                              MaterialPageRoute(
-                                  builder: (_) => EditPostScreen(post: post)),
-                            );
-                            if (updated != null) onEdited!(updated);
-                          },
-                    onDelete: onDeleted == null
-                        ? null
-                        : () async {
-                            final ok =
-                                await _confirmProfileDelete(context, 'post');
-                            if (ok) {
-                              try {
-                                await PostService.delete(post.id);
-                                onDeleted!();
-                              } catch (e) {
-                                if (context.mounted) {
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    SnackBar(
-                                        content: Text('Failed to delete: $e')),
-                                  );
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      '@${post.authorUsername}',
+                      style: NileTextStyles.bodySm(),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  Text(
+                    _timeAgo(post.createdAt),
+                    style: NileTextStyles.caption(),
+                  ),
+                  if (onEdited != null || onDeleted != null)
+                    _ProfileContentMenu(
+                      onEdit: onEdited == null
+                          ? null
+                          : () async {
+                              final updated = await Navigator.push<Post>(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (_) => EditPostScreen(post: post),
+                                ),
+                              );
+                              if (updated != null) onEdited!(updated);
+                            },
+                      onDelete: onDeleted == null
+                          ? null
+                          : () async {
+                              final ok = await _confirmProfileDelete(
+                                context,
+                                'post',
+                              );
+                              if (ok) {
+                                try {
+                                  await PostService.delete(post.id);
+                                  onDeleted!();
+                                } catch (e) {
+                                  if (context.mounted) {
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      SnackBar(
+                                        content: Text('Failed to delete: $e'),
+                                      ),
+                                    );
+                                  }
                                 }
                               }
-                            }
-                          },
-                  ),
-              ],
-            ),
-            if (post.hasCaption) ...[
-              const SizedBox(height: 10),
-              Text(post.caption!.trim(), style: NileTextStyles.bodyMd()),
-            ],
-            if (post.hasImage) ...[
-              const SizedBox(height: 10),
-              ClipRRect(
-                borderRadius: BorderRadius.circular(NileRadius.sm),
-                child: Image.network(
-                  post.imageUrl!,
-                  fit: BoxFit.cover,
-                  errorBuilder: (_, _, _) => Container(
-                    height: 200,
-                    color: NileColors.bgRaised,
-                    child: const Center(
-                      child:
-                          Icon(Icons.broken_image, color: NileColors.border),
+                            },
                     ),
-                  ),
-                ),
+                ],
               ),
-            ],
-            if (post.eventId != null) ...[
-              const SizedBox(height: 10),
-              EventLinkCard(eventId: post.eventId!),
-            ],
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                if (onLikeToggle != null)
-                  _LikeRow(
-                    liked: post.likedByMe,
-                    count: post.likeCount,
-                    onTap: onLikeToggle!,
-                  ),
-                const SizedBox(width: 16),
-                InkWell(
-                  onTap: () => _openDetail(context),
+              if (post.hasCaption) ...[
+                const SizedBox(height: 10),
+                Text(post.caption!.trim(), style: NileTextStyles.bodyMd()),
+              ],
+              if (post.hasImage) ...[
+                const SizedBox(height: 10),
+                ClipRRect(
                   borderRadius: BorderRadius.circular(NileRadius.sm),
-                  child: Padding(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const Icon(Icons.mode_comment_outlined,
-                            size: 18, color: NileColors.txtSecondary),
-                        const SizedBox(width: 5),
-                        Text('${post.commentCount}',
-                            style: NileTextStyles.bodySm().copyWith(
-                                color: NileColors.txtSecondary)),
-                      ],
+                  child: AspectRatio(
+                    aspectRatio: 4 / 3,
+                    child: Image.network(
+                      post.imageUrl!,
+                      cacheWidth: nileDecodeWidth(600),
+                      fit: BoxFit.cover,
+                      errorBuilder: (_, _, _) => Container(
+                        color: NileColors.bgRaised,
+                        child: const Center(
+                          child: Icon(
+                            Icons.broken_image,
+                            color: NileColors.border,
+                          ),
+                        ),
+                      ),
                     ),
                   ),
                 ),
-                if (onRepostToggle != null) ...[
+              ],
+              if (post.eventId != null) ...[
+                const SizedBox(height: 10),
+                EventLinkCard(eventId: post.eventId!),
+              ],
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  if (onLikeToggle != null)
+                    _LikeRow(
+                      liked: post.likedByMe,
+                      count: post.likeCount,
+                      onTap: onLikeToggle!,
+                    ),
                   const SizedBox(width: 16),
-                  _RepostRow(
-                    reposted: post.repostedByMe,
-                    count: post.repostCount,
-                    onTap: onRepostToggle!,
+                  InkWell(
+                    onTap: () => _openDetail(context),
+                    borderRadius: BorderRadius.circular(NileRadius.sm),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: NileSpacing.s4,
+                        vertical: NileSpacing.s4,
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(
+                            Icons.mode_comment_outlined,
+                            size: 18,
+                            color: NileColors.txtSecondary,
+                          ),
+                          const SizedBox(width: 5),
+                          Text(
+                            '${post.commentCount}',
+                            style: NileTextStyles.bodySm().copyWith(
+                              color: NileColors.txtSecondary,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  if (onRepostToggle != null) ...[
+                    const SizedBox(width: 16),
+                    _RepostRow(
+                      reposted: post.repostedByMe,
+                      count: post.repostCount,
+                      onTap: onRepostToggle!,
+                    ),
+                  ],
+                  const Spacer(),
+                  InkWell(
+                    onTap: () => ShareToSheet.show(
+                      context,
+                      postId: post.id,
+                      shareText: _shareText(),
+                    ),
+                    borderRadius: BorderRadius.circular(NileRadius.sm),
+                    child: const Padding(
+                      padding: EdgeInsets.symmetric(horizontal: NileSpacing.s4, vertical: NileSpacing.s4),
+                      child: Icon(
+                        Icons.send_outlined,
+                        size: 18,
+                        color: NileColors.txtSecondary,
+                      ),
+                    ),
                   ),
                 ],
-                const Spacer(),
-                InkWell(
-                  onTap: () => ShareToSheet.show(context,
-                      postId: post.id, shareText: _shareText()),
-                  borderRadius: BorderRadius.circular(NileRadius.sm),
-                  child: const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 4, vertical: 4),
-                    child: Icon(Icons.send_outlined,
-                        size: 18, color: NileColors.txtSecondary),
-                  ),
-                ),
-              ],
-            ),
-          ],
+              ),
+            ],
+          ),
         ),
-      ),
       ),
     );
   }
@@ -1505,9 +1658,11 @@ class _ProfileRepostHeader extends StatelessWidget {
         const Icon(Icons.repeat, size: 14, color: NileColors.txtTertiary),
         const SizedBox(width: 6),
         Flexible(
-          child: Text('reposted by @$username',
-              style: NileTextStyles.caption(),
-              overflow: TextOverflow.ellipsis),
+          child: Text(
+            'reposted by @$username',
+            style: NileTextStyles.caption(),
+            overflow: TextOverflow.ellipsis,
+          ),
         ),
       ],
     );
@@ -1518,8 +1673,11 @@ class _RepostRow extends StatelessWidget {
   final bool reposted;
   final int count;
   final VoidCallback onTap;
-  const _RepostRow(
-      {required this.reposted, required this.count, required this.onTap});
+  const _RepostRow({
+    required this.reposted,
+    required this.count,
+    required this.onTap,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -1528,14 +1686,16 @@ class _RepostRow extends StatelessWidget {
       onTap: onTap,
       borderRadius: BorderRadius.circular(NileRadius.sm),
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+        padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s4, vertical: NileSpacing.s4),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
             Icon(Icons.repeat, size: 18, color: color),
             const SizedBox(width: 5),
-            Text('$count',
-                style: NileTextStyles.bodySm().copyWith(color: color)),
+            Text(
+              '$count',
+              style: NileTextStyles.bodySm().copyWith(color: color),
+            ),
           ],
         ),
       ),
@@ -1549,8 +1709,11 @@ class _LikeRow extends StatelessWidget {
   final bool liked;
   final int count;
   final VoidCallback onTap;
-  const _LikeRow(
-      {required this.liked, required this.count, required this.onTap});
+  const _LikeRow({
+    required this.liked,
+    required this.count,
+    required this.onTap,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -1559,15 +1722,20 @@ class _LikeRow extends StatelessWidget {
       onTap: onTap,
       borderRadius: BorderRadius.circular(NileRadius.sm),
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+        padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s4, vertical: NileSpacing.s4),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(liked ? Icons.favorite : Icons.favorite_border,
-                size: 18, color: color),
+            Icon(
+              liked ? Icons.favorite : Icons.favorite_border,
+              size: 18,
+              color: color,
+            ),
             const SizedBox(width: 5),
-            Text('$count',
-                style: NileTextStyles.bodySm().copyWith(color: color)),
+            Text(
+              '$count',
+              style: NileTextStyles.bodySm().copyWith(color: color),
+            ),
           ],
         ),
       ),
@@ -1593,10 +1761,10 @@ class _ProfileEventCard extends StatelessWidget {
   });
 
   String _shareText() => ShareUrls.eventCaption(
-        id: event.id,
-        title: event.title,
-        hostUsername: event.hostUsername,
-      );
+    id: event.id,
+    title: event.title,
+    hostUsername: event.hostUsername,
+  );
 
   String _timeAgo(DateTime dt) {
     final d = DateTime.now().difference(dt);
@@ -1610,8 +1778,18 @@ class _ProfileEventCard extends StatelessWidget {
     final s = event.scheduledAt;
     if (s == null) return null;
     const months = [
-      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
     ];
     final t =
         '${s.hour.toString().padLeft(2, '0')}:${s.minute.toString().padLeft(2, '0')}';
@@ -1632,19 +1810,19 @@ class _ProfileEventCard extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               SizedBox(
-                width: 112,
-                height: 112,
+                width: 128,
+                height: 72,
                 child: Stack(
                   fit: StackFit.expand,
                   children: [
                     if (cover != null)
                       Image.network(
                         cover,
+                        cacheWidth: nileDecodeWidth(128),
                         fit: BoxFit.cover,
                         errorBuilder: (_, _, _) => const ColoredBox(
                           color: NileColors.bgRaised,
-                          child: Icon(Icons.live_tv,
-                              color: NileColors.border),
+                          child: Icon(Icons.live_tv, color: NileColors.border),
                         ),
                       )
                     else
@@ -1660,110 +1838,133 @@ class _ProfileEventCard extends StatelessWidget {
                   ],
                 ),
               ),
-            Expanded(
-              child: Padding(
-                padding: const EdgeInsets.all(12),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        if (event.repostedByUsername != null) ...[
-                          _ProfileRepostHeader(
-                              username: event.repostedByUsername!),
-                          const SizedBox(height: 4),
-                        ],
-                        Text(
-                          event.title,
-                          style: NileTextStyles.headingSm(),
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        if (event.description != null &&
-                            event.description!.isNotEmpty) ...[
-                          const SizedBox(height: 4),
+              Expanded(
+                child: Padding(
+                  padding: const EdgeInsets.all(NileSpacing.s12),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          if (event.repostedByUsername != null) ...[
+                            _ProfileRepostHeader(
+                              username: event.repostedByUsername!,
+                            ),
+                            const SizedBox(height: 4),
+                          ],
                           Text(
-                            event.description!,
-                            style: NileTextStyles.bodySm(),
+                            event.title,
+                            style: NileTextStyles.headingSm(),
                             maxLines: 2,
                             overflow: TextOverflow.ellipsis,
                           ),
+                          if (event.description != null &&
+                              event.description!.isNotEmpty) ...[
+                            const SizedBox(height: 4),
+                            Text(
+                              event.description!,
+                              style: NileTextStyles.bodySm(),
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ],
                         ],
-                      ],
-                    ),
-                    const SizedBox(height: 6),
-                    Row(
-                      children: [
-                        if (event.isLive) ...[
-                          const Icon(Icons.visibility,
-                              size: 13, color: NileColors.txtTertiary),
-                          const SizedBox(width: 4),
-                          Text('${event.viewerCount}',
-                              style: NileTextStyles.caption()),
-                        ] else if (_scheduledLabel() != null) ...[
-                          const Icon(Icons.calendar_today,
-                              size: 12, color: NileColors.txtTertiary),
-                          const SizedBox(width: 4),
-                          Text(_scheduledLabel()!,
-                              style: NileTextStyles.caption()),
-                        ] else
-                          Text(_timeAgo(event.createdAt),
-                              style: NileTextStyles.caption()),
-                        if (onLikeToggle != null) ...[
+                      ),
+                      const SizedBox(height: 6),
+                      Row(
+                        children: [
+                          if (event.isLive) ...[
+                            const Icon(
+                              Icons.visibility,
+                              size: 13,
+                              color: NileColors.txtTertiary,
+                            ),
+                            const SizedBox(width: 4),
+                            Text(
+                              '${event.viewerCount}',
+                              style: NileTextStyles.caption().tabular,
+                            ),
+                          ] else if (_scheduledLabel() != null) ...[
+                            const Icon(
+                              Icons.calendar_today,
+                              size: 12,
+                              color: NileColors.txtTertiary,
+                            ),
+                            const SizedBox(width: 4),
+                            Text(
+                              _scheduledLabel()!,
+                              style: NileTextStyles.caption(),
+                            ),
+                          ] else
+                            Text(
+                              _timeAgo(event.createdAt),
+                              style: NileTextStyles.caption(),
+                            ),
+                          if (onLikeToggle != null) ...[
+                            const SizedBox(width: 12),
+                            _LikeRow(
+                              liked: event.likedByMe,
+                              count: event.likeCount,
+                              onTap: onLikeToggle!,
+                            ),
+                          ],
+                          if (onRepostToggle != null) ...[
+                            const SizedBox(width: 12),
+                            _RepostRow(
+                              reposted: event.repostedByMe,
+                              count: event.repostCount,
+                              onTap: onRepostToggle!,
+                            ),
+                          ],
                           const SizedBox(width: 12),
-                          _LikeRow(
-                            liked: event.likedByMe,
-                            count: event.likeCount,
-                            onTap: onLikeToggle!,
+                          InkWell(
+                            onTap: () => ShareToSheet.showEvent(
+                              context,
+                              eventId: event.id,
+                              shareText: _shareText(),
+                            ),
+                            borderRadius: BorderRadius.circular(NileRadius.sm),
+                            child: const Padding(
+                              padding: EdgeInsets.symmetric(
+                                horizontal: NileSpacing.s4,
+                                vertical: NileSpacing.s4,
+                              ),
+                              child: Icon(
+                                Icons.send_outlined,
+                                size: 18,
+                                color: NileColors.txtSecondary,
+                              ),
+                            ),
                           ),
-                        ],
-                        if (onRepostToggle != null) ...[
-                          const SizedBox(width: 12),
-                          _RepostRow(
-                            reposted: event.repostedByMe,
-                            count: event.repostCount,
-                            onTap: onRepostToggle!,
-                          ),
-                        ],
-                        const SizedBox(width: 12),
-                        InkWell(
-                          onTap: () => ShareToSheet.showEvent(context,
-                              eventId: event.id, shareText: _shareText()),
-                          borderRadius: BorderRadius.circular(NileRadius.sm),
-                          child: const Padding(
-                            padding: EdgeInsets.symmetric(
-                                horizontal: 4, vertical: 4),
-                            child: Icon(Icons.send_outlined,
-                                size: 18, color: NileColors.txtSecondary),
-                          ),
-                        ),
-                        const Spacer(),
-                        if (event.price != null && event.price! > 0)
-                          Text(
-                            '\$${(event.price! / 100).toStringAsFixed(2)}',
-                            style: NileTextStyles.labelSm()
-                                .copyWith(color: NileColors.volt),
-                          ),
-                        if (onEdited != null)
-                          _ProfileContentMenu(
-                            onEdit: () async {
-                              final updated = await Navigator.push<Event>(
-                                context,
-                                MaterialPageRoute(
+                          const Spacer(),
+                          if (event.price != null && event.price! > 0)
+                            Text(
+                              '\$${(event.price! / 100).toStringAsFixed(2)}',
+                              style: NileTextStyles.labelSm().copyWith(
+                                color: NileColors.txtPrimary,
+                              ),
+                            ),
+                          if (onEdited != null)
+                            _ProfileContentMenu(
+                              onEdit: () async {
+                                final updated = await Navigator.push<Event>(
+                                  context,
+                                  MaterialPageRoute(
                                     builder: (_) =>
-                                        EditEventScreen(event: event)),
-                              );
-                              if (updated != null) onEdited!(updated);
-                            },
-                          ),
-                      ],
-                    ),
-                  ],
+                                        EditEventScreen(event: event),
+                                  ),
+                                );
+                                if (updated != null) onEdited!(updated);
+                              },
+                            ),
+                        ],
+                      ),
+                    ],
+                  ),
                 ),
               ),
-            ),
             ],
           ),
         ),
@@ -1795,11 +1996,11 @@ class _StatusPill extends StatelessWidget {
       label = 'ENDED';
     } else {
       bg = Colors.black54;
-      fg = NileColors.volt;
+      fg = Colors.white;
       label = 'SCHEDULED';
     }
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s6, vertical: NileSpacing.s2),
       decoration: BoxDecoration(
         color: bg,
         borderRadius: BorderRadius.circular(NileRadius.xs),
@@ -1838,33 +2039,35 @@ class _StatCol extends StatelessWidget {
     );
 
     if (onTap == null) return col;
-    return GestureDetector(
-      onTap: onTap,
-      child: col,
-    );
+    return GestureDetector(onTap: onTap, child: col);
   }
 }
 
 // ── Profile screen edit/delete helpers ───────────────────────────────────────
 
-Future<bool> _confirmProfileDelete(BuildContext context, String itemType) async {
+Future<bool> _confirmProfileDelete(
+  BuildContext context,
+  String itemType,
+) async {
   return await showDialog<bool>(
         context: context,
         builder: (_) => AlertDialog(
           backgroundColor: NileColors.bgSurface,
-          title:
-              Text('Delete $itemType?', style: NileTextStyles.headingSm()),
-          content: Text('This cannot be undone.',
-              style: NileTextStyles.bodyMd()
-                  .copyWith(color: NileColors.txtSecondary)),
+          title: Text('Delete $itemType?', style: NileTextStyles.headingSm()),
+          content: Text(
+            'This cannot be undone.',
+            style: NileTextStyles.bodyMd().copyWith(
+              color: NileColors.txtSecondary,
+            ),
+          ),
           actions: [
             TextButton(
-                onPressed: () => Navigator.pop(context, false),
-                child: const Text('Cancel')),
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel'),
+            ),
             TextButton(
               onPressed: () => Navigator.pop(context, true),
-              child: Text('Delete',
-                  style: TextStyle(color: NileColors.error)),
+              child: Text('Delete', style: TextStyle(color: NileColors.error)),
             ),
           ],
         ),
@@ -1881,11 +2084,15 @@ class _ProfileContentMenu extends StatelessWidget {
   Widget build(BuildContext context) {
     return PopupMenuButton<String>(
       padding: EdgeInsets.zero,
-      icon:
-          const Icon(Icons.more_horiz, size: 18, color: NileColors.txtTertiary),
+      icon: const Icon(
+        Icons.more_horiz,
+        size: 18,
+        color: NileColors.txtTertiary,
+      ),
       color: NileColors.bgRaised,
       shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(NileRadius.sm)),
+        borderRadius: BorderRadius.circular(NileRadius.sm),
+      ),
       onSelected: (v) {
         if (v == 'edit') onEdit?.call();
         if (v == 'delete') onDelete?.call();
@@ -1896,8 +2103,7 @@ class _ProfileContentMenu extends StatelessWidget {
         if (onDelete != null)
           PopupMenuItem(
             value: 'delete',
-            child:
-                Text('Delete', style: TextStyle(color: NileColors.error)),
+            child: Text('Delete', style: TextStyle(color: NileColors.error)),
           ),
       ],
     );

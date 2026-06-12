@@ -7,13 +7,21 @@ import '../services/post_service.dart';
 import '../services/report_service.dart';
 import '../theme.dart';
 import '../widgets/event_link_card.dart';
+import '../widgets/like_button.dart';
 import 'profile_screen.dart';
 import 'widgets/load_more_footer.dart';
 import 'widgets/moderation_menu.dart';
 
 class PostDetailScreen extends StatefulWidget {
   final Post post;
-  const PostDetailScreen({super.key, required this.post});
+
+  /// Id of the profile this screen was pushed from, if any. Tapping that same
+  /// user's avatar here pops back to their profile instead of pushing a
+  /// duplicate copy of it — otherwise profile → post → profile → … chains
+  /// grow the navigation stack without bound.
+  final String? fromProfileId;
+
+  const PostDetailScreen({super.key, required this.post, this.fromProfileId});
 
   @override
   State<PostDetailScreen> createState() => _PostDetailScreenState();
@@ -64,10 +72,11 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
     try {
       final fresh = await PostService.fetchById(_post.id);
       if (fresh == null || !mounted) return;
-      final liked =
-          await LikeService.getLikedPostIds([_post.id]);
+      final liked = await LikeService.getLikedPostIds([_post.id]);
       if (!mounted) return;
-      setState(() => _post = fresh.copyWith(likedByMe: liked.contains(_post.id)));
+      setState(
+        () => _post = fresh.copyWith(likedByMe: liked.contains(_post.id)),
+      );
     } catch (_) {
       // Non-fatal — keep the post we were given.
     }
@@ -116,10 +125,12 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
 
     final wasLiked = _post.likedByMe;
     final delta = wasLiked ? -1 : 1;
-    setState(() => _post = _post.copyWith(
-          likedByMe: !wasLiked,
-          likeCount: (_post.likeCount + delta).clamp(0, 1 << 30),
-        ));
+    setState(
+      () => _post = _post.copyWith(
+        likedByMe: !wasLiked,
+        likeCount: (_post.likeCount + delta).clamp(0, 1 << 30),
+      ),
+    );
 
     try {
       if (wasLiked) {
@@ -130,10 +141,12 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
     } catch (_) {
       // Revert.
       if (!mounted) return;
-      setState(() => _post = _post.copyWith(
-            likedByMe: wasLiked,
-            likeCount: (_post.likeCount - delta).clamp(0, 1 << 30),
-          ));
+      setState(
+        () => _post = _post.copyWith(
+          likedByMe: wasLiked,
+          likeCount: (_post.likeCount - delta).clamp(0, 1 << 30),
+        ),
+      );
     } finally {
       if (mounted) setState(() => _liking = false);
     }
@@ -155,9 +168,9 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
       _commentFocus.unfocus();
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Couldn\'t post: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Couldn\'t post: $e')));
     } finally {
       if (mounted) setState(() => _submitting = false);
     }
@@ -167,7 +180,8 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
     setState(() {
       _comments = _comments?.where((x) => x.id != c.id).toList();
       _post = _post.copyWith(
-          commentCount: (_post.commentCount - 1).clamp(0, 1 << 30));
+        commentCount: (_post.commentCount - 1).clamp(0, 1 << 30),
+      );
     });
     try {
       await CommentService.delete(c.id);
@@ -178,9 +192,9 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
         _comments = [c, ...(_comments ?? [])];
         _post = _post.copyWith(commentCount: _post.commentCount + 1);
       });
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Couldn\'t delete: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Couldn\'t delete: $e')));
     }
   }
 
@@ -224,9 +238,12 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
                   },
                   child: ListView(
                     controller: _scroll,
-                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+                    padding: const EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s8, NileSpacing.s16, NileSpacing.s24),
                     children: [
-                      _PostBody(post: _post),
+                      _PostBody(
+                        post: _post,
+                        fromProfileId: widget.fromProfileId,
+                      ),
                       const SizedBox(height: 12),
                       _ActionsRow(
                         post: _post,
@@ -239,36 +256,43 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
                       const SizedBox(height: 8),
                       if (_commentsError != null)
                         Padding(
-                          padding: const EdgeInsets.all(16),
+                          padding: const EdgeInsets.all(NileSpacing.s16),
                           child: Text(
                             'Couldn\'t load comments: $_commentsError',
-                            style: NileTextStyles.bodySm()
-                                .copyWith(color: NileColors.error),
+                            style: NileTextStyles.bodySm().copyWith(
+                              color: NileColors.error,
+                            ),
                           ),
                         )
                       else if (_comments == null)
                         const Padding(
-                          padding: EdgeInsets.all(24),
+                          padding: EdgeInsets.all(NileSpacing.s24),
                           child: Center(
                             child: CircularProgressIndicator(
-                                color: NileColors.volt),
+                              color: NileColors.volt,
+                            ),
                           ),
                         )
                       else if (_comments!.isEmpty)
                         Padding(
-                          padding: const EdgeInsets.symmetric(vertical: 32),
+                          padding: const EdgeInsets.symmetric(vertical: NileSpacing.s32),
                           child: Center(
-                            child: Text('Be the first to comment.',
-                                style: NileTextStyles.bodySm()),
+                            child: Text(
+                              'Be the first to comment.',
+                              style: NileTextStyles.bodySm(),
+                            ),
                           ),
                         )
                       else ...[
-                        ..._comments!.map((c) => _CommentTile(
-                              comment: c,
-                              canDelete: c.authorId == _myId() || _isMyPost,
-                              isMine: c.authorId == _myId(),
-                              onDelete: () => _deleteComment(c),
-                            )),
+                        ..._comments!.map(
+                          (c) => _CommentTile(
+                            comment: c,
+                            canDelete: c.authorId == _myId() || _isMyPost,
+                            isMine: c.authorId == _myId(),
+                            onDelete: () => _deleteComment(c),
+                            fromProfileId: widget.fromProfileId,
+                          ),
+                        ),
                         if (_hasMore) const LoadMoreFooter(),
                       ],
                     ],
@@ -293,7 +317,8 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
 
 class _PostBody extends StatelessWidget {
   final Post post;
-  const _PostBody({required this.post});
+  final String? fromProfileId;
+  const _PostBody({required this.post, this.fromProfileId});
 
   String _timeAgo(DateTime dt) {
     final d = DateTime.now().difference(dt);
@@ -307,43 +332,54 @@ class _PostBody extends StatelessWidget {
   Widget build(BuildContext context) {
     return Material(
       color: NileColors.bgSurface,
-      borderRadius: BorderRadius.circular(NileRadius.md),
+      borderRadius: BorderRadius.circular(NileRadius.lg),
       clipBehavior: Clip.antiAlias,
       child: Padding(
-        padding: const EdgeInsets.all(12),
+        padding: const EdgeInsets.all(NileSpacing.s12),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             InkWell(
-              onTap: () => Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (_) => ProfileScreen(userId: post.authorId),
-                ),
-              ),
+              // Came here from this author's profile? Pop back to it rather
+              // than stacking a duplicate.
+              onTap: () => fromProfileId == post.authorId
+                  ? Navigator.pop(context)
+                  : Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => ProfileScreen(userId: post.authorId),
+                      ),
+                    ),
               child: Row(
                 children: [
                   CircleAvatar(
                     radius: 14,
                     backgroundColor: NileColors.bgRaised,
                     backgroundImage: post.authorAvatarUrl != null
-                        ? NetworkImage(post.authorAvatarUrl!)
+                        ? nileAvatarImage(post.authorAvatarUrl!, 14)
                         : null,
                     child: post.authorAvatarUrl == null
-                        ? Text(post.authorUsername[0].toUpperCase(),
+                        ? Text(
+                            post.authorUsername[0].toUpperCase(),
                             style: NileTextStyles.labelSm().copyWith(
-                                color: NileColors.txtPrimary,
-                                letterSpacing: 0))
+                              color: NileColors.txtPrimary,
+                              letterSpacing: 0,
+                            ),
+                          )
                         : null,
                   ),
                   const SizedBox(width: 8),
                   Expanded(
-                    child: Text('@${post.authorUsername}',
-                        style: NileTextStyles.bodySm(),
-                        overflow: TextOverflow.ellipsis),
+                    child: Text(
+                      '@${post.authorUsername}',
+                      style: NileTextStyles.bodySm(),
+                      overflow: TextOverflow.ellipsis,
+                    ),
                   ),
-                  Text(_timeAgo(post.createdAt),
-                      style: NileTextStyles.caption()),
+                  Text(
+                    _timeAgo(post.createdAt),
+                    style: NileTextStyles.caption(),
+                  ),
                 ],
               ),
             ),
@@ -355,15 +391,20 @@ class _PostBody extends StatelessWidget {
               const SizedBox(height: 10),
               ClipRRect(
                 borderRadius: BorderRadius.circular(NileRadius.sm),
-                child: Image.network(
-                  post.imageUrl!,
-                  fit: BoxFit.cover,
-                  errorBuilder: (_, _, _) => Container(
-                    height: 200,
-                    color: NileColors.bgRaised,
-                    child: const Center(
-                      child: Icon(Icons.broken_image,
-                          color: NileColors.border),
+                child: AspectRatio(
+                  aspectRatio: 4 / 3,
+                  child: Image.network(
+                    post.imageUrl!,
+                    cacheWidth: nileDecodeWidth(600),
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, _, _) => Container(
+                      color: NileColors.bgRaised,
+                      child: const Center(
+                        child: Icon(
+                          Icons.broken_image,
+                          color: NileColors.border,
+                        ),
+                      ),
                     ),
                   ),
                 ),
@@ -398,10 +439,10 @@ class _ActionsRow extends StatelessWidget {
   Widget build(BuildContext context) {
     return Row(
       children: [
-        _IconCount(
-          icon: post.likedByMe ? Icons.favorite : Icons.favorite_border,
-          color: post.likedByMe ? NileColors.coral : NileColors.txtSecondary,
+        LikeButton(
+          liked: post.likedByMe,
           count: post.likeCount,
+          iconSize: 20,
           onTap: busy ? null : onLike,
         ),
         const SizedBox(width: 20),
@@ -434,13 +475,15 @@ class _IconCount extends StatelessWidget {
       onTap: onTap,
       borderRadius: BorderRadius.circular(NileRadius.sm),
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+        padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s6, vertical: NileSpacing.s4),
         child: Row(
           children: [
             Icon(icon, size: 20, color: color),
             const SizedBox(width: 6),
-            Text('$count',
-                style: NileTextStyles.bodySm().copyWith(color: color)),
+            Text(
+              '$count',
+              style: NileTextStyles.bodySm().copyWith(color: color),
+            ),
           ],
         ),
       ),
@@ -455,11 +498,13 @@ class _CommentTile extends StatelessWidget {
   final bool canDelete;
   final bool isMine;
   final VoidCallback onDelete;
+  final String? fromProfileId;
   const _CommentTile({
     required this.comment,
     required this.canDelete,
     required this.isMine,
     required this.onDelete,
+    this.fromProfileId,
   });
 
   String _timeAgo(DateTime dt) {
@@ -473,27 +518,32 @@ class _CommentTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 8),
+      padding: const EdgeInsets.symmetric(vertical: NileSpacing.s8),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           GestureDetector(
-            onTap: () => Navigator.push(
-              context,
-              MaterialPageRoute(
-                builder: (_) => ProfileScreen(userId: comment.authorId),
-              ),
-            ),
+            onTap: () => fromProfileId == comment.authorId
+                ? Navigator.pop(context)
+                : Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => ProfileScreen(userId: comment.authorId),
+                    ),
+                  ),
             child: CircleAvatar(
               radius: 16,
               backgroundColor: NileColors.bgRaised,
               backgroundImage: comment.authorAvatarUrl != null
-                  ? NetworkImage(comment.authorAvatarUrl!)
+                  ? nileAvatarImage(comment.authorAvatarUrl!, 16)
                   : null,
               child: comment.authorAvatarUrl == null
-                  ? Text(comment.authorUsername[0].toUpperCase(),
-                      style: NileTextStyles.labelSm()
-                          .copyWith(letterSpacing: 0))
+                  ? Text(
+                      comment.authorUsername[0].toUpperCase(),
+                      style: NileTextStyles.labelSm().copyWith(
+                        letterSpacing: 0,
+                      ),
+                    )
                   : null,
             ),
           ),
@@ -504,12 +554,17 @@ class _CommentTile extends StatelessWidget {
               children: [
                 Row(
                   children: [
-                    Text('@${comment.authorUsername}',
-                        style: NileTextStyles.labelSm()
-                            .copyWith(letterSpacing: 0)),
+                    Text(
+                      '@${comment.authorUsername}',
+                      style: NileTextStyles.labelSm().copyWith(
+                        letterSpacing: 0,
+                      ),
+                    ),
                     const SizedBox(width: 6),
-                    Text(_timeAgo(comment.createdAt),
-                        style: NileTextStyles.caption()),
+                    Text(
+                      _timeAgo(comment.createdAt),
+                      style: NileTextStyles.caption(),
+                    ),
                     const Spacer(),
                     if (canDelete || !isMine)
                       _CommentMenu(
@@ -551,11 +606,15 @@ class _CommentMenu extends StatelessWidget {
   Widget build(BuildContext context) {
     return PopupMenuButton<String>(
       padding: EdgeInsets.zero,
-      icon: const Icon(Icons.more_horiz,
-          size: 16, color: NileColors.txtTertiary),
+      icon: const Icon(
+        Icons.more_horiz,
+        size: 16,
+        color: NileColors.txtTertiary,
+      ),
       color: NileColors.bgRaised,
       shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(NileRadius.sm)),
+        borderRadius: BorderRadius.circular(NileRadius.sm),
+      ),
       onSelected: (v) {
         if (v == 'delete') onDelete();
         if (v == 'report') onReport();
@@ -566,8 +625,7 @@ class _CommentMenu extends StatelessWidget {
         if (canDelete)
           PopupMenuItem(
             value: 'delete',
-            child:
-                Text('Delete', style: TextStyle(color: NileColors.error)),
+            child: Text('Delete', style: TextStyle(color: NileColors.error)),
           ),
       ],
     );
@@ -593,7 +651,7 @@ class _CommentInput extends StatelessWidget {
     return SafeArea(
       top: false,
       child: Container(
-        padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
+        padding: const EdgeInsets.fromLTRB(NileSpacing.s12, NileSpacing.s8, NileSpacing.s8, NileSpacing.s8),
         decoration: const BoxDecoration(
           color: NileColors.bgSurface,
           border: Border(top: BorderSide(color: NileColors.border)),
@@ -627,7 +685,9 @@ class _CommentInput extends StatelessWidget {
                       width: 18,
                       height: 18,
                       child: CircularProgressIndicator(
-                          strokeWidth: 2, color: NileColors.volt),
+                        strokeWidth: 2,
+                        color: NileColors.volt,
+                      ),
                     )
                   : const Icon(Icons.send, color: NileColors.volt),
               tooltip: 'Post comment',

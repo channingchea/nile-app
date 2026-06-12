@@ -10,6 +10,10 @@ import '../services/profile_service.dart';
 import '../services/search_service.dart';
 import '../theme.dart';
 import '../widgets/event_link_card.dart';
+import '../widgets/like_button.dart';
+import '../widgets/live_badge.dart';
+import '../widgets/nile_skeleton.dart';
+import '../widgets/pressable.dart';
 import 'event_detail_screen.dart';
 import 'post_detail_screen.dart';
 import 'profile_screen.dart';
@@ -42,13 +46,25 @@ class _DiscoverScreenState extends State<DiscoverScreen>
   List<Event> _recEvents = [];
 
   bool _isSearching = false;
-  final Map<_Tab, bool> _loading = {_Tab.posts: false, _Tab.events: false, _Tab.people: false};
+  final Map<_Tab, bool> _loading = {
+    _Tab.posts: false,
+    _Tab.events: false,
+    _Tab.people: false,
+  };
   final Map<_Tab, String?> _error = {};
 
   // Pagination state, per tab.
   final Map<_Tab, String?> _cursor = {};
-  final Map<_Tab, bool> _hasMore = {_Tab.posts: false, _Tab.events: false, _Tab.people: false};
-  final Map<_Tab, bool> _loadingMore = {_Tab.posts: false, _Tab.events: false, _Tab.people: false};
+  final Map<_Tab, bool> _hasMore = {
+    _Tab.posts: false,
+    _Tab.events: false,
+    _Tab.people: false,
+  };
+  final Map<_Tab, bool> _loadingMore = {
+    _Tab.posts: false,
+    _Tab.events: false,
+    _Tab.people: false,
+  };
   final Map<_Tab, ScrollController> _scroll = {};
 
   // Optimistic follow + like state.
@@ -121,24 +137,24 @@ class _DiscoverScreenState extends State<DiscoverScreen>
     }
   }
 
-  Future<Paged<Post>> _fetchPosts(String q, String? cursor) =>
-      q.isEmpty
-          ? PostService.getDiscover(cursor: cursor)
-          : SearchService.searchPosts(q, cursor: cursor);
+  Future<Paged<Post>> _fetchPosts(String q, String? cursor) => q.isEmpty
+      ? PostService.getDiscover(cursor: cursor)
+      : SearchService.searchPosts(q, cursor: cursor);
 
-  Future<Paged<Event>> _fetchEvents(String q, String? cursor) =>
-      q.isEmpty
-          ? SearchService.discoverEvents(cursor: cursor)
-          : SearchService.searchEvents(q, cursor: cursor);
+  Future<Paged<Event>> _fetchEvents(String q, String? cursor) => q.isEmpty
+      ? SearchService.discoverEvents(cursor: cursor)
+      : SearchService.searchEvents(q, cursor: cursor);
 
-  Future<Paged<UserProfile>> _fetchPeople(String q, String? cursor) =>
-      q.isEmpty
-          ? SearchService.suggestedUsers(cursor: cursor)
-          : SearchService.searchUsers(q, cursor: cursor);
+  Future<Paged<UserProfile>> _fetchPeople(String q, String? cursor) => q.isEmpty
+      ? SearchService.suggestedUsers(cursor: cursor)
+      : SearchService.searchUsers(q, cursor: cursor);
 
   Future<void> _loadPosts() async {
     final q = _controller.text.trim();
-    setState(() { _loading[_Tab.posts] = true; _error[_Tab.posts] = null; });
+    setState(() {
+      _loading[_Tab.posts] = true;
+      _error[_Tab.posts] = null;
+    });
     try {
       final results = await Future.wait([
         _fetchPosts(q, null),
@@ -164,7 +180,10 @@ class _DiscoverScreenState extends State<DiscoverScreen>
 
   Future<void> _loadEvents() async {
     final q = _controller.text.trim();
-    setState(() { _loading[_Tab.events] = true; _error[_Tab.events] = null; });
+    setState(() {
+      _loading[_Tab.events] = true;
+      _error[_Tab.events] = null;
+    });
     try {
       final results = await Future.wait([
         _fetchEvents(q, null),
@@ -190,7 +209,10 @@ class _DiscoverScreenState extends State<DiscoverScreen>
 
   Future<void> _loadPeople() async {
     final q = _controller.text.trim();
-    setState(() { _loading[_Tab.people] = true; _error[_Tab.people] = null; });
+    setState(() {
+      _loading[_Tab.people] = true;
+      _error[_Tab.people] = null;
+    });
     try {
       final page = await _fetchPeople(q, null);
       await _loadFollowStates(page.items);
@@ -256,22 +278,28 @@ class _DiscoverScreenState extends State<DiscoverScreen>
   Future<void> _loadFollowStates(List<UserProfile> users) async {
     final myId = Supabase.instance.client.auth.currentUser?.id;
     if (myId == null) return;
-    final unknown = users.where((u) => !_followState.containsKey(u.id)).toList();
+    final unknown = users
+        .where((u) => !_followState.containsKey(u.id))
+        .toList();
     if (unknown.isEmpty) return;
-    await Future.wait(unknown.map((u) async {
-      final following = await FollowService.isFollowing(u.id);
-      if (mounted) _followState[u.id] = following;
-    }));
+    await Future.wait(
+      unknown.map((u) async {
+        final following = await FollowService.isFollowing(u.id);
+        if (mounted) _followState[u.id] = following;
+      }),
+    );
   }
 
   Future<void> _togglePostLike(int index) async {
     if (_posts == null) return;
     final post = _posts![index];
     final wasLiked = post.likedByMe;
-    setState(() => _posts![index] = post.copyWith(
-          likedByMe: !wasLiked,
-          likeCount: (post.likeCount + (wasLiked ? -1 : 1)).clamp(0, 1 << 30),
-        ));
+    setState(
+      () => _posts![index] = post.copyWith(
+        likedByMe: !wasLiked,
+        likeCount: (post.likeCount + (wasLiked ? -1 : 1)).clamp(0, 1 << 30),
+      ),
+    );
     try {
       wasLiked
           ? await LikeService.unlikePost(post.id)
@@ -285,10 +313,12 @@ class _DiscoverScreenState extends State<DiscoverScreen>
     if (_events == null) return;
     final ev = _events![index];
     final wasLiked = ev.likedByMe;
-    setState(() => _events![index] = ev.copyWith(
-          likedByMe: !wasLiked,
-          likeCount: (ev.likeCount + (wasLiked ? -1 : 1)).clamp(0, 1 << 30),
-        ));
+    setState(
+      () => _events![index] = ev.copyWith(
+        likedByMe: !wasLiked,
+        likeCount: (ev.likeCount + (wasLiked ? -1 : 1)).clamp(0, 1 << 30),
+      ),
+    );
     try {
       wasLiked
           ? await LikeService.unlikeEvent(ev.id)
@@ -315,13 +345,13 @@ class _DiscoverScreenState extends State<DiscoverScreen>
   }
 
   void _openEvent(Event ev) => Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (_) => ev.isLive
-              ? ViewerScreen(initialEventId: ev.liveKitEventId)
-              : EventDetailScreen(event: ev),
-        ),
-      );
+    context,
+    MaterialPageRoute(
+      builder: (_) => ev.isLive
+          ? ViewerScreen(initialEventId: ev.liveKitEventId)
+          : EventDetailScreen(event: ev),
+    ),
+  );
 
   Future<void> _openRecPost(int j) async {
     final updated = await Navigator.push<Post>(
@@ -347,9 +377,9 @@ class _DiscoverScreenState extends State<DiscoverScreen>
             child: TabBarView(
               controller: _tabs,
               children: [
-                _buildPostsTab(),
-                _buildEventsTab(),
-                _buildPeopleTab(),
+                _fade(_buildPostsTab()),
+                _fade(_buildEventsTab()),
+                _fade(_buildPeopleTab()),
               ],
             ),
           ),
@@ -360,7 +390,7 @@ class _DiscoverScreenState extends State<DiscoverScreen>
 
   Widget _buildSearchBar() {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+      padding: const EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s12, NileSpacing.s16, NileSpacing.s8),
       child: TextField(
         controller: _controller,
         focusNode: _focusNode,
@@ -374,7 +404,7 @@ class _DiscoverScreenState extends State<DiscoverScreen>
                   onPressed: _clearSearch,
                 )
               : null,
-          contentPadding: const EdgeInsets.symmetric(vertical: 12),
+          contentPadding: const EdgeInsets.symmetric(vertical: NileSpacing.s12),
         ),
       ),
     );
@@ -400,6 +430,12 @@ class _DiscoverScreenState extends State<DiscoverScreen>
 
   // ── Tabs ──────────────────────────────────────────────────────────────────
 
+  /// Cross-fades tab body state changes (skeleton → content → empty/error).
+  Widget _fade(Widget child) => AnimatedSwitcher(
+    duration: const Duration(milliseconds: 250),
+    child: child,
+  );
+
   Widget _buildPostsTab() {
     if (_error[_Tab.posts] != null) {
       return _ErrorState(message: _error[_Tab.posts]!, onRetry: _loadPosts);
@@ -422,7 +458,7 @@ class _DiscoverScreenState extends State<DiscoverScreen>
       child: ListView.separated(
         controller: _scroll[_Tab.posts],
         physics: const AlwaysScrollableScrollPhysics(),
-        padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+        padding: const EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s12, NileSpacing.s16, NileSpacing.s24),
         itemCount: header + posts.length + (_hasMore[_Tab.posts]! ? 1 : 0),
         separatorBuilder: (_, i) =>
             SizedBox(height: showRail && i == 0 ? 20 : 12),
@@ -447,7 +483,8 @@ class _DiscoverScreenState extends State<DiscoverScreen>
               final updated = await Navigator.push<Post>(
                 context,
                 MaterialPageRoute(
-                    builder: (_) => PostDetailScreen(post: posts[idx])),
+                  builder: (_) => PostDetailScreen(post: posts[idx]),
+                ),
               );
               if (updated != null && mounted) {
                 setState(() => _posts![idx] = updated);
@@ -469,11 +506,16 @@ class _DiscoverScreenState extends State<DiscoverScreen>
       return _EmptyState(
         icon: _isSearching ? Icons.search_off : Icons.event_outlined,
         title: _isSearching ? 'No events found' : 'No events yet',
-        subtitle: _isSearching ? 'Try a different search.' : 'Be the first to go live.',
+        subtitle: _isSearching
+            ? 'Try a different search.'
+            : 'Be the first to go live.',
       );
     }
     final showRail = !_isSearching && _recEvents.isNotEmpty;
     final header = showRail ? 1 : 0;
+    // Rail cards own the Hero for their events; main-list duplicates disable
+    // theirs (two live Heroes with one tag abort every flight).
+    final railIds = showRail ? {for (final e in _recEvents) e.id} : <String>{};
     return RefreshIndicator(
       color: NileColors.volt,
       backgroundColor: NileColors.bgSurface,
@@ -481,7 +523,7 @@ class _DiscoverScreenState extends State<DiscoverScreen>
       child: ListView.separated(
         controller: _scroll[_Tab.events],
         physics: const AlwaysScrollableScrollPhysics(),
-        padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+        padding: const EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s12, NileSpacing.s16, NileSpacing.s24),
         itemCount: header + events.length + (_hasMore[_Tab.events]! ? 1 : 0),
         separatorBuilder: (_, i) =>
             SizedBox(height: showRail && i == 0 ? 20 : 12),
@@ -498,6 +540,7 @@ class _DiscoverScreenState extends State<DiscoverScreen>
           if (idx >= events.length) return const LoadMoreFooter();
           return _DiscoverEventCard(
             event: events[idx],
+            hero: !railIds.contains(events[idx].id),
             onLikeToggle: () => _toggleEventLike(idx),
             onTap: () => _openEvent(events[idx]),
           );
@@ -516,7 +559,9 @@ class _DiscoverScreenState extends State<DiscoverScreen>
       return _EmptyState(
         icon: _isSearching ? Icons.search_off : Icons.people_outline,
         title: _isSearching ? 'No people found' : 'No creators yet',
-        subtitle: _isSearching ? 'Try a different name.' : 'Be the first to go live.',
+        subtitle: _isSearching
+            ? 'Try a different name.'
+            : 'Be the first to go live.',
       );
     }
     return RefreshIndicator(
@@ -526,7 +571,7 @@ class _DiscoverScreenState extends State<DiscoverScreen>
       child: ListView.separated(
         controller: _scroll[_Tab.people],
         physics: const AlwaysScrollableScrollPhysics(),
-        padding: const EdgeInsets.only(top: 4, bottom: 24),
+        padding: const EdgeInsets.only(top: NileSpacing.s4, bottom: NileSpacing.s24),
         itemCount: users.length + (_hasMore[_Tab.people]! ? 1 : 0),
         separatorBuilder: (_, i) => i >= users.length - 1
             ? const SizedBox.shrink()
@@ -538,18 +583,20 @@ class _DiscoverScreenState extends State<DiscoverScreen>
             isFollowing: _followState[users[i].id] ?? false,
             isLoading: _followLoading.contains(users[i].id),
             onFollowTap: () => _toggleFollow(users[i]),
-            onTap: () => Navigator.push(
-              context,
-              MaterialPageRoute(
-                  builder: (_) => ProfileScreen(userId: users[i].id)),
-            ).then((_) {
-              if (!mounted) return;
-              _followState.remove(users[i].id);
-              setState(() {});
-              FollowService.isFollowing(users[i].id).then((v) {
-                if (mounted) setState(() => _followState[users[i].id] = v);
-              });
-            }),
+            onTap: () =>
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => ProfileScreen(userId: users[i].id),
+                  ),
+                ).then((_) {
+                  if (!mounted) return;
+                  _followState.remove(users[i].id);
+                  setState(() {});
+                  FollowService.isFollowing(users[i].id).then((v) {
+                    if (mounted) setState(() => _followState[users[i].id] = v);
+                  });
+                }),
           );
         },
       ),
@@ -585,19 +632,21 @@ class _UserTile extends StatelessWidget {
     return InkWell(
       onTap: onTap,
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s16, vertical: NileSpacing.s12),
         child: Row(
           children: [
             CircleAvatar(
               radius: 24,
               backgroundColor: NileColors.bgRaised,
-              backgroundImage:
-                  user.avatarUrl != null ? NetworkImage(user.avatarUrl!) : null,
+              backgroundImage: user.avatarUrl != null
+                  ? nileAvatarImage(user.avatarUrl!, 24)
+                  : null,
               child: user.avatarUrl == null
                   ? Text(
                       user.username[0].toUpperCase(),
-                      style: NileTextStyles.headingSm()
-                          .copyWith(color: NileColors.txtSecondary),
+                      style: NileTextStyles.headingSm().copyWith(
+                        color: NileColors.txtSecondary,
+                      ),
                     )
                   : null,
             ),
@@ -612,11 +661,16 @@ class _UserTile extends StatelessWidget {
                     children: [
                       Text('@${user.username}', style: NileTextStyles.bodySm()),
                       if (user.followerCount > 0) ...[
-                        Text(' · ',
-                            style: NileTextStyles.bodySm()
-                                .copyWith(color: NileColors.txtTertiary)),
-                        Text('${_fmt(user.followerCount)} followers',
-                            style: NileTextStyles.caption()),
+                        Text(
+                          ' · ',
+                          style: NileTextStyles.bodySm().copyWith(
+                            color: NileColors.txtTertiary,
+                          ),
+                        ),
+                        Text(
+                          '${_fmt(user.followerCount)} followers',
+                          style: NileTextStyles.caption(),
+                        ),
                       ],
                     ],
                   ),
@@ -661,22 +715,26 @@ class _FollowButton extends StatelessWidget {
       return OutlinedButton(
         onPressed: isLoading ? null : onTap,
         style: OutlinedButton.styleFrom(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s16, vertical: NileSpacing.s8),
           minimumSize: const Size(90, 34),
           tapTargetSize: MaterialTapTargetSize.shrinkWrap,
         ),
         child: isLoading
             ? spinnerSize
-            : Text('Following',
+            : Text(
+                'Following',
                 style: NileTextStyles.labelSm().copyWith(
-                    color: NileColors.txtPrimary, letterSpacing: 0)),
+                  color: NileColors.txtPrimary,
+                  letterSpacing: 0,
+                ),
+              ),
       );
     }
 
     return FilledButton(
       onPressed: isLoading ? null : onTap,
       style: FilledButton.styleFrom(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s16, vertical: NileSpacing.s8),
         minimumSize: const Size(90, 34),
         tapTargetSize: MaterialTapTargetSize.shrinkWrap,
       ),
@@ -685,11 +743,17 @@ class _FollowButton extends StatelessWidget {
               width: 14,
               height: 14,
               child: CircularProgressIndicator(
-                  strokeWidth: 2, color: NileColors.bgPage),
+                strokeWidth: 2,
+                color: NileColors.bgPage,
+              ),
             )
-          : Text('Follow',
-              style: NileTextStyles.labelSm()
-                  .copyWith(color: NileColors.bgPage, letterSpacing: 0)),
+          : Text(
+              'Follow',
+              style: NileTextStyles.labelSm().copyWith(
+                color: NileColors.bgPage,
+                letterSpacing: 0,
+              ),
+            ),
     );
   }
 }
@@ -700,19 +764,22 @@ class _DiscoverPostCard extends StatelessWidget {
   final Post post;
   final VoidCallback onTap;
   final VoidCallback? onLikeToggle;
-  const _DiscoverPostCard(
-      {required this.post, required this.onTap, this.onLikeToggle});
+  const _DiscoverPostCard({
+    required this.post,
+    required this.onTap,
+    this.onLikeToggle,
+  });
 
   @override
   Widget build(BuildContext context) {
     return Material(
       color: NileColors.bgSurface,
-      borderRadius: BorderRadius.circular(NileRadius.md),
+      borderRadius: BorderRadius.circular(NileRadius.lg),
       clipBehavior: Clip.antiAlias,
       child: InkWell(
         onTap: onTap,
         child: Padding(
-          padding: const EdgeInsets.all(12),
+          padding: const EdgeInsets.all(NileSpacing.s12),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
@@ -722,43 +789,56 @@ class _DiscoverPostCard extends StatelessWidget {
                     radius: 12,
                     backgroundColor: NileColors.bgRaised,
                     backgroundImage: post.authorAvatarUrl != null
-                        ? NetworkImage(post.authorAvatarUrl!)
+                        ? nileAvatarImage(post.authorAvatarUrl!, 12)
                         : null,
                     child: post.authorAvatarUrl == null
-                        ? Text(post.authorUsername[0].toUpperCase(),
-                            style: NileTextStyles.caption())
+                        ? Text(
+                            post.authorUsername[0].toUpperCase(),
+                            style: NileTextStyles.caption(),
+                          )
                         : null,
                   ),
                   const SizedBox(width: 8),
                   Expanded(
-                    child: Text('@${post.authorUsername}',
-                        style: NileTextStyles.bodySm(),
-                        overflow: TextOverflow.ellipsis),
+                    child: Text(
+                      '@${post.authorUsername}',
+                      style: NileTextStyles.bodySm(),
+                      overflow: TextOverflow.ellipsis,
+                    ),
                   ),
-                  Text(_timeAgo(post.createdAt), style: NileTextStyles.caption()),
+                  Text(
+                    _timeAgo(post.createdAt),
+                    style: NileTextStyles.caption(),
+                  ),
                 ],
               ),
               if (post.hasCaption) ...[
                 const SizedBox(height: 8),
-                Text(post.caption!.trim(),
-                    style: NileTextStyles.bodyMd(),
-                    maxLines: 4,
-                    overflow: TextOverflow.ellipsis),
+                Text(
+                  post.caption!.trim(),
+                  style: NileTextStyles.bodyMd(),
+                  maxLines: 4,
+                  overflow: TextOverflow.ellipsis,
+                ),
               ],
               if (post.hasImage) ...[
                 const SizedBox(height: 8),
                 ClipRRect(
                   borderRadius: BorderRadius.circular(NileRadius.sm),
                   child: AspectRatio(
-                    aspectRatio: 16 / 9,
+                    aspectRatio: 4 / 3,
                     child: Image.network(
                       post.imageUrl!,
+                      cacheWidth: nileDecodeWidth(600),
                       fit: BoxFit.cover,
                       errorBuilder: (_, _, _) => Container(
                         color: NileColors.bgRaised,
                         child: const Center(
-                            child: Icon(Icons.broken_image,
-                                color: NileColors.border)),
+                          child: Icon(
+                            Icons.broken_image,
+                            color: NileColors.border,
+                          ),
+                        ),
                       ),
                     ),
                   ),
@@ -772,17 +852,24 @@ class _DiscoverPostCard extends StatelessWidget {
                 const SizedBox(height: 6),
                 Row(
                   children: [
-                    _LikeButton(
-                        liked: post.likedByMe,
-                        count: post.likeCount,
-                        onTap: onLikeToggle!),
+                    LikeButton(
+                      liked: post.likedByMe,
+                      count: post.likeCount,
+                      onTap: onLikeToggle!,
+                    ),
                     const SizedBox(width: 14),
-                    const Icon(Icons.mode_comment_outlined,
-                        size: 18, color: NileColors.txtSecondary),
+                    const Icon(
+                      Icons.mode_comment_outlined,
+                      size: 18,
+                      color: NileColors.txtSecondary,
+                    ),
                     const SizedBox(width: 5),
-                    Text('${post.commentCount}',
-                        style: NileTextStyles.bodySm()
-                            .copyWith(color: NileColors.txtSecondary)),
+                    Text(
+                      '${post.commentCount}',
+                      style: NileTextStyles.bodySm().copyWith(
+                        color: NileColors.txtSecondary,
+                      ),
+                    ),
                   ],
                 ),
               ],
@@ -798,78 +885,99 @@ class _DiscoverPostCard extends StatelessWidget {
 
 class _DiscoverEventCard extends StatelessWidget {
   final Event event;
+  final bool hero;
   final VoidCallback onTap;
   final VoidCallback? onLikeToggle;
-  const _DiscoverEventCard(
-      {required this.event, required this.onTap, this.onLikeToggle});
+  const _DiscoverEventCard({
+    required this.event,
+    this.hero = true,
+    required this.onTap,
+    this.onLikeToggle,
+  });
 
   @override
   Widget build(BuildContext context) {
-    return Material(
-      color: NileColors.bgSurface,
-      borderRadius: BorderRadius.circular(NileRadius.md),
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: onTap,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            _EventThumbnail(event: event),
-            Padding(
-              padding: const EdgeInsets.all(12),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      CircleAvatar(
-                        radius: 12,
-                        backgroundColor: NileColors.bgRaised,
-                        backgroundImage: event.hostAvatarUrl != null
-                            ? NetworkImage(event.hostAvatarUrl!)
-                            : null,
-                        child: event.hostAvatarUrl == null
-                            ? Text(event.hostUsername[0].toUpperCase(),
-                                style: NileTextStyles.caption())
-                            : null,
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text('@${event.hostUsername}',
+    return NilePressable(
+      child: Material(
+        color: NileColors.bgSurface,
+        borderRadius: BorderRadius.circular(NileRadius.lg),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onTap,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              _EventThumbnail(event: event, hero: hero),
+              Padding(
+                padding: const EdgeInsets.all(NileSpacing.s12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        CircleAvatar(
+                          radius: 12,
+                          backgroundColor: NileColors.bgRaised,
+                          backgroundImage: event.hostAvatarUrl != null
+                              ? nileAvatarImage(event.hostAvatarUrl!, 12)
+                              : null,
+                          child: event.hostAvatarUrl == null
+                              ? Text(
+                                  event.hostUsername[0].toUpperCase(),
+                                  style: NileTextStyles.caption(),
+                                )
+                              : null,
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            '@${event.hostUsername}',
                             style: NileTextStyles.bodySm(),
-                            overflow: TextOverflow.ellipsis),
-                      ),
-                      if (event.isLive) ...[
-                        const Icon(Icons.visibility,
-                            size: 13, color: NileColors.txtTertiary),
-                        const SizedBox(width: 4),
-                        Text('${event.viewerCount}',
-                            style: NileTextStyles.caption()),
-                      ] else
-                        Text(_timeAgo(event.createdAt),
-                            style: NileTextStyles.caption()),
-                    ],
-                  ),
-                  const SizedBox(height: 6),
-                  Text(event.title,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        if (event.isLive) ...[
+                          const Icon(
+                            Icons.visibility,
+                            size: 13,
+                            color: NileColors.txtTertiary,
+                          ),
+                          const SizedBox(width: 4),
+                          Text(
+                            '${event.viewerCount}',
+                            style: NileTextStyles.caption().tabular,
+                          ),
+                        ] else
+                          Text(
+                            _timeAgo(event.createdAt),
+                            style: NileTextStyles.caption(),
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      event.title,
                       style: NileTextStyles.headingSm(),
                       maxLines: 2,
-                      overflow: TextOverflow.ellipsis),
-                  if (event.isScheduled) ...[
-                    const SizedBox(height: 4),
-                    Text('Scheduled', style: NileTextStyles.caption()),
-                  ],
-                  if (onLikeToggle != null) ...[
-                    const SizedBox(height: 8),
-                    _LikeButton(
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    if (event.isScheduled) ...[
+                      const SizedBox(height: 4),
+                      Text('Scheduled', style: NileTextStyles.caption()),
+                    ],
+                    if (onLikeToggle != null) ...[
+                      const SizedBox(height: 8),
+                      LikeButton(
                         liked: event.likedByMe,
                         count: event.likeCount,
-                        onTap: onLikeToggle!),
+                        onTap: onLikeToggle!,
+                      ),
+                    ],
                   ],
-                ],
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -878,79 +986,49 @@ class _DiscoverEventCard extends StatelessWidget {
 
 class _EventThumbnail extends StatelessWidget {
   final Event event;
-  const _EventThumbnail({required this.event});
+
+  /// Disable when this event already holds a live Hero elsewhere on screen
+  /// (e.g. it's in the network rail) — duplicate tags abort hero flights.
+  final bool hero;
+
+  /// Fill the parent's constraints instead of forcing 16:9 — used inside
+  /// fixed-height cards (network rail) where 16:9 would overflow.
+  final bool flexible;
+  const _EventThumbnail({
+    required this.event,
+    this.hero = true,
+    this.flexible = false,
+  });
 
   @override
   Widget build(BuildContext context) {
-    return AspectRatio(
-      aspectRatio: 16 / 9,
-      child: Stack(
-        fit: StackFit.expand,
-        children: [
-          if (event.coverImageUrl != null)
-            Image.network(
-              event.coverImageUrl!,
-              fit: BoxFit.cover,
-              errorBuilder: (_, _, _) => Container(color: NileColors.bgRaised),
-            )
-          else
-            Container(
-              color: NileColors.bgRaised,
-              child: const Center(
-                  child: Icon(Icons.event, color: NileColors.border, size: 32)),
+    final image = event.coverImageUrl != null
+        ? Image.network(
+            event.coverImageUrl!,
+            cacheWidth: nileDecodeWidth(600),
+            fit: BoxFit.cover,
+            errorBuilder: (_, _, _) => Container(color: NileColors.bgRaised),
+          )
+        : Container(
+            color: NileColors.bgRaised,
+            child: const Center(
+              child: Icon(Icons.event, color: NileColors.border, size: 32),
             ),
-          if (event.isLive)
-            Positioned(
-              top: 8,
-              left: 8,
-              child: Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                decoration: BoxDecoration(
-                  color: NileColors.coral,
-                  borderRadius: BorderRadius.circular(NileRadius.sm),
-                ),
-                child: Text('LIVE',
-                    style: NileTextStyles.caption().copyWith(
-                        color: NileColors.txtPrimary,
-                        fontWeight: FontWeight.w700)),
-              ),
-            ),
-        ],
-      ),
+          );
+    final stack = Stack(
+      fit: StackFit.expand,
+      children: [
+        if (hero)
+          Hero(tag: 'event-cover-${event.id}', child: image)
+        else
+          image,
+        const DecoratedBox(decoration: NileEffects.coverScrim),
+        if (event.isLive) const Positioned(top: 8, left: 8, child: LiveBadge()),
+      ],
     );
-  }
-}
-
-// ── Like button (shared) ──────────────────────────────────────────────────────
-
-class _LikeButton extends StatelessWidget {
-  final bool liked;
-  final int count;
-  final VoidCallback onTap;
-  const _LikeButton(
-      {required this.liked, required this.count, required this.onTap});
-
-  @override
-  Widget build(BuildContext context) {
-    final color = liked ? NileColors.coral : NileColors.txtSecondary;
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(NileRadius.sm),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(liked ? Icons.favorite : Icons.favorite_border,
-                size: 18, color: color),
-            const SizedBox(width: 5),
-            Text('$count',
-                style: NileTextStyles.bodySm().copyWith(color: color)),
-          ],
-        ),
-      ),
-    );
+    return flexible
+        ? stack
+        : AspectRatio(aspectRatio: 16 / 9, child: stack);
   }
 }
 
@@ -974,9 +1052,12 @@ class _NetworkRail extends StatelessWidget {
           ],
         ),
         const SizedBox(height: 4),
-        Text('Liked by people you follow',
-            style: NileTextStyles.caption()
-                .copyWith(color: NileColors.txtTertiary)),
+        Text(
+          'Liked by people you follow',
+          style: NileTextStyles.caption().copyWith(
+            color: NileColors.txtTertiary,
+          ),
+        ),
         const SizedBox(height: 12),
         SizedBox(
           height: 184,
@@ -1002,12 +1083,12 @@ class _RecPostCard extends StatelessWidget {
   Widget build(BuildContext context) {
     return Material(
       color: NileColors.bgSurface,
-      borderRadius: BorderRadius.circular(NileRadius.md),
+      borderRadius: BorderRadius.circular(NileRadius.lg),
       clipBehavior: Clip.antiAlias,
       child: InkWell(
         onTap: onTap,
         child: Padding(
-          padding: const EdgeInsets.all(12),
+          padding: const EdgeInsets.all(NileSpacing.s12),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -1017,18 +1098,22 @@ class _RecPostCard extends StatelessWidget {
                     radius: 11,
                     backgroundColor: NileColors.bgRaised,
                     backgroundImage: post.authorAvatarUrl != null
-                        ? NetworkImage(post.authorAvatarUrl!)
+                        ? nileAvatarImage(post.authorAvatarUrl!, 11)
                         : null,
                     child: post.authorAvatarUrl == null
-                        ? Text(post.authorUsername[0].toUpperCase(),
-                            style: NileTextStyles.caption())
+                        ? Text(
+                            post.authorUsername[0].toUpperCase(),
+                            style: NileTextStyles.caption(),
+                          )
                         : null,
                   ),
                   const SizedBox(width: 8),
                   Expanded(
-                    child: Text('@${post.authorUsername}',
-                        style: NileTextStyles.bodySm(),
-                        overflow: TextOverflow.ellipsis),
+                    child: Text(
+                      '@${post.authorUsername}',
+                      style: NileTextStyles.bodySm(),
+                      overflow: TextOverflow.ellipsis,
+                    ),
                   ),
                 ],
               ),
@@ -1043,15 +1128,20 @@ class _RecPostCard extends StatelessWidget {
               const SizedBox(height: 6),
               Row(
                 children: [
-                  Icon(post.likedByMe ? Icons.favorite : Icons.favorite_border,
-                      size: 16,
-                      color: post.likedByMe
-                          ? NileColors.coral
-                          : NileColors.txtSecondary),
+                  Icon(
+                    post.likedByMe ? Icons.favorite : Icons.favorite_border,
+                    size: 16,
+                    color: post.likedByMe
+                        ? NileColors.coral
+                        : NileColors.txtSecondary,
+                  ),
                   const SizedBox(width: 5),
-                  Text('${post.likeCount}',
-                      style: NileTextStyles.bodySm()
-                          .copyWith(color: NileColors.txtSecondary)),
+                  Text(
+                    '${post.likeCount}',
+                    style: NileTextStyles.bodySm().copyWith(
+                      color: NileColors.txtSecondary,
+                    ),
+                  ),
                 ],
               ),
             ],
@@ -1071,27 +1161,31 @@ class _RecEventCard extends StatelessWidget {
   Widget build(BuildContext context) {
     return Material(
       color: NileColors.bgSurface,
-      borderRadius: BorderRadius.circular(NileRadius.md),
+      borderRadius: BorderRadius.circular(NileRadius.lg),
       clipBehavior: Clip.antiAlias,
       child: InkWell(
         onTap: onTap,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            _EventThumbnail(event: event),
+            Expanded(child: _EventThumbnail(event: event, flexible: true)),
             Padding(
-              padding: const EdgeInsets.all(12),
+              padding: const EdgeInsets.all(NileSpacing.s12),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('@${event.hostUsername}',
-                      style: NileTextStyles.bodySm(),
-                      overflow: TextOverflow.ellipsis),
+                  Text(
+                    '@${event.hostUsername}',
+                    style: NileTextStyles.bodySm(),
+                    overflow: TextOverflow.ellipsis,
+                  ),
                   const SizedBox(height: 4),
-                  Text(event.title,
-                      style: NileTextStyles.labelMd(),
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis),
+                  Text(
+                    event.title,
+                    style: NileTextStyles.labelMd(),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
                 ],
               ),
             ),
@@ -1116,7 +1210,7 @@ class _Loading extends StatelessWidget {
   const _Loading();
   @override
   Widget build(BuildContext context) =>
-      const Center(child: CircularProgressIndicator(color: NileColors.volt));
+      const SingleChildScrollView(child: NileSkeletonList());
 }
 
 // ── Empty / error states ──────────────────────────────────────────────────────
@@ -1125,14 +1219,17 @@ class _EmptyState extends StatelessWidget {
   final IconData icon;
   final String title;
   final String subtitle;
-  const _EmptyState(
-      {required this.icon, required this.title, required this.subtitle});
+  const _EmptyState({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+  });
 
   @override
   Widget build(BuildContext context) {
     return Center(
       child: Padding(
-        padding: const EdgeInsets.all(40),
+        padding: const EdgeInsets.all(NileSpacing.s40),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -1140,10 +1237,13 @@ class _EmptyState extends StatelessWidget {
             const SizedBox(height: 16),
             Text(title, style: NileTextStyles.headingMd()),
             const SizedBox(height: 8),
-            Text(subtitle,
-                textAlign: TextAlign.center,
-                style: NileTextStyles.bodyMd()
-                    .copyWith(color: NileColors.txtSecondary)),
+            Text(
+              subtitle,
+              textAlign: TextAlign.center,
+              style: NileTextStyles.bodyMd().copyWith(
+                color: NileColors.txtSecondary,
+              ),
+            ),
           ],
         ),
       ),
@@ -1160,7 +1260,7 @@ class _ErrorState extends StatelessWidget {
   Widget build(BuildContext context) {
     return Center(
       child: Padding(
-        padding: const EdgeInsets.all(40),
+        padding: const EdgeInsets.all(NileSpacing.s40),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -1168,10 +1268,13 @@ class _ErrorState extends StatelessWidget {
             const SizedBox(height: 16),
             Text('Something went wrong', style: NileTextStyles.headingMd()),
             const SizedBox(height: 8),
-            Text(message,
-                textAlign: TextAlign.center,
-                style: NileTextStyles.bodyMd()
-                    .copyWith(color: NileColors.txtSecondary)),
+            Text(
+              message,
+              textAlign: TextAlign.center,
+              style: NileTextStyles.bodyMd().copyWith(
+                color: NileColors.txtSecondary,
+              ),
+            ),
             const SizedBox(height: 24),
             FilledButton(onPressed: onRetry, child: const Text('Retry')),
           ],

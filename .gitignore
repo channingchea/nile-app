@@ -44,3 +44,6 @@ app.*.map.json
 /android/app/profile
 /android/app/release
 supabase/.temp/
+
+# FUSE temp artifacts (sandbox sed -i leftovers)
+**/.fuse_hidden*
