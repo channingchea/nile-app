@@ -1882,9 +1882,13 @@ class _ProfileEventCard extends StatelessWidget {
                               color: NileColors.txtTertiary,
                             ),
                             const SizedBox(width: 4),
-                            Text(
-                              '${event.viewerCount}',
-                              style: NileTextStyles.caption().tabular,
+                            Flexible(
+                              child: Text(
+                                '${event.viewerCount}',
+                                style: NileTextStyles.caption().tabular,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
                             ),
                           ] else if (_scheduledLabel() != null) ...[
                             const Icon(
@@ -1893,14 +1897,22 @@ class _ProfileEventCard extends StatelessWidget {
                               color: NileColors.txtTertiary,
                             ),
                             const SizedBox(width: 4),
-                            Text(
-                              _scheduledLabel()!,
-                              style: NileTextStyles.caption(),
+                            Flexible(
+                              child: Text(
+                                _scheduledLabel()!,
+                                style: NileTextStyles.caption(),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
                             ),
                           ] else
-                            Text(
-                              _timeAgo(event.createdAt),
-                              style: NileTextStyles.caption(),
+                            Flexible(
+                              child: Text(
+                                _timeAgo(event.createdAt),
+                                style: NileTextStyles.caption(),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
                             ),
                           if (onLikeToggle != null) ...[
                             const SizedBox(width: 12),

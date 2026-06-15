@@ -22,8 +22,10 @@ class AudioMeter extends StatefulWidget {
 }
 
 class _AudioMeterState extends State<AudioMeter> {
-  static const _clipThreshold = 0.92; // fraction of full-scale that latches clip
-  static const _peakDecay = 0.04; // how fast the peak-hold marker falls per tick
+  static const _clipThreshold =
+      0.92; // fraction of full-scale that latches clip
+  static const _peakDecay =
+      0.04; // how fast the peak-hold marker falls per tick
 
   Timer? _timer;
   double _level = 0; // smoothed current level (0–1)
@@ -55,7 +57,8 @@ class _AudioMeterState extends State<AudioMeter> {
       clipping = true;
       _clipAt = DateTime.now();
     } else if (_clipAt != null &&
-        DateTime.now().difference(_clipAt!) > const Duration(milliseconds: 1500)) {
+        DateTime.now().difference(_clipAt!) >
+            const Duration(milliseconds: 1500)) {
       clipping = false; // hold the warning ~1.5s after the last over
     }
 
@@ -75,7 +78,7 @@ class _AudioMeterState extends State<AudioMeter> {
         Container(
           width: 56,
           height: widget.height,
-          padding: const EdgeInsets.all(4),
+          padding: const EdgeInsets.all(NileSpacing.s4),
           decoration: BoxDecoration(
             color: NileColors.bgPage,
             borderRadius: BorderRadius.circular(NileRadius.sm),
@@ -91,7 +94,7 @@ class _AudioMeterState extends State<AudioMeter> {
           opacity: _clipping ? 1 : 0.25,
           duration: const Duration(milliseconds: 120),
           child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+            padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s8, vertical: NileSpacing.s4),
             decoration: BoxDecoration(
               color: _clipping ? NileColors.coral : Colors.transparent,
               borderRadius: BorderRadius.circular(NileRadius.sm),

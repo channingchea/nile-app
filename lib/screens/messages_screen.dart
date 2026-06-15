@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../services/message_service.dart';
 import '../theme.dart';
+import '../widgets/empty_state.dart';
 import 'conversation_screen.dart';
 
 class MessagesScreen extends StatefulWidget {
@@ -16,6 +17,8 @@ class _MessagesScreenState extends State<MessagesScreen> {
   bool _loading = true;
   String? _error;
   RealtimeChannel? _channel;
+  final _searchCtrl = TextEditingController();
+  String _query = '';
 
   @override
   void initState() {
@@ -27,7 +30,18 @@ class _MessagesScreenState extends State<MessagesScreen> {
   @override
   void dispose() {
     _channel?.unsubscribe();
+    _searchCtrl.dispose();
     super.dispose();
+  }
+
+  /// Conversations filtered by the current search query (by username).
+  List<Conversation> get _filtered {
+    final all = _convs ?? const [];
+    final q = _query.trim().toLowerCase();
+    if (q.isEmpty) return all;
+    return all
+        .where((c) => c.otherUsername.toLowerCase().contains(q))
+        .toList();
   }
 
   void _subscribeRealtime() {
@@ -39,19 +53,35 @@ class _MessagesScreenState extends State<MessagesScreen> {
           event: PostgresChangeEvent.all,
           schema: 'public',
           table: 'conversations',
-          callback: (_) { if (mounted) _load(); },
+          callback: (_) {
+            if (mounted) _load();
+          },
         )
         .onPostgresChanges(
           event: PostgresChangeEvent.insert,
           schema: 'public',
           table: 'messages',
-          callback: (_) { if (mounted) _load(); },
+          callback: (_) {
+            if (mounted) _load();
+          },
+        )
+        // Refresh live-presence dots when any event goes live/ends.
+        .onPostgresChanges(
+          event: PostgresChangeEvent.update,
+          schema: 'public',
+          table: 'events',
+          callback: (_) {
+            if (mounted) _load();
+          },
         )
         .subscribe();
   }
 
   Future<void> _load() async {
-    setState(() { _loading = true; _error = null; });
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
     try {
       final convs = await MessageService.getConversations();
       if (mounted) setState(() => _convs = convs);
@@ -79,10 +109,22 @@ class _MessagesScreenState extends State<MessagesScreen> {
                   pinned: true,
                   backgroundColor: NileColors.bgPage,
                   title: Text('Messages', style: NileTextStyles.headingLg()),
+                  // Search bar appears only once there are conversations.
+                  bottom: (_convs != null && _convs!.isNotEmpty)
+                      ? PreferredSize(
+                          preferredSize: const Size.fromHeight(56),
+                          child: _SearchField(
+                            controller: _searchCtrl,
+                            onChanged: (v) => setState(() => _query = v),
+                          ),
+                        )
+                      : null,
                 ),
                 if (_loading)
                   const SliverFillRemaining(
-                    child: Center(child: CircularProgressIndicator(color: NileColors.volt)),
+                    child: Center(
+                      child: CircularProgressIndicator(color: NileColors.volt),
+                    ),
                   )
                 else if (_error != null)
                   SliverFillRemaining(
@@ -90,22 +132,27 @@ class _MessagesScreenState extends State<MessagesScreen> {
                   )
                 else if (_convs == null || _convs!.isEmpty)
                   const SliverFillRemaining(child: _EmptyView())
+                else if (_filtered.isEmpty)
+                  const SliverFillRemaining(
+                    hasScrollBody: false,
+                    child: _NoMatchesView(),
+                  )
                 else
                   SliverList.separated(
-                    itemCount: _convs!.length,
+                    itemCount: _filtered.length,
                     separatorBuilder: (_, _) => const Divider(
                       height: 1,
                       indent: 72,
                       color: NileColors.border,
                     ),
                     itemBuilder: (_, i) => _ConversationTile(
-                      conv: _convs![i],
+                      conv: _filtered[i],
                       onTap: () async {
                         await Navigator.push(
                           context,
                           MaterialPageRoute(
                             builder: (_) =>
-                                ConversationScreen(conversation: _convs![i]),
+                                ConversationScreen(conversation: _filtered[i]),
                           ),
                         );
                         _load(); // Refresh unread counts on return.
@@ -144,10 +191,14 @@ class _ConversationTile extends StatelessWidget {
     return InkWell(
       onTap: onTap,
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s16, vertical: NileSpacing.s12),
         child: Row(
           children: [
-            _Avatar(username: conv.otherUsername, avatarUrl: conv.otherAvatarUrl),
+            _Avatar(
+              username: conv.otherUsername,
+              avatarUrl: conv.otherAvatarUrl,
+              isLive: conv.isLive,
+            ),
             const SizedBox(width: 12),
             Expanded(
               child: Column(
@@ -159,8 +210,9 @@ class _ConversationTile extends StatelessWidget {
                         child: Text(
                           '@${conv.otherUsername}',
                           style: NileTextStyles.bodyMd().copyWith(
-                            fontWeight:
-                                hasUnread ? FontWeight.w600 : FontWeight.w400,
+                            fontWeight: hasUnread
+                                ? FontWeight.w600
+                                : FontWeight.w400,
                             color: hasUnread
                                 ? NileColors.txtPrimary
                                 : NileColors.txtPrimary,
@@ -191,18 +243,19 @@ class _ConversationTile extends StatelessWidget {
                       ),
                       if (hasUnread)
                         Container(
-                          margin: const EdgeInsets.only(left: 8),
+                          margin: const EdgeInsets.only(left: NileSpacing.s8),
                           padding: const EdgeInsets.symmetric(
-                              horizontal: 6, vertical: 2),
+                            horizontal: NileSpacing.s6,
+                            vertical: NileSpacing.s2,
+                          ),
                           decoration: BoxDecoration(
                             color: NileColors.volt,
-                            borderRadius:
-                                BorderRadius.circular(NileRadius.pill),
+                            borderRadius: BorderRadius.circular(
+                              NileRadius.pill,
+                            ),
                           ),
                           child: Text(
-                            conv.unreadCount > 9
-                                ? '9+'
-                                : '${conv.unreadCount}',
+                            conv.unreadCount > 9 ? '9+' : '${conv.unreadCount}',
                             style: NileTextStyles.caption().copyWith(
                               color: NileColors.bgPage,
                               fontWeight: FontWeight.w700,
@@ -226,15 +279,17 @@ class _ConversationTile extends StatelessWidget {
 class _Avatar extends StatelessWidget {
   final String username;
   final String? avatarUrl;
+  final bool isLive;
   final double radius;
-  const _Avatar({required this.username, this.avatarUrl}) : radius = 24;
+  const _Avatar({required this.username, this.avatarUrl, this.isLive = false})
+    : radius = 24;
 
   @override
   Widget build(BuildContext context) {
-    return CircleAvatar(
+    final avatar = CircleAvatar(
       radius: radius,
       backgroundColor: NileColors.bgRaised,
-      backgroundImage: avatarUrl != null ? NetworkImage(avatarUrl!) : null,
+      backgroundImage: avatarUrl != null ? nileAvatarImage(avatarUrl!, radius) : null,
       child: avatarUrl == null
           ? Text(
               username.isNotEmpty ? username[0].toUpperCase() : '?',
@@ -245,37 +300,117 @@ class _Avatar extends StatelessWidget {
             )
           : null,
     );
+    if (!isLive) return avatar;
+    // Coral presence dot, ringed in the page color to read against the avatar.
+    return Stack(
+      children: [
+        avatar,
+        Positioned(
+          right: 0,
+          bottom: 0,
+          child: Container(
+            width: 14,
+            height: 14,
+            decoration: BoxDecoration(
+              color: NileColors.coral,
+              shape: BoxShape.circle,
+              border: Border.all(color: NileColors.bgPage, width: 2),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// ── Search field ──────────────────────────────────────────────────────────────
+
+class _SearchField extends StatelessWidget {
+  final TextEditingController controller;
+  final ValueChanged<String> onChanged;
+  const _SearchField({required this.controller, required this.onChanged});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        NileSpacing.s16,
+        NileSpacing.s4,
+        NileSpacing.s16,
+        NileSpacing.s8,
+      ),
+      child: TextField(
+        controller: controller,
+        onChanged: onChanged,
+        textInputAction: TextInputAction.search,
+        style: NileTextStyles.bodyMd(),
+        decoration: InputDecoration(
+          isDense: true,
+          hintText: 'Search messages',
+          prefixIcon: const Icon(
+            Icons.search,
+            size: 20,
+            color: NileColors.txtTertiary,
+          ),
+          suffixIcon: controller.text.isEmpty
+              ? null
+              : IconButton(
+                  icon: const Icon(
+                    Icons.close,
+                    size: 18,
+                    color: NileColors.txtTertiary,
+                  ),
+                  onPressed: () {
+                    controller.clear();
+                    onChanged('');
+                  },
+                ),
+          contentPadding: const EdgeInsets.symmetric(
+            horizontal: NileSpacing.s12,
+            vertical: NileSpacing.s8,
+          ),
+          fillColor: NileColors.bgRaised,
+          filled: true,
+          border: OutlineInputBorder(
+            borderSide: BorderSide.none,
+            borderRadius: BorderRadius.circular(NileRadius.pill),
+          ),
+          enabledBorder: OutlineInputBorder(
+            borderSide: BorderSide.none,
+            borderRadius: BorderRadius.circular(NileRadius.pill),
+          ),
+          focusedBorder: OutlineInputBorder(
+            borderSide: BorderSide.none,
+            borderRadius: BorderRadius.circular(NileRadius.pill),
+          ),
+        ),
+      ),
+    );
   }
 }
 
 // ── Empty / error views ───────────────────────────────────────────────────────
 
+class _NoMatchesView extends StatelessWidget {
+  const _NoMatchesView();
+
+  @override
+  Widget build(BuildContext context) => const NileEmptyState(
+    icon: Icons.search_off,
+    title: 'No matches',
+    body: 'No conversations match your search.',
+  );
+}
+
 class _EmptyView extends StatelessWidget {
   const _EmptyView();
 
   @override
-  Widget build(BuildContext context) {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(40),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.send_outlined, size: 56, color: NileColors.border),
-            const SizedBox(height: 16),
-            Text('No messages yet', style: NileTextStyles.headingMd()),
-            const SizedBox(height: 8),
-            Text(
-              'Send a message by visiting someone\'s profile.',
-              textAlign: TextAlign.center,
-              style:
-                  NileTextStyles.bodyMd().copyWith(color: NileColors.txtSecondary),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
+  Widget build(BuildContext context) => const NileEmptyState(
+    icon: Icons.send_outlined,
+    title: 'No messages yet',
+    body: 'Send a message by visiting someone\'s profile.',
+  );
 }
 
 class _ErrorView extends StatelessWidget {
@@ -287,7 +422,7 @@ class _ErrorView extends StatelessWidget {
   Widget build(BuildContext context) {
     return Center(
       child: Padding(
-        padding: const EdgeInsets.all(40),
+        padding: const EdgeInsets.all(NileSpacing.s40),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -298,8 +433,9 @@ class _ErrorView extends StatelessWidget {
             Text(
               message,
               textAlign: TextAlign.center,
-              style: NileTextStyles.bodyMd()
-                  .copyWith(color: NileColors.txtSecondary),
+              style: NileTextStyles.bodyMd().copyWith(
+                color: NileColors.txtSecondary,
+              ),
             ),
             const SizedBox(height: 24),
             FilledButton(onPressed: onRetry, child: const Text('Retry')),
@@ -317,18 +453,19 @@ class NileAvatar extends StatelessWidget {
   final String username;
   final String? avatarUrl;
   final double radius;
-  const NileAvatar(
-      {super.key,
-      required this.username,
-      this.avatarUrl,
-      this.radius = 24});
+  const NileAvatar({
+    super.key,
+    required this.username,
+    this.avatarUrl,
+    this.radius = 24,
+  });
 
   @override
   Widget build(BuildContext context) {
     return CircleAvatar(
       radius: radius,
       backgroundColor: NileColors.bgRaised,
-      backgroundImage: avatarUrl != null ? NetworkImage(avatarUrl!) : null,
+      backgroundImage: avatarUrl != null ? nileAvatarImage(avatarUrl!, radius) : null,
       child: avatarUrl == null
           ? Text(
               username.isNotEmpty ? username[0].toUpperCase() : '?',

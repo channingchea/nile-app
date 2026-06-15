@@ -11,9 +11,10 @@ class RepostService {
   }
 
   static Future<void> repost(String postId) async {
-    await supabase
-        .from('reposts')
-        .upsert({'user_id': _uid(), 'post_id': postId});
+    await supabase.from('reposts').upsert({
+      'user_id': _uid(),
+      'post_id': postId,
+    });
   }
 
   static Future<void> unrepost(String postId) async {

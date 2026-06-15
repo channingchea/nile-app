@@ -2,29 +2,37 @@ import 'supabase_client.dart';
 
 enum ReportTargetType { user, post, event, comment }
 
-enum ReportReason { spam, harassment, hateSpeech, nudity, violence, selfHarm, other }
+enum ReportReason {
+  spam,
+  harassment,
+  hateSpeech,
+  nudity,
+  violence,
+  selfHarm,
+  other,
+}
 
 extension ReportReasonX on ReportReason {
   /// Matches the report_reason Postgres enum.
   String get dbValue => switch (this) {
-        ReportReason.spam => 'spam',
-        ReportReason.harassment => 'harassment',
-        ReportReason.hateSpeech => 'hate_speech',
-        ReportReason.nudity => 'nudity',
-        ReportReason.violence => 'violence',
-        ReportReason.selfHarm => 'self_harm',
-        ReportReason.other => 'other',
-      };
+    ReportReason.spam => 'spam',
+    ReportReason.harassment => 'harassment',
+    ReportReason.hateSpeech => 'hate_speech',
+    ReportReason.nudity => 'nudity',
+    ReportReason.violence => 'violence',
+    ReportReason.selfHarm => 'self_harm',
+    ReportReason.other => 'other',
+  };
 
   String get label => switch (this) {
-        ReportReason.spam => 'Spam',
-        ReportReason.harassment => 'Harassment or bullying',
-        ReportReason.hateSpeech => 'Hate speech',
-        ReportReason.nudity => 'Nudity or sexual content',
-        ReportReason.violence => 'Violence',
-        ReportReason.selfHarm => 'Self-harm',
-        ReportReason.other => 'Other',
-      };
+    ReportReason.spam => 'Spam',
+    ReportReason.harassment => 'Harassment or bullying',
+    ReportReason.hateSpeech => 'Hate speech',
+    ReportReason.nudity => 'Nudity or sexual content',
+    ReportReason.violence => 'Violence',
+    ReportReason.selfHarm => 'Self-harm',
+    ReportReason.other => 'Other',
+  };
 }
 
 class ReportService {

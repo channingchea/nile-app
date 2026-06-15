@@ -29,16 +29,18 @@ class FavoritesService {
         .select('favorite_id')
         .eq('user_id', uid);
     return {
-      for (final r in rows as List) (r as Map<String, dynamic>)['favorite_id'] as String
+      for (final r in rows as List)
+        (r as Map<String, dynamic>)['favorite_id'] as String,
     };
   }
 
   static Future<void> add(String favoriteId) async {
     final uid = supabase.auth.currentUser?.id;
     if (uid == null || uid == favoriteId) return;
-    await supabase
-        .from('operator_favorites')
-        .upsert({'user_id': uid, 'favorite_id': favoriteId});
+    await supabase.from('operator_favorites').upsert({
+      'user_id': uid,
+      'favorite_id': favoriteId,
+    });
   }
 
   static Future<void> remove(String favoriteId) async {

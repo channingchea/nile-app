@@ -9,6 +9,7 @@ class NotificationPreferences {
   final bool eventLive;
   final bool eventEnded;
   final bool operatorAssigned;
+  final bool newMessage;
 
   const NotificationPreferences({
     this.postLike = true,
@@ -18,6 +19,7 @@ class NotificationPreferences {
     this.eventLive = true,
     this.eventEnded = true,
     this.operatorAssigned = true,
+    this.newMessage = true,
   });
 
   factory NotificationPreferences.fromJson(Map<String, dynamic> j) =>
@@ -29,6 +31,7 @@ class NotificationPreferences {
         eventLive: j['event_live'] as bool? ?? true,
         eventEnded: j['event_ended'] as bool? ?? true,
         operatorAssigned: j['operator_assigned'] as bool? ?? true,
+        newMessage: j['new_message'] as bool? ?? true,
       );
 
   NotificationPreferences copyWith({
@@ -39,26 +42,28 @@ class NotificationPreferences {
     bool? eventLive,
     bool? eventEnded,
     bool? operatorAssigned,
-  }) =>
-      NotificationPreferences(
-        postLike: postLike ?? this.postLike,
-        postComment: postComment ?? this.postComment,
-        follow: follow ?? this.follow,
-        eventStarting: eventStarting ?? this.eventStarting,
-        eventLive: eventLive ?? this.eventLive,
-        eventEnded: eventEnded ?? this.eventEnded,
-        operatorAssigned: operatorAssigned ?? this.operatorAssigned,
-      );
+    bool? newMessage,
+  }) => NotificationPreferences(
+    postLike: postLike ?? this.postLike,
+    postComment: postComment ?? this.postComment,
+    follow: follow ?? this.follow,
+    eventStarting: eventStarting ?? this.eventStarting,
+    eventLive: eventLive ?? this.eventLive,
+    eventEnded: eventEnded ?? this.eventEnded,
+    operatorAssigned: operatorAssigned ?? this.operatorAssigned,
+    newMessage: newMessage ?? this.newMessage,
+  );
 
   Map<String, dynamic> toColumns() => {
-        'post_like': postLike,
-        'post_comment': postComment,
-        'follow': follow,
-        'event_starting': eventStarting,
-        'event_live': eventLive,
-        'event_ended': eventEnded,
-        'operator_assigned': operatorAssigned,
-      };
+    'post_like': postLike,
+    'post_comment': postComment,
+    'follow': follow,
+    'event_starting': eventStarting,
+    'event_live': eventLive,
+    'event_ended': eventEnded,
+    'operator_assigned': operatorAssigned,
+    'new_message': newMessage,
+  };
 }
 
 class NotificationPreferencesService {

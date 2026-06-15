@@ -8,14 +8,16 @@ class LoadMoreFooter extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => const Padding(
-        padding: EdgeInsets.symmetric(vertical: 20),
-        child: Center(
-          child: SizedBox(
-            width: 22,
-            height: 22,
-            child: CircularProgressIndicator(
-                strokeWidth: 2, color: NileColors.volt),
-          ),
+    padding: EdgeInsets.symmetric(vertical: NileSpacing.s16),
+    child: Center(
+      child: SizedBox(
+        width: 22,
+        height: 22,
+        child: CircularProgressIndicator(
+          strokeWidth: 2,
+          color: NileColors.volt,
         ),
-      );
+      ),
+    ),
+  );
 }

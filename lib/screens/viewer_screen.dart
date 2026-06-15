@@ -8,6 +8,7 @@ import '../services/event_service.dart';
 import '../services/livekit_service.dart';
 import '../services/profile_service.dart';
 import '../theme.dart';
+import '../widgets/rolling_number.dart';
 
 class ViewerScreen extends StatefulWidget {
   final String? initialEventId;
@@ -221,9 +222,12 @@ class _ViewerScreenState extends State<ViewerScreen> {
         ..on<RoomDisconnectedEvent>(_onRoomDisconnected);
 
       // Fail loudly instead of hanging on "Joining stream…" forever.
-      await room.connect(wsUrl, token).timeout(
+      await room
+          .connect(wsUrl, token)
+          .timeout(
             const Duration(seconds: 15),
-            onTimeout: () => throw Exception('Connection timed out. Try again.'),
+            onTimeout: () =>
+                throw Exception('Connection timed out. Try again.'),
           );
 
       // Read the master-audio participant's joinedAt before touching any
@@ -296,7 +300,9 @@ class _ViewerScreenState extends State<ViewerScreen> {
     // Don't gate on TrackSource (can be `unknown` at subscribe time) — _addCamera
     // checks the participant's role == 'camera' authoritatively.
     if (event.track is VideoTrack) {
-      final idx = _cameras.indexWhere((c) => c.identity == event.participant.identity);
+      final idx = _cameras.indexWhere(
+        (c) => c.identity == event.participant.identity,
+      );
       if (idx != -1) {
         setState(() {
           _cameras[idx] = CameraFeed(
@@ -315,7 +321,9 @@ class _ViewerScreenState extends State<ViewerScreen> {
 
   void _onTrackUnsubscribed(TrackUnsubscribedEvent event) {
     if (event.track is VideoTrack) {
-      final idx = _cameras.indexWhere((c) => c.identity == event.participant.identity);
+      final idx = _cameras.indexWhere(
+        (c) => c.identity == event.participant.identity,
+      );
       if (idx != -1) {
         setState(() {
           _cameras[idx] = CameraFeed(
@@ -409,7 +417,8 @@ class _ViewerScreenState extends State<ViewerScreen> {
     RemoteParticipant participant,
     RemoteTrackPublication publication,
   ) {
-    final cameraJoinedAt = (_parseMeta(participant.metadata)['joinedAt'] as num?)?.toInt();
+    final cameraJoinedAt =
+        (_parseMeta(participant.metadata)['joinedAt'] as num?)?.toInt();
     int delayMs = 0;
     if (_audioJoinedAt != null && cameraJoinedAt != null) {
       delayMs = (_audioJoinedAt! - cameraJoinedAt).clamp(0, _maxSyncDelayMs);
@@ -506,7 +515,9 @@ class _ViewerScreenState extends State<ViewerScreen> {
       ..on<ParticipantMetadataUpdatedEvent>(_onParticipantMetadataUpdated)
       ..on<RoomDisconnectedEvent>(_onRoomDisconnected);
 
-    await room.connect(conn.wsUrl, conn.token).timeout(
+    await room
+        .connect(conn.wsUrl, conn.token)
+        .timeout(
           const Duration(seconds: 15),
           onTimeout: () => throw Exception('Reconnect timed out.'),
         );
@@ -582,7 +593,8 @@ class _ViewerScreenState extends State<ViewerScreen> {
       }
       return;
     }
-    final target = _masterAudioIdentity ??
+    final target =
+        _masterAudioIdentity ??
         (_cameras.isNotEmpty
             ? _cameras[_focusedIndex.clamp(0, _cameras.length - 1)].identity
             : null);
@@ -629,15 +641,18 @@ class _ViewerScreenState extends State<ViewerScreen> {
     if (meta['role'] != 'camera') return;
     if (_cameras.any((c) => c.identity == participant.identity)) return;
 
-    final cameraName = (meta['cameraName'] as String?)
-        ?? (participant.name.isNotEmpty ? participant.name : participant.identity);
+    final cameraName =
+        (meta['cameraName'] as String?) ??
+        (participant.name.isNotEmpty ? participant.name : participant.identity);
 
     setState(() {
-      _cameras.add(CameraFeed(
-        identity: participant.identity,
-        cameraName: cameraName,
-        track: track,
-      ));
+      _cameras.add(
+        CameraFeed(
+          identity: participant.identity,
+          cameraName: cameraName,
+          track: track,
+        ),
+      );
     });
     _updateAudioRouting();
   }
@@ -691,7 +706,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
 
   Widget _buildForm() {
     return SingleChildScrollView(
-      padding: const EdgeInsets.all(32.0),
+      padding: const EdgeInsets.all(NileSpacing.s32),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -720,11 +735,9 @@ class _ViewerScreenState extends State<ViewerScreen> {
             style: FilledButton.styleFrom(
               backgroundColor: NileColors.volt,
               foregroundColor: NileColors.bgPage,
-              padding: const EdgeInsets.symmetric(vertical: 16),
+              padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
               textStyle: NileTextStyles.labelLg(),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(NileRadius.sm),
-              ),
+              shape: const StadiumBorder(),
             ),
           ),
         ],
@@ -754,7 +767,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
         Expanded(
           child: Center(
             child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 32),
+              padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s32),
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
@@ -768,8 +781,9 @@ class _ViewerScreenState extends State<ViewerScreen> {
                   const SizedBox(height: 8),
                   Text(
                     'The show will begin soon.',
-                    style: NileTextStyles.bodyMd()
-                        .copyWith(color: NileColors.txtSecondary),
+                    style: NileTextStyles.bodyMd().copyWith(
+                      color: NileColors.txtSecondary,
+                    ),
                     textAlign: TextAlign.center,
                   ),
                   const SizedBox(height: 28),
@@ -799,7 +813,9 @@ class _ViewerScreenState extends State<ViewerScreen> {
               const SizedBox(height: 8),
               Text(
                 'Camera Off',
-                style: NileTextStyles.bodyMd().copyWith(color: NileColors.txtTertiary),
+                style: NileTextStyles.bodyMd().copyWith(
+                  color: NileColors.txtTertiary,
+                ),
               ),
             ],
           ],
@@ -829,8 +845,9 @@ class _ViewerScreenState extends State<ViewerScreen> {
                       const SizedBox(height: 16),
                       Text(
                         'Waiting for cameras to connect...',
-                        style: NileTextStyles.bodyMd()
-                            .copyWith(color: NileColors.txtSecondary),
+                        style: NileTextStyles.bodyMd().copyWith(
+                          color: NileColors.txtSecondary,
+                        ),
                       ),
                     ],
                   ),
@@ -883,8 +900,9 @@ class _ViewerScreenState extends State<ViewerScreen> {
               const SizedBox(height: 8),
               Text(
                 'The stream dropped briefly. Hang tight.',
-                style: NileTextStyles.bodyMd()
-                    .copyWith(color: NileColors.txtSecondary),
+                style: NileTextStyles.bodyMd().copyWith(
+                  color: NileColors.txtSecondary,
+                ),
               ),
             ],
           ),
@@ -907,31 +925,35 @@ class _ViewerScreenState extends State<ViewerScreen> {
       child: Row(
         children: [
           // Status badge — SOUND CHECK (volt) in the Lobby, LIVE (coral) once live
-          Builder(builder: (_) {
-            final inLobby = _eventStatus == 'soundcheck' && !_streamEnded;
-            return Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              decoration: BoxDecoration(
-                color: inLobby ? NileColors.volt : NileColors.coral,
-                borderRadius: BorderRadius.circular(NileRadius.xs),
-              ),
-              child: Text(
-                inLobby ? 'SOUND CHECK' : 'LIVE',
-                style: NileTextStyles.caption().copyWith(
-                  color: inLobby ? NileColors.bgPage : Colors.white,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: 1.2,
+          Builder(
+            builder: (_) {
+              final inLobby = _eventStatus == 'soundcheck' && !_streamEnded;
+              return Container(
+                padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s8, vertical: NileSpacing.s4),
+                decoration: BoxDecoration(
+                  color: inLobby ? NileColors.volt : NileColors.coral,
+                  borderRadius: BorderRadius.circular(NileRadius.xs),
                 ),
-              ),
-            );
-          }),
+                child: Text(
+                  inLobby ? 'SOUND CHECK' : 'LIVE',
+                  style: NileTextStyles.caption().copyWith(
+                    color: inLobby ? NileColors.bgPage : Colors.white,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 1.2,
+                  ),
+                ),
+              );
+            },
+          ),
           const SizedBox(width: 10),
           // Viewer count
           const Icon(Icons.visibility, size: 14, color: NileColors.txtTertiary),
           const SizedBox(width: 4),
-          Text(
-            '$_viewerCount',
-            style: NileTextStyles.bodySm().copyWith(color: NileColors.txtSecondary),
+          NileRollingNumber(
+            value: _viewerCount,
+            style: NileTextStyles.bodySm().copyWith(
+              color: NileColors.txtSecondary,
+            ),
           ),
           const Spacer(),
           // Chat toggle (hidden in the Lobby — no live chat before the show)
@@ -941,9 +963,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
               children: [
                 IconButton(
                   icon: Icon(
-                    _chatOpen
-                        ? Icons.chat_bubble
-                        : Icons.chat_bubble_outline,
+                    _chatOpen ? Icons.chat_bubble : Icons.chat_bubble_outline,
                   ),
                   color: _chatOpen ? NileColors.volt : NileColors.txtSecondary,
                   iconSize: 20,
@@ -1019,18 +1039,20 @@ class _ViewerScreenState extends State<ViewerScreen> {
       return Center(
         child: Text(
           'No messages yet. Say hi 👋',
-          style: NileTextStyles.bodySm().copyWith(color: NileColors.txtTertiary),
+          style: NileTextStyles.bodySm().copyWith(
+            color: NileColors.txtTertiary,
+          ),
         ),
       );
     }
     return ListView.builder(
       controller: _chatScrollController,
-      padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+      padding: const EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s8, NileSpacing.s16, NileSpacing.s8),
       itemCount: _chatMessages.length,
       itemBuilder: (context, i) {
         final m = _chatMessages[i];
         return Padding(
-          padding: const EdgeInsets.symmetric(vertical: 3),
+          padding: const EdgeInsets.symmetric(vertical: NileSpacing.s2),
           child: RichText(
             text: TextSpan(
               children: [
@@ -1041,10 +1063,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
                     fontWeight: FontWeight.w600,
                   ),
                 ),
-                TextSpan(
-                  text: m.content,
-                  style: NileTextStyles.bodyMd(),
-                ),
+                TextSpan(text: m.content, style: NileTextStyles.bodyMd()),
               ],
             ),
           ),
@@ -1055,7 +1074,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
 
   Widget _buildChatInput(double bottomInset) {
     return Padding(
-      padding: EdgeInsets.fromLTRB(12, 8, 12, 8 + bottomInset),
+      padding: EdgeInsets.fromLTRB(NileSpacing.s12, NileSpacing.s8, NileSpacing.s12, NileSpacing.s8 + bottomInset),
       child: Row(
         children: [
           Expanded(
@@ -1065,17 +1084,21 @@ class _ViewerScreenState extends State<ViewerScreen> {
               textInputAction: TextInputAction.send,
               onSubmitted: (_) => _sendChat(),
               maxLength: 250,
-              buildCounter: (_,
-                      {required currentLength,
-                      required isFocused,
-                      maxLength}) =>
-                  null,
+              buildCounter:
+                  (
+                    _, {
+                    required currentLength,
+                    required isFocused,
+                    maxLength,
+                  }) => null,
               decoration: InputDecoration(
                 isDense: true,
                 hintText: 'Chat…',
                 fillColor: NileColors.bgRaised,
-                contentPadding:
-                    const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: NileSpacing.s12,
+                  vertical: NileSpacing.s8,
+                ),
                 border: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(NileRadius.pill),
                   borderSide: BorderSide.none,
@@ -1103,7 +1126,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
   Widget _buildAudioBar() {
     final hasAudio = _masterAudioIdentity != null;
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s16, vertical: NileSpacing.s8),
       color: NileColors.bgSurface,
       child: Row(
         children: [
@@ -1117,8 +1140,8 @@ class _ViewerScreenState extends State<ViewerScreen> {
             _masterAudioIdentity == null
                 ? 'No master audio'
                 : _isStreamAudioSource()
-                    ? 'Stream Audio'
-                    : 'Master: ${_masterAudioName()}',
+                ? 'Stream Audio'
+                : 'Master: ${_masterAudioName()}',
             style: NileTextStyles.bodySm().copyWith(
               color: hasAudio ? NileColors.volt : NileColors.txtTertiary,
             ),
@@ -1126,7 +1149,9 @@ class _ViewerScreenState extends State<ViewerScreen> {
           const Spacer(),
           IconButton(
             icon: Icon(_audioEnabled ? Icons.volume_up : Icons.volume_off),
-            color: _audioEnabled ? NileColors.txtPrimary : NileColors.txtTertiary,
+            color: _audioEnabled
+                ? NileColors.txtPrimary
+                : NileColors.txtTertiary,
             iconSize: 20,
             onPressed: () {
               setState(() => _audioEnabled = !_audioEnabled);
@@ -1176,7 +1201,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
           bottom: 12,
           left: 12,
           child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+            padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s8, vertical: NileSpacing.s4),
             decoration: BoxDecoration(
               color: NileColors.bgPage.withValues(alpha: 0.7),
               borderRadius: BorderRadius.circular(NileRadius.sm),
@@ -1194,13 +1219,13 @@ class _ViewerScreenState extends State<ViewerScreen> {
       color: NileColors.bgPage,
       child: ListView.builder(
         scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.all(8),
+        padding: const EdgeInsets.all(NileSpacing.s8),
         itemCount: _cameras.length,
         itemBuilder: (context, index) => _buildThumbnailItem(
           index: index,
           width: 140,
           height: double.infinity,
-          margin: const EdgeInsets.only(right: 8),
+          margin: const EdgeInsets.only(right: NileSpacing.s8),
         ),
       ),
     );
@@ -1212,13 +1237,13 @@ class _ViewerScreenState extends State<ViewerScreen> {
       color: NileColors.bgPage,
       child: ListView.builder(
         scrollDirection: Axis.vertical,
-        padding: const EdgeInsets.all(6),
+        padding: const EdgeInsets.all(NileSpacing.s6),
         itemCount: _cameras.length,
         itemBuilder: (context, index) => _buildThumbnailItem(
           index: index,
           width: double.infinity,
           height: 80,
-          margin: const EdgeInsets.only(bottom: 6),
+          margin: const EdgeInsets.only(bottom: NileSpacing.s8),
         ),
       ),
     );
@@ -1303,7 +1328,9 @@ class _ViewerScreenState extends State<ViewerScreen> {
             const SizedBox(height: 8),
             Text(
               'The host has ended the stream.',
-              style: NileTextStyles.bodyMd().copyWith(color: NileColors.txtSecondary),
+              style: NileTextStyles.bodyMd().copyWith(
+                color: NileColors.txtSecondary,
+              ),
             ),
             const SizedBox(height: 36),
             FilledButton(
@@ -1311,11 +1338,12 @@ class _ViewerScreenState extends State<ViewerScreen> {
               style: FilledButton.styleFrom(
                 backgroundColor: NileColors.volt,
                 foregroundColor: NileColors.bgPage,
-                padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 14),
-                textStyle: NileTextStyles.labelLg(),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(NileRadius.sm),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: NileSpacing.s40,
+                  vertical: NileSpacing.s16,
                 ),
+                textStyle: NileTextStyles.labelLg(),
+                shape: const StadiumBorder(),
               ),
               child: const Text('Close'),
             ),

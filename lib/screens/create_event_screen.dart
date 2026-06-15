@@ -60,8 +60,18 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
 
   String _formatScheduled(DateTime dt) {
     const months = [
-      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
     ];
     final t =
         '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
@@ -82,7 +92,9 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
       if (bytes != null && mounted) setState(() => _coverBytes = bytes);
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$e')));
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('$e')));
       }
     } finally {
       if (mounted) setState(() => _uploadingCover = false);
@@ -112,7 +124,8 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
     final time = await showTimePicker(
       context: context,
       initialTime: TimeOfDay.fromDateTime(
-          _scheduledAt ?? now.add(const Duration(hours: 1))),
+        _scheduledAt ?? now.add(const Duration(hours: 1)),
+      ),
       builder: (ctx, child) => Theme(
         data: Theme.of(ctx).copyWith(
           colorScheme: const ColorScheme.dark(
@@ -127,8 +140,13 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
     );
     if (time == null) return;
     setState(() {
-      _scheduledAt =
-          DateTime(date.year, date.month, date.day, time.hour, time.minute);
+      _scheduledAt = DateTime(
+        date.year,
+        date.month,
+        date.day,
+        time.hour,
+        time.minute,
+      );
     });
   }
 
@@ -162,7 +180,9 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
         } catch (e) {
           if (mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text('Cover upload failed — saved without one. ($e)')),
+              SnackBar(
+                content: Text('Cover upload failed — saved without one. ($e)'),
+              ),
             );
           }
         }
@@ -220,10 +240,14 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
         title: Text('Create Event', style: NileTextStyles.headingMd()),
         backgroundColor: Colors.transparent,
       ),
-      body: NileMaxWidth(child: SingleChildScrollView(
-        padding: const EdgeInsets.fromLTRB(24, 8, 24, 40),
-        child: _state == _CreateState.created ? _buildCreated() : _buildForm(),
-      )),
+      body: NileMaxWidth(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(NileSpacing.s24, NileSpacing.s8, NileSpacing.s24, NileSpacing.s40),
+          child: _state == _CreateState.created
+              ? _buildCreated()
+              : _buildForm(),
+        ),
+      ),
     );
   }
 
@@ -288,10 +312,12 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
                       TextFormField(
                         controller: _priceController,
                         keyboardType: const TextInputType.numberWithOptions(
-                            decimal: true),
+                          decimal: true,
+                        ),
                         inputFormatters: [
                           FilteringTextInputFormatter.allow(
-                              RegExp(r'^\d*\.?\d{0,2}')),
+                            RegExp(r'^\d*\.?\d{0,2}'),
+                          ),
                         ],
                         decoration: const InputDecoration(
                           prefixText: '\$ ',
@@ -320,8 +346,9 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
                         inputFormatters: [
                           FilteringTextInputFormatter.digitsOnly,
                         ],
-                        decoration:
-                            const InputDecoration(hintText: 'Unlimited'),
+                        decoration: const InputDecoration(
+                          hintText: 'Unlimited',
+                        ),
                         validator: (v) {
                           if (v == null || v.isEmpty) return null;
                           final n = int.tryParse(v);
@@ -337,16 +364,19 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
             if (_errorMessage != null) ...[
               const SizedBox(height: 20),
               Container(
-                padding: const EdgeInsets.all(12),
+                padding: const EdgeInsets.all(NileSpacing.s12),
                 decoration: BoxDecoration(
                   color: NileColors.error.withValues(alpha: 0.1),
                   borderRadius: BorderRadius.circular(NileRadius.sm),
-                  border: Border.all(color: NileColors.error.withValues(alpha: 0.4)),
+                  border: Border.all(
+                    color: NileColors.error.withValues(alpha: 0.4),
+                  ),
                 ),
                 child: Text(
                   _errorMessage!,
-                  style: NileTextStyles.bodySm()
-                      .copyWith(color: NileColors.error),
+                  style: NileTextStyles.bodySm().copyWith(
+                    color: NileColors.error,
+                  ),
                 ),
               ),
             ],
@@ -365,7 +395,7 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
                   : const Icon(Icons.add_circle_outline),
               label: Text(isCreating ? 'Creating…' : 'Create Event'),
               style: FilledButton.styleFrom(
-                padding: const EdgeInsets.symmetric(vertical: 16),
+                padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
                 textStyle: NileTextStyles.labelLg().copyWith(color: null),
               ),
             ),
@@ -391,16 +421,17 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
         Text(
           'Event created. Share the Event ID below\nwith your camera operators and viewers.',
           textAlign: TextAlign.center,
-          style:
-              NileTextStyles.bodyMd().copyWith(color: NileColors.txtSecondary),
+          style: NileTextStyles.bodyMd().copyWith(
+            color: NileColors.txtSecondary,
+          ),
         ),
         const SizedBox(height: 32),
         Container(
-          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+          padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s16, vertical: NileSpacing.s16),
           decoration: BoxDecoration(
             color: NileColors.bgSurface,
             border: Border.all(color: NileColors.border),
-            borderRadius: BorderRadius.circular(NileRadius.md),
+            borderRadius: BorderRadius.circular(NileRadius.lg),
           ),
           child: Row(
             children: [
@@ -410,14 +441,16 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
                   children: [
                     Text(
                       'EVENT ID',
-                      style: NileTextStyles.caption()
-                          .copyWith(letterSpacing: 1.5),
+                      style: NileTextStyles.caption().copyWith(
+                        letterSpacing: 1.5,
+                      ),
                     ),
                     const SizedBox(height: 4),
                     Text(
                       _eventId!,
-                      style: NileTextStyles.headingSm()
-                          .copyWith(letterSpacing: 0.5),
+                      style: NileTextStyles.headingSm().copyWith(
+                        letterSpacing: 0.5,
+                      ),
                     ),
                   ],
                 ),
@@ -436,7 +469,9 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
           onPressed: () => Navigator.pushReplacement(
             context,
             MaterialPageRoute(
-              builder: (_) => CameraScreen(initialEventId: _eventId),
+              // The creator of the event is its host.
+              builder: (_) =>
+                  CameraScreen(initialEventId: _eventId, isHost: true),
             ),
           ),
           icon: const Icon(Icons.videocam),
@@ -444,7 +479,7 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
           style: FilledButton.styleFrom(
             backgroundColor: NileColors.coral,
             foregroundColor: Colors.white,
-            padding: const EdgeInsets.symmetric(vertical: 16),
+            padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
           ),
         ),
         const SizedBox(height: 12),
@@ -458,7 +493,7 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
           icon: const Icon(Icons.tv),
           label: const Text('Watch as Viewer'),
           style: OutlinedButton.styleFrom(
-            padding: const EdgeInsets.symmetric(vertical: 16),
+            padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
           ),
         ),
         const SizedBox(height: 12),
@@ -466,8 +501,9 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
           onPressed: () => Navigator.pop(context),
           child: Text(
             'Back to Home',
-            style:
-                NileTextStyles.bodyMd().copyWith(color: NileColors.txtTertiary),
+            style: NileTextStyles.bodyMd().copyWith(
+              color: NileColors.txtTertiary,
+            ),
           ),
         ),
       ],
@@ -511,7 +547,7 @@ class _CoverPicker extends StatelessWidget {
           clipBehavior: Clip.antiAlias,
           decoration: BoxDecoration(
             color: NileColors.bgSurface,
-            borderRadius: BorderRadius.circular(NileRadius.md),
+            borderRadius: BorderRadius.circular(NileRadius.lg),
             border: Border.all(
               color: hasImage ? Colors.transparent : NileColors.border,
               style: hasImage ? BorderStyle.solid : BorderStyle.solid,
@@ -539,8 +575,11 @@ class _CoverPicker extends StatelessWidget {
                     color: Colors.black54,
                     shape: const CircleBorder(),
                     child: IconButton(
-                      icon: const Icon(Icons.close,
-                          size: 18, color: Colors.white),
+                      icon: const Icon(
+                        Icons.close,
+                        size: 18,
+                        color: Colors.white,
+                      ),
                       onPressed: onClear,
                       tooltip: 'Remove cover',
                     ),
@@ -554,17 +593,22 @@ class _CoverPicker extends StatelessWidget {
   }
 
   Widget _emptyState() => const Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.add_photo_alternate_outlined,
-                size: 36, color: NileColors.txtTertiary),
-            SizedBox(height: 8),
-            Text('Add cover photo',
-                style: TextStyle(color: NileColors.txtSecondary)),
-          ],
+    child: Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(
+          Icons.add_photo_alternate_outlined,
+          size: 36,
+          color: NileColors.txtTertiary,
         ),
-      );
+        SizedBox(height: 8),
+        Text(
+          'Add cover photo',
+          style: TextStyle(color: NileColors.txtSecondary),
+        ),
+      ],
+    ),
+  );
 }
 
 class _DateField extends StatelessWidget {
@@ -586,7 +630,7 @@ class _DateField extends StatelessWidget {
       onTap: onTap,
       borderRadius: BorderRadius.circular(NileRadius.sm),
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
+        padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s12, vertical: NileSpacing.s12),
         decoration: BoxDecoration(
           color: NileColors.bgSurface,
           border: Border.all(color: NileColors.border),
@@ -594,22 +638,31 @@ class _DateField extends StatelessWidget {
         ),
         child: Row(
           children: [
-            const Icon(Icons.calendar_today,
-                size: 16, color: NileColors.txtSecondary),
+            const Icon(
+              Icons.calendar_today,
+              size: 16,
+              color: NileColors.txtSecondary,
+            ),
             const SizedBox(width: 10),
             Expanded(
               child: Text(
-                value == null ? 'Pick a date & time (optional)' : formatter(value!),
+                value == null
+                    ? 'Pick a date & time (optional)'
+                    : formatter(value!),
                 style: value == null
-                    ? NileTextStyles.bodyMd()
-                        .copyWith(color: NileColors.txtTertiary)
+                    ? NileTextStyles.bodyMd().copyWith(
+                        color: NileColors.txtTertiary,
+                      )
                     : NileTextStyles.bodyMd(),
               ),
             ),
             if (value != null)
               IconButton(
-                icon: const Icon(Icons.close,
-                    size: 18, color: NileColors.txtTertiary),
+                icon: const Icon(
+                  Icons.close,
+                  size: 18,
+                  color: NileColors.txtTertiary,
+                ),
                 onPressed: onClear,
                 tooltip: 'Clear',
               ),

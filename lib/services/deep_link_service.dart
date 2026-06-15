@@ -76,23 +76,38 @@ class DeepLinkService {
     final nav = _navKey?.currentState;
     if (nav == null) return;
 
+    // The user arrived from outside the app, so land them on a fresh stack.
+    // Repeated links would otherwise pile duplicate screens on top of
+    // whatever was already pushed (worst case: a second live ViewerScreen,
+    // i.e. two simultaneous LiveKit connections).
+    void pushFresh(Route<void> route) {
+      nav.popUntil((r) => r.isFirst);
+      nav.push(route);
+    }
+
     switch (parsed.kind) {
       case 'post':
         final post = await PostService.fetchById(parsed.value);
         if (post == null) return;
-        nav.push(MaterialPageRoute(builder: (_) => PostDetailScreen(post: post)));
+        pushFresh(
+          MaterialPageRoute(builder: (_) => PostDetailScreen(post: post)),
+        );
       case 'event':
         final event = await EventService.fetchById(parsed.value);
         if (event == null) return;
-        nav.push(MaterialPageRoute(
-          builder: (_) => event.isLive
-              ? ViewerScreen(initialEventId: event.liveKitEventId)
-              : EventDetailScreen(event: event),
-        ));
+        pushFresh(
+          MaterialPageRoute(
+            builder: (_) => event.isLive
+                ? ViewerScreen(initialEventId: event.liveKitEventId)
+                : EventDetailScreen(event: event),
+          ),
+        );
       case 'profile':
         final userId = await ProfileService.idForUsername(parsed.value);
         if (userId == null) return;
-        nav.push(MaterialPageRoute(builder: (_) => ProfileScreen(userId: userId)));
+        pushFresh(
+          MaterialPageRoute(builder: (_) => ProfileScreen(userId: userId)),
+        );
     }
   }
 }

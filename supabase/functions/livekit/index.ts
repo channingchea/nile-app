@@ -11,6 +11,7 @@
 //   audio-token       host    → { token, wsUrl }
 //   list-cameras      host    → { cameras: [{ identity, name, cameraName, cameraId }] }
 //   set-master-audio  host    → { success: true }
+//   set-ready         crew    → { success: true }   ← flags caller's feed ready
 //   start-show        host    → { success: true }   ← stamps showStartedAt anchor
 //   viewer-token      viewer  → { mode: "webrtc", token, wsUrl }   ← typed descriptor (3.2)
 //
@@ -89,58 +90,100 @@ function parseMeta(raw: string | undefined): Record<string, unknown> {
   }
 }
 
+// ── Structured logging (roadmap #4 observability) ─────────────────────────────
+//
+// One JSON line per request — searchable in the Supabase logs explorer, e.g.:
+//   event_message LIKE '%"level":"error"%'  or  '%"action":"viewer-token"%'
+// Fields: level, fn, reqId, action, userId, status, ms (+ error/stack on 500).
+
+interface ReqCtx {
+  reqId: string;
+  action?: string;
+  userId?: string;
+}
+
+function log(level: "info" | "warn" | "error", fields: Record<string, unknown>) {
+  console.log(JSON.stringify({ level, fn: "livekit", ...fields }));
+}
+
 // ── Handler ───────────────────────────────────────────────────────────────────
 
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
+  const ctx: ReqCtx = { reqId: crypto.randomUUID().slice(0, 8) };
+  const t0 = Date.now();
   try {
-    // Identity from the verified JWT — the gateway already enforced verify-jwt,
-    // but we re-derive the user so we never trust an id from the body (3.3).
-    const authHeader = req.headers.get("Authorization");
-    if (!authHeader) return json({ error: "Missing Authorization header" }, 401);
-
-    const userClient = createClient(
-      Deno.env.get("SUPABASE_URL")!,
-      Deno.env.get("SUPABASE_ANON_KEY")!,
-      { global: { headers: { Authorization: authHeader } } },
-    );
-    const { data: { user }, error: authError } = await userClient.auth.getUser();
-    if (authError || !user) return json({ error: "Unauthorized" }, 401);
-
-    // Service-role client for server-side checks that bypass RLS.
-    const admin = createClient(
-      Deno.env.get("SUPABASE_URL")!,
-      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
-    );
-
-    const body = await req.json().catch(() => ({}));
-    const action = body.action as string | undefined;
-    if (!action) return json({ error: "Missing action" }, 400);
-
-    switch (action) {
-      case "create-room":
-        return await createRoom(body, user.id, admin);
-      case "camera-token":
-        return await cameraToken(body, user.id, admin);
-      case "audio-token":
-        return await audioToken(body, user.id, admin);
-      case "list-cameras":
-        return await listCameras(body, user.id, admin);
-      case "set-master-audio":
-        return await setMasterAudio(body, user.id, admin);
-      case "start-show":
-        return await startShow(body, user.id, admin);
-      case "viewer-token":
-        return await viewerToken(body, user.id, admin);
-      default:
-        return json({ error: `Unknown action: ${action}` }, 400);
-    }
+    const res = await handle(req, ctx);
+    log(res.status < 400 ? "info" : "warn", {
+      reqId: ctx.reqId,
+      action: ctx.action,
+      userId: ctx.userId,
+      status: res.status,
+      ms: Date.now() - t0,
+    });
+    return res;
   } catch (err) {
-    console.error(err);
+    log("error", {
+      reqId: ctx.reqId,
+      action: ctx.action,
+      userId: ctx.userId,
+      status: 500,
+      ms: Date.now() - t0,
+      error: String(err),
+      stack: err instanceof Error ? err.stack : undefined,
+    });
     return json({ error: String(err) }, 500);
   }
 });
+
+async function handle(req: Request, ctx: ReqCtx): Promise<Response> {
+  // Identity from the verified JWT — the gateway already enforced verify-jwt,
+  // but we re-derive the user so we never trust an id from the body (3.3).
+  const authHeader = req.headers.get("Authorization");
+  if (!authHeader) return json({ error: "Missing Authorization header" }, 401);
+
+  const userClient = createClient(
+    Deno.env.get("SUPABASE_URL")!,
+    Deno.env.get("SUPABASE_ANON_KEY")!,
+    { global: { headers: { Authorization: authHeader } } },
+  );
+  const { data: { user }, error: authError } = await userClient.auth.getUser();
+  if (authError || !user) return json({ error: "Unauthorized" }, 401);
+  ctx.userId = user.id;
+
+  // Service-role client for server-side checks that bypass RLS.
+  const admin = createClient(
+    Deno.env.get("SUPABASE_URL")!,
+    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
+  );
+
+  const body = await req.json().catch(() => ({}));
+  const action = body.action as string | undefined;
+  if (!action) return json({ error: "Missing action" }, 400);
+  ctx.action = action;
+
+  switch (action) {
+    case "create-room":
+      return await createRoom(body, user.id, admin);
+    case "camera-token":
+      return await cameraToken(body, user.id, admin);
+    case "audio-token":
+      return await audioToken(body, user.id, admin);
+    case "list-cameras":
+      return await listCameras(body, user.id, admin);
+    case "set-master-audio":
+      return await setMasterAudio(body, user.id, admin);
+    case "set-ready":
+      return await setReady(body, user.id, admin);
+    case "start-show":
+      return await startShow(body, user.id, admin);
+    case "viewer-token":
+      return await viewerToken(body, user.id, admin);
+    default:
+      return json({ error: `Unknown action: ${action}` }, 400);
+  }
+}
 
 // ── Host authorization ────────────────────────────────────────────────────────
 
@@ -251,7 +294,10 @@ async function cameraToken(body: any, userId: string, admin: any): Promise<Respo
     // joinedAt is server-stamped (no device clock skew) so the viewer can align
     // this camera against the master-audio timeline. A fresh token on rejoin =
     // a fresh joinedAt automatically.
-    metadata: JSON.stringify({ role: "camera", cameraId, cameraName, isMasterAudio, joinedAt: Date.now() }),
+    // userId (from the verified JWT) lets the host's crew panel and set-ready
+    // match this publisher to the assigned-operator roster. ready starts false
+    // on every fresh token, so a reconnect naturally resets readiness.
+    metadata: JSON.stringify({ role: "camera", cameraId, cameraName, isMasterAudio, joinedAt: Date.now(), userId, ready: false }),
   });
 
   return json({ token, wsUrl: LIVEKIT_URL, isMasterAudio });
@@ -273,7 +319,8 @@ async function audioToken(body: any, userId: string, admin: any): Promise<Respon
     canPublish: true,
     canSubscribe: false,
     // joinedAt is the zero reference for camera-sync offsets (see viewer side).
-    metadata: JSON.stringify({ role: "master-audio", joinedAt: Date.now() }),
+    // userId + ready: see camera-token.
+    metadata: JSON.stringify({ role: "master-audio", joinedAt: Date.now(), userId, ready: false }),
   });
 
   return json({ token, wsUrl: LIVEKIT_URL });
@@ -329,6 +376,34 @@ async function setMasterAudio(body: any, userId: string, admin: any): Promise<Re
       const updated = { ...meta, isMasterAudio: p.identity === cameraIdentity };
       await roomService.updateParticipant(roomName, p.identity, {
         metadata: JSON.stringify(updated),
+      });
+    }),
+  );
+
+  return json({ success: true });
+}
+
+// set-ready — a crew member flags their own feed as ready (or not) during
+// Sound Check. Self-targeted: we find the caller's publisher(s) by the userId
+// stamped into their token metadata, never by an identity from the body.
+async function setReady(body: any, userId: string, admin: any): Promise<Response> {
+  const { eventId, ready } = body;
+  if (!eventId || typeof ready !== "boolean") {
+    return json({ error: "eventId and ready (boolean) are required" }, 400);
+  }
+
+  const gate = await requireOperator(eventId, userId, admin);
+  if (gate instanceof Response) return gate;
+
+  const roomName = roomNameFor(eventId);
+  const participants = await roomService.listParticipants(roomName);
+
+  await Promise.all(
+    participants.map(async (p) => {
+      const meta = parseMeta(p.metadata);
+      if (meta.userId !== userId) return;
+      await roomService.updateParticipant(roomName, p.identity, {
+        metadata: JSON.stringify({ ...meta, ready }),
       });
     }),
   );

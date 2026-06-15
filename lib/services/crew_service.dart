@@ -18,12 +18,12 @@ class EventCamera {
   });
 
   factory EventCamera.fromJson(Map<String, dynamic> json) => EventCamera(
-        id: json['id'] as String,
-        eventId: json['event_id'] as String,
-        slotIndex: (json['slot_index'] as num).toInt(),
-        label: json['label'] as String,
-        isMasterAudio: json['is_master_audio'] as bool? ?? false,
-      );
+    id: json['id'] as String,
+    eventId: json['event_id'] as String,
+    slotIndex: (json['slot_index'] as num).toInt(),
+    label: json['label'] as String,
+    isMasterAudio: json['is_master_audio'] as bool? ?? false,
+  );
 }
 
 /// An assigned operator with their profile and the camera slot index they're
@@ -32,8 +32,11 @@ class AssignedOperator {
   final UserProfile profile;
   final int? slotIndex;
   final bool isAudioOperator;
-  const AssignedOperator(
-      {required this.profile, this.slotIndex, this.isAudioOperator = false});
+  const AssignedOperator({
+    required this.profile,
+    this.slotIndex,
+    this.isAudioOperator = false,
+  });
 }
 
 /// A chosen operator and the camera slot index they're assigned to (1-based),
@@ -52,8 +55,11 @@ class MyOperatorAssignment {
   final String eventId;
   final EventCamera? camera; // null = assigned to "any camera"
   final bool isAudioOperator;
-  const MyOperatorAssignment(
-      {required this.eventId, this.camera, this.isAudioOperator = false});
+  const MyOperatorAssignment({
+    required this.eventId,
+    this.camera,
+    this.isAudioOperator = false,
+  });
 
   /// Camera name to pre-fill when entering the stream, or null if unassigned.
   String? get cameraLabel => camera?.label;
@@ -79,7 +85,7 @@ class CrewService {
           'slot_index': i + 1,
           'label': 'Camera ${i + 1}',
           'is_master_audio': false,
-        }
+        },
     ];
 
     final rows = await supabase
@@ -113,7 +119,7 @@ class CrewService {
             'slot_index': i + 1,
             'label': 'Camera ${i + 1}',
             'is_master_audio': false,
-          }
+          },
       ];
       await supabase.from('event_cameras').insert(payload);
       return;
@@ -121,8 +127,10 @@ class CrewService {
 
     // Shrinking: clear operator references to the slots being removed, then
     // delete those slots.
-    final removedIds =
-        existing.where((c) => c.slotIndex > count).map((c) => c.id).toList();
+    final removedIds = existing
+        .where((c) => c.slotIndex > count)
+        .map((c) => c.id)
+        .toList();
     if (removedIds.isNotEmpty) {
       await supabase
           .from('event_operators')
@@ -156,7 +164,8 @@ class CrewService {
     final rows = await supabase
         .from('event_operators')
         .select(
-            'camera_id, is_audio_operator, profiles!event_operators_operator_id_fkey(*), event_cameras(slot_index)')
+          'camera_id, is_audio_operator, profiles!event_operators_operator_id_fkey(*), event_cameras(slot_index)',
+        )
         .eq('event_id', eventId);
     final out = <AssignedOperator>[];
     for (final r in rows as List) {
@@ -164,13 +173,30 @@ class CrewService {
       final prof = row['profiles'] as Map<String, dynamic>?;
       if (prof == null) continue;
       final cam = row['event_cameras'] as Map<String, dynamic>?;
-      out.add(AssignedOperator(
-        profile: UserProfile.fromMap(prof),
-        slotIndex: cam == null ? null : (cam['slot_index'] as num).toInt(),
-        isAudioOperator: row['is_audio_operator'] as bool? ?? false,
-      ));
+      out.add(
+        AssignedOperator(
+          profile: UserProfile.fromMap(prof),
+          slotIndex: cam == null ? null : (cam['slot_index'] as num).toInt(),
+          isAudioOperator: row['is_audio_operator'] as bool? ?? false,
+        ),
+      );
     }
     return out;
+  }
+
+  /// Like [fetchOperators], but resolves the event by its LiveKit room slug —
+  /// the only id the live-time screens carry. Returns [] if the slug is unknown.
+  static Future<List<AssignedOperator>> fetchOperatorsByRoom(
+    String liveKitEventId,
+  ) async {
+    final rows = await supabase
+        .from('events')
+        .select('id')
+        .eq('livekit_room', liveKitEventId)
+        .limit(1);
+    final list = rows as List;
+    if (list.isEmpty) return [];
+    return fetchOperators((list.first as Map)['id'] as String);
   }
 
   /// Assign [operatorId] to [eventId] (optionally to [cameraId]) and notify
@@ -182,12 +208,15 @@ class CrewService {
     String? cameraId,
     bool isAudioOperator = false,
   }) async {
-    await supabase.rpc('assign_event_operator', params: {
-      'p_event_id': eventId,
-      'p_operator_id': operatorId,
-      'p_camera_id': cameraId,
-      'p_is_audio_operator': isAudioOperator,
-    });
+    await supabase.rpc(
+      'assign_event_operator',
+      params: {
+        'p_event_id': eventId,
+        'p_operator_id': operatorId,
+        'p_camera_id': cameraId,
+        'p_is_audio_operator': isAudioOperator,
+      },
+    );
   }
 
   /// Remove an operator from an event (host only).

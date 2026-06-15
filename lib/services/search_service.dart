@@ -15,8 +15,10 @@ class SearchService {
 
   /// Full-text search on username and display_name (case-insensitive).
   /// Excludes the signed-in user. Offset-paged via [cursor] (row offset).
-  static Future<Paged<UserProfile>> searchUsers(String query,
-      {String? cursor}) async {
+  static Future<Paged<UserProfile>> searchUsers(
+    String query, {
+    String? cursor,
+  }) async {
     final q = query.trim();
     if (q.isEmpty) return Paged.empty();
     final pattern = '%$q%';
@@ -54,8 +56,7 @@ class SearchService {
         .order('id', ascending: true)
         .range(offset, offset + kPageSize - 1);
 
-    var items =
-        (rows as List).map((r) => UserProfile.fromMap(r)).toList();
+    var items = (rows as List).map((r) => UserProfile.fromMap(r)).toList();
     items = await _withLiveFollowerCounts(items);
     final hasMore = items.length == kPageSize;
     return Paged(
@@ -103,20 +104,19 @@ class SearchService {
     final blocked = _notInList(await BlockService.blockedIds());
     if (blocked != null) b = b.not('user_id', 'in', blocked);
     if (cursor != null) b = b.lt('created_at', cursor);
-    final rows =
-        await b.order('created_at', ascending: false).limit(kPageSize);
+    final rows = await b.order('created_at', ascending: false).limit(kPageSize);
     return _pagePosts(rows as List);
   }
 
   static Paged<Post> _pagePosts(List rows) {
-    final items =
-        rows.map((r) => Post.fromJson(r as Map<String, dynamic>)).toList();
+    final items = rows
+        .map((r) => Post.fromJson(r as Map<String, dynamic>))
+        .toList();
     final hasMore = items.length == kPageSize;
     return Paged(
       items: items,
       hasMore: hasMore,
-      nextCursor:
-          hasMore ? items.last.createdAt.toIso8601String() : null,
+      nextCursor: hasMore ? items.last.createdAt.toIso8601String() : null,
     );
   }
 
@@ -124,7 +124,10 @@ class SearchService {
 
   /// Search events by title or description (case-insensitive). Excludes ended
   /// events. Keyset-paged by created_at via [cursor].
-  static Future<Paged<Event>> searchEvents(String query, {String? cursor}) async {
+  static Future<Paged<Event>> searchEvents(
+    String query, {
+    String? cursor,
+  }) async {
     final q = query.trim();
     if (q.isEmpty) return Paged.empty();
     final pattern = '%$q%';
@@ -139,8 +142,7 @@ class SearchService {
     final blocked = _notInList(await BlockService.blockedIds());
     if (blocked != null) b = b.not('host_id', 'in', blocked);
     if (cursor != null) b = b.lt('created_at', cursor);
-    final rows =
-        await b.order('created_at', ascending: false).limit(kPageSize);
+    final rows = await b.order('created_at', ascending: false).limit(kPageSize);
     return _pageEvents(rows as List);
   }
 
@@ -156,8 +158,7 @@ class SearchService {
     final blocked = _notInList(await BlockService.blockedIds());
     if (blocked != null) b = b.not('host_id', 'in', blocked);
     if (cursor != null) b = b.lt('created_at', cursor);
-    final rows =
-        await b.order('created_at', ascending: false).limit(kPageSize);
+    final rows = await b.order('created_at', ascending: false).limit(kPageSize);
     return _pageEvents(rows as List);
   }
 
@@ -198,6 +199,24 @@ class SearchService {
     return EventService.hydrateLikes(events);
   }
 
+  /// Events tagged with topics the user picked in the interest bubbles,
+  /// ranked by their summed weights (bigger bubbles rank higher).
+  static Future<List<Event>> recommendedEventsByTopic({int limit = 10}) async {
+    if (supabase.auth.currentUser == null) return [];
+    final ids = await _recommendedIds('recommend_events_by_topic', limit);
+    if (ids.isEmpty) return [];
+    final rows = await supabase
+        .from('events')
+        .select('*, profiles!events_host_id_fkey(username, avatar_url)')
+        .inFilter('id', ids)
+        .neq('status', 'draft');
+    final events = (rows as List)
+        .map((r) => Event.fromJson(r as Map<String, dynamic>))
+        .toList();
+    _reorder(events, ids, (e) => e.id);
+    return EventService.hydrateLikes(events);
+  }
+
   /// Calls a recommendation RPC and returns the ordered list of row ids.
   static Future<List<String>> _recommendedIds(String fn, int limit) async {
     final rows = await supabase.rpc(fn, params: {'page_limit': limit});
@@ -207,18 +226,22 @@ class SearchService {
   /// Reorders [items] in place to match the order of [orderedIds]. PostgREST
   /// `in` filters don't preserve order, so the RPC ranking is reapplied here.
   static void _reorder<T>(
-      List<T> items, List<String> orderedIds, String Function(T) idOf) {
+    List<T> items,
+    List<String> orderedIds,
+    String Function(T) idOf,
+  ) {
     final rank = {for (var i = 0; i < orderedIds.length; i++) orderedIds[i]: i};
-    items.sort((a, b) =>
-        (rank[idOf(a)] ?? 1 << 30).compareTo(rank[idOf(b)] ?? 1 << 30));
+    items.sort(
+      (a, b) => (rank[idOf(a)] ?? 1 << 30).compareTo(rank[idOf(b)] ?? 1 << 30),
+    );
   }
 
   static Paged<Event> _pageEvents(List rows) {
-    final items =
-        rows.map((r) => Event.fromJson(r as Map<String, dynamic>)).toList();
+    final items = rows
+        .map((r) => Event.fromJson(r as Map<String, dynamic>))
+        .toList();
     final hasMore = items.length == kPageSize;
-    final nextCursor =
-        hasMore ? items.last.createdAt.toIso8601String() : null;
+    final nextCursor = hasMore ? items.last.createdAt.toIso8601String() : null;
     // Live-first within the page (created_at cursor stays based on raw order).
     items.sort((a, b) {
       if (a.isLive != b.isLive) return a.isLive ? -1 : 1;

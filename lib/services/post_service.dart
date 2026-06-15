@@ -10,20 +10,22 @@ import 'supabase_client.dart';
 
 class Post {
   final String id;
-  final String authorId;         // maps to posts.user_id
+  final String authorId; // maps to posts.user_id
   final String authorUsername;
   final String? authorAvatarUrl;
-  final String? content;         // maps to posts.content (the caption/body)
+  final String? content; // maps to posts.content (the caption/body)
   final String? imageUrl;
   final int likeCount;
   final int commentCount;
   final int repostCount;
-  final String? eventId;         // optional link to an event
+  final String? eventId; // optional link to an event
   final DateTime createdAt;
   final DateTime? updatedAt;
+
   /// Transient — populated client-side by [PostService] after a feed fetch.
   final bool likedByMe;
   final bool repostedByMe;
+
   /// Transient — set when this row entered the feed via someone's repost,
   /// so the card can render a "↻ reposted by @user" header.
   final String? repostedByUsername;
@@ -79,8 +81,10 @@ class Post {
     );
   }
 
-  factory Post.fromJson(Map<String, dynamic> json,
-      {String? repostedByUsername}) {
+  factory Post.fromJson(
+    Map<String, dynamic> json, {
+    String? repostedByUsername,
+  }) {
     final profile = (json['profiles'] as Map<String, dynamic>?) ?? {};
     return Post(
       id: json['id'] as String,
@@ -110,16 +114,17 @@ class PostService {
 
   /// Posts from followed authors, newest first. Keyset-paged by created_at
   /// via [cursor] (the previous page's last created_at).
-  static Future<Paged<Post>> getFeed(List<String> followingIds,
-      {String? cursor}) async {
+  static Future<Paged<Post>> getFeed(
+    List<String> followingIds, {
+    String? cursor,
+  }) async {
     if (followingIds.isEmpty) return Paged.empty();
     var b = supabase
         .from('posts')
         .select(_postSelect)
         .inFilter('user_id', followingIds);
     if (cursor != null) b = b.lt('created_at', cursor);
-    final rows =
-        await b.order('created_at', ascending: false).limit(kPageSize);
+    final rows = await b.order('created_at', ascending: false).limit(kPageSize);
     return _page(rows as List);
   }
 
@@ -129,14 +134,16 @@ class PostService {
   /// client-side (like recommendations) — not part of the post keyset, since a
   /// repost sorts by its own time, not the original post's created_at.
   static Future<List<({Post post, DateTime repostedAt})>> getRepostsFeed(
-      List<String> reposterIds,
-      {int limit = kPageSize}) async {
+    List<String> reposterIds, {
+    int limit = kPageSize,
+  }) async {
     if (reposterIds.isEmpty) return const [];
     final rows = await supabase
         .from('reposts')
         .select(
-            'created_at, reposter:profiles!reposts_user_id_fkey(username), '
-            'post:posts!reposts_post_id_fkey($_postSelect)')
+          'created_at, reposter:profiles!reposts_user_id_fkey(username), '
+          'post:posts!reposts_post_id_fkey($_postSelect)',
+        )
         .inFilter('user_id', reposterIds)
         .order('created_at', ascending: false)
         .limit(limit);
@@ -153,8 +160,10 @@ class PostService {
       if (post == null) continue;
       final reposter = (m['reposter'] as Map<String, dynamic>?) ?? {};
       out.add((
-        post: Post.fromJson(post,
-            repostedByUsername: reposter['username'] as String?),
+        post: Post.fromJson(
+          post,
+          repostedByUsername: reposter['username'] as String?,
+        ),
         repostedAt: DateTime.parse(m['created_at'] as String),
       ));
     }
@@ -165,24 +174,26 @@ class PostService {
   static Future<Paged<Post>> getDiscover({String? cursor}) async {
     var b = supabase.from('posts').select(_postSelect);
     if (cursor != null) b = b.lt('created_at', cursor);
-    final rows =
-        await b.order('created_at', ascending: false).limit(kPageSize);
+    final rows = await b.order('created_at', ascending: false).limit(kPageSize);
     return _page(rows as List);
   }
 
   /// All posts by one author, newest first (profile screen). Keyset-paged.
-  static Future<Paged<Post>> getByAuthor(String authorId,
-      {String? cursor, int limit = kPageSize}) async {
+  static Future<Paged<Post>> getByAuthor(
+    String authorId, {
+    String? cursor,
+    int limit = kPageSize,
+  }) async {
     var b = supabase.from('posts').select(_postSelect).eq('user_id', authorId);
     if (cursor != null) b = b.lt('created_at', cursor);
-    final rows =
-        await b.order('created_at', ascending: false).limit(limit);
+    final rows = await b.order('created_at', ascending: false).limit(limit);
     return _page(rows as List, pageSize: limit);
   }
 
   static Paged<Post> _page(List rows, {int pageSize = kPageSize}) {
-    final items =
-        rows.map((r) => Post.fromJson(r as Map<String, dynamic>)).toList();
+    final items = rows
+        .map((r) => Post.fromJson(r as Map<String, dynamic>))
+        .toList();
     final hasMore = items.length == pageSize;
     return Paged(
       items: items,
@@ -264,8 +275,9 @@ class PostService {
   /// round-trip. Returns a new list with the flag set; original is untouched.
   static Future<List<Post>> hydrateLikes(List<Post> posts) async {
     if (posts.isEmpty) return posts;
-    final liked =
-        await LikeService.getLikedPostIds(posts.map((p) => p.id).toList());
+    final liked = await LikeService.getLikedPostIds(
+      posts.map((p) => p.id).toList(),
+    );
     return posts
         .map((p) => p.copyWith(likedByMe: liked.contains(p.id)))
         .toList();
@@ -275,7 +287,8 @@ class PostService {
   static Future<List<Post>> hydrateReposts(List<Post> posts) async {
     if (posts.isEmpty) return posts;
     final reposted = await RepostService.getRepostedPostIds(
-        posts.map((p) => p.id).toList());
+      posts.map((p) => p.id).toList(),
+    );
     return posts
         .map((p) => p.copyWith(repostedByMe: reposted.contains(p.id)))
         .toList();
@@ -290,7 +303,9 @@ class PostService {
 
     final filename = '${DateTime.now().millisecondsSinceEpoch}.jpg';
     final path = '$uid/$filename';
-    await supabase.storage.from('posts').uploadBinary(
+    await supabase.storage
+        .from('posts')
+        .uploadBinary(
           path,
           bytes,
           fileOptions: const FileOptions(

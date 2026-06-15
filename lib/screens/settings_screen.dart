@@ -3,6 +3,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import '../services/account_service.dart';
 import '../services/profile_service.dart';
 import '../theme.dart';
+import 'auth/interest_picker_screen.dart';
 import 'blocked_accounts_screen.dart';
 import 'edit_profile_screen.dart';
 import 'my_tickets_screen.dart';
@@ -35,6 +36,13 @@ class SettingsScreen extends StatelessWidget {
     Navigator.push(
       context,
       MaterialPageRoute(builder: (_) => const PayoutsScreen()),
+    );
+  }
+
+  void _interests(BuildContext context) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const InterestPickerScreen()),
     );
   }
 
@@ -109,52 +117,58 @@ class SettingsScreen extends StatelessWidget {
       appBar: AppBar(title: const Text('Settings')),
       body: NileMaxWidth(
         child: ListView(
-        padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
-        children: [
-          _SettingsTile(
-            icon: Icons.edit_outlined,
-            label: 'Edit profile',
-            onTap: () => _editProfile(context),
-          ),
-          const SizedBox(height: 10),
-          _SettingsTile(
-            icon: Icons.confirmation_number_outlined,
-            label: 'My tickets',
-            onTap: () => _myTickets(context),
-          ),
-          const SizedBox(height: 10),
-          _SettingsTile(
-            icon: Icons.account_balance_outlined,
-            label: 'Payouts',
-            onTap: () => _payouts(context),
-          ),
-          const SizedBox(height: 10),
-          _SettingsTile(
-            icon: Icons.notifications_outlined,
-            label: 'Notifications',
-            onTap: () => _notifications(context),
-          ),
-          const SizedBox(height: 10),
-          _SettingsTile(
-            icon: Icons.block,
-            label: 'Blocked accounts',
-            onTap: () => _blockedAccounts(context),
-          ),
-          const SizedBox(height: 10),
-          _SettingsTile(
-            icon: Icons.logout,
-            label: 'Sign out',
-            color: NileColors.error,
-            onTap: () => _signOut(context),
-          ),
-          const SizedBox(height: 10),
-          _SettingsTile(
-            icon: Icons.delete_forever_outlined,
-            label: 'Delete account',
-            color: NileColors.error,
-            onTap: () => _deleteAccount(context),
-          ),
-        ],
+          padding: const EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s16, NileSpacing.s16, NileSpacing.s32),
+          children: [
+            _SettingsTile(
+              icon: Icons.edit_outlined,
+              label: 'Edit profile',
+              onTap: () => _editProfile(context),
+            ),
+            const SizedBox(height: 10),
+            _SettingsTile(
+              icon: Icons.confirmation_number_outlined,
+              label: 'My tickets',
+              onTap: () => _myTickets(context),
+            ),
+            const SizedBox(height: 10),
+            _SettingsTile(
+              icon: Icons.account_balance_outlined,
+              label: 'Payouts',
+              onTap: () => _payouts(context),
+            ),
+            const SizedBox(height: 10),
+            _SettingsTile(
+              icon: Icons.bubble_chart_outlined,
+              label: 'Your interests',
+              onTap: () => _interests(context),
+            ),
+            const SizedBox(height: 10),
+            _SettingsTile(
+              icon: Icons.notifications_outlined,
+              label: 'Notifications',
+              onTap: () => _notifications(context),
+            ),
+            const SizedBox(height: 10),
+            _SettingsTile(
+              icon: Icons.block,
+              label: 'Blocked accounts',
+              onTap: () => _blockedAccounts(context),
+            ),
+            const SizedBox(height: 10),
+            _SettingsTile(
+              icon: Icons.logout,
+              label: 'Sign out',
+              color: NileColors.error,
+              onTap: () => _signOut(context),
+            ),
+            const SizedBox(height: 10),
+            _SettingsTile(
+              icon: Icons.delete_forever_outlined,
+              label: 'Delete account',
+              color: NileColors.error,
+              onTap: () => _deleteAccount(context),
+            ),
+          ],
         ),
       ),
     );
@@ -237,24 +251,29 @@ class _SettingsTile extends StatelessWidget {
     final c = color ?? NileColors.txtPrimary;
     return InkWell(
       onTap: onTap,
-      borderRadius: BorderRadius.circular(NileRadius.md),
+      borderRadius: BorderRadius.circular(NileRadius.lg),
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+        padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s16, vertical: NileSpacing.s16),
         decoration: BoxDecoration(
           color: NileColors.bgSurface,
-          borderRadius: BorderRadius.circular(NileRadius.md),
+          borderRadius: BorderRadius.circular(NileRadius.lg),
         ),
         child: Row(
           children: [
             Icon(icon, color: c, size: 22),
             const SizedBox(width: 14),
             Expanded(
-              child: Text(label,
-                  style: NileTextStyles.labelLg().copyWith(color: c)),
+              child: Text(
+                label,
+                style: NileTextStyles.labelLg().copyWith(color: c),
+              ),
             ),
             if (color == null)
-              const Icon(Icons.chevron_right,
-                  color: NileColors.txtTertiary, size: 20),
+              const Icon(
+                Icons.chevron_right,
+                color: NileColors.txtTertiary,
+                size: 20,
+              ),
           ],
         ),
       ),

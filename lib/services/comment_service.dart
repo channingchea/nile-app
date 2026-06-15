@@ -46,12 +46,16 @@ class CommentService {
       '*, profiles!post_comments_user_id_fkey(username, avatar_url)';
 
   /// Comments on a post, newest first. Keyset-paged by created_at via [cursor].
-  static Future<Paged<Comment>> listForPost(String postId,
-      {String? cursor}) async {
-    var b = supabase.from('post_comments').select(_select).eq('post_id', postId);
+  static Future<Paged<Comment>> listForPost(
+    String postId, {
+    String? cursor,
+  }) async {
+    var b = supabase
+        .from('post_comments')
+        .select(_select)
+        .eq('post_id', postId);
     if (cursor != null) b = b.lt('created_at', cursor);
-    final rows =
-        await b.order('created_at', ascending: false).limit(kPageSize);
+    final rows = await b.order('created_at', ascending: false).limit(kPageSize);
     final items = (rows as List)
         .map((r) => Comment.fromJson(r as Map<String, dynamic>))
         .toList();
@@ -74,11 +78,7 @@ class CommentService {
 
     final row = await supabase
         .from('post_comments')
-        .insert({
-          'post_id': postId,
-          'user_id': uid,
-          'body': trimmed,
-        })
+        .insert({'post_id': postId, 'user_id': uid, 'body': trimmed})
         .select(_select)
         .single();
 

@@ -24,12 +24,12 @@ class PayoutStatus {
   bool get isPending => connected && !isActive;
 
   factory PayoutStatus.fromJson(Map<String, dynamic> j) => PayoutStatus(
-        connected: j['connected'] as bool? ?? false,
-        chargesEnabled: j['charges_enabled'] as bool? ?? false,
-        payoutsEnabled: j['payouts_enabled'] as bool? ?? false,
-        detailsSubmitted: j['details_submitted'] as bool? ?? false,
-        dashboardUrl: j['dashboard_url'] as String?,
-      );
+    connected: j['connected'] as bool? ?? false,
+    chargesEnabled: j['charges_enabled'] as bool? ?? false,
+    payoutsEnabled: j['payouts_enabled'] as bool? ?? false,
+    detailsSubmitted: j['details_submitted'] as bool? ?? false,
+    dashboardUrl: j['dashboard_url'] as String?,
+  );
 }
 
 class PayoutService {

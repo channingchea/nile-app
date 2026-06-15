@@ -28,8 +28,11 @@ class LivekitService {
   static Future<void> createRoom({
     required String eventId,
     required String eventName,
-  }) =>
-      _invoke<Map>({'action': 'create-room', 'eventId': eventId, 'eventName': eventName});
+  }) => _invoke<Map>({
+    'action': 'create-room',
+    'eventId': eventId,
+    'eventName': eventName,
+  });
 
   /// Host: publisher token for a camera. → (token, wsUrl, isMasterAudio)
   static Future<LivekitToken> cameraToken({
@@ -53,19 +56,29 @@ class LivekitService {
   /// Host: audio-only master publisher token. → (token, wsUrl)
   static Future<LivekitToken> audioToken({required String eventId}) async {
     final d = await _invoke<Map>({'action': 'audio-token', 'eventId': eventId});
-    return LivekitToken(token: d['token'] as String, wsUrl: d['wsUrl'] as String);
+    return LivekitToken(
+      token: d['token'] as String,
+      wsUrl: d['wsUrl'] as String,
+    );
   }
 
   /// Host: reassign the master-audio flag across cameras.
   static Future<void> setMasterAudio({
     required String eventId,
     required String cameraIdentity,
-  }) =>
-      _invoke<Map>({
-        'action': 'set-master-audio',
-        'eventId': eventId,
-        'cameraIdentity': cameraIdentity,
-      });
+  }) => _invoke<Map>({
+    'action': 'set-master-audio',
+    'eventId': eventId,
+    'cameraIdentity': cameraIdentity,
+  });
+
+  /// Crew: flag the caller's own feed as ready (or not) during Sound Check.
+  /// The Edge Function matches the caller's publisher(s) by the userId in
+  /// their token metadata — no identity is sent from the client.
+  static Future<void> setReady({
+    required String eventId,
+    required bool ready,
+  }) => _invoke<Map>({'action': 'set-ready', 'eventId': eventId, 'ready': ready});
 
   /// Host: stamp the show's wall-clock anchor (showStartedAt) into room metadata.
   /// Call alongside EventService.goLive when Start Show is pressed.
@@ -75,7 +88,10 @@ class LivekitService {
   /// Viewer: ticket-gated connection descriptor. Identity comes from the JWT.
   /// Today `mode` is always "webrtc"; the seam allows "hls" at much higher scale.
   static Future<ViewerConnection> viewerToken({required String eventId}) async {
-    final d = await _invoke<Map>({'action': 'viewer-token', 'eventId': eventId});
+    final d = await _invoke<Map>({
+      'action': 'viewer-token',
+      'eventId': eventId,
+    });
     return ViewerConnection(
       mode: (d['mode'] as String?) ?? 'webrtc',
       token: d['token'] as String,
@@ -88,12 +104,20 @@ class LivekitToken {
   final String token;
   final String wsUrl;
   final bool isMasterAudio;
-  const LivekitToken({required this.token, required this.wsUrl, this.isMasterAudio = false});
+  const LivekitToken({
+    required this.token,
+    required this.wsUrl,
+    this.isMasterAudio = false,
+  });
 }
 
 class ViewerConnection {
   final String mode; // "webrtc" today; "hls" reserved for future scale
   final String token;
   final String wsUrl;
-  const ViewerConnection({required this.mode, required this.token, required this.wsUrl});
+  const ViewerConnection({
+    required this.mode,
+    required this.token,
+    required this.wsUrl,
+  });
 }

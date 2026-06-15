@@ -19,10 +19,8 @@ class CrewState {
   /// Chosen crew members, keyed by user id. No slot/device here.
   final Map<String, OperatorPick> operators;
 
-  CrewState({
-    this.cameraCount = 1,
-    Map<String, OperatorPick>? operators,
-  }) : operators = operators ?? {};
+  CrewState({this.cameraCount = 1, Map<String, OperatorPick>? operators})
+    : operators = operators ?? {};
 }
 
 /// The cameras-count + crew picker, shared by the create flow and the edit
@@ -85,7 +83,9 @@ class _CrewEditorState extends State<CrewEditor> {
           ..clear()
           ..addAll(favs.map((f) => f.id));
       });
-    } catch (_) {/* best-effort */}
+    } catch (_) {
+      /* best-effort */
+    }
   }
 
   Future<void> _toggleFavorite(UserProfile u) async {
@@ -156,12 +156,13 @@ class _CrewEditorState extends State<CrewEditor> {
     if (visible.isEmpty) {
       return [
         Padding(
-          padding: const EdgeInsets.symmetric(vertical: 16),
+          padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
           child: Text(
             'No favorites yet. Tap the star next to anyone in Search to add '
             'them here for quick assignment next time.',
-            style:
-                NileTextStyles.bodySm().copyWith(color: NileColors.txtTertiary),
+            style: NileTextStyles.bodySm().copyWith(
+              color: NileColors.txtTertiary,
+            ),
           ),
         ),
       ];
@@ -201,7 +202,8 @@ class _CrewEditorState extends State<CrewEditor> {
         _StepHeader(
           number: 2,
           title: 'Choose Your Crew',
-          subtitle: 'Crew members get free access and a notification. '
+          subtitle:
+              'Crew members get free access and a notification. '
               'You\'ll assign cameras and devices during Sound Check.',
         ),
         const SizedBox(height: 12),
@@ -234,12 +236,14 @@ class _CrewEditorState extends State<CrewEditor> {
               hintText: 'Search people by name or @username',
               suffixIcon: _searching
                   ? const Padding(
-                      padding: EdgeInsets.all(12),
+                      padding: EdgeInsets.all(NileSpacing.s12),
                       child: SizedBox(
                         width: 16,
                         height: 16,
                         child: CircularProgressIndicator(
-                            strokeWidth: 2, color: NileColors.volt),
+                          strokeWidth: 2,
+                          color: NileColors.volt,
+                        ),
                       ),
                     )
                   : null,
@@ -268,8 +272,11 @@ class _StepHeader extends StatelessWidget {
   final String title;
   final String subtitle;
 
-  const _StepHeader(
-      {required this.number, required this.title, required this.subtitle});
+  const _StepHeader({
+    required this.number,
+    required this.title,
+    required this.subtitle,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -280,11 +287,17 @@ class _StepHeader extends StatelessWidget {
           width: 26,
           height: 26,
           alignment: Alignment.center,
-          decoration:
-              const BoxDecoration(color: NileColors.volt, shape: BoxShape.circle),
-          child: Text('$number',
-              style: NileTextStyles.labelMd().copyWith(
-                  color: NileColors.bgPage, fontWeight: FontWeight.w700)),
+          decoration: const BoxDecoration(
+            color: NileColors.volt,
+            shape: BoxShape.circle,
+          ),
+          child: Text(
+            '$number',
+            style: NileTextStyles.labelMd().copyWith(
+              color: NileColors.bgPage,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
         ),
         const SizedBox(width: 12),
         Expanded(
@@ -293,9 +306,12 @@ class _StepHeader extends StatelessWidget {
             children: [
               Text(title, style: NileTextStyles.headingSm()),
               const SizedBox(height: 2),
-              Text(subtitle,
-                  style: NileTextStyles.bodySm()
-                      .copyWith(color: NileColors.txtSecondary)),
+              Text(
+                subtitle,
+                style: NileTextStyles.bodySm().copyWith(
+                  color: NileColors.txtSecondary,
+                ),
+              ),
             ],
           ),
         ),
@@ -310,16 +326,17 @@ class _CameraStepper extends StatelessWidget {
   final VoidCallback onAdd;
   final VoidCallback onRemove;
 
-  const _CameraStepper(
-      {required this.count,
-      required this.max,
-      required this.onAdd,
-      required this.onRemove});
+  const _CameraStepper({
+    required this.count,
+    required this.max,
+    required this.onAdd,
+    required this.onRemove,
+  });
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s8, vertical: NileSpacing.s4),
       decoration: BoxDecoration(
         color: NileColors.bgSurface,
         border: Border.all(color: NileColors.border),
@@ -334,8 +351,10 @@ class _CameraStepper extends StatelessWidget {
             color: NileColors.txtPrimary,
             disabledColor: NileColors.txtTertiary,
           ),
-          Text('$count',
-              style: NileTextStyles.headingSm().copyWith(letterSpacing: 0.5)),
+          Text(
+            '$count',
+            style: NileTextStyles.headingSm().copyWith(letterSpacing: 0.5),
+          ),
           IconButton(
             onPressed: count < max ? onAdd : null,
             icon: const Icon(Icons.add),
@@ -370,17 +389,21 @@ class _OperatorResultTile extends StatelessWidget {
       onTap: onTap,
       borderRadius: BorderRadius.circular(NileRadius.sm),
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s12, vertical: NileSpacing.s8),
         child: Row(
           children: [
             CircleAvatar(
               radius: 18,
               backgroundColor: NileColors.bgRaised,
-              backgroundImage:
-                  (url != null && url.isNotEmpty) ? NetworkImage(url) : null,
+              backgroundImage: (url != null && url.isNotEmpty)
+                  ? nileAvatarImage(url, 18)
+                  : null,
               child: (url == null || url.isEmpty)
-                  ? const Icon(Icons.person,
-                      size: 18, color: NileColors.txtTertiary)
+                  ? const Icon(
+                      Icons.person,
+                      size: 18,
+                      color: NileColors.txtTertiary,
+                    )
                   : null,
             ),
             const SizedBox(width: 12),
@@ -388,16 +411,21 @@ class _OperatorResultTile extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('@${user.username}',
+                  Text(
+                    '@${user.username}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: NileTextStyles.labelMd(),
+                  ),
+                  if (user.displayName.isNotEmpty)
+                    Text(
+                      user.displayName,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: NileTextStyles.labelMd()),
-                  if (user.displayName.isNotEmpty)
-                    Text(user.displayName,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: NileTextStyles.caption()
-                            .copyWith(color: NileColors.txtTertiary)),
+                      style: NileTextStyles.caption().copyWith(
+                        color: NileColors.txtTertiary,
+                      ),
+                    ),
                 ],
               ),
             ),
@@ -430,8 +458,8 @@ class _AssignMyselfTile extends StatelessWidget {
       onTap: onTap,
       borderRadius: BorderRadius.circular(NileRadius.sm),
       child: Container(
-        margin: const EdgeInsets.only(bottom: 8),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        margin: const EdgeInsets.only(bottom: NileSpacing.s8),
+        padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s12, vertical: NileSpacing.s8),
         decoration: BoxDecoration(
           color: NileColors.volt.withValues(alpha: 0.08),
           border: Border.all(color: NileColors.volt.withValues(alpha: 0.4)),
@@ -442,19 +470,25 @@ class _AssignMyselfTile extends StatelessWidget {
             CircleAvatar(
               radius: 16,
               backgroundColor: NileColors.bgRaised,
-              backgroundImage:
-                  (url != null && url.isNotEmpty) ? NetworkImage(url) : null,
+              backgroundImage: (url != null && url.isNotEmpty)
+                  ? nileAvatarImage(url, 16)
+                  : null,
               child: (url == null || url.isEmpty)
-                  ? const Icon(Icons.person,
-                      size: 16, color: NileColors.txtTertiary)
+                  ? const Icon(
+                      Icons.person,
+                      size: 16,
+                      color: NileColors.txtTertiary,
+                    )
                   : null,
             ),
             const SizedBox(width: 12),
             Expanded(
-              child: Text('Assign myself (@${me.username})',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: NileTextStyles.labelMd()),
+              child: Text(
+                'Assign myself (@${me.username})',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: NileTextStyles.labelMd(),
+              ),
             ),
             const Icon(Icons.add_circle_outline, color: NileColors.volt),
           ],
@@ -485,7 +519,9 @@ class _PickerTabs extends StatelessWidget {
       ),
       child: Row(
         children: [
-          Expanded(child: _seg('Search', !showFavorites, () => onChanged(false))),
+          Expanded(
+            child: _seg('Search', !showFavorites, () => onChanged(false)),
+          ),
           Expanded(
             child: _seg(
               favoriteCount > 0 ? 'Favorites ($favoriteCount)' : 'Favorites',
@@ -504,7 +540,7 @@ class _PickerTabs extends StatelessWidget {
       borderRadius: BorderRadius.circular(NileRadius.sm),
       child: Container(
         alignment: Alignment.center,
-        padding: const EdgeInsets.symmetric(vertical: 12),
+        padding: const EdgeInsets.symmetric(vertical: NileSpacing.s12),
         decoration: BoxDecoration(
           color: selected ? NileColors.volt : Colors.transparent,
           borderRadius: BorderRadius.circular(NileRadius.sm),
@@ -534,8 +570,8 @@ class _OperatorAssignedRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      margin: const EdgeInsets.only(bottom: 8),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      margin: const EdgeInsets.only(bottom: NileSpacing.s8),
+      padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s12, vertical: NileSpacing.s8),
       decoration: BoxDecoration(
         color: NileColors.bgSurface,
         border: Border.all(color: NileColors.border),
@@ -545,12 +581,13 @@ class _OperatorAssignedRow extends StatelessWidget {
         children: [
           Expanded(
             child: Text(
-                isMe
-                    ? '@${pick.profile.username} (you)'
-                    : '@${pick.profile.username}',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: NileTextStyles.labelMd()),
+              isMe
+                  ? '@${pick.profile.username} (you)'
+                  : '@${pick.profile.username}',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: NileTextStyles.labelMd(),
+            ),
           ),
           IconButton(
             icon: const Icon(Icons.close, size: 18),

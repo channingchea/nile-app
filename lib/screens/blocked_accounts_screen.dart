@@ -44,8 +44,9 @@ class _BlockedAccountsScreenState extends State<BlockedAccountsScreen> {
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('Couldn\'t unblock: $e')));
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Couldn\'t unblock: $e')));
       }
     } finally {
       if (mounted) setState(() => _busy.remove(p.id));
@@ -67,9 +68,10 @@ class _BlockedAccountsScreenState extends State<BlockedAccountsScreen> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text(_error!,
-                style:
-                    NileTextStyles.bodyMd().copyWith(color: NileColors.error)),
+            Text(
+              _error!,
+              style: NileTextStyles.bodyMd().copyWith(color: NileColors.error),
+            ),
             const SizedBox(height: 12),
             FilledButton(onPressed: _load, child: const Text('Retry')),
           ],
@@ -79,7 +81,8 @@ class _BlockedAccountsScreenState extends State<BlockedAccountsScreen> {
     final accounts = _accounts;
     if (accounts == null) {
       return const Center(
-          child: CircularProgressIndicator(color: NileColors.volt));
+        child: CircularProgressIndicator(color: NileColors.volt),
+      );
     }
     if (accounts.isEmpty) {
       return Center(
@@ -90,14 +93,16 @@ class _BlockedAccountsScreenState extends State<BlockedAccountsScreen> {
             const SizedBox(height: 12),
             Text('No blocked accounts', style: NileTextStyles.headingSm()),
             const SizedBox(height: 4),
-            Text('Accounts you block will appear here.',
-                style: NileTextStyles.bodySm()),
+            Text(
+              'Accounts you block will appear here.',
+              style: NileTextStyles.bodySm(),
+            ),
           ],
         ),
       );
     }
     return ListView.separated(
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
+      padding: const EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s16, NileSpacing.s16, NileSpacing.s32),
       itemCount: accounts.length,
       separatorBuilder: (_, _) => const SizedBox(height: 10),
       itemBuilder: (_, i) => _BlockedTile(
@@ -122,10 +127,10 @@ class _BlockedTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s12, vertical: NileSpacing.s8),
       decoration: BoxDecoration(
         color: NileColors.bgSurface,
-        borderRadius: BorderRadius.circular(NileRadius.md),
+        borderRadius: BorderRadius.circular(NileRadius.lg),
       ),
       child: Row(
         children: [
@@ -133,18 +138,22 @@ class _BlockedTile extends StatelessWidget {
             onTap: () => Navigator.push(
               context,
               MaterialPageRoute(
-                  builder: (_) => ProfileScreen(userId: profile.id)),
+                builder: (_) => ProfileScreen(userId: profile.id),
+              ),
             ),
             child: CircleAvatar(
               radius: 20,
               backgroundColor: NileColors.bgRaised,
               backgroundImage: profile.avatarUrl != null
-                  ? NetworkImage(profile.avatarUrl!)
+                  ? nileAvatarImage(profile.avatarUrl!, 20)
                   : null,
               child: profile.avatarUrl == null
-                  ? Text(profile.username[0].toUpperCase(),
-                      style:
-                          NileTextStyles.labelMd().copyWith(letterSpacing: 0))
+                  ? Text(
+                      profile.username[0].toUpperCase(),
+                      style: NileTextStyles.labelMd().copyWith(
+                        letterSpacing: 0,
+                      ),
+                    )
                   : null,
             ),
           ),
@@ -153,12 +162,16 @@ class _BlockedTile extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(profile.displayName,
-                    style: NileTextStyles.labelMd(),
-                    overflow: TextOverflow.ellipsis),
-                Text('@${profile.username}',
-                    style: NileTextStyles.bodySm(),
-                    overflow: TextOverflow.ellipsis),
+                Text(
+                  profile.displayName,
+                  style: NileTextStyles.labelMd(),
+                  overflow: TextOverflow.ellipsis,
+                ),
+                Text(
+                  '@${profile.username}',
+                  style: NileTextStyles.bodySm(),
+                  overflow: TextOverflow.ellipsis,
+                ),
               ],
             ),
           ),
@@ -170,7 +183,9 @@ class _BlockedTile extends StatelessWidget {
                     width: 14,
                     height: 14,
                     child: CircularProgressIndicator(
-                        strokeWidth: 2, color: NileColors.txtPrimary),
+                      strokeWidth: 2,
+                      color: NileColors.txtPrimary,
+                    ),
                   )
                 : const Text('Unblock'),
           ),

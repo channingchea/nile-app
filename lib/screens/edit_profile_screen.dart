@@ -39,10 +39,10 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
   void initState() {
     super.initState();
     _displayNameCtrl = TextEditingController(text: widget.profile.displayName);
-    _usernameCtrl    = TextEditingController(text: widget.profile.username);
-    _bioCtrl         = TextEditingController(text: widget.profile.bio ?? '');
+    _usernameCtrl = TextEditingController(text: widget.profile.username);
+    _bioCtrl = TextEditingController(text: widget.profile.bio ?? '');
     _remoteAvatarUrl = widget.profile.avatarUrl;
-    _remoteCoverUrl  = widget.profile.coverUrl;
+    _remoteCoverUrl = widget.profile.coverUrl;
   }
 
   @override
@@ -66,7 +66,9 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
       );
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$e')));
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('$e')));
       }
       return;
     }
@@ -78,14 +80,22 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
     });
 
     try {
-      final url = await ProfileService.uploadAvatarBytes(widget.profile.id, bytes);
-      if (mounted) setState(() { _remoteAvatarUrl = url; _uploadingAvatar = false; });
+      final url = await ProfileService.uploadAvatarBytes(
+        widget.profile.id,
+        bytes,
+      );
+      if (mounted) {
+        setState(() {
+          _remoteAvatarUrl = url;
+          _uploadingAvatar = false;
+        });
+      }
     } catch (e) {
       if (mounted) {
         setState(() => _uploadingAvatar = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Avatar upload failed: $e')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Avatar upload failed: $e')));
       }
     }
   }
@@ -102,7 +112,9 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
       );
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$e')));
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('$e')));
       }
       return;
     }
@@ -114,14 +126,22 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
     });
 
     try {
-      final url = await ProfileService.uploadCoverBytes(widget.profile.id, bytes);
-      if (mounted) setState(() { _remoteCoverUrl = url; _uploadingCover = false; });
+      final url = await ProfileService.uploadCoverBytes(
+        widget.profile.id,
+        bytes,
+      );
+      if (mounted) {
+        setState(() {
+          _remoteCoverUrl = url;
+          _uploadingCover = false;
+        });
+      }
     } catch (e) {
       if (mounted) {
         setState(() => _uploadingCover = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Cover upload failed: $e')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Cover upload failed: $e')));
       }
     }
   }
@@ -148,9 +168,9 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
       if (mounted) Navigator.of(context).pop(withImages);
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Save failed: $e')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Save failed: $e')));
       }
     } finally {
       if (mounted) setState(() => _saving = false);
@@ -174,185 +194,202 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
                     width: 20,
                     height: 20,
                     child: CircularProgressIndicator(
-                        strokeWidth: 2, color: NileColors.volt),
+                      strokeWidth: 2,
+                      color: NileColors.volt,
+                    ),
                   )
-                : Text('Save',
-                    style: NileTextStyles.labelMd()
-                        .copyWith(color: NileColors.volt)),
+                : Text(
+                    'Save',
+                    style: NileTextStyles.labelMd().copyWith(
+                      color: NileColors.volt,
+                    ),
+                  ),
           ),
         ],
       ),
-      body: NileMaxWidth(child: SingleChildScrollView(
-        child: Form(
-          key: _formKey,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // ── Cover + avatar (full-bleed, no horizontal padding) ─────────
-              Stack(
-                clipBehavior: Clip.none,
-                children: [
-                  // Cover photo
-                  CoverPhoto(
-                    url: _remoteCoverUrl,
-                    localBytes: _localCoverBytes,
-                    height: _coverHeight,
-                    onTap: _pickCover,
-                  ),
-
-                  // Upload spinner over cover
-                  if (_uploadingCover)
-                    Positioned.fill(
-                      child: Container(
-                        color: NileColors.bgPage.withValues(alpha: 0.5),
-                        child: const Center(
-                          child: CircularProgressIndicator(
-                              color: NileColors.volt),
-                        ),
-                      ),
+      body: NileMaxWidth(
+        child: SingleChildScrollView(
+          child: Form(
+            key: _formKey,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // ── Cover + avatar (full-bleed, no horizontal padding) ─────────
+                Stack(
+                  clipBehavior: Clip.none,
+                  children: [
+                    // Cover photo
+                    CoverPhoto(
+                      url: _remoteCoverUrl,
+                      localBytes: _localCoverBytes,
+                      height: _coverHeight,
+                      onTap: _pickCover,
                     ),
 
-                  // "Edit cover" chip when not uploading and no image yet
-                  if (!_uploadingCover &&
-                      _localCoverBytes == null &&
-                      _remoteCoverUrl == null)
-                    Positioned(
-                      bottom: 8,
-                      right: 12,
-                      child: GestureDetector(
-                        onTap: _pickCover,
-                        child: buildCameraChip('Add cover'),
-                      ),
-                    ),
-
-                  // Avatar overlapping the cover
-                  Positioned(
-                    bottom: -_avatarRadius,
-                    left: 20,
-                    child: GestureDetector(
-                      onTap: _pickAvatar,
-                      child: Stack(
-                        children: [
-                          Container(
-                            padding: const EdgeInsets.all(3),
-                            decoration: const BoxDecoration(
-                              color: NileColors.bgPage,
-                              shape: BoxShape.circle,
-                            ),
-                            child: CircleAvatar(
-                              radius: _avatarRadius,
-                              backgroundColor: NileColors.bgRaised,
-                              backgroundImage: _localAvatarBytes != null
-                                  ? MemoryImage(_localAvatarBytes!)
-                                  : (_remoteAvatarUrl != null
-                                      ? NetworkImage(_remoteAvatarUrl!)
-                                          as ImageProvider
-                                      : null),
-                              child: (_localAvatarBytes == null &&
-                                      _remoteAvatarUrl == null)
-                                  ? Icon(Icons.person,
-                                      size: _avatarRadius,
-                                      color: NileColors.txtTertiary)
-                                  : null,
+                    // Upload spinner over cover
+                    if (_uploadingCover)
+                      Positioned.fill(
+                        child: Container(
+                          color: NileColors.bgPage.withValues(alpha: 0.5),
+                          child: const Center(
+                            child: CircularProgressIndicator(
+                              color: NileColors.volt,
                             ),
                           ),
-                          // Camera badge
-                          Positioned(
-                            bottom: 3,
-                            right: 3,
-                            child: Container(
+                        ),
+                      ),
+
+                    // "Edit cover" chip when not uploading and no image yet
+                    if (!_uploadingCover &&
+                        _localCoverBytes == null &&
+                        _remoteCoverUrl == null)
+                      Positioned(
+                        bottom: 8,
+                        right: 12,
+                        child: GestureDetector(
+                          onTap: _pickCover,
+                          child: buildCameraChip('Add cover'),
+                        ),
+                      ),
+
+                    // Avatar overlapping the cover
+                    Positioned(
+                      bottom: -_avatarRadius,
+                      left: 20,
+                      child: GestureDetector(
+                        onTap: _pickAvatar,
+                        child: Stack(
+                          children: [
+                            Container(
+                              padding: const EdgeInsets.all(NileSpacing.s2),
                               decoration: const BoxDecoration(
-                                color: NileColors.volt,
+                                color: NileColors.bgPage,
                                 shape: BoxShape.circle,
                               ),
-                              padding: const EdgeInsets.all(6),
-                              child: _uploadingAvatar
-                                  ? const SizedBox(
-                                      width: 14,
-                                      height: 14,
-                                      child: CircularProgressIndicator(
-                                          strokeWidth: 2,
-                                          color: NileColors.bgPage),
-                                    )
-                                  : const Icon(Icons.camera_alt,
-                                      size: 14, color: NileColors.bgPage),
+                              child: CircleAvatar(
+                                radius: _avatarRadius,
+                                backgroundColor: NileColors.bgRaised,
+                                backgroundImage: _localAvatarBytes != null
+                                    ? MemoryImage(_localAvatarBytes!)
+                                    : (_remoteAvatarUrl != null
+                                          ? nileAvatarImage(_remoteAvatarUrl!, _avatarRadius)
+                                          : null),
+                                child:
+                                    (_localAvatarBytes == null &&
+                                        _remoteAvatarUrl == null)
+                                    ? Icon(
+                                        Icons.person,
+                                        size: _avatarRadius,
+                                        color: NileColors.txtTertiary,
+                                      )
+                                    : null,
+                              ),
                             ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-
-              // Clearance for the avatar overhang, then the "Edit photo" link
-              // centered horizontally beneath the avatar.
-              SizedBox(height: _avatarRadius + 12),
-              Padding(
-                padding: EdgeInsets.only(left: 20),
-                child: SizedBox(
-                  width: _avatarRadius * 2,
-                  child: Center(
-                    child: GestureDetector(
-                      onTap: _pickAvatar,
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 4),
-                        child: Text(
-                          _uploadingAvatar ? 'Uploading…' : 'Edit photo',
-                          style: NileTextStyles.bodySm().copyWith(
-                            color: NileColors.volt,
-                            decoration: TextDecoration.underline,
-                            decorationColor: NileColors.volt,
-                          ),
+                            // Camera badge
+                            Positioned(
+                              bottom: 3,
+                              right: 3,
+                              child: Container(
+                                decoration: const BoxDecoration(
+                                  color: NileColors.volt,
+                                  shape: BoxShape.circle,
+                                ),
+                                padding: const EdgeInsets.all(NileSpacing.s6),
+                                child: _uploadingAvatar
+                                    ? const SizedBox(
+                                        width: 14,
+                                        height: 14,
+                                        child: CircularProgressIndicator(
+                                          strokeWidth: 2,
+                                          color: NileColors.bgPage,
+                                        ),
+                                      )
+                                    : const Icon(
+                                        Icons.camera_alt,
+                                        size: 14,
+                                        color: NileColors.bgPage,
+                                      ),
+                              ),
+                            ),
+                          ],
                         ),
                       ),
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 8),
-
-              // ── Form fields ───────────────────────────────────────────────
-              Padding(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-                child: Column(
-                  children: [
-                    _NileField(
-                      controller: _displayNameCtrl,
-                      label: 'Display name',
-                      validator: (v) =>
-                          (v == null || v.trim().isEmpty) ? 'Required' : null,
-                    ),
-                    const SizedBox(height: 16),
-                    _NileField(
-                      controller: _usernameCtrl,
-                      label: 'Username',
-                      prefix: '@',
-                      validator: (v) {
-                        if (v == null || v.trim().isEmpty) return 'Required';
-                        if (!RegExp(r'^[a-z0-9_]{3,20}$')
-                            .hasMatch(v.trim())) {
-                          return '3–20 chars: lowercase letters, numbers, underscores';
-                        }
-                        return null;
-                      },
-                    ),
-                    const SizedBox(height: 16),
-                    _NileField(
-                      controller: _bioCtrl,
-                      label: 'Bio',
-                      maxLines: 3,
-                      maxLength: 200,
-                      validator: null,
                     ),
                   ],
                 ),
-              ),
-            ],
+
+                // Clearance for the avatar overhang, then the "Edit photo" link
+                // centered horizontally beneath the avatar.
+                SizedBox(height: _avatarRadius + 12),
+                Padding(
+                  padding: EdgeInsets.only(left: NileSpacing.s16),
+                  child: SizedBox(
+                    width: _avatarRadius * 2,
+                    child: Center(
+                      child: GestureDetector(
+                        onTap: _pickAvatar,
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(vertical: NileSpacing.s4),
+                          child: Text(
+                            _uploadingAvatar ? 'Uploading…' : 'Edit photo',
+                            style: NileTextStyles.bodySm().copyWith(
+                              color: NileColors.volt,
+                              decoration: TextDecoration.underline,
+                              decorationColor: NileColors.volt,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+
+                // ── Form fields ───────────────────────────────────────────────
+                Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: NileSpacing.s16,
+                    vertical: NileSpacing.s8,
+                  ),
+                  child: Column(
+                    children: [
+                      _NileField(
+                        controller: _displayNameCtrl,
+                        label: 'Display name',
+                        validator: (v) =>
+                            (v == null || v.trim().isEmpty) ? 'Required' : null,
+                      ),
+                      const SizedBox(height: 16),
+                      _NileField(
+                        controller: _usernameCtrl,
+                        label: 'Username',
+                        prefix: '@',
+                        validator: (v) {
+                          if (v == null || v.trim().isEmpty) return 'Required';
+                          if (!RegExp(
+                            r'^[a-z0-9_]{3,20}$',
+                          ).hasMatch(v.trim())) {
+                            return '3–20 chars: lowercase letters, numbers, underscores';
+                          }
+                          return null;
+                        },
+                      ),
+                      const SizedBox(height: 16),
+                      _NileField(
+                        controller: _bioCtrl,
+                        label: 'Bio',
+                        maxLines: 3,
+                        maxLength: 200,
+                        validator: null,
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
-      )),
+      ),
     );
   }
 }
@@ -387,8 +424,9 @@ class _NileField extends StatelessWidget {
       decoration: InputDecoration(
         labelText: label,
         prefixText: prefix,
-        prefixStyle:
-            NileTextStyles.bodyLg().copyWith(color: NileColors.txtTertiary),
+        prefixStyle: NileTextStyles.bodyLg().copyWith(
+          color: NileColors.txtTertiary,
+        ),
         counterStyle: NileTextStyles.caption(),
       ),
     );

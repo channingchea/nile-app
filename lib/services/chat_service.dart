@@ -22,19 +22,19 @@ class ChatMessage {
   bool get isMine => senderId == supabase.auth.currentUser?.id;
 
   Map<String, dynamic> toJson() => {
-        'sender_id': senderId,
-        'username': username,
-        'content': content,
-        'sent_at': sentAt.toIso8601String(),
-      };
+    'sender_id': senderId,
+    'username': username,
+    'content': content,
+    'sent_at': sentAt.toIso8601String(),
+  };
 
   factory ChatMessage.fromJson(Map<String, dynamic> json) => ChatMessage(
-        senderId: json['sender_id'] as String? ?? '',
-        username: json['username'] as String? ?? 'viewer',
-        content: json['content'] as String? ?? '',
-        sentAt: DateTime.tryParse(json['sent_at'] as String? ?? '') ??
-            DateTime.now(),
-      );
+    senderId: json['sender_id'] as String? ?? '',
+    username: json['username'] as String? ?? 'viewer',
+    content: json['content'] as String? ?? '',
+    sentAt:
+        DateTime.tryParse(json['sent_at'] as String? ?? '') ?? DateTime.now(),
+  );
 }
 
 // ── Service ─────────────────────────────────────────────────────────────────

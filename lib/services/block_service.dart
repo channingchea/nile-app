@@ -13,11 +13,11 @@ class BlockedProfile {
     this.avatarUrl,
   });
   factory BlockedProfile.fromMap(Map<String, dynamic> m) => BlockedProfile(
-        id: m['id'] as String,
-        username: m['username'] as String,
-        displayName: (m['display_name'] as String?) ?? m['username'] as String,
-        avatarUrl: m['avatar_url'] as String?,
-      );
+    id: m['id'] as String,
+    username: m['username'] as String,
+    displayName: (m['display_name'] as String?) ?? m['username'] as String,
+    avatarUrl: m['avatar_url'] as String?,
+  );
 }
 
 /// Blocking is bidirectional: if A blocks B, neither sees the other anywhere.
@@ -27,10 +27,10 @@ class BlockService {
   /// Block [targetUserId]. Server trigger also purges follow edges both ways.
   static Future<void> block(String targetUserId) async {
     final myId = _requireUid();
-    await supabase.from('blocks').upsert(
-      {'blocker_id': myId, 'blocked_id': targetUserId},
-      onConflict: 'blocker_id,blocked_id',
-    );
+    await supabase.from('blocks').upsert({
+      'blocker_id': myId,
+      'blocked_id': targetUserId,
+    }, onConflict: 'blocker_id,blocked_id');
   }
 
   static Future<void> unblock(String targetUserId) async {

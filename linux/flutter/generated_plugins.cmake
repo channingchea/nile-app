@@ -7,6 +7,7 @@ list(APPEND FLUTTER_PLUGIN_LIST
   flutter_webrtc
   gtk
   livekit_client
+  sentry_flutter
   url_launcher_linux
 )
 

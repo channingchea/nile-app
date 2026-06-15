@@ -11,6 +11,7 @@ import '../services/profile_service.dart';
 import '../theme.dart';
 import '../widgets/crew_editor.dart';
 import '../widgets/duration_field.dart';
+import '../widgets/topic_chips.dart';
 import 'create_post_screen.dart';
 import 'event_detail_screen.dart';
 
@@ -26,17 +27,20 @@ class EventDraft {
   int? priceCents;
   int? ticketLimit;
 
+  /// Topic tags — what `recommend_events_by_topic` matches interests against.
+  final Set<String> topicIds = {};
+
   // Set once the event row is created (end of Page 1).
   Event? event;
 
   // Page 2 (crew) state — cameras + chosen operators, shared with [CrewEditor].
   final CrewState crew = CrewState();
+
   /// Persisted camera rows after Page 2 commits (for slot ids + summary).
   List<EventCamera> savedCameras = [];
 
   /// Computed end time, or null if there's no start.
-  DateTime? get endAt =>
-      scheduledAt?.add(Duration(minutes: durationMinutes));
+  DateTime? get endAt => scheduledAt?.add(Duration(minutes: durationMinutes));
 }
 
 /// Full-screen create-event flow. A self-contained [Navigator] stack so users
@@ -108,7 +112,8 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
   bool _uploadingCover = false;
   bool _submitting = false;
   String? _errorMessage;
-  String? _dateError; // "Scheduled For" is required; not a FormField so tracked here.
+  String?
+  _dateError; // "Scheduled For" is required; not a FormField so tracked here.
 
   // Duration unit toggle: false = minutes, true = hours.
   bool _durationInHours = true;
@@ -121,14 +126,17 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
     _nameController = TextEditingController(text: _draft.name);
     _descriptionController = TextEditingController(text: _draft.description);
     _priceController = TextEditingController(
-        text: _draft.priceCents == null
-            ? ''
-            : (_draft.priceCents! / 100).toStringAsFixed(2));
+      text: _draft.priceCents == null
+          ? ''
+          : (_draft.priceCents! / 100).toStringAsFixed(2),
+    );
     _ticketLimitController = TextEditingController(
-        text: _draft.ticketLimit?.toString() ?? '');
+      text: _draft.ticketLimit?.toString() ?? '',
+    );
     // Seed duration field from the draft in the currently-selected unit (hours).
     _durationController = TextEditingController(
-        text: _trimNum(_draft.durationMinutes / 60));
+      text: _trimNum(_draft.durationMinutes / 60),
+    );
     // Live preview: rebuild on every keystroke so the "ends at" caption tracks.
     _durationController.addListener(() => setState(() {}));
   }
@@ -165,8 +173,18 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
 
   String _formatScheduled(DateTime dt) {
     const months = [
-      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
     ];
     final t =
         '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
@@ -233,7 +251,9 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
       if (bytes != null && mounted) setState(() => _draft.coverBytes = bytes);
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$e')));
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('$e')));
       }
     } finally {
       if (mounted) setState(() => _uploadingCover = false);
@@ -263,7 +283,8 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
     final time = await showTimePicker(
       context: context,
       initialTime: TimeOfDay.fromDateTime(
-          _draft.scheduledAt ?? now.add(const Duration(hours: 1))),
+        _draft.scheduledAt ?? now.add(const Duration(hours: 1)),
+      ),
       builder: (ctx, child) => Theme(
         data: Theme.of(ctx).copyWith(
           colorScheme: const ColorScheme.dark(
@@ -278,8 +299,13 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
     );
     if (time == null) return;
     setState(() {
-      _draft.scheduledAt =
-          DateTime(date.year, date.month, date.day, time.hour, time.minute);
+      _draft.scheduledAt = DateTime(
+        date.year,
+        date.month,
+        date.day,
+        time.hour,
+        time.minute,
+      );
       _dateError = null;
     });
   }
@@ -328,7 +354,9 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
         } catch (e) {
           if (mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text('Cover upload failed — saved without one. ($e)')),
+              SnackBar(
+                content: Text('Cover upload failed — saved without one. ($e)'),
+              ),
             );
           }
         }
@@ -347,13 +375,15 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
         price: _draft.priceCents,
         ticketLimit: _draft.ticketLimit,
         asDraft: true,
+        topicIds: _draft.topicIds.toList(),
       );
       _draft.event = event;
 
       if (!mounted) return;
       Navigator.of(context).push(
         MaterialPageRoute(
-          builder: (_) => ChooseCrewPage(draft: _draft, onCancel: widget.onCancel),
+          builder: (_) =>
+              ChooseCrewPage(draft: _draft, onCancel: widget.onCancel),
         ),
       );
     } catch (e) {
@@ -385,7 +415,7 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
           child: Form(
             key: _formKey,
             child: SingleChildScrollView(
-              padding: const EdgeInsets.fromLTRB(24, 8, 24, 40),
+              padding: const EdgeInsets.fromLTRB(NileSpacing.s24, NileSpacing.s8, NileSpacing.s24, NileSpacing.s40),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
@@ -420,13 +450,23 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
                     ),
                   ),
                   const SizedBox(height: 20),
+                  _SectionLabel('Topics'),
+                  const SizedBox(height: 6),
+                  Text(
+                    'Tag your event so it reaches people into these topics.',
+                    style: NileTextStyles.bodySm().copyWith(
+                      color: NileColors.txtTertiary,
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  TopicChips(selected: _draft.topicIds),
+                  const SizedBox(height: 20),
                   _SectionLabel('Scheduled For'),
                   const SizedBox(height: 6),
                   _DateField(
                     value: _draft.scheduledAt,
                     onTap: _pickDateTime,
-                    onClear: () =>
-                        setState(() => _draft.scheduledAt = null),
+                    onClear: () => setState(() => _draft.scheduledAt = null),
                     formatter: _formatScheduled,
                     errorText: _dateError,
                   ),
@@ -450,11 +490,14 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
                             const SizedBox(height: 6),
                             TextFormField(
                               controller: _priceController,
-                              keyboardType: const TextInputType.numberWithOptions(
-                                  decimal: true),
+                              keyboardType:
+                                  const TextInputType.numberWithOptions(
+                                    decimal: true,
+                                  ),
                               inputFormatters: [
                                 FilteringTextInputFormatter.allow(
-                                    RegExp(r'^\d*\.?\d{0,2}')),
+                                  RegExp(r'^\d*\.?\d{0,2}'),
+                                ),
                               ],
                               decoration: const InputDecoration(
                                 prefixText: '\$ ',
@@ -483,8 +526,9 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
                               inputFormatters: [
                                 FilteringTextInputFormatter.digitsOnly,
                               ],
-                              decoration:
-                                  const InputDecoration(hintText: 'Unlimited'),
+                              decoration: const InputDecoration(
+                                hintText: 'Unlimited',
+                              ),
                               validator: (v) {
                                 if (v == null || v.isEmpty) return null;
                                 final n = int.tryParse(v);
@@ -500,17 +544,19 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
                   if (_errorMessage != null) ...[
                     const SizedBox(height: 20),
                     Container(
-                      padding: const EdgeInsets.all(12),
+                      padding: const EdgeInsets.all(NileSpacing.s12),
                       decoration: BoxDecoration(
                         color: NileColors.error.withValues(alpha: 0.1),
                         borderRadius: BorderRadius.circular(NileRadius.sm),
                         border: Border.all(
-                            color: NileColors.error.withValues(alpha: 0.4)),
+                          color: NileColors.error.withValues(alpha: 0.4),
+                        ),
                       ),
                       child: Text(
                         _errorMessage!,
-                        style: NileTextStyles.bodySm()
-                            .copyWith(color: NileColors.error),
+                        style: NileTextStyles.bodySm().copyWith(
+                          color: NileColors.error,
+                        ),
                       ),
                     ),
                   ],
@@ -529,7 +575,7 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
                         : const Icon(Icons.arrow_forward),
                     label: Text(_submitting ? 'Creating…' : 'Next'),
                     style: FilledButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(vertical: 16),
+                      padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
                       textStyle: NileTextStyles.labelLg().copyWith(color: null),
                     ),
                   ),
@@ -582,9 +628,13 @@ class _ChooseCrewPageState extends State<ChooseCrewPage> {
       // Persist the camera count; the per-slot rows (labels/master/operator
       // assignment) are filled in later, on the Sound Check page.
       await EventService.update(
-          eventId: eventId, cameraCount: _crew.cameraCount);
+        eventId: eventId,
+        cameraCount: _crew.cameraCount,
+      );
       final saved = await CrewService.saveCameras(
-          eventId: eventId, count: _crew.cameraCount);
+        eventId: eventId,
+        count: _crew.cameraCount,
+      );
       _draft.savedCameras = saved;
 
       // Crew members are added without a camera/device slot here.
@@ -641,7 +691,7 @@ class _ChooseCrewPageState extends State<ChooseCrewPage> {
         child: AbsorbPointer(
           absorbing: _committing,
           child: SingleChildScrollView(
-            padding: const EdgeInsets.fromLTRB(24, 8, 24, 40),
+            padding: const EdgeInsets.fromLTRB(NileSpacing.s24, NileSpacing.s8, NileSpacing.s24, NileSpacing.s40),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
@@ -650,29 +700,34 @@ class _ChooseCrewPageState extends State<ChooseCrewPage> {
                 Text(
                   'Publishing makes your event visible to followers. Not ready? '
                   'Save it as a draft and finish later from your profile.',
-                  style: NileTextStyles.bodySm()
-                      .copyWith(color: NileColors.txtTertiary),
+                  style: NileTextStyles.bodySm().copyWith(
+                    color: NileColors.txtTertiary,
+                  ),
                 ),
                 if (_error != null) ...[
                   const SizedBox(height: 16),
                   Container(
-                    padding: const EdgeInsets.all(12),
+                    padding: const EdgeInsets.all(NileSpacing.s12),
                     decoration: BoxDecoration(
                       color: NileColors.error.withValues(alpha: 0.1),
                       borderRadius: BorderRadius.circular(NileRadius.sm),
                       border: Border.all(
-                          color: NileColors.error.withValues(alpha: 0.4)),
+                        color: NileColors.error.withValues(alpha: 0.4),
+                      ),
                     ),
-                    child: Text(_error!,
-                        style: NileTextStyles.bodySm()
-                            .copyWith(color: NileColors.error)),
+                    child: Text(
+                      _error!,
+                      style: NileTextStyles.bodySm().copyWith(
+                        color: NileColors.error,
+                      ),
+                    ),
                   ),
                 ],
                 const SizedBox(height: 28),
                 FilledButton(
                   onPressed: _committing ? null : () => _commit(asDraft: false),
                   style: FilledButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(vertical: 16),
+                    padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
                     textStyle: NileTextStyles.labelLg().copyWith(color: null),
                   ),
                   child: _committing
@@ -680,18 +735,25 @@ class _ChooseCrewPageState extends State<ChooseCrewPage> {
                           width: 18,
                           height: 18,
                           child: CircularProgressIndicator(
-                              strokeWidth: 2, color: NileColors.bgPage),
+                            strokeWidth: 2,
+                            color: NileColors.bgPage,
+                          ),
                         )
-                      : Text(_crew.operators.isEmpty
-                          ? 'Publish Event'
-                          : 'Assign & Publish'),
+                      : Text(
+                          _crew.operators.isEmpty
+                              ? 'Publish Event'
+                              : 'Assign & Publish',
+                        ),
                 ),
                 const SizedBox(height: 8),
                 TextButton(
                   onPressed: _committing ? null : () => _commit(asDraft: true),
-                  child: Text('Save event as draft',
-                      style: NileTextStyles.bodyMd()
-                          .copyWith(color: NileColors.txtSecondary)),
+                  child: Text(
+                    'Save event as draft',
+                    style: NileTextStyles.bodyMd().copyWith(
+                      color: NileColors.txtSecondary,
+                    ),
+                  ),
                 ),
               ],
             ),
@@ -727,7 +789,9 @@ class EventCreatedPage extends StatelessWidget {
 
   String _timeRange() {
     final start = draft.scheduledAt;
-    if (start == null) return 'Not scheduled · ${_fmtDuration(draft.durationMinutes)}';
+    if (start == null) {
+      return 'Not scheduled · ${_fmtDuration(draft.durationMinutes)}';
+    }
     final end = draft.endAt!;
     return '${_fmtDateTime(start)} → ${_fmtClock(end)} · ${_fmtDuration(draft.durationMinutes)}';
   }
@@ -762,25 +826,27 @@ class EventCreatedPage extends StatelessWidget {
       ),
       body: NileMaxWidth(
         child: SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(24, 8, 24, 40),
+          padding: const EdgeInsets.fromLTRB(NileSpacing.s24, NileSpacing.s8, NileSpacing.s24, NileSpacing.s40),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               const SizedBox(height: 16),
               const Icon(Icons.check_circle, size: 56, color: NileColors.volt),
               const SizedBox(height: 12),
-              Text('You\'re all set',
-                  textAlign: TextAlign.center,
-                  style: NileTextStyles.headingLg()),
+              Text(
+                'You\'re all set',
+                textAlign: TextAlign.center,
+                style: NileTextStyles.headingLg(),
+              ),
               const SizedBox(height: 24),
 
               // Summary card
               Container(
-                padding: const EdgeInsets.all(18),
+                padding: const EdgeInsets.all(NileSpacing.s16),
                 decoration: BoxDecoration(
                   color: NileColors.bgSurface,
                   border: Border.all(color: NileColors.border),
-                  borderRadius: BorderRadius.circular(NileRadius.md),
+                  borderRadius: BorderRadius.circular(NileRadius.lg),
                 ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -800,7 +866,7 @@ class EventCreatedPage extends StatelessWidget {
                       text: operators.isEmpty
                           ? 'No operators assigned yet'
                           : '${operators.length} operator${operators.length == 1 ? '' : 's'}: '
-                              '${operators.map((o) => '@${o.profile.username}').join(', ')}',
+                                '${operators.map((o) => '@${o.profile.username}').join(', ')}',
                     ),
                   ],
                 ),
@@ -812,7 +878,7 @@ class EventCreatedPage extends StatelessWidget {
                 icon: const Icon(Icons.edit_outlined),
                 label: const Text('Post About It'),
                 style: FilledButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(vertical: 16),
+                  padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
                   textStyle: NileTextStyles.labelLg().copyWith(color: null),
                 ),
               ),
@@ -823,7 +889,7 @@ class EventCreatedPage extends StatelessWidget {
                 icon: const Icon(Icons.ios_share),
                 label: const Text('Share With Friends'),
                 style: OutlinedButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(vertical: 16),
+                  padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
                 ),
               ),
 
@@ -833,14 +899,16 @@ class EventCreatedPage extends StatelessWidget {
                 onTap: ev == null
                     ? null
                     : () => Navigator.of(context).push(
-                          MaterialPageRoute(
-                            builder: (_) => EventDetailScreen(event: ev),
-                          ),
+                        MaterialPageRoute(
+                          builder: (_) => EventDetailScreen(event: ev),
                         ),
+                      ),
                 borderRadius: BorderRadius.circular(NileRadius.sm),
                 child: Container(
                   padding: const EdgeInsets.symmetric(
-                      horizontal: 16, vertical: 14),
+                    horizontal: NileSpacing.s16,
+                    vertical: NileSpacing.s12,
+                  ),
                   decoration: BoxDecoration(
                     color: NileColors.bgSurface,
                     border: Border.all(color: NileColors.border),
@@ -848,15 +916,23 @@ class EventCreatedPage extends StatelessWidget {
                   ),
                   child: Row(
                     children: [
-                      const Icon(Icons.open_in_new,
-                          size: 18, color: NileColors.txtSecondary),
+                      const Icon(
+                        Icons.open_in_new,
+                        size: 18,
+                        color: NileColors.txtSecondary,
+                      ),
                       const SizedBox(width: 10),
                       Expanded(
-                        child: Text('View event page',
-                            style: NileTextStyles.bodyMd()),
+                        child: Text(
+                          'View event page',
+                          style: NileTextStyles.bodyMd(),
+                        ),
                       ),
-                      const Icon(Icons.chevron_right,
-                          size: 20, color: NileColors.txtTertiary),
+                      const Icon(
+                        Icons.chevron_right,
+                        size: 20,
+                        color: NileColors.txtTertiary,
+                      ),
                     ],
                   ),
                 ),
@@ -883,8 +959,18 @@ String _fmtClock(DateTime dt) =>
 
 String _fmtDateTime(DateTime dt) {
   const months = [
-    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
+    'Jan',
+    'Feb',
+    'Mar',
+    'Apr',
+    'May',
+    'Jun',
+    'Jul',
+    'Aug',
+    'Sep',
+    'Oct',
+    'Nov',
+    'Dec',
   ];
   return '${months[dt.month - 1]} ${dt.day} · ${_fmtClock(dt)}';
 }
@@ -914,9 +1000,12 @@ class _SummaryLine extends StatelessWidget {
         Icon(icon, size: 16, color: NileColors.txtSecondary),
         const SizedBox(width: 8),
         Expanded(
-          child: Text(text,
-              style: NileTextStyles.bodySm()
-                  .copyWith(color: NileColors.txtPrimary)),
+          child: Text(
+            text,
+            style: NileTextStyles.bodySm().copyWith(
+              color: NileColors.txtPrimary,
+            ),
+          ),
         ),
       ],
     );
@@ -948,7 +1037,7 @@ class _CoverPicker extends StatelessWidget {
           clipBehavior: Clip.antiAlias,
           decoration: BoxDecoration(
             color: NileColors.bgSurface,
-            borderRadius: BorderRadius.circular(NileRadius.md),
+            borderRadius: BorderRadius.circular(NileRadius.lg),
             border: Border.all(
               color: hasImage ? Colors.transparent : NileColors.border,
             ),
@@ -975,8 +1064,11 @@ class _CoverPicker extends StatelessWidget {
                     color: Colors.black54,
                     shape: const CircleBorder(),
                     child: IconButton(
-                      icon: const Icon(Icons.close,
-                          size: 18, color: Colors.white),
+                      icon: const Icon(
+                        Icons.close,
+                        size: 18,
+                        color: Colors.white,
+                      ),
                       onPressed: onClear,
                       tooltip: 'Remove cover',
                     ),
@@ -990,17 +1082,22 @@ class _CoverPicker extends StatelessWidget {
   }
 
   Widget _emptyState() => const Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.add_photo_alternate_outlined,
-                size: 36, color: NileColors.txtTertiary),
-            SizedBox(height: 8),
-            Text('Add cover photo',
-                style: TextStyle(color: NileColors.txtSecondary)),
-          ],
+    child: Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(
+          Icons.add_photo_alternate_outlined,
+          size: 36,
+          color: NileColors.txtTertiary,
         ),
-      );
+        SizedBox(height: 8),
+        Text(
+          'Add cover photo',
+          style: TextStyle(color: NileColors.txtSecondary),
+        ),
+      ],
+    ),
+  );
 }
 
 class _DateField extends StatelessWidget {
@@ -1027,33 +1124,39 @@ class _DateField extends StatelessWidget {
           onTap: onTap,
           borderRadius: BorderRadius.circular(NileRadius.sm),
           child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
+            padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s12, vertical: NileSpacing.s12),
             decoration: BoxDecoration(
               color: NileColors.bgSurface,
               border: Border.all(
-                  color: errorText != null
-                      ? NileColors.error
-                      : NileColors.border),
+                color: errorText != null ? NileColors.error : NileColors.border,
+              ),
               borderRadius: BorderRadius.circular(NileRadius.sm),
             ),
             child: Row(
               children: [
-                const Icon(Icons.calendar_today,
-                    size: 16, color: NileColors.txtSecondary),
+                const Icon(
+                  Icons.calendar_today,
+                  size: 16,
+                  color: NileColors.txtSecondary,
+                ),
                 const SizedBox(width: 10),
                 Expanded(
                   child: Text(
                     value == null ? 'Pick a date & time' : formatter(value!),
                     style: value == null
-                        ? NileTextStyles.bodyMd()
-                            .copyWith(color: NileColors.txtTertiary)
+                        ? NileTextStyles.bodyMd().copyWith(
+                            color: NileColors.txtTertiary,
+                          )
                         : NileTextStyles.bodyMd(),
                   ),
                 ),
                 if (value != null)
                   IconButton(
-                    icon: const Icon(Icons.close,
-                        size: 18, color: NileColors.txtTertiary),
+                    icon: const Icon(
+                      Icons.close,
+                      size: 18,
+                      color: NileColors.txtTertiary,
+                    ),
                     onPressed: onClear,
                     tooltip: 'Clear',
                   ),
@@ -1063,10 +1166,11 @@ class _DateField extends StatelessWidget {
         ),
         if (errorText != null)
           Padding(
-            padding: const EdgeInsets.only(left: 12, top: 6),
-            child: Text(errorText!,
-                style: NileTextStyles.caption()
-                    .copyWith(color: NileColors.error)),
+            padding: const EdgeInsets.only(left: NileSpacing.s12, top: NileSpacing.s8),
+            child: Text(
+              errorText!,
+              style: NileTextStyles.caption().copyWith(color: NileColors.error),
+            ),
           ),
       ],
     );

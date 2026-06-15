@@ -11,3 +11,9 @@ const String supabaseUrl =
     'https://jelmkkvyrliywcdkzhuu.supabase.co'; // https://xxxx.supabase.co
 const String supabaseAnonKey =
     'sb_publishable_5CL1YQYinwBJrVM0FPvUsQ_eIAgrsRE'; // safe for client use
+
+// ── Sentry (crash / error reporting) ──────────────────────────────────────────
+// Injected at build time so the DSN never lives in the repo:
+//   flutter run --dart-define=SENTRY_DSN=https://...@oXXXX.ingest.sentry.io/XXXX
+// When absent (plain `flutter run`), Sentry is skipped entirely — zero overhead.
+const String sentryDsn = String.fromEnvironment('SENTRY_DSN');

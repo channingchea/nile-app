@@ -5,14 +5,17 @@ import 'supabase_client.dart';
 class EventRepostService {
   static String _uid() {
     final uid = supabase.auth.currentUser?.id;
-    if (uid == null) throw StateError('EventRepostService: no authenticated user');
+    if (uid == null) {
+      throw StateError('EventRepostService: no authenticated user');
+    }
     return uid;
   }
 
   static Future<void> repost(String eventId) async {
-    await supabase
-        .from('event_reposts')
-        .upsert({'user_id': _uid(), 'event_id': eventId});
+    await supabase.from('event_reposts').upsert({
+      'user_id': _uid(),
+      'event_id': eventId,
+    });
   }
 
   static Future<void> unrepost(String eventId) async {

@@ -17,24 +17,24 @@ class ShareToSheet extends StatefulWidget {
     this.postId,
     this.eventId,
     required this.shareText,
-  }) : assert(postId != null || eventId != null,
-            'ShareToSheet needs a postId or eventId');
+  }) : assert(
+         postId != null || eventId != null,
+         'ShareToSheet needs a postId or eventId',
+       );
 
   /// Open for a post.
   static Future<void> show(
     BuildContext context, {
     required String postId,
     required String shareText,
-  }) =>
-      _open(context, ShareToSheet(postId: postId, shareText: shareText));
+  }) => _open(context, ShareToSheet(postId: postId, shareText: shareText));
 
   /// Open for an event.
   static Future<void> showEvent(
     BuildContext context, {
     required String eventId,
     required String shareText,
-  }) =>
-      _open(context, ShareToSheet(eventId: eventId, shareText: shareText));
+  }) => _open(context, ShareToSheet(eventId: eventId, shareText: shareText));
 
   static Future<void> _open(BuildContext context, ShareToSheet sheet) {
     return showModalBottomSheet(
@@ -42,8 +42,9 @@ class ShareToSheet extends StatefulWidget {
       backgroundColor: NileColors.bgSurface,
       isScrollControlled: true,
       shape: const RoundedRectangleBorder(
-        borderRadius:
-            BorderRadius.vertical(top: Radius.circular(NileRadius.lg)),
+        borderRadius: BorderRadius.vertical(
+          top: Radius.circular(NileRadius.lg),
+        ),
       ),
       builder: (_) => sheet,
     );
@@ -83,15 +84,15 @@ class _ShareToSheetState extends State<ShareToSheet> {
       }
       if (!mounted) return;
       Navigator.pop(context);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Sent to @${conv.otherUsername}')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Sent to @${conv.otherUsername}')));
     } catch (_) {
       if (!mounted) return;
       setState(() => _sendingTo = null);
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Failed to share')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Failed to share')));
     }
   }
 
@@ -101,17 +102,21 @@ class _ShareToSheetState extends State<ShareToSheet> {
     return SafeArea(
       child: Padding(
         padding: EdgeInsets.only(
-            bottom: MediaQuery.of(context).viewInsets.bottom),
+          bottom: MediaQuery.of(context).viewInsets.bottom,
+        ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Padding(
-              padding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
+              padding: const EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s16, NileSpacing.s16, NileSpacing.s8),
               child: Text('Share to', style: NileTextStyles.headingSm()),
             ),
             ListTile(
-              leading: const Icon(Icons.ios_share, color: NileColors.txtPrimary),
+              leading: const Icon(
+                Icons.ios_share,
+                color: NileColors.txtPrimary,
+              ),
               title: Text('Share via…', style: NileTextStyles.bodyMd()),
               onTap: () {
                 Navigator.pop(context);
@@ -121,16 +126,18 @@ class _ShareToSheetState extends State<ShareToSheet> {
             const Divider(height: 1, color: NileColors.bgRaised),
             if (convs == null)
               const Padding(
-                padding: EdgeInsets.all(24),
+                padding: EdgeInsets.all(NileSpacing.s24),
                 child: Center(
-                    child:
-                        CircularProgressIndicator(color: NileColors.volt)),
+                  child: CircularProgressIndicator(color: NileColors.volt),
+                ),
               )
             else if (convs.isEmpty)
               Padding(
-                padding: const EdgeInsets.all(24),
-                child: Text('No conversations yet',
-                    style: NileTextStyles.caption()),
+                padding: const EdgeInsets.all(NileSpacing.s24),
+                child: Text(
+                  'No conversations yet',
+                  style: NileTextStyles.caption(),
+                ),
               )
             else
               Flexible(
@@ -145,14 +152,19 @@ class _ShareToSheetState extends State<ShareToSheet> {
                         avatarUrl: c.otherAvatarUrl,
                         radius: 18,
                       ),
-                      title: Text('@${c.otherUsername}',
-                          style: NileTextStyles.bodyMd()),
+                      title: Text(
+                        '@${c.otherUsername}',
+                        style: NileTextStyles.bodyMd(),
+                      ),
                       trailing: _sendingTo == c.id
                           ? const SizedBox(
                               width: 18,
                               height: 18,
                               child: CircularProgressIndicator(
-                                  strokeWidth: 2, color: NileColors.volt))
+                                strokeWidth: 2,
+                                color: NileColors.volt,
+                              ),
+                            )
                           : null,
                       onTap: () => _shareToConversation(c),
                     );

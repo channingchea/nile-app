@@ -28,6 +28,7 @@ class UserProfile {
   final int followingCount;
   final String? stripeAccountId;
   final DateTime createdAt;
+  final DateTime? onboardedAt;
 
   const UserProfile({
     required this.id,
@@ -40,6 +41,7 @@ class UserProfile {
     required this.followingCount,
     this.stripeAccountId,
     required this.createdAt,
+    this.onboardedAt,
   });
 
   /// True once the host has begun Stripe Connect onboarding. Live
@@ -59,6 +61,9 @@ class UserProfile {
       followingCount: (map['following_count'] as num?)?.toInt() ?? 0,
       stripeAccountId: map['stripe_account_id'] as String?,
       createdAt: DateTime.parse(map['created_at'] as String),
+      onboardedAt: map['onboarded_at'] != null
+          ? DateTime.parse(map['onboarded_at'] as String)
+          : null,
     );
   }
 
@@ -83,6 +88,7 @@ class UserProfile {
       followingCount: followingCount ?? this.followingCount,
       stripeAccountId: stripeAccountId ?? this.stripeAccountId,
       createdAt: createdAt,
+      onboardedAt: onboardedAt,
     );
   }
 }
@@ -98,12 +104,19 @@ class ProfileService {
   /// rather than the denormalized `follower_count` / `following_count`
   /// columns on `profiles`, which can drift out of sync.
   static Future<UserProfile?> fetchProfile(String userId) async {
-    final profileFuture =
-        supabase.from('profiles').select().eq('id', userId).maybeSingle();
-    final followersFuture =
-        supabase.from('follows').select('follower_id').eq('following_id', userId);
-    final followingFuture =
-        supabase.from('follows').select('following_id').eq('follower_id', userId);
+    final profileFuture = supabase
+        .from('profiles')
+        .select()
+        .eq('id', userId)
+        .maybeSingle();
+    final followersFuture = supabase
+        .from('follows')
+        .select('follower_id')
+        .eq('following_id', userId);
+    final followingFuture = supabase
+        .from('follows')
+        .select('following_id')
+        .eq('follower_id', userId);
 
     final data = await profileFuture;
     if (data == null) return null;
@@ -160,13 +173,39 @@ class ProfileService {
     return UserProfile.fromMap(data);
   }
 
+  /// True once the signed-in user has completed (or skipped through)
+  /// onboarding. Lightweight read used by _AuthGate to route new users.
+  static Future<bool> isOnboarded() async {
+    final uid = supabase.auth.currentUser?.id;
+    if (uid == null) return true; // no session — gate routes to login anyway
+    final row = await supabase
+        .from('profiles')
+        .select('onboarded_at')
+        .eq('id', uid)
+        .maybeSingle();
+    // Fail-open: a missing row (trigger lag) shouldn't trap the user.
+    return row == null || row['onboarded_at'] != null;
+  }
+
+  /// Stamp onboarding as complete. Final action of the onboarding flow.
+  static Future<void> markOnboarded() async {
+    final uid = supabase.auth.currentUser?.id;
+    if (uid == null) return;
+    await supabase
+        .from('profiles')
+        .update({'onboarded_at': DateTime.now().toIso8601String()})
+        .eq('id', uid);
+  }
+
   // ─── Avatar upload ────────────────────────────────────────────────────────
 
   /// Pick an image from the gallery, upload it, and return both the bytes
   /// (for instant local preview) and the new public URL.
   /// Returns null if the user cancels.
   static Future<({Uint8List bytes, String url})?> pickAndUploadAvatar(
-      String userId, BuildContext context) async {
+    String userId,
+    BuildContext context,
+  ) async {
     final bytes = await pickImageBytes(
       context,
       cropPathFn: ellipseCropShapeFn,
@@ -179,7 +218,9 @@ class ProfileService {
 
   /// Upload raw bytes as the user's avatar and return the public URL.
   static Future<String> uploadAvatarBytes(
-      String userId, Uint8List bytes) async {
+    String userId,
+    Uint8List bytes,
+  ) async {
     return _uploadImage(
       storagePath: '$userId/avatar.jpg',
       bytes: bytes,
@@ -194,7 +235,9 @@ class ProfileService {
   /// both bytes (for instant preview) and the new public URL.
   /// Returns null if the user cancels.
   static Future<({Uint8List bytes, String url})?> pickAndUploadCover(
-      String userId, BuildContext context) async {
+    String userId,
+    BuildContext context,
+  ) async {
     final bytes = await pickImageBytes(
       context,
       maxWidth: 600,
@@ -207,8 +250,7 @@ class ProfileService {
   }
 
   /// Upload raw bytes as the user's cover photo and return the public URL.
-  static Future<String> uploadCoverBytes(
-      String userId, Uint8List bytes) async {
+  static Future<String> uploadCoverBytes(String userId, Uint8List bytes) async {
     return _uploadImage(
       storagePath: '$userId/cover.jpg',
       bytes: bytes,
@@ -304,7 +346,9 @@ class ProfileService {
     required String profileField,
     required String userId,
   }) async {
-    await supabase.storage.from('avatars').uploadBinary(
+    await supabase.storage
+        .from('avatars')
+        .uploadBinary(
           storagePath,
           bytes,
           fileOptions: const FileOptions(
@@ -313,7 +357,9 @@ class ProfileService {
           ),
         );
 
-    final publicUrl = supabase.storage.from('avatars').getPublicUrl(storagePath);
+    final publicUrl = supabase.storage
+        .from('avatars')
+        .getPublicUrl(storagePath);
     final bustUrl = '$publicUrl?t=${DateTime.now().millisecondsSinceEpoch}';
 
     await supabase
@@ -336,7 +382,8 @@ class NileCropperLayoutSnapper extends StatefulWidget {
   });
 
   @override
-  State<NileCropperLayoutSnapper> createState() => _NileCropperLayoutSnapperState();
+  State<NileCropperLayoutSnapper> createState() =>
+      _NileCropperLayoutSnapperState();
 }
 
 class _NileCropperLayoutSnapperState extends State<NileCropperLayoutSnapper> {
@@ -345,7 +392,8 @@ class _NileCropperLayoutSnapperState extends State<NileCropperLayoutSnapper> {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (widget.controller is CroppableImageControllerWithMixins) {
-        (widget.controller as CroppableImageControllerWithMixins).setViewportScale();
+        (widget.controller as CroppableImageControllerWithMixins)
+            .setViewportScale();
       }
     });
   }

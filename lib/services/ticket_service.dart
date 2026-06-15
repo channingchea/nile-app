@@ -26,14 +26,14 @@ class Ticket {
   bool get isPaid => status == 'paid';
 
   factory Ticket.fromJson(Map<String, dynamic> j) => Ticket(
-        id: j['id'] as String,
-        eventId: j['event_id'] as String,
-        buyerId: j['buyer_id'] as String,
-        stripePaymentIntentId: j['stripe_payment_intent_id'] as String,
-        amountCents: (j['amount_cents'] as num).toInt(),
-        status: j['status'] as String,
-        createdAt: DateTime.parse(j['created_at'] as String),
-      );
+    id: j['id'] as String,
+    eventId: j['event_id'] as String,
+    buyerId: j['buyer_id'] as String,
+    stripePaymentIntentId: j['stripe_payment_intent_id'] as String,
+    amountCents: (j['amount_cents'] as num).toInt(),
+    status: j['status'] as String,
+    createdAt: DateTime.parse(j['created_at'] as String),
+  );
 }
 
 /// A buyer's ticket paired with its event (for the My Tickets screen).
@@ -110,12 +110,14 @@ class TicketService {
   /// newest first. Keyset-paged by created_at via [cursor]. RLS
   /// `tickets_select_own` scopes this to the current buyer.
   static Future<Paged<MyTicket>> myTickets({String? cursor}) async {
-    var b = supabase.from('tickets').select(
-        '*, events!tickets_event_id_fkey('
-        '*, profiles!events_host_id_fkey(username, avatar_url))');
+    var b = supabase
+        .from('tickets')
+        .select(
+          '*, events!tickets_event_id_fkey('
+          '*, profiles!events_host_id_fkey(username, avatar_url))',
+        );
     if (cursor != null) b = b.lt('created_at', cursor);
-    final rows =
-        await b.order('created_at', ascending: false).limit(kPageSize);
+    final rows = await b.order('created_at', ascending: false).limit(kPageSize);
 
     final raw = (rows as List)
         .map((r) => MyTicket.fromJson(r as Map<String, dynamic>))
@@ -123,8 +125,9 @@ class TicketService {
     // hasMore / cursor based on the raw page so paging stays correct even
     // when event-less tickets are filtered out.
     final hasMore = raw.length == kPageSize;
-    final nextCursor =
-        hasMore ? raw.last.ticket.createdAt.toIso8601String() : null;
+    final nextCursor = hasMore
+        ? raw.last.ticket.createdAt.toIso8601String()
+        : null;
     final items = raw.where((t) => t.event != null).toList();
     return Paged(items: items, hasMore: hasMore, nextCursor: nextCursor);
   }
@@ -132,17 +135,20 @@ class TicketService {
   /// Attendees for [eventId] with buyer profiles joined, newest first.
   /// Keyset-paged by created_at via [cursor]. Includes paid and refunded
   /// tickets (pending hidden). RLS (`tickets_select_host`) restricts to host.
-  static Future<Paged<Attendee>> attendees(String eventId,
-      {String? cursor}) async {
+  static Future<Paged<Attendee>> attendees(
+    String eventId, {
+    String? cursor,
+  }) async {
     var b = supabase
         .from('tickets')
-        .select('id, amount_cents, created_at, status, '
-            'profiles!tickets_buyer_id_fkey(id, username, avatar_url)')
+        .select(
+          'id, amount_cents, created_at, status, '
+          'profiles!tickets_buyer_id_fkey(id, username, avatar_url)',
+        )
         .eq('event_id', eventId)
         .inFilter('status', ['paid', 'refunded']);
     if (cursor != null) b = b.lt('created_at', cursor);
-    final rows =
-        await b.order('created_at', ascending: false).limit(kPageSize);
+    final rows = await b.order('created_at', ascending: false).limit(kPageSize);
 
     final items = (rows as List)
         .map((r) => Attendee.fromJson(r as Map<String, dynamic>))

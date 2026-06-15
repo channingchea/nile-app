@@ -6,6 +6,7 @@
 // we stub that method channel to return empty. We pump a single frame (not
 // pumpAndSettle) so the _AuthGate loading state renders without a live session.
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -32,8 +33,12 @@ void main() {
   });
 
   testWidgets('NileApp builds its first frame', (tester) async {
-    await tester.pumpWidget(const NileApp());
-
-    expect(find.byType(MaterialApp), findsOneWidget);
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    try {
+      await tester.pumpWidget(const NileApp());
+      expect(find.byType(MaterialApp), findsOneWidget);
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
   });
 }

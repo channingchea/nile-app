@@ -34,10 +34,12 @@ class DurationField extends StatelessWidget {
                 keyboardType: TextInputType.numberWithOptions(decimal: inHours),
                 inputFormatters: [
                   FilteringTextInputFormatter.allow(
-                      inHours ? RegExp(r'^\d*\.?\d{0,2}') : RegExp(r'^\d*')),
+                    inHours ? RegExp(r'^\d*\.?\d{0,2}') : RegExp(r'^\d*'),
+                  ),
                 ],
-                decoration:
-                    InputDecoration(hintText: inHours ? 'e.g. 1.5' : 'e.g. 90'),
+                decoration: InputDecoration(
+                  hintText: inHours ? 'e.g. 1.5' : 'e.g. 90',
+                ),
                 validator: (v) {
                   if (v == null || v.trim().isEmpty) return 'Required';
                   final n = double.tryParse(v.trim());
@@ -54,11 +56,18 @@ class DurationField extends StatelessWidget {
           const SizedBox(height: 8),
           Row(
             children: [
-              const Icon(Icons.schedule, size: 14, color: NileColors.txtTertiary),
+              const Icon(
+                Icons.schedule,
+                size: 14,
+                color: NileColors.txtTertiary,
+              ),
               const SizedBox(width: 6),
-              Text(preview!,
-                  style: NileTextStyles.caption()
-                      .copyWith(color: NileColors.txtSecondary)),
+              Text(
+                preview!,
+                style: NileTextStyles.caption().copyWith(
+                  color: NileColors.txtSecondary,
+                ),
+              ),
             ],
           ),
         ],
@@ -95,7 +104,7 @@ class _UnitToggle extends StatelessWidget {
       onTap: onTap,
       borderRadius: BorderRadius.circular(NileRadius.sm),
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s16, vertical: NileSpacing.s12),
         decoration: BoxDecoration(
           color: selected ? NileColors.volt : Colors.transparent,
           borderRadius: BorderRadius.circular(NileRadius.sm),

@@ -6,6 +6,7 @@ import 'package:share_plus/share_plus.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../services/calendar_ics.dart';
 import '../services/crew_service.dart';
 import '../services/share_urls.dart';
 import '../services/event_service.dart';
@@ -14,6 +15,8 @@ import '../services/report_service.dart';
 import '../services/supabase_client.dart';
 import '../services/ticket_service.dart';
 import '../theme.dart';
+import '../widgets/live_badge.dart';
+import '../widgets/rolling_number.dart';
 import 'attendee_list_screen.dart';
 import 'audio_screen.dart';
 import 'camera_screen.dart';
@@ -32,9 +35,21 @@ class EventDetailScreen extends StatefulWidget {
   final Event? event;
   final String? eventId;
 
-  const EventDetailScreen({super.key, this.event, this.eventId})
-      : assert(event != null || eventId != null,
-            'EventDetailScreen needs either event or eventId');
+  /// Id of the profile this screen was pushed from, if any. Tapping the host
+  /// row pops back to that profile instead of pushing a duplicate copy, so
+  /// profile → event → profile → … chains can't grow the stack unbounded.
+  final String? fromProfileId;
+
+  const EventDetailScreen({
+    super.key,
+    this.event,
+    this.eventId,
+    this.fromProfileId,
+  })
+    : assert(
+        event != null || eventId != null,
+        'EventDetailScreen needs either event or eventId',
+      );
 
   @override
   State<EventDetailScreen> createState() => _EventDetailScreenState();
@@ -113,10 +128,27 @@ class _EventDetailScreenState extends State<EventDetailScreen>
       if (!mounted) return;
       if (purchased) {
         setState(() => _hasTicket = true);
+        _offerAddToCalendar(event);
         return;
       }
       await Future.delayed(const Duration(seconds: 2));
     }
+  }
+
+  /// Post-purchase prompt to save the event to the user's calendar.
+  void _offerAddToCalendar(Event event) {
+    if (!mounted || !CalendarIcs.canAdd(event)) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: const Text('Ticket confirmed!'),
+        duration: const Duration(seconds: 6),
+        action: SnackBarAction(
+          label: 'Add to calendar',
+          textColor: NileColors.volt,
+          onPressed: () => CalendarIcs.share(event),
+        ),
+      ),
+    );
   }
 
   // ── Data ────────────────────────────────────────────────────────────────────
@@ -206,8 +238,7 @@ class _EventDetailScreenState extends State<EventDetailScreen>
           'description': record['description'] ?? _event!.description,
           'status': record['status'] ?? _event!.status,
           'livekit_room': record['livekit_room'] ?? _event!.liveKitEventId,
-          'cover_image_url':
-              record['cover_image_url'] ?? _event!.coverImageUrl,
+          'cover_image_url': record['cover_image_url'] ?? _event!.coverImageUrl,
           'viewer_count': record['viewer_count'] ?? _event!.viewerCount,
           'price': record['price'] ?? _event!.price,
           'ticket_limit': record['ticket_limit'] ?? _event!.ticketLimit,
@@ -241,9 +272,9 @@ class _EventDetailScreenState extends State<EventDetailScreen>
     } catch (e) {
       if (!mounted) return;
       setState(() => _isFollowing = wasFollowing);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Couldn\'t update follow: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Couldn\'t update follow: $e')));
     } finally {
       if (mounted) setState(() => _followBusy = false);
     }
@@ -263,9 +294,9 @@ class _EventDetailScreenState extends State<EventDetailScreen>
     if (_event == null) return;
     await Clipboard.setData(ClipboardData(text: _event!.id));
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Event ID copied')),
-    );
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('Event ID copied')));
   }
 
   Future<void> _buyTicket() async {
@@ -285,7 +316,9 @@ class _EventDetailScreenState extends State<EventDetailScreen>
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Complete payment in your browser. Ticket status updates automatically.'),
+          content: Text(
+            'Complete payment in your browser. Ticket status updates automatically.',
+          ),
           duration: Duration(seconds: 5),
         ),
       );
@@ -293,9 +326,9 @@ class _EventDetailScreenState extends State<EventDetailScreen>
       await _refreshTicketStatus();
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Couldn\'t start checkout: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Couldn\'t start checkout: $e')));
     } finally {
       if (mounted) setState(() => _ticketBusy = false);
     }
@@ -320,8 +353,7 @@ class _EventDetailScreenState extends State<EventDetailScreen>
   /// go straight to streaming.
   void _enterAsCamera() {
     if (_event == null || !(_isOwnEvent || _isOperator)) return;
-    final needsSetup =
-        _isOwnEvent && !_event!.isSoundCheck && !_event!.isLive;
+    final needsSetup = _isOwnEvent && !_event!.isSoundCheck && !_event!.isLive;
     if (needsSetup) {
       Navigator.push(
         context,
@@ -342,10 +374,7 @@ class _EventDetailScreenState extends State<EventDetailScreen>
       );
       return;
     }
-    Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => _streamScreen()),
-    );
+    Navigator.push(context, MaterialPageRoute(builder: (_) => _streamScreen()));
   }
 
   /// The streaming screen for this user on this event: audio operators run the
@@ -353,18 +382,29 @@ class _EventDetailScreenState extends State<EventDetailScreen>
   /// label pre-filled; the host defaults to their own handle.
   Widget _streamScreen() {
     if (_assignment?.isAudioOperator == true) {
-      return AudioScreen(initialEventId: _event!.liveKitEventId);
+      return AudioScreen(
+        initialEventId: _event!.liveKitEventId,
+        isHost: _isOwnEvent,
+      );
     }
-    final cameraName = _assignment?.cameraLabel ??
+    final cameraName =
+        _assignment?.cameraLabel ??
         (_isOwnEvent ? '@${_event!.hostUsername}' : null);
     return CameraScreen(
       initialEventId: _event!.liveKitEventId,
       initialCameraName: cameraName,
+      isHost: _isOwnEvent,
     );
   }
 
   void _openHost() {
     if (_event == null) return;
+    // Came here from the host's profile? Pop back to it instead of stacking
+    // a duplicate.
+    if (widget.fromProfileId == _event!.hostId) {
+      Navigator.pop(context);
+      return;
+    }
     Navigator.push(
       context,
       MaterialPageRoute(builder: (_) => ProfileScreen(userId: _event!.hostId)),
@@ -393,8 +433,9 @@ class _EventDetailScreenState extends State<EventDetailScreen>
         content: Text(
           'This permanently deletes "${_event!.title}" and all its tickets. '
           'This can\'t be undone.',
-          style: NileTextStyles.bodySm()
-              .copyWith(color: NileColors.txtSecondary),
+          style: NileTextStyles.bodySm().copyWith(
+            color: NileColors.txtSecondary,
+          ),
         ),
         actions: [
           TextButton(
@@ -403,8 +444,7 @@ class _EventDetailScreenState extends State<EventDetailScreen>
           ),
           TextButton(
             onPressed: () => Navigator.pop(ctx, true),
-            style:
-                TextButton.styleFrom(foregroundColor: NileColors.coral),
+            style: TextButton.styleFrom(foregroundColor: NileColors.coral),
             child: const Text('Delete'),
           ),
         ],
@@ -413,18 +453,20 @@ class _EventDetailScreenState extends State<EventDetailScreen>
     if (confirmed != true || !mounted) return;
 
     try {
-      await EventService.deleteEvent(_event!.id,
-          liveKitEventId: _event!.liveKitEventId);
+      await EventService.deleteEvent(
+        _event!.id,
+        liveKitEventId: _event!.liveKitEventId,
+      );
       if (!mounted) return;
       Navigator.pop(context, true); // signal deletion to the previous screen
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Event deleted')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Event deleted')));
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Couldn\'t delete: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Couldn\'t delete: $e')));
     }
   }
 
@@ -433,10 +475,8 @@ class _EventDetailScreenState extends State<EventDetailScreen>
     Navigator.push(
       context,
       MaterialPageRoute(
-        builder: (_) => AttendeeListScreen(
-          eventId: _event!.id,
-          eventTitle: _event!.title,
-        ),
+        builder: (_) =>
+            AttendeeListScreen(eventId: _event!.id, eventTitle: _event!.title),
       ),
     );
   }
@@ -452,10 +492,14 @@ class _EventDetailScreenState extends State<EventDetailScreen>
   }
 
   Widget _buildBody() {
-    if (_loading) {
-      return const Center(child: CircularProgressIndicator(color: NileColors.volt));
-    }
-    if (_error != null || _event == null) {
+    // Render immediately when an event was passed in so the Hero flight from
+    // the previous screen can run; follow/ticket state hydrates in place.
+    if (_event == null) {
+      if (_loading) {
+        return const Center(
+          child: CircularProgressIndicator(color: NileColors.volt),
+        );
+      }
       return _ErrorView(message: _error ?? 'Event not found', onRetry: _load);
     }
     return CustomScrollView(
@@ -468,20 +512,23 @@ class _EventDetailScreenState extends State<EventDetailScreen>
             if (_isOwnEvent) ...[
               IconButton(
                 tooltip: 'Attendees',
-                icon: const Icon(Icons.people_outline,
-                    color: NileColors.txtPrimary),
+                icon: const Icon(
+                  Icons.people_outline,
+                  color: NileColors.txtPrimary,
+                ),
                 onPressed: _openAttendees,
               ),
               IconButton(
                 tooltip: 'Edit',
-                icon: const Icon(Icons.edit_outlined,
-                    color: NileColors.txtPrimary),
+                icon: const Icon(
+                  Icons.edit_outlined,
+                  color: NileColors.txtPrimary,
+                ),
                 onPressed: _edit,
               ),
               IconButton(
                 tooltip: 'Delete',
-                icon: const Icon(Icons.delete_outline,
-                    color: NileColors.coral),
+                icon: const Icon(Icons.delete_outline, color: NileColors.coral),
                 onPressed: _delete,
               ),
             ],
@@ -498,8 +545,10 @@ class _EventDetailScreenState extends State<EventDetailScreen>
             if (!_isOwnEvent)
               IconButton(
                 tooltip: 'Report event',
-                icon: const Icon(Icons.flag_outlined,
-                    color: NileColors.txtPrimary),
+                icon: const Icon(
+                  Icons.flag_outlined,
+                  color: NileColors.txtPrimary,
+                ),
                 onPressed: () => Moderation.showReportSheet(
                   context,
                   targetType: ReportTargetType.event,
@@ -513,7 +562,7 @@ class _EventDetailScreenState extends State<EventDetailScreen>
           ),
         ),
         SliverPadding(
-          padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
+          padding: const EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s16, NileSpacing.s16, NileSpacing.s32),
           sliver: SliverList.list(
             children: [
               Row(
@@ -602,14 +651,17 @@ class _CoverImage extends StatelessWidget {
     return Stack(
       fit: StackFit.expand,
       children: [
-        if (event.thumbnailUrl != null)
-          Image.network(
-            event.thumbnailUrl!,
-            fit: BoxFit.cover,
-            errorBuilder: (_, _, _) => placeholder,
-          )
-        else
-          placeholder,
+        Hero(
+          tag: 'event-cover-${event.id}',
+          child: event.thumbnailUrl != null
+              ? Image.network(
+                  event.thumbnailUrl!,
+                  cacheWidth: nileDecodeWidth(600),
+                  fit: BoxFit.cover,
+                  errorBuilder: (_, _, _) => placeholder,
+                )
+              : placeholder,
+        ),
         const DecoratedBox(
           decoration: BoxDecoration(
             gradient: LinearGradient(
@@ -631,14 +683,12 @@ class _StatusChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (event.isLive) return const LiveBadge(label: 'LIVE NOW');
+
     late final Color bg;
     late final Color fg;
     late final String label;
-    if (event.isLive) {
-      bg = NileColors.coral;
-      fg = Colors.white;
-      label = 'LIVE NOW';
-    } else if (event.isSoundCheck) {
+    if (event.isSoundCheck) {
       bg = NileColors.bgRaised;
       fg = NileColors.volt;
       label = 'STARTING SOON';
@@ -647,32 +697,24 @@ class _StatusChip extends StatelessWidget {
       fg = NileColors.txtSecondary;
       label = 'ENDED';
     } else {
+      // Neutral — volt is reserved for the Get Ticket CTA on this screen.
       bg = NileColors.bgRaised;
-      fg = NileColors.volt;
+      fg = NileColors.txtSecondary;
       label = 'SCHEDULED';
     }
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s8, vertical: NileSpacing.s4),
       decoration: BoxDecoration(
         color: bg,
         borderRadius: BorderRadius.circular(NileRadius.xs),
       ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (event.isLive) ...[
-            const CircleAvatar(radius: 3.5, backgroundColor: Colors.white),
-            const SizedBox(width: 6),
-          ],
-          Text(
-            label,
-            style: NileTextStyles.caption().copyWith(
-              color: fg,
-              fontWeight: FontWeight.w700,
-              letterSpacing: 1.2,
-            ),
-          ),
-        ],
+      child: Text(
+        label,
+        style: NileTextStyles.caption().copyWith(
+          color: fg,
+          fontWeight: FontWeight.w700,
+          letterSpacing: 1.2,
+        ),
       ),
     );
   }
@@ -706,7 +748,7 @@ class _HostRow extends StatelessWidget {
             radius: 22,
             backgroundColor: NileColors.bgRaised,
             backgroundImage: event.hostAvatarUrl != null
-                ? NetworkImage(event.hostAvatarUrl!)
+                ? nileAvatarImage(event.hostAvatarUrl!, 22)
                 : null,
             child: event.hostAvatarUrl == null
                 ? Text(
@@ -758,12 +800,23 @@ class _CountdownBlock extends StatelessWidget {
   String _fmtScheduled(DateTime dt) {
     final local = dt.toLocal();
     final now = DateTime.now();
-    final sameDay = local.year == now.year &&
+    final sameDay =
+        local.year == now.year &&
         local.month == now.month &&
         local.day == now.day;
     const months = [
-      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
     ];
     final time =
         '${local.hour.toString().padLeft(2, '0')}:${local.minute.toString().padLeft(2, '0')}';
@@ -777,10 +830,10 @@ class _CountdownBlock extends StatelessWidget {
 
     if (expired) {
       return Container(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(NileSpacing.s16),
         decoration: BoxDecoration(
           color: NileColors.bgSurface,
-          borderRadius: BorderRadius.circular(NileRadius.md),
+          borderRadius: BorderRadius.circular(NileRadius.lg),
           border: Border.all(color: NileColors.border),
         ),
         child: Row(
@@ -812,10 +865,10 @@ class _CountdownBlock extends StatelessWidget {
     final secs = d.inSeconds.remainder(60);
 
     return Container(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(NileSpacing.s16),
       decoration: BoxDecoration(
         color: NileColors.bgSurface,
-        borderRadius: BorderRadius.circular(NileRadius.md),
+        borderRadius: BorderRadius.circular(NileRadius.lg),
         border: Border.all(color: NileColors.border),
       ),
       child: Column(
@@ -823,8 +876,11 @@ class _CountdownBlock extends StatelessWidget {
         children: [
           Row(
             children: [
-              const Icon(Icons.calendar_today,
-                  size: 14, color: NileColors.txtSecondary),
+              const Icon(
+                Icons.calendar_today,
+                size: 14,
+                color: NileColors.txtSecondary,
+              ),
               const SizedBox(width: 6),
               Text(_fmtScheduled(scheduledAt!), style: NileTextStyles.bodySm()),
             ],
@@ -862,7 +918,7 @@ class _CountUnit extends StatelessWidget {
             value.toString().padLeft(2, '0'),
             textAlign: TextAlign.center,
             style: NileTextStyles.displayMd().copyWith(
-              color: NileColors.volt,
+              color: NileColors.txtPrimary,
               fontFeatures: const [FontFeature.tabularFigures()],
             ),
           ),
@@ -894,20 +950,20 @@ class _PriceChip extends StatelessWidget {
     final label = isOperator
         ? '✓ Crew'
         : hasTicket
-            ? '✓ Ticket'
-            : soldOut
-                ? 'Sold Out'
-                : '\$${(priceCents / 100).toStringAsFixed(priceCents % 100 == 0 ? 0 : 2)}';
+        ? '✓ Ticket'
+        : soldOut
+        ? 'Sold Out'
+        : '\$${(priceCents / 100).toStringAsFixed(priceCents % 100 == 0 ? 0 : 2)}';
 
     final bg = hasAccess ? NileColors.volt.withAlpha(30) : NileColors.bgRaised;
     final fg = hasAccess
         ? NileColors.volt
         : soldOut
-            ? NileColors.txtSecondary
-            : NileColors.txtPrimary;
+        ? NileColors.txtSecondary
+        : NileColors.txtPrimary;
 
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s8, vertical: NileSpacing.s4),
       decoration: BoxDecoration(
         color: bg,
         borderRadius: BorderRadius.circular(NileRadius.xs),
@@ -972,7 +1028,7 @@ class _PrimaryCta extends StatelessWidget {
             child: FilledButton.icon(
               onPressed: onEnterAsCamera,
               style: FilledButton.styleFrom(
-                padding: const EdgeInsets.symmetric(vertical: 16),
+                padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
                 backgroundColor: NileColors.coral,
                 foregroundColor: Colors.white,
               ),
@@ -993,7 +1049,7 @@ class _PrimaryCta extends StatelessWidget {
                 icon: const Icon(Icons.play_arrow),
                 label: Text(event.isLive ? 'Watch instead' : 'View Lobby'),
                 style: OutlinedButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(vertical: 16),
+                  padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
                 ),
               ),
             ),
@@ -1019,7 +1075,7 @@ class _PrimaryCta extends StatelessWidget {
           child: FilledButton.icon(
             onPressed: onWatch,
             style: FilledButton.styleFrom(
-              padding: const EdgeInsets.symmetric(vertical: 16),
+              padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
               backgroundColor: NileColors.volt,
               foregroundColor: NileColors.bgPage,
             ),
@@ -1033,7 +1089,7 @@ class _PrimaryCta extends StatelessWidget {
         child: FilledButton.icon(
           onPressed: onWatch,
           style: FilledButton.styleFrom(
-            padding: const EdgeInsets.symmetric(vertical: 16),
+            padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
             backgroundColor: NileColors.coral,
             foregroundColor: Colors.white,
           ),
@@ -1044,13 +1100,15 @@ class _PrimaryCta extends StatelessWidget {
               const Text('Watch Now'),
               const SizedBox(width: 8),
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s6, vertical: NileSpacing.s2),
                 decoration: BoxDecoration(
                   color: Colors.white24,
                   borderRadius: BorderRadius.circular(NileRadius.xs),
                 ),
-                child: Text('${event.viewerCount}',
-                    style: NileTextStyles.caption().copyWith(color: Colors.white)),
+                child: NileRollingNumber(
+                  value: event.viewerCount,
+                  style: NileTextStyles.caption().copyWith(color: Colors.white),
+                ),
               ),
             ],
           ),
@@ -1066,7 +1124,7 @@ class _PrimaryCta extends StatelessWidget {
           icon: const Icon(Icons.stop_circle_outlined),
           label: const Text('Stream Ended'),
           style: OutlinedButton.styleFrom(
-            padding: const EdgeInsets.symmetric(vertical: 16),
+            padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
           ),
         ),
       );
@@ -1089,7 +1147,7 @@ class _PrimaryCta extends StatelessWidget {
         icon: const Icon(Icons.access_time),
         label: Text(countdownExpired ? 'Waiting for host' : 'Not started yet'),
         style: OutlinedButton.styleFrom(
-          padding: const EdgeInsets.symmetric(vertical: 16),
+          padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
         ),
       ),
     );
@@ -1111,13 +1169,15 @@ class _GetTicketButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final priceLabel = '\$${(priceCents / 100).toStringAsFixed(priceCents % 100 == 0 ? 0 : 2)}';
-    return SizedBox(
+    final priceLabel =
+        '\$${(priceCents / 100).toStringAsFixed(priceCents % 100 == 0 ? 0 : 2)}';
+    final enabled = !soldOut && !busy;
+    final button = SizedBox(
       width: double.infinity,
       child: FilledButton.icon(
         onPressed: (soldOut || busy) ? null : onBuy,
         style: FilledButton.styleFrom(
-          padding: const EdgeInsets.symmetric(vertical: 16),
+          padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
           backgroundColor: NileColors.volt,
           foregroundColor: Colors.black,
           disabledBackgroundColor: NileColors.bgRaised,
@@ -1126,12 +1186,19 @@ class _GetTicketButton extends StatelessWidget {
             ? const SizedBox(
                 width: 18,
                 height: 18,
-                child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black),
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: Colors.black,
+                ),
               )
             : const Icon(Icons.confirmation_number_outlined),
         label: Text(soldOut ? 'Sold Out' : 'Get Ticket — $priceLabel'),
       ),
     );
+    // Faint volt glow on the screen's single primary CTA.
+    return enabled
+        ? DecoratedBox(decoration: NileEffects.voltGlow, child: button)
+        : button;
   }
 }
 
@@ -1144,17 +1211,19 @@ class _ErrorView extends StatelessWidget {
   Widget build(BuildContext context) {
     return Center(
       child: Padding(
-        padding: const EdgeInsets.all(40),
+        padding: const EdgeInsets.all(NileSpacing.s40),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(Icons.error_outline,
-                size: 48, color: NileColors.error),
+            const Icon(Icons.error_outline, size: 48, color: NileColors.error),
             const SizedBox(height: 16),
-            Text(message,
-                textAlign: TextAlign.center,
-                style: NileTextStyles.bodyMd()
-                    .copyWith(color: NileColors.txtSecondary)),
+            Text(
+              message,
+              textAlign: TextAlign.center,
+              style: NileTextStyles.bodyMd().copyWith(
+                color: NileColors.txtSecondary,
+              ),
+            ),
             const SizedBox(height: 24),
             FilledButton(onPressed: onRetry, child: const Text('Retry')),
           ],

@@ -1,8 +1,11 @@
 import 'package:flutter/material.dart';
 import '../services/event_service.dart';
+import '../services/message_service.dart';
 import '../services/notification_service.dart';
 import '../services/post_service.dart';
 import '../theme.dart';
+import '../widgets/empty_state.dart';
+import 'conversation_screen.dart';
 import 'event_detail_screen.dart';
 import 'post_detail_screen.dart';
 import 'profile_screen.dart';
@@ -47,7 +50,10 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
   }
 
   Future<void> _load() async {
-    setState(() { _items = null; _error = null; });
+    setState(() {
+      _items = null;
+      _error = null;
+    });
     try {
       final page = await NotificationService.list();
       setState(() {
@@ -94,8 +100,16 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
       case NotificationType.follow:
         Navigator.push(
           context,
+          MaterialPageRoute(builder: (_) => ProfileScreen(userId: n.actorId)),
+        );
+      case NotificationType.newMessage:
+        // actor_id is the sender; resolve (or reuse) the conversation by it.
+        final conv = await MessageService.getOrCreate(n.actorId);
+        if (!mounted) return;
+        Navigator.push(
+          context,
           MaterialPageRoute(
-            builder: (_) => ProfileScreen(userId: n.actorId),
+            builder: (_) => ConversationScreen(conversation: conv),
           ),
         );
       case NotificationType.eventStarting:
@@ -133,7 +147,10 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
                 SliverAppBar(
                   pinned: true,
                   backgroundColor: NileColors.bgPage,
-                  title: Text('Notifications', style: NileTextStyles.headingMd()),
+                  title: Text(
+                    'Notifications',
+                    style: NileTextStyles.headingMd(),
+                  ),
                 ),
                 ..._buildSlivers(),
               ],
@@ -160,7 +177,9 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
     if (_items == null) {
       return [
         const SliverFillRemaining(
-          child: Center(child: CircularProgressIndicator(color: NileColors.volt)),
+          child: Center(
+            child: CircularProgressIndicator(color: NileColors.volt),
+          ),
         ),
       ];
     }
@@ -177,7 +196,7 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
     }
     return [
       SliverPadding(
-        padding: const EdgeInsets.symmetric(vertical: 8),
+        padding: const EdgeInsets.symmetric(vertical: NileSpacing.s8),
         sliver: SliverList.separated(
           itemCount: _items!.length + (_hasMore ? 1 : 0),
           separatorBuilder: (_, i) => i >= _items!.length - 1
@@ -204,41 +223,44 @@ class _NotificationTile extends StatelessWidget {
   const _NotificationTile({required this.notification, required this.onTap});
 
   String _message() => switch (notification.type) {
-        NotificationType.postLike =>
-          '@${notification.actorUsername} liked your post',
-        NotificationType.postComment =>
-          '@${notification.actorUsername} commented on your post',
-        NotificationType.follow =>
-          '@${notification.actorUsername} started following you',
-        NotificationType.eventStarting =>
-          '@${notification.actorUsername}’s event starts in 15 minutes',
-        NotificationType.eventLive =>
-          '@${notification.actorUsername} is live now',
-        NotificationType.eventEnded =>
-          '@${notification.actorUsername}’s event ended — replay is ready',
-        NotificationType.operatorAssigned =>
-          '@${notification.actorUsername} added you as a camera operator',
-      };
+    NotificationType.postLike =>
+      '@${notification.actorUsername} liked your post',
+    NotificationType.postComment =>
+      '@${notification.actorUsername} commented on your post',
+    NotificationType.follow =>
+      '@${notification.actorUsername} started following you',
+    NotificationType.eventStarting =>
+      '@${notification.actorUsername}’s event starts in 15 minutes',
+    NotificationType.eventLive => '@${notification.actorUsername} is live now',
+    NotificationType.eventEnded =>
+      '@${notification.actorUsername}’s event ended — replay is ready',
+    NotificationType.operatorAssigned =>
+      '@${notification.actorUsername} added you as a camera operator',
+    NotificationType.newMessage =>
+      '@${notification.actorUsername} sent you a message',
+  };
 
   IconData _icon() => switch (notification.type) {
-        NotificationType.postLike => Icons.favorite,
-        NotificationType.postComment => Icons.mode_comment,
-        NotificationType.follow => Icons.person_add,
-        NotificationType.eventStarting => Icons.live_tv,
-        NotificationType.eventLive => Icons.sensors,
-        NotificationType.eventEnded => Icons.replay,
-        NotificationType.operatorAssigned => Icons.videocam,
-      };
+    NotificationType.postLike => Icons.favorite,
+    NotificationType.postComment => Icons.mode_comment,
+    NotificationType.follow => Icons.person_add,
+    NotificationType.eventStarting => Icons.live_tv,
+    NotificationType.eventLive => Icons.sensors,
+    NotificationType.eventEnded => Icons.replay,
+    NotificationType.operatorAssigned => Icons.videocam,
+    NotificationType.newMessage => Icons.send_rounded,
+  };
 
   Color _iconColor() => switch (notification.type) {
-        NotificationType.postLike => NileColors.coral,
-        NotificationType.postComment => NileColors.volt,
-        NotificationType.follow => NileColors.volt,
-        NotificationType.eventStarting => NileColors.coral,
-        NotificationType.eventLive => NileColors.coral,
-        NotificationType.eventEnded => NileColors.volt,
-        NotificationType.operatorAssigned => NileColors.azure,
-      };
+    NotificationType.postLike => NileColors.coral,
+    NotificationType.postComment => NileColors.volt,
+    NotificationType.follow => NileColors.volt,
+    NotificationType.eventStarting => NileColors.coral,
+    NotificationType.eventLive => NileColors.coral,
+    NotificationType.eventEnded => NileColors.txtSecondary,
+    NotificationType.operatorAssigned => NileColors.azure,
+    NotificationType.newMessage => NileColors.volt,
+  };
 
   String _timeAgo(DateTime dt) {
     final d = DateTime.now().difference(dt);
@@ -257,7 +279,7 @@ class _NotificationTile extends StatelessWidget {
         color: unread
             ? NileColors.volt.withValues(alpha: 0.04)
             : Colors.transparent,
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s16, vertical: NileSpacing.s12),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -269,20 +291,23 @@ class _NotificationTile extends StatelessWidget {
                   onTap: () => Navigator.push(
                     context,
                     MaterialPageRoute(
-                      builder: (_) => ProfileScreen(userId: notification.actorId),
+                      builder: (_) =>
+                          ProfileScreen(userId: notification.actorId),
                     ),
                   ),
                   child: CircleAvatar(
                     radius: 20,
                     backgroundColor: NileColors.bgRaised,
                     backgroundImage: notification.actorAvatarUrl != null
-                        ? NetworkImage(notification.actorAvatarUrl!)
+                        ? nileAvatarImage(notification.actorAvatarUrl!, 20)
                         : null,
                     child: notification.actorAvatarUrl == null
                         ? Text(
                             notification.actorUsername[0].toUpperCase(),
-                            style: NileTextStyles.labelSm()
-                                .copyWith(color: NileColors.txtPrimary, letterSpacing: 0),
+                            style: NileTextStyles.labelSm().copyWith(
+                              color: NileColors.txtPrimary,
+                              letterSpacing: 0,
+                            ),
                           )
                         : null,
                   ),
@@ -318,17 +343,16 @@ class _NotificationTile extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(height: 2),
-                  Text(_timeAgo(notification.createdAt),
-                      style: NileTextStyles.caption()),
+                  Text(
+                    _timeAgo(notification.createdAt),
+                    style: NileTextStyles.caption(),
+                  ),
                 ],
               ),
             ),
             if (unread) ...[
               const SizedBox(width: 8),
-              const CircleAvatar(
-                radius: 4,
-                backgroundColor: NileColors.volt,
-              ),
+              const CircleAvatar(radius: 4, backgroundColor: NileColors.volt),
             ],
           ],
         ),
@@ -352,26 +376,6 @@ class _CenterMessage extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(40),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 56, color: iconColor),
-            const SizedBox(height: 16),
-            Text(title, style: NileTextStyles.headingMd()),
-            const SizedBox(height: 8),
-            Text(
-              body,
-              textAlign: TextAlign.center,
-              style: NileTextStyles.bodyMd()
-                  .copyWith(color: NileColors.txtSecondary),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
+  Widget build(BuildContext context) =>
+      NileEmptyState(icon: icon, iconColor: iconColor, title: title, body: body);
 }

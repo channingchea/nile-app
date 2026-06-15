@@ -16,4 +16,4 @@ class Paged<T> {
 }
 
 /// Default page size used across paginated queries.
-const int kPageSize = 20;
+const int kPageSize = 13;

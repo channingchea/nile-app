@@ -5,6 +5,7 @@ import 'event_repost_service.dart';
 import 'like_service.dart';
 import 'pagination.dart';
 import 'supabase_client.dart';
+import 'topic_service.dart';
 
 // ── Required SQL (run once in Supabase SQL editor) ────────────────────────────
 // create or replace function increment_viewer_count(p_livekit_room text)
@@ -30,21 +31,23 @@ class Event {
   final String title;
   final String? description;
   final String status; // 'scheduled' | 'live' | 'ended'
-  final String liveKitEventId;
+  final String? liveKitEventId;
   final String? coverImageUrl;
   final int viewerCount;
   final int likeCount;
   final int repostCount;
-  final int? price;        // cents
+  final int? price; // cents
   final int? ticketLimit;
   final int cameraCount;
   final DateTime createdAt;
   final DateTime? startedAt;
   final DateTime? scheduledAt;
   final DateTime? endAt;
+
   /// Transient — populated client-side via [EventService.hydrateLikes].
   final bool likedByMe;
   final bool repostedByMe;
+
   /// Transient — set when this event entered a feed via someone's repost.
   final String? repostedByUsername;
 
@@ -56,7 +59,7 @@ class Event {
     required this.title,
     this.description,
     required this.status,
-    required this.liveKitEventId,
+    this.liveKitEventId,
     this.coverImageUrl,
     required this.viewerCount,
     this.likeCount = 0,
@@ -115,8 +118,10 @@ class Event {
   bool get isEnded => status == 'ended';
   bool get isDraft => status == 'draft';
 
-  factory Event.fromJson(Map<String, dynamic> json,
-      {String? repostedByUsername}) {
+  factory Event.fromJson(
+    Map<String, dynamic> json, {
+    String? repostedByUsername,
+  }) {
     final profile = (json['profiles'] as Map<String, dynamic>?) ?? {};
     return Event(
       id: json['id'] as String,
@@ -126,8 +131,9 @@ class Event {
       title: json['title'] as String,
       description: json['description'] as String?,
       status: json['status'] as String,
-      liveKitEventId: json['livekit_room'] as String,
-      coverImageUrl: (json['cover_image_url'] ?? json['thumbnail_url']) as String?,
+      liveKitEventId: json['livekit_room'] as String?,
+      coverImageUrl:
+          (json['cover_image_url'] ?? json['thumbnail_url']) as String?,
       viewerCount: (json['viewer_count'] as num?)?.toInt() ?? 0,
       likeCount: (json['like_count'] as num?)?.toInt() ?? 0,
       repostCount: (json['repost_count'] as num?)?.toInt() ?? 0,
@@ -157,8 +163,10 @@ class EventService {
   /// "Passed" = status is `ended`, OR it was scheduled and the scheduled time
   /// is already in the past (host no-show). Events with no scheduled_at are
   /// treated as evergreen posts and remain visible until they end.
-  static Future<Paged<Event>> getFeed(List<String> followingIds,
-      {String? cursor}) async {
+  static Future<Paged<Event>> getFeed(
+    List<String> followingIds, {
+    String? cursor,
+  }) async {
     if (followingIds.isEmpty) return Paged.empty();
 
     var b = supabase
@@ -168,17 +176,18 @@ class EventService {
         .neq('status', 'ended')
         .neq('status', 'draft');
     if (cursor != null) b = b.lt('created_at', cursor);
-    final rows =
-        await b.order('created_at', ascending: false).limit(kPageSize);
+    final rows = await b.order('created_at', ascending: false).limit(kPageSize);
 
-    final raw =
-        (rows as List).map((r) => Event.fromJson(r as Map<String, dynamic>));
+    final raw = (rows as List).map(
+      (r) => Event.fromJson(r as Map<String, dynamic>),
+    );
     // hasMore / cursor are based on the raw page (before no-show filtering) so
     // paging stays correct even when items are dropped.
     final fetched = raw.toList();
     final hasMore = fetched.length == kPageSize;
-    final nextCursor =
-        hasMore ? fetched.last.createdAt.toIso8601String() : null;
+    final nextCursor = hasMore
+        ? fetched.last.createdAt.toIso8601String()
+        : null;
 
     final now = DateTime.now();
     final events = fetched.where((e) {
@@ -207,19 +216,22 @@ class EventService {
 
   /// All published events from a single host (newest first), excluding drafts.
   /// Used by public profile pages. Keyset-paged by created_at via [cursor].
-  static Future<Paged<Event>> getEventsByHost(String hostId,
-      {String? cursor, int limit = kPageSize}) async {
+  static Future<Paged<Event>> getEventsByHost(
+    String hostId, {
+    String? cursor,
+    int limit = kPageSize,
+  }) async {
     var b = supabase
         .from('events')
         .select('*, profiles!events_host_id_fkey(username, avatar_url)')
         .eq('host_id', hostId)
         .neq('status', 'draft');
     if (cursor != null) b = b.lt('created_at', cursor);
-    final rows =
-        await b.order('created_at', ascending: false).limit(limit);
+    final rows = await b.order('created_at', ascending: false).limit(limit);
 
-    final items =
-        (rows as List).map((r) => Event.fromJson(r as Map<String, dynamic>)).toList();
+    final items = (rows as List)
+        .map((r) => Event.fromJson(r as Map<String, dynamic>))
+        .toList();
     final hasMore = items.length == limit;
     return Paged(
       items: items,
@@ -231,8 +243,10 @@ class EventService {
   /// The current user's draft events (newest first). Owner-only — RLS scopes
   /// draft visibility to the host, so this only ever returns the caller's own
   /// drafts. Used by the Drafts tab on the profile page.
-  static Future<Paged<Event>> getDrafts(
-      {String? cursor, int limit = kPageSize}) async {
+  static Future<Paged<Event>> getDrafts({
+    String? cursor,
+    int limit = kPageSize,
+  }) async {
     final uid = supabase.auth.currentUser?.id;
     if (uid == null) return Paged.empty();
     var b = supabase
@@ -243,8 +257,9 @@ class EventService {
     if (cursor != null) b = b.lt('created_at', cursor);
     final rows = await b.order('created_at', ascending: false).limit(limit);
 
-    final items =
-        (rows as List).map((r) => Event.fromJson(r as Map<String, dynamic>)).toList();
+    final items = (rows as List)
+        .map((r) => Event.fromJson(r as Map<String, dynamic>))
+        .toList();
     final hasMore = items.length == limit;
     return Paged(
       items: items,
@@ -276,28 +291,39 @@ class EventService {
     String? coverImageUrl,
     DateTime? scheduledAt,
     DateTime? endAt,
-    int? price,        // cents
+    int? price, // cents
     int? ticketLimit,
     int? cameraCount,
     bool asDraft = false,
+    List<String>? topicIds,
   }) async {
     final uid = supabase.auth.currentUser?.id;
     if (uid == null) throw StateError('EventService: no authenticated user');
 
-    final row = await supabase.from('events').insert({
-      'host_id': uid,
-      'title': title,
-      'livekit_room': liveKitEventId,
-      if (asDraft) 'status': 'draft',
-      if (description != null && description.isNotEmpty) 'description': description,
-      'cover_image_url': ?coverImageUrl,
-      if (scheduledAt != null) 'scheduled_at': scheduledAt.toIso8601String(),
-      if (endAt != null) 'end_at': endAt.toIso8601String(),
-      'price': ?price,
-      'ticket_limit': ?ticketLimit,
-      'camera_count': ?cameraCount,
-    }).select('*, profiles!events_host_id_fkey(username, avatar_url)').single();
-    return Event.fromJson(row);
+    final row = await supabase
+        .from('events')
+        .insert({
+          'host_id': uid,
+          'title': title,
+          'livekit_room': liveKitEventId,
+          if (asDraft) 'status': 'draft',
+          if (description != null && description.isNotEmpty)
+            'description': description,
+          'cover_image_url': ?coverImageUrl,
+          if (scheduledAt != null)
+            'scheduled_at': scheduledAt.toIso8601String(),
+          if (endAt != null) 'end_at': endAt.toIso8601String(),
+          'price': ?price,
+          'ticket_limit': ?ticketLimit,
+          'camera_count': ?cameraCount,
+        })
+        .select('*, profiles!events_host_id_fkey(username, avatar_url)')
+        .single();
+    final event = Event.fromJson(row);
+    if (topicIds != null && topicIds.isNotEmpty) {
+      await TopicService.setEventTopics(event.id, topicIds);
+    }
+    return event;
   }
 
   /// Update mutable fields on an existing event. Only fields you pass are
@@ -318,7 +344,11 @@ class EventService {
     int? ticketLimit,
     bool clearTicketLimit = false,
     int? cameraCount,
+    List<String>? topicIds, // null = leave tags untouched; [] = clear all
   }) async {
+    if (topicIds != null) {
+      await TopicService.setEventTopics(eventId, topicIds);
+    }
     final updates = <String, dynamic>{
       'title': ?title,
       'description': ?description,
@@ -357,15 +387,19 @@ class EventService {
 
   /// Delete an event (host only). RLS `events_delete_own` enforces ownership;
   /// tickets cascade via the FK. Best-effort removal of the cover image too.
-  static Future<void> deleteEvent(String eventId,
-      {String? liveKitEventId}) async {
+  static Future<void> deleteEvent(
+    String eventId, {
+    String? liveKitEventId,
+  }) async {
     await supabase.from('events').delete().eq('id', eventId);
     if (liveKitEventId != null) {
       try {
-        await supabase.storage
-            .from('events')
-            .remove(['$liveKitEventId/cover.jpg']);
-      } catch (_) {/* cover may not exist — ignore */}
+        await supabase.storage.from('events').remove([
+          '$liveKitEventId/cover.jpg',
+        ]);
+      } catch (_) {
+        /* cover may not exist — ignore */
+      }
     }
   }
 
@@ -376,7 +410,9 @@ class EventService {
     required Uint8List bytes,
   }) async {
     final path = '$liveKitEventId/cover.jpg';
-    await supabase.storage.from('events').uploadBinary(
+    await supabase.storage
+        .from('events')
+        .uploadBinary(
           path,
           bytes,
           fileOptions: const FileOptions(
@@ -391,8 +427,9 @@ class EventService {
   /// Populates [Event.likedByMe] for every event in one round-trip.
   static Future<List<Event>> hydrateLikes(List<Event> events) async {
     if (events.isEmpty) return events;
-    final liked =
-        await LikeService.getLikedEventIds(events.map((e) => e.id).toList());
+    final liked = await LikeService.getLikedEventIds(
+      events.map((e) => e.id).toList(),
+    );
     return events
         .map((e) => e.copyWith(likedByMe: liked.contains(e.id)))
         .toList();
@@ -402,7 +439,8 @@ class EventService {
   static Future<List<Event>> hydrateReposts(List<Event> events) async {
     if (events.isEmpty) return events;
     final reposted = await EventRepostService.getRepostedEventIds(
-        events.map((e) => e.id).toList());
+      events.map((e) => e.id).toList(),
+    );
     return events
         .map((e) => e.copyWith(repostedByMe: reposted.contains(e.id)))
         .toList();
@@ -413,15 +451,17 @@ class EventService {
   /// repostedAt) pairs so the feed can sort by repost time. Mirrors
   /// [PostService.getRepostsFeed].
   static Future<List<({Event event, DateTime repostedAt})>> getRepostsFeed(
-      List<String> reposterIds,
-      {int limit = kPageSize}) async {
+    List<String> reposterIds, {
+    int limit = kPageSize,
+  }) async {
     if (reposterIds.isEmpty) return const [];
     final rows = await supabase
         .from('event_reposts')
         .select(
-            'created_at, reposter:profiles!event_reposts_user_id_fkey(username), '
-            'event:events!event_reposts_event_id_fkey('
-            '*, profiles!events_host_id_fkey(username, avatar_url))')
+          'created_at, reposter:profiles!event_reposts_user_id_fkey(username), '
+          'event:events!event_reposts_event_id_fkey('
+          '*, profiles!events_host_id_fkey(username, avatar_url))',
+        )
         .inFilter('user_id', reposterIds)
         .order('created_at', ascending: false)
         .limit(limit);
@@ -432,8 +472,10 @@ class EventService {
       if (ev == null) continue;
       final reposter = (m['reposter'] as Map<String, dynamic>?) ?? {};
       out.add((
-        event: Event.fromJson(ev,
-            repostedByUsername: reposter['username'] as String?),
+        event: Event.fromJson(
+          ev,
+          repostedByUsername: reposter['username'] as String?,
+        ),
         repostedAt: DateTime.parse(m['created_at'] as String),
       ));
     }
@@ -448,7 +490,9 @@ class EventService {
         .eq('id', eventId)
         .limit(1);
     final list = rows as List;
-    return list.isEmpty ? null : Event.fromJson(list.first as Map<String, dynamic>);
+    return list.isEmpty
+        ? null
+        : Event.fromJson(list.first as Map<String, dynamic>);
   }
 
   /// Subscribe to realtime updates on an event row by its primary id.
@@ -500,7 +544,10 @@ class EventService {
   static Future<void> goLive(String liveKitEventId) async {
     await supabase
         .from('events')
-        .update({'status': 'live', 'started_at': DateTime.now().toIso8601String()})
+        .update({
+          'status': 'live',
+          'started_at': DateTime.now().toIso8601String(),
+        })
         .eq('livekit_room', liveKitEventId);
   }
 
@@ -508,7 +555,10 @@ class EventService {
   static Future<void> end(String liveKitEventId) async {
     await supabase
         .from('events')
-        .update({'status': 'ended', 'ended_at': DateTime.now().toIso8601String()})
+        .update({
+          'status': 'ended',
+          'ended_at': DateTime.now().toIso8601String(),
+        })
         .eq('livekit_room', liveKitEventId);
   }
 
@@ -530,7 +580,9 @@ class EventService {
 
   /// Fetch current viewer_count, status, and scheduled_at for an event by
   /// liveKitEventId. scheduled_at gates how early a host may enter sound check.
-  static Future<Map<String, dynamic>?> fetchEventState(String liveKitEventId) async {
+  static Future<Map<String, dynamic>?> fetchEventState(
+    String liveKitEventId,
+  ) async {
     final rows = await supabase
         .from('events')
         .select('viewer_count, status, scheduled_at')

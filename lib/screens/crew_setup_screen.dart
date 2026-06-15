@@ -137,7 +137,8 @@ class _CrewSetupScreenState extends State<CrewSetupScreen> {
       body: NileMaxWidth(
         child: _loading
             ? const Center(
-                child: CircularProgressIndicator(color: NileColors.volt))
+                child: CircularProgressIndicator(color: NileColors.volt),
+              )
             : _buildBody(),
       ),
     );
@@ -148,15 +149,16 @@ class _CrewSetupScreenState extends State<CrewSetupScreen> {
       children: [
         Expanded(
           child: ListView(
-            padding: const EdgeInsets.all(24),
+            padding: const EdgeInsets.all(NileSpacing.s24),
             children: [
               Text('Assign your crew', style: NileTextStyles.headingLg()),
               const SizedBox(height: 8),
               Text(
                 'Map each crew member to a camera, and pick who carries the '
                 'stream audio. You can change this any time during Sound Check.',
-                style: NileTextStyles.bodyMd()
-                    .copyWith(color: NileColors.txtSecondary),
+                style: NileTextStyles.bodyMd().copyWith(
+                  color: NileColors.txtSecondary,
+                ),
               ),
               const SizedBox(height: 24),
               if (_picks.isEmpty)
@@ -173,9 +175,12 @@ class _CrewSetupScreenState extends State<CrewSetupScreen> {
                 ],
               if (_error != null) ...[
                 const SizedBox(height: 8),
-                Text(_error!,
-                    style: NileTextStyles.bodySm()
-                        .copyWith(color: NileColors.error)),
+                Text(
+                  _error!,
+                  style: NileTextStyles.bodySm().copyWith(
+                    color: NileColors.error,
+                  ),
+                ),
               ],
             ],
           ),
@@ -187,7 +192,7 @@ class _CrewSetupScreenState extends State<CrewSetupScreen> {
 
   Widget _buildFooter() {
     return Container(
-      padding: const EdgeInsets.fromLTRB(24, 12, 24, 24),
+      padding: const EdgeInsets.fromLTRB(NileSpacing.s24, NileSpacing.s12, NileSpacing.s24, NileSpacing.s24),
       decoration: const BoxDecoration(
         color: NileColors.bgPage,
         border: Border(top: BorderSide(color: NileColors.border)),
@@ -199,18 +204,18 @@ class _CrewSetupScreenState extends State<CrewSetupScreen> {
           style: FilledButton.styleFrom(
             backgroundColor: NileColors.volt,
             foregroundColor: NileColors.bgPage,
-            padding: const EdgeInsets.symmetric(vertical: 16),
+            padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
             textStyle: NileTextStyles.labelLg(),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(NileRadius.sm),
-            ),
+            shape: const StadiumBorder(),
           ),
           child: _saving
               ? const SizedBox(
                   height: 20,
                   width: 20,
                   child: CircularProgressIndicator(
-                      strokeWidth: 2, color: NileColors.bgPage),
+                    strokeWidth: 2,
+                    color: NileColors.bgPage,
+                  ),
                 )
               : const Text('Continue to Sound Check'),
         ),
@@ -239,11 +244,11 @@ class _CrewAssignmentCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final url = pick.profile.avatarUrl;
     return Container(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(NileSpacing.s16),
       decoration: BoxDecoration(
         color: NileColors.bgSurface,
         border: Border.all(color: NileColors.border),
-        borderRadius: BorderRadius.circular(NileRadius.md),
+        borderRadius: BorderRadius.circular(NileRadius.lg),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -253,11 +258,15 @@ class _CrewAssignmentCard extends StatelessWidget {
               CircleAvatar(
                 radius: 18,
                 backgroundColor: NileColors.bgRaised,
-                backgroundImage:
-                    (url != null && url.isNotEmpty) ? NetworkImage(url) : null,
+                backgroundImage: (url != null && url.isNotEmpty)
+                    ? nileAvatarImage(url, 18)
+                    : null,
                 child: (url == null || url.isEmpty)
-                    ? const Icon(Icons.person,
-                        size: 18, color: NileColors.txtTertiary)
+                    ? const Icon(
+                        Icons.person,
+                        size: 18,
+                        color: NileColors.txtTertiary,
+                      )
                     : null,
               ),
               const SizedBox(width: 12),
@@ -265,15 +274,20 @@ class _CrewAssignmentCard extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(pick.profile.displayName,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: NileTextStyles.labelMd()),
-                    Text('@${pick.profile.username}',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: NileTextStyles.caption()
-                            .copyWith(color: NileColors.txtTertiary)),
+                    Text(
+                      pick.profile.displayName,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: NileTextStyles.labelMd(),
+                    ),
+                    Text(
+                      '@${pick.profile.username}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: NileTextStyles.caption().copyWith(
+                        color: NileColors.txtTertiary,
+                      ),
+                    ),
                   ],
                 ),
               ),
@@ -286,10 +300,7 @@ class _CrewAssignmentCard extends StatelessWidget {
             onChanged: onSlotChanged,
           ),
           const SizedBox(height: 12),
-          _AudioToggle(
-            selected: pick.isAudioOperator,
-            onTap: onAudioToggled,
-          ),
+          _AudioToggle(selected: pick.isAudioOperator, onTap: onAudioToggled),
         ],
       ),
     );
@@ -310,27 +321,24 @@ class _SlotDropdown extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return InputDecorator(
-      decoration: const InputDecoration(
-        labelText: 'Camera',
-        isDense: true,
-      ),
+      decoration: const InputDecoration(labelText: 'Camera', isDense: true),
       child: DropdownButtonHideUnderline(
         child: DropdownButton<int?>(
           value: value,
           isExpanded: true,
           dropdownColor: NileColors.bgRaised,
           style: NileTextStyles.bodyMd().copyWith(color: NileColors.txtPrimary),
-          icon: const Icon(Icons.arrow_drop_down, color: NileColors.txtSecondary),
+          icon: const Icon(
+            Icons.arrow_drop_down,
+            color: NileColors.txtSecondary,
+          ),
           items: [
             const DropdownMenuItem<int?>(
               value: null,
               child: Text('Any camera'),
             ),
             for (final c in cameras)
-              DropdownMenuItem<int?>(
-                value: c.slotIndex,
-                child: Text(c.label),
-              ),
+              DropdownMenuItem<int?>(value: c.slotIndex, child: Text(c.label)),
           ],
           onChanged: onChanged,
         ),
@@ -351,11 +359,12 @@ class _AudioToggle extends StatelessWidget {
       onTap: onTap,
       borderRadius: BorderRadius.circular(NileRadius.sm),
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s12, vertical: NileSpacing.s8),
         decoration: BoxDecoration(
           color: selected ? NileColors.volt : Colors.transparent,
           border: Border.all(
-              color: selected ? NileColors.volt : NileColors.border),
+            color: selected ? NileColors.volt : NileColors.border,
+          ),
           borderRadius: BorderRadius.circular(NileRadius.sm),
         ),
         child: Row(
@@ -388,28 +397,33 @@ class _EmptyCrew extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.all(24),
+      padding: const EdgeInsets.all(NileSpacing.s24),
       decoration: BoxDecoration(
         color: NileColors.bgSurface,
         border: Border.all(color: NileColors.border),
-        borderRadius: BorderRadius.circular(NileRadius.md),
+        borderRadius: BorderRadius.circular(NileRadius.lg),
       ),
       child: Column(
         children: [
-          const Icon(Icons.group_outlined,
-              size: 32, color: NileColors.txtTertiary),
+          const Icon(
+            Icons.group_outlined,
+            size: 32,
+            color: NileColors.txtTertiary,
+          ),
           const SizedBox(height: 12),
           Text(
             'No crew on this event',
-            style: NileTextStyles.labelMd()
-                .copyWith(color: NileColors.txtSecondary),
+            style: NileTextStyles.labelMd().copyWith(
+              color: NileColors.txtSecondary,
+            ),
           ),
           const SizedBox(height: 4),
           Text(
             'You can still run the show solo — continue to Sound Check.',
             textAlign: TextAlign.center,
-            style: NileTextStyles.bodySm()
-                .copyWith(color: NileColors.txtTertiary),
+            style: NileTextStyles.bodySm().copyWith(
+              color: NileColors.txtTertiary,
+            ),
           ),
         ],
       ),

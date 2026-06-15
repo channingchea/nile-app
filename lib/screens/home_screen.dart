@@ -81,56 +81,65 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: NileColors.bgPage,
-      body: NileMaxWidth(
-        // IndexedStack keeps every tab built, so the same event can hold a
-        // live Hero on two tabs at once — duplicate tags abort ALL hero
-        // flights. HeroMode keeps only the visible tab's heroes active.
-        child: IndexedStack(
-          index: _selectedIndex,
-          children: [
-            for (final (i, page) in _pages.indexed)
-              HeroMode(enabled: i == _selectedIndex, child: page),
+    // Android system back from a non-Home tab returns to the Home tab instead
+    // of exiting the app (standard bottom-nav behavior); back from Home exits
+    // as usual. No effect on iOS/desktop, where there's no system back.
+    return PopScope(
+      canPop: _selectedIndex == 0,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) setState(() => _selectedIndex = 0);
+      },
+      child: Scaffold(
+        backgroundColor: NileColors.bgPage,
+        body: NileMaxWidth(
+          // IndexedStack keeps every tab built, so the same event can hold a
+          // live Hero on two tabs at once — duplicate tags abort ALL hero
+          // flights. HeroMode keeps only the visible tab's heroes active.
+          child: IndexedStack(
+            index: _selectedIndex,
+            children: [
+              for (final (i, page) in _pages.indexed)
+                HeroMode(enabled: i == _selectedIndex, child: page),
+            ],
+          ),
+        ),
+        floatingActionButton: _selectedIndex == 0
+            ? FloatingActionButton(
+                onPressed: _showActionSheet,
+                backgroundColor: NileColors.volt,
+                foregroundColor: NileColors.bgPage,
+                child: const Icon(Icons.add),
+              )
+            : null,
+        bottomNavigationBar: NavigationBar(
+          backgroundColor: NileColors.bgSurface,
+          indicatorColor: NileColors.volt.withValues(alpha: 0.15),
+          selectedIndex: _selectedIndex,
+          onDestinationSelected: (i) => setState(() => _selectedIndex = i),
+          labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
+          destinations: const [
+            NavigationDestination(
+              icon: Icon(Icons.home_outlined),
+              selectedIcon: Icon(Icons.home, color: NileColors.volt),
+              label: 'Home',
+            ),
+            NavigationDestination(
+              icon: Icon(Icons.search_outlined),
+              selectedIcon: Icon(Icons.search, color: NileColors.volt),
+              label: 'Discover',
+            ),
+            NavigationDestination(
+              icon: Icon(Icons.send_outlined),
+              selectedIcon: Icon(Icons.send, color: NileColors.volt),
+              label: 'Messages',
+            ),
+            NavigationDestination(
+              icon: Icon(Icons.person_outline),
+              selectedIcon: Icon(Icons.person, color: NileColors.volt),
+              label: 'Profile',
+            ),
           ],
         ),
-      ),
-      floatingActionButton: _selectedIndex == 0
-          ? FloatingActionButton(
-              onPressed: _showActionSheet,
-              backgroundColor: NileColors.volt,
-              foregroundColor: NileColors.bgPage,
-              child: const Icon(Icons.add),
-            )
-          : null,
-      bottomNavigationBar: NavigationBar(
-        backgroundColor: NileColors.bgSurface,
-        indicatorColor: NileColors.volt.withValues(alpha: 0.15),
-        selectedIndex: _selectedIndex,
-        onDestinationSelected: (i) => setState(() => _selectedIndex = i),
-        labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
-        destinations: const [
-          NavigationDestination(
-            icon: Icon(Icons.home_outlined),
-            selectedIcon: Icon(Icons.home, color: NileColors.volt),
-            label: 'Home',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.search_outlined),
-            selectedIcon: Icon(Icons.search, color: NileColors.volt),
-            label: 'Discover',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.send_outlined),
-            selectedIcon: Icon(Icons.send, color: NileColors.volt),
-            label: 'Messages',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.person_outline),
-            selectedIcon: Icon(Icons.person, color: NileColors.volt),
-            label: 'Profile',
-          ),
-        ],
       ),
     );
   }

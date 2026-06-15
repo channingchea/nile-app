@@ -38,10 +38,11 @@ class _PayoutsScreenState extends State<PayoutsScreen> {
 
   Future<void> _openExternal(String url) async {
     final uri = Uri.parse(url);
-    if (!await launchUrl(uri, mode: LaunchMode.externalApplication) && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Couldn't open link")),
-      );
+    if (!await launchUrl(uri, mode: LaunchMode.externalApplication) &&
+        mounted) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text("Couldn't open link")));
     }
   }
 
@@ -52,9 +53,9 @@ class _PayoutsScreenState extends State<PayoutsScreen> {
       await _openExternal(url);
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Couldn\'t start setup: $e')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Couldn\'t start setup: $e')));
       }
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -79,19 +80,25 @@ class _PayoutsScreenState extends State<PayoutsScreen> {
 
   Widget _buildBody() {
     if (_error != null) {
-      return _scroll(Text('Couldn\'t load payout status.\n$_error',
+      return _scroll(
+        Text(
+          'Couldn\'t load payout status.\n$_error',
           textAlign: TextAlign.center,
-          style: NileTextStyles.bodySm()
-              .copyWith(color: NileColors.txtSecondary)));
+          style: NileTextStyles.bodySm().copyWith(
+            color: NileColors.txtSecondary,
+          ),
+        ),
+      );
     }
     if (_status == null) {
       return const Center(
-          child: CircularProgressIndicator(color: NileColors.volt));
+        child: CircularProgressIndicator(color: NileColors.volt),
+      );
     }
 
     final s = _status!;
     return ListView(
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
+      padding: const EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s16, NileSpacing.s16, NileSpacing.s32),
       children: [
         _StatusCard(status: s),
         const SizedBox(height: 20),
@@ -113,22 +120,23 @@ class _PayoutsScreenState extends State<PayoutsScreen> {
         Text(
           'Nile uses Stripe to pay out ticket revenue. Setup opens in your '
           'browser; pull down to refresh once you\'re done.',
-          style:
-              NileTextStyles.caption().copyWith(color: NileColors.txtTertiary),
+          style: NileTextStyles.caption().copyWith(
+            color: NileColors.txtTertiary,
+          ),
         ),
       ],
     );
   }
 
   Widget _scroll(Widget child) => ListView(
-        physics: const AlwaysScrollableScrollPhysics(),
-        children: [
-          SizedBox(height: MediaQuery.of(context).size.height * 0.3),
-          Center(
-              child:
-                  Padding(padding: const EdgeInsets.all(24), child: child)),
-        ],
-      );
+    physics: const AlwaysScrollableScrollPhysics(),
+    children: [
+      SizedBox(height: MediaQuery.of(context).size.height * 0.3),
+      Center(
+        child: Padding(padding: const EdgeInsets.all(NileSpacing.s24), child: child),
+      ),
+    ],
+  );
 }
 
 class _StatusCard extends StatelessWidget {
@@ -158,16 +166,16 @@ class _StatusCard extends StatelessWidget {
     }
 
     return Container(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(NileSpacing.s16),
       decoration: BoxDecoration(
         color: NileColors.bgSurface,
-        borderRadius: BorderRadius.circular(NileRadius.md),
+        borderRadius: BorderRadius.circular(NileRadius.lg),
       ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Padding(
-            padding: const EdgeInsets.only(top: 4),
+            padding: const EdgeInsets.only(top: NileSpacing.s4),
             child: Container(
               width: 10,
               height: 10,
@@ -181,9 +189,12 @@ class _StatusCard extends StatelessWidget {
               children: [
                 Text(title, style: NileTextStyles.headingSm()),
                 const SizedBox(height: 4),
-                Text(subtitle,
-                    style: NileTextStyles.bodySm()
-                        .copyWith(color: NileColors.txtSecondary)),
+                Text(
+                  subtitle,
+                  style: NileTextStyles.bodySm().copyWith(
+                    color: NileColors.txtSecondary,
+                  ),
+                ),
               ],
             ),
           ),
@@ -216,7 +227,9 @@ class _ActionButton extends StatelessWidget {
                 width: 18,
                 height: 18,
                 child: CircularProgressIndicator(
-                    strokeWidth: 2, color: NileColors.bgPage),
+                  strokeWidth: 2,
+                  color: NileColors.bgPage,
+                ),
               )
             : Icon(icon, size: 18),
         label: Text(label),

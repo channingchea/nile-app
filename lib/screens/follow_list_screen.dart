@@ -62,11 +62,14 @@ class _FollowListScreenState extends State<FollowListScreen> {
 
   Future<Paged<UserProfile>> _fetch(String? cursor) =>
       widget.mode == FollowListMode.followers
-          ? FollowService.getFollowers(widget.userId, cursor: cursor)
-          : FollowService.getFollowing(widget.userId, cursor: cursor);
+      ? FollowService.getFollowers(widget.userId, cursor: cursor)
+      : FollowService.getFollowing(widget.userId, cursor: cursor);
 
   Future<void> _load() async {
-    setState(() { _users = null; _error = null; });
+    setState(() {
+      _users = null;
+      _error = null;
+    });
     try {
       final page = await _fetch(null);
       await _loadFollowStates(page.items);
@@ -102,9 +105,9 @@ class _FollowListScreenState extends State<FollowListScreen> {
   Future<void> _loadFollowStates(List<UserProfile> users) async {
     if (_myId.isEmpty) return;
     await Future.wait(
-      users
-          .where((u) => u.id != _myId && !_followState.containsKey(u.id))
-          .map((u) async {
+      users.where((u) => u.id != _myId && !_followState.containsKey(u.id)).map((
+        u,
+      ) async {
         final v = await FollowService.isFollowing(u.id);
         if (mounted) _followState[u.id] = v;
       }),
@@ -142,8 +145,7 @@ class _FollowListScreenState extends State<FollowListScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(title, style: NileTextStyles.headingSm()),
-            Text('@${widget.displayName}',
-                style: NileTextStyles.caption()),
+            Text('@${widget.displayName}', style: NileTextStyles.caption()),
           ],
         ),
       ),
@@ -155,17 +157,23 @@ class _FollowListScreenState extends State<FollowListScreen> {
     if (_error != null) {
       return Center(
         child: Padding(
-          padding: const EdgeInsets.all(40),
+          padding: const EdgeInsets.all(NileSpacing.s40),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(Icons.error_outline,
-                  size: 48, color: NileColors.error),
+              const Icon(
+                Icons.error_outline,
+                size: 48,
+                color: NileColors.error,
+              ),
               const SizedBox(height: 12),
-              Text(_error!,
-                  textAlign: TextAlign.center,
-                  style: NileTextStyles.bodyMd()
-                      .copyWith(color: NileColors.txtSecondary)),
+              Text(
+                _error!,
+                textAlign: TextAlign.center,
+                style: NileTextStyles.bodyMd().copyWith(
+                  color: NileColors.txtSecondary,
+                ),
+              ),
               const SizedBox(height: 20),
               FilledButton(onPressed: _load, child: const Text('Retry')),
             ],
@@ -176,7 +184,8 @@ class _FollowListScreenState extends State<FollowListScreen> {
 
     if (_users == null) {
       return const Center(
-          child: CircularProgressIndicator(color: NileColors.volt));
+        child: CircularProgressIndicator(color: NileColors.volt),
+      );
     }
 
     if (_users!.isEmpty) {
@@ -185,15 +194,18 @@ class _FollowListScreenState extends State<FollowListScreen> {
           : 'Not following anyone yet.';
       return Center(
         child: Padding(
-          padding: const EdgeInsets.all(40),
+          padding: const EdgeInsets.all(NileSpacing.s40),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
               Icon(Icons.people_outline, size: 56, color: NileColors.border),
               const SizedBox(height: 16),
-              Text(emptyText,
-                  style: NileTextStyles.bodyMd()
-                      .copyWith(color: NileColors.txtSecondary)),
+              Text(
+                emptyText,
+                style: NileTextStyles.bodyMd().copyWith(
+                  color: NileColors.txtSecondary,
+                ),
+              ),
             ],
           ),
         ),
@@ -221,18 +233,20 @@ class _FollowListScreenState extends State<FollowListScreen> {
             isFollowing: _followState[user.id] ?? false,
             isLoading: _followLoading.contains(user.id),
             onFollowTap: isMe ? null : () => _toggleFollow(user),
-            onTap: () => Navigator.push(
-              context,
-              MaterialPageRoute(
-                builder: (_) => ProfileScreen(userId: user.id),
-              ),
-            ).then((_) {
-              if (mounted && !isMe) {
-                _followState.remove(user.id);
-                FollowService.isFollowing(user.id)
-                    .then((v) { if (mounted) setState(() => _followState[user.id] = v); });
-              }
-            }),
+            onTap: () =>
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => ProfileScreen(userId: user.id),
+                  ),
+                ).then((_) {
+                  if (mounted && !isMe) {
+                    _followState.remove(user.id);
+                    FollowService.isFollowing(user.id).then((v) {
+                      if (mounted) setState(() => _followState[user.id] = v);
+                    });
+                  }
+                }),
           );
         },
       ),
@@ -270,18 +284,22 @@ class _UserTile extends StatelessWidget {
     return InkWell(
       onTap: onTap,
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s16, vertical: NileSpacing.s12),
         child: Row(
           children: [
             CircleAvatar(
               radius: 24,
               backgroundColor: NileColors.bgRaised,
-              backgroundImage:
-                  user.avatarUrl != null ? NetworkImage(user.avatarUrl!) : null,
+              backgroundImage: user.avatarUrl != null
+                  ? nileAvatarImage(user.avatarUrl!, 24)
+                  : null,
               child: user.avatarUrl == null
-                  ? Text(user.username[0].toUpperCase(),
-                      style: NileTextStyles.headingSm()
-                          .copyWith(color: NileColors.txtSecondary))
+                  ? Text(
+                      user.username[0].toUpperCase(),
+                      style: NileTextStyles.headingSm().copyWith(
+                        color: NileColors.txtSecondary,
+                      ),
+                    )
                   : null,
             ),
             const SizedBox(width: 12),
@@ -295,11 +313,16 @@ class _UserTile extends StatelessWidget {
                     children: [
                       Text('@${user.username}', style: NileTextStyles.bodySm()),
                       if (user.followerCount > 0) ...[
-                        Text(' · ',
-                            style: NileTextStyles.bodySm()
-                                .copyWith(color: NileColors.txtTertiary)),
-                        Text('${_fmt(user.followerCount)} followers',
-                            style: NileTextStyles.caption()),
+                        Text(
+                          ' · ',
+                          style: NileTextStyles.bodySm().copyWith(
+                            color: NileColors.txtTertiary,
+                          ),
+                        ),
+                        Text(
+                          '${_fmt(user.followerCount)} followers',
+                          style: NileTextStyles.caption(),
+                        ),
                       ],
                     ],
                   ),
@@ -337,7 +360,8 @@ class _FollowButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     const spinner = SizedBox(
-      width: 14, height: 14,
+      width: 14,
+      height: 14,
       child: CircularProgressIndicator(strokeWidth: 2),
     );
 
@@ -345,33 +369,45 @@ class _FollowButton extends StatelessWidget {
       return OutlinedButton(
         onPressed: isLoading ? null : onTap,
         style: OutlinedButton.styleFrom(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s16, vertical: NileSpacing.s8),
           minimumSize: const Size(90, 34),
           tapTargetSize: MaterialTapTargetSize.shrinkWrap,
         ),
         child: isLoading
             ? spinner
-            : Text('Following',
-                style: NileTextStyles.labelSm()
-                    .copyWith(color: NileColors.txtPrimary, letterSpacing: 0)),
+            : Text(
+                'Following',
+                style: NileTextStyles.labelSm().copyWith(
+                  color: NileColors.txtPrimary,
+                  letterSpacing: 0,
+                ),
+              ),
       );
     }
 
     return FilledButton(
       onPressed: isLoading ? null : onTap,
       style: FilledButton.styleFrom(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s16, vertical: NileSpacing.s8),
         minimumSize: const Size(90, 34),
         tapTargetSize: MaterialTapTargetSize.shrinkWrap,
       ),
       child: isLoading
           ? const SizedBox(
-              width: 14, height: 14,
+              width: 14,
+              height: 14,
               child: CircularProgressIndicator(
-                  strokeWidth: 2, color: NileColors.bgPage))
-          : Text('Follow',
-              style: NileTextStyles.labelSm()
-                  .copyWith(color: NileColors.bgPage, letterSpacing: 0)),
+                strokeWidth: 2,
+                color: NileColors.bgPage,
+              ),
+            )
+          : Text(
+              'Follow',
+              style: NileTextStyles.labelSm().copyWith(
+                color: NileColors.bgPage,
+                letterSpacing: 0,
+              ),
+            ),
     );
   }
 }

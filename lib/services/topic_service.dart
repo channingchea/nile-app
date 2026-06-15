@@ -16,11 +16,11 @@ class Topic {
   });
 
   factory Topic.fromMap(Map<String, dynamic> map) => Topic(
-        id: map['id'] as String,
-        slug: map['slug'] as String,
-        name: map['name'] as String,
-        sortOrder: (map['sort_order'] as num?)?.toInt() ?? 0,
-      );
+    id: map['id'] as String,
+    slug: map['slug'] as String,
+    name: map['name'] as String,
+    sortOrder: (map['sort_order'] as num?)?.toInt() ?? 0,
+  );
 }
 
 // ── Service ───────────────────────────────────────────────────────────────────
@@ -91,7 +91,9 @@ class TopicService {
   /// Replace [eventId]'s tags with [topicIds] (insert added, delete removed).
   /// RLS restricts writes to the event's host.
   static Future<void> setEventTopics(
-      String eventId, List<String> topicIds) async {
+    String eventId,
+    List<String> topicIds,
+  ) async {
     final current = (await topicIdsForEvent(eventId)).toSet();
     final wanted = topicIds.toSet();
     final toAdd = wanted.difference(current).toList();

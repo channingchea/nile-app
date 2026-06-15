@@ -35,8 +35,10 @@ class ShareUrls {
     return '$title on Nile$by\n${event(id)}';
   }
 
-  static String postCaption({required String id, required String authorUsername}) =>
-      '@$authorUsername on Nile\n${post(id)}';
+  static String postCaption({
+    required String id,
+    required String authorUsername,
+  }) => '@$authorUsername on Nile\n${post(id)}';
 
   static String profileCaption({
     required String username,

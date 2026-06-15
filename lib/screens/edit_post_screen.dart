@@ -42,8 +42,7 @@ class _EditPostScreenState extends State<EditPostScreen> {
   }
 
   bool get _hasImage =>
-      _newImageBytes != null ||
-      (_existingImageUrl != null && !_imageCleared);
+      _newImageBytes != null || (_existingImageUrl != null && !_imageCleared);
 
   bool get _canSave {
     final hasCaption = _captionController.text.trim().isNotEmpty;
@@ -67,7 +66,9 @@ class _EditPostScreenState extends State<EditPostScreen> {
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$e')));
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('$e')));
       }
     } finally {
       if (mounted) setState(() => _pickingImage = false);
@@ -75,10 +76,10 @@ class _EditPostScreenState extends State<EditPostScreen> {
   }
 
   void _removeImage() => setState(() {
-        _newImageBytes = null;
-        _existingImageUrl = null;
-        _imageCleared = true;
-      });
+    _newImageBytes = null;
+    _existingImageUrl = null;
+    _imageCleared = true;
+  });
 
   Future<void> _save() async {
     if (!_canSave) return;
@@ -94,9 +95,9 @@ class _EditPostScreenState extends State<EditPostScreen> {
           newImageUrl = await PostService.uploadImageBytes(_newImageBytes!);
         } catch (e) {
           if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text('Image upload failed: $e')),
-            );
+            ScaffoldMessenger.of(
+              context,
+            ).showSnackBar(SnackBar(content: Text('Image upload failed: $e')));
           }
         }
       }
@@ -129,7 +130,7 @@ class _EditPostScreenState extends State<EditPostScreen> {
         backgroundColor: Colors.transparent,
         actions: [
           Padding(
-            padding: const EdgeInsets.only(right: 12, top: 8, bottom: 8),
+            padding: const EdgeInsets.only(right: NileSpacing.s12, top: NileSpacing.s8, bottom: NileSpacing.s8),
             child: FilledButton(
               onPressed: _canSave ? _save : null,
               style: FilledButton.styleFrom(
@@ -137,7 +138,7 @@ class _EditPostScreenState extends State<EditPostScreen> {
                 foregroundColor: NileColors.bgPage,
                 disabledBackgroundColor: NileColors.bgRaised,
                 disabledForegroundColor: NileColors.txtTertiary,
-                padding: const EdgeInsets.symmetric(horizontal: 18),
+                padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s16),
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(NileRadius.pill),
                 ),
@@ -147,7 +148,9 @@ class _EditPostScreenState extends State<EditPostScreen> {
                       width: 16,
                       height: 16,
                       child: CircularProgressIndicator(
-                          strokeWidth: 2, color: NileColors.bgPage),
+                        strokeWidth: 2,
+                        color: NileColors.bgPage,
+                      ),
                     )
                   : Text('Save', style: NileTextStyles.labelMd()),
             ),
@@ -158,7 +161,7 @@ class _EditPostScreenState extends State<EditPostScreen> {
         child: AbsorbPointer(
           absorbing: _saving,
           child: SingleChildScrollView(
-            padding: const EdgeInsets.fromLTRB(20, 8, 20, 40),
+            padding: const EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s8, NileSpacing.s16, NileSpacing.s40),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
@@ -194,27 +197,34 @@ class _EditPostScreenState extends State<EditPostScreen> {
                             width: 16,
                             height: 16,
                             child: CircularProgressIndicator(
-                                strokeWidth: 2, color: NileColors.volt),
+                              strokeWidth: 2,
+                              color: NileColors.volt,
+                            ),
                           )
                         : const Icon(Icons.add_photo_alternate_outlined),
                     label: Text(_pickingImage ? 'Loading…' : 'Add photo'),
                     style: OutlinedButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
                       side: const BorderSide(color: NileColors.border),
                     ),
                   ),
                 if (_error != null) ...[
                   const SizedBox(height: 20),
                   Container(
-                    padding: const EdgeInsets.all(12),
+                    padding: const EdgeInsets.all(NileSpacing.s12),
                     decoration: BoxDecoration(
                       color: NileColors.error.withValues(alpha: 0.1),
                       borderRadius: BorderRadius.circular(NileRadius.sm),
-                      border: Border.all(color: NileColors.error.withValues(alpha: 0.4)),
+                      border: Border.all(
+                        color: NileColors.error.withValues(alpha: 0.4),
+                      ),
                     ),
-                    child: Text(_error!,
-                        style:
-                            NileTextStyles.bodySm().copyWith(color: NileColors.error)),
+                    child: Text(
+                      _error!,
+                      style: NileTextStyles.bodySm().copyWith(
+                        color: NileColors.error,
+                      ),
+                    ),
                   ),
                 ],
                 const SizedBox(height: 12),
@@ -260,13 +270,14 @@ class _ImageEditor extends StatelessWidget {
           if (bytes != null)
             Image.memory(bytes!, fit: BoxFit.cover, width: double.infinity)
           else if (url != null)
-            Image.network(url!, fit: BoxFit.cover, width: double.infinity),
+            Image.network(url!, fit: BoxFit.cover, width: double.infinity, cacheWidth: nileDecodeWidth(600)),
           if (busy)
             Positioned.fill(
               child: ColoredBox(
                 color: Colors.black54,
                 child: const Center(
-                    child: CircularProgressIndicator(color: NileColors.volt)),
+                  child: CircularProgressIndicator(color: NileColors.volt),
+                ),
               ),
             ),
           Positioned(
@@ -293,16 +304,21 @@ class _ImageEditor extends StatelessWidget {
                   onTap: onReplace,
                   customBorder: const StadiumBorder(),
                   child: Padding(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: NileSpacing.s12,
+                      vertical: NileSpacing.s6,
+                    ),
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         const Icon(Icons.edit, size: 14, color: Colors.white),
                         const SizedBox(width: 4),
-                        Text('Replace',
-                            style: NileTextStyles.caption()
-                                .copyWith(color: Colors.white)),
+                        Text(
+                          'Replace',
+                          style: NileTextStyles.caption().copyWith(
+                            color: Colors.white,
+                          ),
+                        ),
                       ],
                     ),
                   ),

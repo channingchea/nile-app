@@ -2,9 +2,13 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<!-- TEMPORARILY DISABLED: Associated Domains requires a paid Apple Developer
+	     team; personal team builds fail with it present. RESTORE before shipping
+	     Universal Links (once enrolled + APNs key in hand):
 	<key>com.apple.developer.associated-domains</key>
 	<array>
 		<string>applinks:links.nile.app</string>
 	</array>
+	-->
 </dict>
 </plist>

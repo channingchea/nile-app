@@ -11,6 +11,7 @@ enum NotificationType {
   eventLive,
   eventEnded,
   operatorAssigned,
+  newMessage,
 }
 
 class AppNotification {
@@ -20,7 +21,8 @@ class AppNotification {
   final String actorUsername;
   final String? actorAvatarUrl;
   final NotificationType type;
-  final String? entityId; // post_id for post_like / post_comment; event_id for event_starting; null for follow
+  final String?
+  entityId; // post_id for post_like / post_comment; event_id for event_starting; null for follow
   final DateTime? readAt;
   final DateTime createdAt;
 
@@ -56,21 +58,21 @@ class AppNotification {
   }
 
   static NotificationType _parseType(String raw) => switch (raw) {
-        'post_like' => NotificationType.postLike,
-        'post_comment' => NotificationType.postComment,
-        'event_starting' => NotificationType.eventStarting,
-        'event_live' => NotificationType.eventLive,
-        'event_ended' => NotificationType.eventEnded,
-        'operator_assigned' => NotificationType.operatorAssigned,
-        _ => NotificationType.follow,
-      };
+    'post_like' => NotificationType.postLike,
+    'post_comment' => NotificationType.postComment,
+    'event_starting' => NotificationType.eventStarting,
+    'event_live' => NotificationType.eventLive,
+    'event_ended' => NotificationType.eventEnded,
+    'operator_assigned' => NotificationType.operatorAssigned,
+    'new_message' => NotificationType.newMessage,
+    _ => NotificationType.follow,
+  };
 }
 
 // ── Service ───────────────────────────────────────────────────────────────────
 
 class NotificationService {
-  static const _select =
-      '*, actor:profiles!actor_id(username, avatar_url)';
+  static const _select = '*, actor:profiles!actor_id(username, avatar_url)';
 
   /// Notifications for the current user, newest first. Keyset-paged by
   /// created_at via [cursor].
@@ -81,8 +83,7 @@ class NotificationService {
         .select(_select)
         .eq('recipient_id', uid);
     if (cursor != null) b = b.lt('created_at', cursor);
-    final rows =
-        await b.order('created_at', ascending: false).limit(kPageSize);
+    final rows = await b.order('created_at', ascending: false).limit(kPageSize);
     final items = (rows as List)
         .map((r) => AppNotification.fromJson(r as Map<String, dynamic>))
         .toList();
@@ -125,7 +126,9 @@ class NotificationService {
 
   static String _requireUid() {
     final uid = supabase.auth.currentUser?.id;
-    if (uid == null) throw StateError('NotificationService: no authenticated user');
+    if (uid == null) {
+      throw StateError('NotificationService: no authenticated user');
+    }
     return uid;
   }
 }

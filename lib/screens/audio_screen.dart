@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:livekit_client/livekit_client.dart';
+import 'package:supabase_flutter/supabase_flutter.dart' show RealtimeChannel;
 import '../services/livekit_service.dart';
 import '../services/event_service.dart';
 import '../widgets/audio_meter.dart';
@@ -10,7 +11,12 @@ class AudioScreen extends StatefulWidget {
   /// ID field is pre-filled and Sound Check starts automatically.
   final String? initialEventId;
 
-  const AudioScreen({super.key, this.initialEventId});
+  /// True when the signed-in user owns this event. Realistically the Stream
+  /// Audio operator is never the host, but the param mirrors CameraScreen for
+  /// consistency — it gates the Sound Check revert-to-scheduled on leave.
+  final bool isHost;
+
+  const AudioScreen({super.key, this.initialEventId, this.isHost = false});
 
   @override
   State<AudioScreen> createState() => _AudioScreenState();
@@ -26,6 +32,19 @@ class _AudioScreenState extends State<AudioScreen> {
   String? _eventId;
   String? _errorMessage;
 
+  /// My "Ready to Stream" flag during Sound Check (mirrored to the host's crew
+  /// panel via participant metadata). Always starts false on connect.
+  bool _ready = false;
+
+  /// True when this operator (re)joined while the show was already live (e.g.
+  /// after a drop). The auto soundcheck→live flip is suppressed and they
+  /// rejoin the show by pressing "Ready to Stream" instead.
+  bool _joinedLiveShow = false;
+
+  /// Non-host: the host starts/ends the show from their camera screen, so this
+  /// screen follows the DB status (the single source of truth) via realtime.
+  RealtimeChannel? _statusChannel;
+
   @override
   void initState() {
     super.initState();
@@ -38,6 +57,7 @@ class _AudioScreenState extends State<AudioScreen> {
 
   @override
   void dispose() {
+    _statusChannel?.unsubscribe();
     _eventIdController.dispose();
     _room?.disconnect();
     super.dispose();
@@ -68,21 +88,51 @@ class _AudioScreenState extends State<AudioScreen> {
       // Line-level feed from a soundboard: disable WebRTC's auto-gain, noise
       // suppression and echo cancellation so the operator's manual gain staging
       // is what viewers hear (and what the meter reflects).
-      final track = await LocalAudioTrack.create(const AudioCaptureOptions(
-        autoGainControl: false,
-        noiseSuppression: false,
-        echoCancellation: false,
-      ));
+      final track = await LocalAudioTrack.create(
+        const AudioCaptureOptions(
+          autoGainControl: false,
+          noiseSuppression: false,
+          echoCancellation: false,
+        ),
+      );
       await room.localParticipant?.publishAudioTrack(track);
 
       setState(() {
         _room = room;
         _eventId = eventId;
+        _ready = false; // metadata always starts ready: false at token-issue
         _streamState = AudioStreamState.soundCheck;
       });
 
-      // Best-effort; the show only goes live on Start Show.
+      // Best-effort; the show only goes live when the host presses Start Show.
       EventService.enterSoundCheck(eventId).catchError((_) {});
+
+      // If the show is already live (rejoin after a drop), suppress the auto
+      // soundcheck→live flip: they re-enter via "Ready to Stream" instead.
+      _joinedLiveShow = false;
+      EventService.fetchEventState(eventId)
+          .then((state) {
+            if (mounted) _joinedLiveShow = state?['status'] == 'live';
+          })
+          .catchError((_) {});
+
+      // Follow the show's DB status: flip to LIVE when the host starts it,
+      // tear down when it ends.
+      _statusChannel?.unsubscribe();
+      _statusChannel = EventService.subscribeToEvent(
+        liveKitEventId: eventId,
+        onUpdate: (record) {
+          if (!mounted) return;
+          final status = record['status'];
+          if (status == 'live' &&
+              _streamState == AudioStreamState.soundCheck &&
+              !_joinedLiveShow) {
+            setState(() => _streamState = AudioStreamState.live);
+          } else if (status == 'ended') {
+            _stopStreaming();
+          }
+        },
+      );
     } catch (e) {
       setState(() {
         _streamState = AudioStreamState.idle;
@@ -91,29 +141,41 @@ class _AudioScreenState extends State<AudioScreen> {
     }
   }
 
-  /// Flip the event live — viewers waiting in the Lobby now hear the feed.
-  Future<void> _startShow() async {
-    if (_eventId != null) {
-      EventService.goLive(_eventId!).catchError((_) {});
-      // Stamp the camera-sync anchor (showStartedAt) into the room metadata.
-      LivekitService.startShow(eventId: _eventId!).catchError((_) {});
+  /// Toggle my "Ready to Stream" flag — surfaced on the host's crew panel.
+  Future<void> _toggleReady() async {
+    if (_eventId == null) return;
+    final next = !_ready;
+    setState(() => _ready = next);
+    try {
+      await LivekitService.setReady(eventId: _eventId!, ready: next);
+      if (next &&
+          _joinedLiveShow &&
+          mounted &&
+          _streamState == AudioStreamState.soundCheck) {
+        setState(() => _streamState = AudioStreamState.live);
+      }
+    } catch (_) {
+      if (mounted) setState(() => _ready = !next); // revert on failure
     }
-    setState(() => _streamState = AudioStreamState.live);
   }
 
+  /// Leave the feed. Never ends a live show (host-only, from their camera
+  /// screen). Only a HOST leaving during Sound Check reverts to scheduled.
   Future<void> _stopStreaming() async {
-    // Live → end it; left during Sound Check → revert to scheduled.
-    if (_eventId != null) {
-      if (_streamState == AudioStreamState.live) {
-        EventService.end(_eventId!).catchError((_) {});
-      } else if (_streamState == AudioStreamState.soundCheck) {
-        EventService.revertToScheduled(_eventId!).catchError((_) {});
-      }
+    if (_eventId != null &&
+        widget.isHost &&
+        _streamState == AudioStreamState.soundCheck) {
+      EventService.revertToScheduled(_eventId!).catchError((_) {});
     }
+    _statusChannel?.unsubscribe();
+    _statusChannel = null;
     await _room?.disconnect();
+    if (!mounted) return;
     setState(() {
       _room = null;
       _eventId = null;
+      _ready = false;
+      _joinedLiveShow = false;
       _streamState = AudioStreamState.idle;
     });
   }
@@ -126,13 +188,17 @@ class _AudioScreenState extends State<AudioScreen> {
         title: Text('Stream Audio', style: NileTextStyles.headingMd()),
         backgroundColor: Colors.transparent,
       ),
-      body: NileMaxWidth(child: SingleChildScrollView(
-        padding: const EdgeInsets.all(32.0),
-        child: switch (_streamState) {
-          AudioStreamState.idle || AudioStreamState.connecting => _buildForm(),
-          AudioStreamState.soundCheck || AudioStreamState.live => _buildLive(),
-        },
-      )),
+      body: NileMaxWidth(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(NileSpacing.s32),
+          child: switch (_streamState) {
+            AudioStreamState.idle ||
+            AudioStreamState.connecting => _buildForm(),
+            AudioStreamState.soundCheck ||
+            AudioStreamState.live => _buildLive(),
+          },
+        ),
+      ),
     );
   }
 
@@ -154,7 +220,9 @@ class _AudioScreenState extends State<AudioScreen> {
         Text(
           'Connect a mixer or sound board to this device\nand stream audio to all viewers.',
           textAlign: TextAlign.center,
-          style: NileTextStyles.bodyMd().copyWith(color: NileColors.txtSecondary),
+          style: NileTextStyles.bodyMd().copyWith(
+            color: NileColors.txtSecondary,
+          ),
         ),
         const SizedBox(height: 48),
         TextField(
@@ -191,11 +259,9 @@ class _AudioScreenState extends State<AudioScreen> {
           style: FilledButton.styleFrom(
             backgroundColor: NileColors.volt,
             foregroundColor: NileColors.bgPage,
-            padding: const EdgeInsets.symmetric(vertical: 16),
+            padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
             textStyle: NileTextStyles.labelLg(),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(NileRadius.sm),
-            ),
+            shape: const StadiumBorder(),
           ),
         ),
       ],
@@ -214,14 +280,16 @@ class _AudioScreenState extends State<AudioScreen> {
           Text(
             'Keep levels out of the red. If CLIP lights, lower the gain\non your mixer — clipping can\'t be fixed after the fact.',
             textAlign: TextAlign.center,
-            style: NileTextStyles.bodyMd().copyWith(color: NileColors.txtSecondary),
+            style: NileTextStyles.bodyMd().copyWith(
+              color: NileColors.txtSecondary,
+            ),
           ),
           const SizedBox(height: 32),
         ] else
           const Icon(Icons.mic, size: 80, color: NileColors.volt),
         const SizedBox(height: 24),
         Container(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s16, vertical: NileSpacing.s12),
           decoration: BoxDecoration(
             color: inSoundCheck ? NileColors.bgRaised : NileColors.coral,
             borderRadius: BorderRadius.circular(NileRadius.sm),
@@ -241,24 +309,40 @@ class _AudioScreenState extends State<AudioScreen> {
               ? 'Set your mixer levels against the meter.\nViewers can\'t hear this yet.'
               : 'Master audio is streaming.\nViewers are hearing this feed.',
           textAlign: TextAlign.center,
-          style: NileTextStyles.bodyMd().copyWith(color: NileColors.txtSecondary),
+          style: NileTextStyles.bodyMd().copyWith(
+            color: NileColors.txtSecondary,
+          ),
         ),
         const SizedBox(height: 48),
+        // Ready to Stream — tells the host this feed is good to go. The show
+        // itself is started by the host (Start Show lives on their screen).
         if (inSoundCheck) ...[
-          FilledButton.icon(
-            onPressed: _startShow,
-            icon: const Icon(Icons.play_arrow),
-            label: const Text('Start Show'),
-            style: FilledButton.styleFrom(
-              backgroundColor: NileColors.coral,
-              foregroundColor: Colors.white,
-              padding: const EdgeInsets.symmetric(vertical: 16),
-              textStyle: NileTextStyles.labelLg(),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(NileRadius.sm),
+          if (_ready)
+            FilledButton.icon(
+              onPressed: _toggleReady,
+              icon: const Icon(Icons.check_circle),
+              label: const Text('Ready'),
+              style: FilledButton.styleFrom(
+                backgroundColor: NileColors.volt,
+                foregroundColor: NileColors.bgPage,
+                padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
+                textStyle: NileTextStyles.labelLg(),
+                shape: const StadiumBorder(),
+              ),
+            )
+          else
+            OutlinedButton.icon(
+              onPressed: _toggleReady,
+              icon: const Icon(Icons.check_circle_outline),
+              label: const Text('Ready to Stream'),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: NileColors.volt,
+                side: const BorderSide(color: NileColors.volt),
+                padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
+                textStyle: NileTextStyles.labelLg(),
+                shape: const StadiumBorder(),
               ),
             ),
-          ),
           const SizedBox(height: 12),
         ],
         OutlinedButton.icon(
@@ -269,11 +353,9 @@ class _AudioScreenState extends State<AudioScreen> {
             style: NileTextStyles.labelMd().copyWith(color: NileColors.error),
           ),
           style: OutlinedButton.styleFrom(
-            padding: const EdgeInsets.symmetric(vertical: 16),
+            padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
             side: const BorderSide(color: NileColors.error),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(NileRadius.sm),
-            ),
+            shape: const StadiumBorder(),
           ),
         ),
       ],

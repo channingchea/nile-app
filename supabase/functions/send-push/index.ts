@@ -48,6 +48,10 @@ function buildMessage(p: Payload): { title: string; body: string } {
       return { title: "Live now", body: `${who} is live` };
     case "event_ended":
       return { title: "Event ended", body: `${who}'s event has ended` };
+    case "operator_assigned":
+      return { title: "You're on the crew", body: `${who} added you as a camera operator` };
+    case "new_message":
+      return { title: who, body: "Sent you a message" };
     default:
       return { title: "Nile", body: "You have a new notification" };
   }

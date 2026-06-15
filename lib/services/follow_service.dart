@@ -59,34 +59,34 @@ class FollowService {
         .select('following_id')
         .eq('follower_id', myId);
 
-    return (rows as List)
-        .map((r) => r['following_id'] as String)
-        .toList();
+    return (rows as List).map((r) => r['following_id'] as String).toList();
   }
 
   // ─── Lists ────────────────────────────────────────────────────────────────
 
   /// Profiles of users who follow [userId], newest follow first.
   /// Keyset-paged on follows.created_at via [cursor].
-  static Future<Paged<UserProfile>> getFollowers(String userId,
-          {String? cursor}) =>
-      _pagedFollows(
-        column: 'following_id',
-        value: userId,
-        profileJoin: 'profile:profiles!follower_id(*)',
-        cursor: cursor,
-      );
+  static Future<Paged<UserProfile>> getFollowers(
+    String userId, {
+    String? cursor,
+  }) => _pagedFollows(
+    column: 'following_id',
+    value: userId,
+    profileJoin: 'profile:profiles!follower_id(*)',
+    cursor: cursor,
+  );
 
   /// Profiles of users that [userId] follows, newest follow first.
   /// Keyset-paged on follows.created_at via [cursor].
-  static Future<Paged<UserProfile>> getFollowing(String userId,
-          {String? cursor}) =>
-      _pagedFollows(
-        column: 'follower_id',
-        value: userId,
-        profileJoin: 'profile:profiles!following_id(*)',
-        cursor: cursor,
-      );
+  static Future<Paged<UserProfile>> getFollowing(
+    String userId, {
+    String? cursor,
+  }) => _pagedFollows(
+    column: 'follower_id',
+    value: userId,
+    profileJoin: 'profile:profiles!following_id(*)',
+    cursor: cursor,
+  );
 
   static Future<Paged<UserProfile>> _pagedFollows({
     required String column,
@@ -99,16 +99,14 @@ class FollowService {
         .select('created_at, $profileJoin')
         .eq(column, value);
     if (cursor != null) b = b.lt('created_at', cursor);
-    final rows =
-        await b.order('created_at', ascending: false).limit(kPageSize);
+    final rows = await b.order('created_at', ascending: false).limit(kPageSize);
 
     final list = rows as List;
     final items = list
         .map((r) => UserProfile.fromMap(r['profile'] as Map<String, dynamic>))
         .toList();
     final hasMore = list.length == kPageSize;
-    final nextCursor =
-        hasMore ? list.last['created_at'] as String : null;
+    final nextCursor = hasMore ? list.last['created_at'] as String : null;
     return Paged(items: items, hasMore: hasMore, nextCursor: nextCursor);
   }
 

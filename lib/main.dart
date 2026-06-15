@@ -2,15 +2,18 @@ import 'dart:async';
 
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/foundation.dart'
-    show kIsWeb, defaultTargetPlatform, TargetPlatform;
+    show kDebugMode, kIsWeb, defaultTargetPlatform, TargetPlatform;
 import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter/material.dart';
+import 'package:sentry_flutter/sentry_flutter.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'config.dart';
 import 'screens/auth/login_screen.dart';
+import 'screens/auth/onboarding_screen.dart';
 import 'screens/home_screen.dart';
 import 'screens/splash_screen.dart';
 import 'services/deep_link_service.dart';
+import 'services/profile_service.dart';
 import 'services/push_service.dart';
 import 'theme.dart';
 
@@ -22,6 +25,23 @@ bool get _firebaseSupported =>
     defaultTargetPlatform == TargetPlatform.android;
 
 void main() async {
+  // Crash/error reporting (roadmap #4 observability). Inert without a DSN.
+  // SentryFlutter.init hooks FlutterError.onError + PlatformDispatcher.onError,
+  // so uncaught errors anywhere in the app are reported automatically.
+  if (sentryDsn.isNotEmpty) {
+    await SentryFlutter.init((options) {
+      options.dsn = sentryDsn;
+      options.environment = kDebugMode ? 'debug' : 'production';
+      options.tracesSampleRate = 0.2; // light performance sampling
+    }, appRunner: _bootstrap);
+  } else {
+    await _bootstrap();
+  }
+}
+
+Future<void> _bootstrap() async {
+  // Must run INSIDE the Sentry zone (appRunner) — initializing the binding in
+  // main() and then calling runApp here throws "Zone mismatch" (FLUTTER-1).
   WidgetsFlutterBinding.ensureInitialized();
 
   // Firebase (FCM) is only configured for web, iOS, and Android. Desktop
@@ -42,10 +62,7 @@ void main() async {
     );
   }
 
-  await Supabase.initialize(
-    url: supabaseUrl,
-    anonKey: supabaseAnonKey,
-  );
+  await Supabase.initialize(url: supabaseUrl, anonKey: supabaseAnonKey);
 
   runApp(const NileApp());
 }
@@ -57,11 +74,11 @@ class _NileScrollBehavior extends MaterialScrollBehavior {
 
   @override
   Set<PointerDeviceKind> get dragDevices => {
-        PointerDeviceKind.touch,
-        PointerDeviceKind.mouse,
-        PointerDeviceKind.trackpad,
-        PointerDeviceKind.stylus,
-      };
+    PointerDeviceKind.touch,
+    PointerDeviceKind.mouse,
+    PointerDeviceKind.trackpad,
+    PointerDeviceKind.stylus,
+  };
 }
 
 class NileApp extends StatefulWidget {
@@ -100,8 +117,9 @@ class _NileAppState extends State<NileApp> {
 }
 
 /// Listens to Supabase auth state and routes accordingly.
-/// - Authenticated   → HomeScreen
-/// - Unauthenticated → LoginScreen
+/// - Authenticated, onboarded     → HomeScreen
+/// - Authenticated, not onboarded → OnboardingScreen (onboarded_at IS NULL)
+/// - Unauthenticated              → LoginScreen
 ///
 /// On sign-out, also clears any pushed routes (e.g. Settings) so the user
 /// is returned to the gate rather than left stranded on a stale screen.
@@ -121,9 +139,25 @@ class _AuthGateState extends State<_AuthGate> {
   static const _minSplash = Duration(milliseconds: 1500);
 
   late final StreamSubscription<AuthState> _sub;
+  // Cancellable (unlike Future.delayed) so dispose leaves no pending timer —
+  // flutter_test fails any test that tears down the tree with one outstanding.
+  Timer? _splashTimer;
   Session? _session;
   bool _initialized = false;
   bool _splashDone = false;
+  // null = unknown (fetch in flight or no session); the splash covers latency.
+  bool? _onboarded;
+
+  /// Fetch onboarded_at for the current session and cache it. Guarded against
+  /// stale responses when the user changes mid-flight.
+  Future<void> _resolveOnboarded() async {
+    final uid = _session?.user.id;
+    if (uid == null) return;
+    final done = await ProfileService.isOnboarded();
+    if (mounted && _session?.user.id == uid) {
+      setState(() => _onboarded = done);
+    }
+  }
 
   @override
   void initState() {
@@ -132,6 +166,7 @@ class _AuthGateState extends State<_AuthGate> {
     // A synchronously-restored session won't necessarily re-emit on the auth
     // stream, so treat its presence as already-resolved.
     _initialized = _session != null;
+    if (_session != null) _resolveOnboarded();
     // On web, skip the splash entirely — the session is restored asynchronously
     // via the auth stream (currentSession is always null at initState on web),
     // so the minimum-duration guard never fires correctly. Web has no native
@@ -139,7 +174,7 @@ class _AuthGateState extends State<_AuthGate> {
     if (kIsWeb) {
       _splashDone = true;
     } else {
-      Future.delayed(_minSplash, () {
+      _splashTimer = Timer(_minSplash, () {
         if (mounted) setState(() => _splashDone = true);
       });
     }
@@ -151,8 +186,10 @@ class _AuthGateState extends State<_AuthGate> {
       switch (state.event) {
         case AuthChangeEvent.signedIn:
           PushService.onSignIn();
+          _onboarded = null; // fresh signup/sign-in: re-check below
         case AuthChangeEvent.signedOut:
           PushService.onSignOut();
+          _onboarded = null;
         default:
           break;
       }
@@ -160,11 +197,13 @@ class _AuthGateState extends State<_AuthGate> {
         _session = state.session;
         _initialized = true;
       });
+      if (_session != null && _onboarded == null) _resolveOnboarded();
     });
   }
 
   @override
   void dispose() {
+    _splashTimer?.cancel();
     _sub.cancel();
     super.dispose();
   }
@@ -178,6 +217,12 @@ class _AuthGateState extends State<_AuthGate> {
     if (!_splashDone || !_initialized) {
       return const SplashScreen();
     }
-    return _session != null ? const HomeScreen() : const LoginScreen();
+    if (_session == null) return const LoginScreen();
+    // Session present but onboarding state still loading — hold the splash.
+    if (_onboarded == null) return const SplashScreen();
+    if (!_onboarded!) {
+      return OnboardingScreen(onDone: () => setState(() => _onboarded = true));
+    }
+    return const HomeScreen();
   }
 }

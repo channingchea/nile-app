@@ -25,11 +25,11 @@ class Moderation {
       backgroundColor: NileColors.bgSurface,
       isScrollControlled: true,
       shape: const RoundedRectangleBorder(
-        borderRadius:
-            BorderRadius.vertical(top: Radius.circular(NileRadius.lg)),
+        borderRadius: BorderRadius.vertical(
+          top: Radius.circular(NileRadius.lg),
+        ),
       ),
-      builder: (_) =>
-          _ReportSheet(targetType: targetType, targetId: targetId),
+      builder: (_) => _ReportSheet(targetType: targetType, targetId: targetId),
     );
     if (submitted == true && context.mounted) {
       _toast(context, 'Report submitted. Thanks for letting us know.');
@@ -74,7 +74,8 @@ class Moderation {
     final ok = await _confirm(
       context,
       title: 'Unblock @$username?',
-      message: 'You\'ll be able to see each other again. Follows are not '
+      message:
+          'You\'ll be able to see each other again. Follows are not '
           'restored automatically.',
       confirmLabel: 'Unblock',
       destructive: false,
@@ -93,8 +94,7 @@ class Moderation {
   // ── Shared bits ──────────────────────────────────────────────────────────
 
   static void _toast(BuildContext context, String msg) =>
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(msg)));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
 
   static Future<bool> _confirm(
     BuildContext context, {
@@ -108,9 +108,12 @@ class Moderation {
           builder: (_) => AlertDialog(
             backgroundColor: NileColors.bgSurface,
             title: Text(title, style: NileTextStyles.headingSm()),
-            content: Text(message,
-                style: NileTextStyles.bodyMd()
-                    .copyWith(color: NileColors.txtSecondary)),
+            content: Text(
+              message,
+              style: NileTextStyles.bodyMd().copyWith(
+                color: NileColors.txtSecondary,
+              ),
+            ),
             actions: [
               TextButton(
                 onPressed: () => Navigator.pop(context, false),
@@ -119,8 +122,9 @@ class Moderation {
               TextButton(
                 onPressed: () => Navigator.pop(context, true),
                 style: TextButton.styleFrom(
-                  foregroundColor:
-                      destructive ? NileColors.error : NileColors.volt,
+                  foregroundColor: destructive
+                      ? NileColors.error
+                      : NileColors.volt,
                 ),
                 child: Text(confirmLabel),
               ),
@@ -154,11 +158,11 @@ class _ReportSheetState extends State<_ReportSheet> {
   }
 
   String get _targetNoun => switch (widget.targetType) {
-        ReportTargetType.user => 'account',
-        ReportTargetType.post => 'post',
-        ReportTargetType.event => 'event',
-        ReportTargetType.comment => 'comment',
-      };
+    ReportTargetType.user => 'account',
+    ReportTargetType.post => 'post',
+    ReportTargetType.event => 'event',
+    ReportTargetType.comment => 'comment',
+  };
 
   Future<void> _submit() async {
     if (_reason == null || _submitting) return;
@@ -174,8 +178,9 @@ class _ReportSheetState extends State<_ReportSheet> {
     } catch (e) {
       if (mounted) {
         setState(() => _submitting = false);
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('Couldn\'t submit: $e')));
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Couldn\'t submit: $e')));
       }
     }
   }
@@ -185,7 +190,7 @@ class _ReportSheetState extends State<_ReportSheet> {
     final bottomInset = MediaQuery.of(context).viewInsets.bottom;
     return SafeArea(
       child: Padding(
-        padding: EdgeInsets.fromLTRB(24, 16, 24, 24 + bottomInset),
+        padding: EdgeInsets.fromLTRB(NileSpacing.s24, NileSpacing.s16, NileSpacing.s24, NileSpacing.s24 + bottomInset),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -203,8 +208,10 @@ class _ReportSheetState extends State<_ReportSheet> {
             const SizedBox(height: 20),
             Text('Report $_targetNoun', style: NileTextStyles.headingMd()),
             const SizedBox(height: 4),
-            Text('Why are you reporting this $_targetNoun?',
-                style: NileTextStyles.bodySm()),
+            Text(
+              'Why are you reporting this $_targetNoun?',
+              style: NileTextStyles.bodySm(),
+            ),
             const SizedBox(height: 16),
             RadioGroup<ReportReason>(
               groupValue: _reason,
@@ -215,14 +222,15 @@ class _ReportSheetState extends State<_ReportSheet> {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: ReportReason.values
-                    .map((r) => RadioListTile<ReportReason>(
-                          value: r,
-                          contentPadding: EdgeInsets.zero,
-                          dense: true,
-                          activeColor: NileColors.volt,
-                          title:
-                              Text(r.label, style: NileTextStyles.bodyMd()),
-                        ))
+                    .map(
+                      (r) => RadioListTile<ReportReason>(
+                        value: r,
+                        contentPadding: EdgeInsets.zero,
+                        dense: true,
+                        activeColor: NileColors.volt,
+                        title: Text(r.label, style: NileTextStyles.bodyMd()),
+                      ),
+                    )
                     .toList(),
               ),
             ),
@@ -246,7 +254,9 @@ class _ReportSheetState extends State<_ReportSheet> {
                       width: 16,
                       height: 16,
                       child: CircularProgressIndicator(
-                          strokeWidth: 2, color: NileColors.bgPage),
+                        strokeWidth: 2,
+                        color: NileColors.bgPage,
+                      ),
                     )
                   : const Text('Submit report'),
             ),

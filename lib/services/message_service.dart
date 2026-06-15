@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'event_service.dart';
 import 'pagination.dart';
@@ -19,6 +21,9 @@ class Conversation {
   final int unreadCount;
   final String? lastMessageContent;
 
+  /// True when the counterpart is currently hosting a live (or soundcheck) show.
+  final bool isLive;
+
   const Conversation({
     required this.id,
     required this.participantA,
@@ -30,6 +35,7 @@ class Conversation {
     this.otherAvatarUrl,
     this.unreadCount = 0,
     this.lastMessageContent,
+    this.isLive = false,
   });
 
   factory Conversation.fromJson(
@@ -41,9 +47,10 @@ class Conversation {
     final aId = json['participant_a'] as String;
     final bId = json['participant_b'] as String;
     final isA = myId == aId;
-    final otherProfile = (isA
-        ? json['profile_b']
-        : json['profile_a']) as Map<String, dynamic>? ?? {};
+    final otherProfile =
+        (isA ? json['profile_b'] : json['profile_a'])
+            as Map<String, dynamic>? ??
+        {};
     return Conversation(
       id: json['id'] as String,
       participantA: aId,
@@ -68,14 +75,21 @@ class Message {
   final String content;
   final DateTime? readAt;
   final DateTime createdAt;
+
+  /// Public URL of an attached image, when this is an image message.
+  final String? imageUrl;
+
   /// Set when this message shares a post (rich card). Null for plain messages.
   final String? sharedPostId;
+
   /// Hydrated original post for [sharedPostId], when joined. May be null even
   /// if [sharedPostId] is set (e.g. realtime payload before hydration, or the
   /// original post was deleted).
   final Post? sharedPost;
+
   /// Set when this message shares an event (rich card).
   final String? sharedEventId;
+
   /// Hydrated event for [sharedEventId], when joined (see [sharedPost] notes).
   final Event? sharedEvent;
 
@@ -86,6 +100,7 @@ class Message {
     required this.content,
     this.readAt,
     required this.createdAt,
+    this.imageUrl,
     this.sharedPostId,
     this.sharedPost,
     this.sharedEventId,
@@ -93,21 +108,24 @@ class Message {
   });
 
   bool get isRead => readAt != null;
+  bool get isImage => imageUrl != null && imageUrl!.isNotEmpty;
   bool get isSharedPost => sharedPostId != null;
   bool get isSharedEvent => sharedEventId != null;
 
-  Message copyWith({Post? sharedPost, Event? sharedEvent}) => Message(
-        id: id,
-        conversationId: conversationId,
-        senderId: senderId,
-        content: content,
-        readAt: readAt,
-        createdAt: createdAt,
-        sharedPostId: sharedPostId,
-        sharedPost: sharedPost ?? this.sharedPost,
-        sharedEventId: sharedEventId,
-        sharedEvent: sharedEvent ?? this.sharedEvent,
-      );
+  Message copyWith({DateTime? readAt, Post? sharedPost, Event? sharedEvent}) =>
+      Message(
+    id: id,
+    conversationId: conversationId,
+    senderId: senderId,
+    content: content,
+    readAt: readAt ?? this.readAt,
+    createdAt: createdAt,
+    imageUrl: imageUrl,
+    sharedPostId: sharedPostId,
+    sharedPost: sharedPost ?? this.sharedPost,
+    sharedEventId: sharedEventId,
+    sharedEvent: sharedEvent ?? this.sharedEvent,
+  );
 
   factory Message.fromJson(Map<String, dynamic> json) {
     final sp = json['shared_post'] as Map<String, dynamic>?;
@@ -121,6 +139,7 @@ class Message {
           ? DateTime.parse(json['read_at'] as String)
           : null,
       createdAt: DateTime.parse(json['created_at'] as String),
+      imageUrl: json['image_url'] as String?,
       sharedPostId: json['shared_post_id'] as String?,
       sharedPost: sp != null ? Post.fromJson(sp) : null,
       sharedEventId: json['shared_event_id'] as String?,
@@ -150,68 +169,32 @@ class MessageService {
   }
 
   /// Returns all conversations for the current user, sorted by most recent
-  /// message. Each conversation includes unread count and last message preview.
+  /// message. Each row already carries the counterpart profile, unread count,
+  /// last-message preview, and live-presence flag — assembled server-side by
+  /// the `get_conversations_for_user` RPC in one round trip.
   static Future<List<Conversation>> getConversations() async {
-    final myId = _requireUid();
-    final rows = await supabase
-        .from('conversations')
-        .select(_convSelect)
-        .or('participant_a.eq.$myId,participant_b.eq.$myId')
-        .order('last_message_at', ascending: false, nullsFirst: false);
-
-    final convs = (rows as List)
-        .map((r) => Conversation.fromJson(r as Map<String, dynamic>, myId))
+    _requireUid();
+    final rows = await supabase.rpc('get_conversations_for_user');
+    return (rows as List)
+        .map((r) => _conversationFromRpc(r as Map<String, dynamic>))
         .toList();
+  }
 
-    if (convs.isEmpty) return [];
-
-    final ids = convs.map((c) => c.id).toList();
-
-    // Fetch unread counts.
-    List unreadRows = [];
-    try {
-      unreadRows = await supabase
-          .from('messages')
-          .select('conversation_id')
-          .inFilter('conversation_id', ids)
-          .neq('sender_id', myId)
-          .isFilter('read_at', null);
-    } catch (_) {}
-
-    final unreadMap = <String, int>{};
-    for (final r in unreadRows) {
-      final cid = r['conversation_id'] as String;
-      unreadMap[cid] = (unreadMap[cid] ?? 0) + 1;
-    }
-
-    // Fetch last message per conversation (one message each, newest first).
-    final lastMap = <String, String>{};
-    try {
-      for (final id in ids) {
-        final res = await supabase
-            .from('messages')
-            .select('conversation_id, content')
-            .eq('conversation_id', id)
-            .order('created_at', ascending: false)
-            .limit(1);
-        if ((res as List).isNotEmpty) {
-          lastMap[id] = res.first['content'] as String;
-        }
-      }
-    } catch (_) {}
-
-    return convs.map((c) => Conversation(
-          id: c.id,
-          participantA: c.participantA,
-          participantB: c.participantB,
-          lastMessageAt: c.lastMessageAt,
-          createdAt: c.createdAt,
-          otherUserId: c.otherUserId,
-          otherUsername: c.otherUsername,
-          otherAvatarUrl: c.otherAvatarUrl,
-          unreadCount: unreadMap[c.id] ?? 0,
-          lastMessageContent: lastMap[c.id],
-        )).toList();
+  static Conversation _conversationFromRpc(Map<String, dynamic> r) {
+    final last = r['last_message_at'];
+    return Conversation(
+      id: r['id'] as String,
+      participantA: r['participant_a'] as String,
+      participantB: r['participant_b'] as String,
+      lastMessageAt: last != null ? DateTime.parse(last as String) : null,
+      createdAt: DateTime.parse(r['created_at'] as String),
+      otherUserId: r['other_user_id'] as String,
+      otherUsername: r['other_username'] as String? ?? 'user',
+      otherAvatarUrl: r['other_avatar_url'] as String?,
+      unreadCount: (r['unread_count'] as num?)?.toInt() ?? 0,
+      lastMessageContent: r['last_message_content'] as String?,
+      isLive: r['is_live'] as bool? ?? false,
+    );
   }
 
   /// Gets or creates a 1-to-1 conversation between the current user and
@@ -223,11 +206,13 @@ class MessageService {
     final b = a == myId ? otherUserId : myId;
 
     // Upsert — do nothing on conflict so we get the existing row back.
-    await supabase.from('conversations').upsert(
-      {'participant_a': a, 'participant_b': b},
-      onConflict: 'participant_a,participant_b',
-      ignoreDuplicates: true,
-    );
+    await supabase
+        .from('conversations')
+        .upsert(
+          {'participant_a': a, 'participant_b': b},
+          onConflict: 'participant_a,participant_b',
+          ignoreDuplicates: true,
+        );
 
     final row = await supabase
         .from('conversations')
@@ -249,8 +234,7 @@ class MessageService {
         .select(_msgSelect)
         .eq('conversation_id', conversationId);
     if (cursor != null) q = q.lt('created_at', cursor);
-    final rows =
-        await q.order('created_at', ascending: false).limit(kPageSize);
+    final rows = await q.order('created_at', ascending: false).limit(kPageSize);
     final items = (rows as List)
         .map((r) => Message.fromJson(r as Map<String, dynamic>))
         .toList();
@@ -264,7 +248,9 @@ class MessageService {
 
   /// Sends a message in [conversationId].
   static Future<Message> sendMessage(
-      String conversationId, String content) async {
+    String conversationId,
+    String content,
+  ) async {
     final myId = _requireUid();
     final row = await supabase
         .from('messages')
@@ -333,6 +319,53 @@ class MessageService {
     return Message.fromJson(row);
   }
 
+  /// Uploads [bytes] to the public 'messages' bucket under the sender's folder
+  /// and sends an image message in [conversationId]. [caption] is the body
+  /// (the content CHECK requires 1..1000 chars), defaulting to 'Photo'.
+  static Future<Message> sendImageMessage(
+    String conversationId,
+    Uint8List bytes, {
+    String caption = 'Photo',
+  }) async {
+    final myId = _requireUid();
+    final path =
+        '$myId/${DateTime.now().millisecondsSinceEpoch}.jpg';
+    await supabase.storage
+        .from('messages')
+        .uploadBinary(
+          path,
+          bytes,
+          fileOptions: const FileOptions(
+            contentType: 'image/jpeg',
+            upsert: true,
+          ),
+        );
+    final imageUrl = supabase.storage.from('messages').getPublicUrl(path);
+    final body = caption.trim().isEmpty ? 'Photo' : caption.trim();
+    final row = await supabase
+        .from('messages')
+        .insert({
+          'conversation_id': conversationId,
+          'sender_id': myId,
+          'content': body,
+          'image_url': imageUrl,
+        })
+        .select(_msgSelect)
+        .single();
+    return Message.fromJson(row);
+  }
+
+  /// Deletes a message the current user authored. RLS should also enforce
+  /// sender-only deletion server-side; the eq('sender_id') guard is defensive.
+  static Future<void> deleteMessage(String messageId) async {
+    final myId = _requireUid();
+    await supabase
+        .from('messages')
+        .delete()
+        .eq('id', messageId)
+        .eq('sender_id', myId);
+  }
+
   /// Marks all unread messages from others in [conversationId] as read.
   static Future<void> markRead(String conversationId) async {
     final myId = _requireUid();
@@ -344,23 +377,28 @@ class MessageService {
         .isFilter('read_at', null);
   }
 
-  /// Subscribes to new messages in [conversationId].
+  /// Subscribes to new, updated, and deleted messages in [conversationId].
+  /// [onMessage] fires for inserts; [onUpdate] fires for updates (e.g. a read
+  /// receipt setting read_at); [onDelete] fires with the deleted message id.
   /// Call [cancel] on the returned subscription to unsubscribe.
   static RealtimeChannel subscribeToMessages(
     String conversationId,
-    void Function(Message) onMessage,
-  ) {
+    void Function(Message) onMessage, {
+    void Function(Message)? onUpdate,
+    void Function(String id)? onDelete,
+  }) {
+    final filter = PostgresChangeFilter(
+      type: PostgresChangeFilterType.eq,
+      column: 'conversation_id',
+      value: conversationId,
+    );
     return supabase
         .channel('messages:$conversationId')
         .onPostgresChanges(
           event: PostgresChangeEvent.insert,
           schema: 'public',
           table: 'messages',
-          filter: PostgresChangeFilter(
-            type: PostgresChangeFilterType.eq,
-            column: 'conversation_id',
-            value: conversationId,
-          ),
+          filter: filter,
           callback: (payload) async {
             try {
               var msg = Message.fromJson(payload.newRecord);
@@ -378,6 +416,69 @@ class MessageService {
             } catch (_) {}
           },
         )
+        .onPostgresChanges(
+          event: PostgresChangeEvent.update,
+          schema: 'public',
+          table: 'messages',
+          filter: filter,
+          callback: (payload) {
+            try {
+              onUpdate?.call(Message.fromJson(payload.newRecord));
+            } catch (_) {}
+          },
+        )
+        .onPostgresChanges(
+          // DELETE old records reliably carry only the primary key, and the
+          // conversation_id filter isn't applied to deletes — the screen
+          // filters by whether the id is in its list.
+          event: PostgresChangeEvent.delete,
+          schema: 'public',
+          table: 'messages',
+          callback: (payload) {
+            try {
+              final id = payload.oldRecord['id'] as String?;
+              if (id != null) onDelete?.call(id);
+            } catch (_) {}
+          },
+        )
         .subscribe();
+  }
+
+  /// Ephemeral typing channel for [conversationId] using Supabase broadcast
+  /// (no schema/persistence — events vanish when no one is listening).
+  /// [onTyping] fires when the *other* participant starts or stops typing;
+  /// its bool is their current typing state. Call [sendTyping] on the returned
+  /// channel via [broadcastTyping]; unsubscribe when leaving the screen.
+  static RealtimeChannel subscribeToTyping(
+    String conversationId,
+    void Function(bool isTyping) onTyping,
+  ) {
+    final myId = _requireUid();
+    return supabase
+        .channel('typing:$conversationId')
+        .onBroadcast(
+          event: 'typing',
+          // The broadcast frame nests our sent map under a 'payload' key:
+          // {event, type, payload: {sender_id, is_typing}}. Fall back to the
+          // top level in case a future client flattens it.
+          callback: (frame) {
+            final data =
+                (frame['payload'] as Map?)?.cast<String, dynamic>() ?? frame;
+            if (data['sender_id'] == myId) return; // ignore our own echoes
+            onTyping(data['is_typing'] == true);
+          },
+        )
+        .subscribe();
+  }
+
+  /// Broadcasts the current user's typing state on [channel] (from
+  /// [subscribeToTyping]). Cheap and fire-and-forget.
+  static void broadcastTyping(RealtimeChannel channel, bool isTyping) {
+    final myId = supabase.auth.currentUser?.id;
+    if (myId == null) return;
+    channel.sendBroadcastMessage(
+      event: 'typing',
+      payload: {'sender_id': myId, 'is_typing': isTyping},
+    );
   }
 }

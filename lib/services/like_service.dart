@@ -8,9 +8,10 @@ class LikeService {
   static Future<void> likePost(String postId) async {
     final uid = supabase.auth.currentUser?.id;
     if (uid == null) throw StateError('LikeService: no authenticated user');
-    await supabase
-        .from('post_likes')
-        .upsert({'user_id': uid, 'post_id': postId});
+    await supabase.from('post_likes').upsert({
+      'user_id': uid,
+      'post_id': postId,
+    });
   }
 
   static Future<void> unlikePost(String postId) async {
@@ -40,9 +41,10 @@ class LikeService {
   static Future<void> likeEvent(String eventId) async {
     final uid = supabase.auth.currentUser?.id;
     if (uid == null) throw StateError('LikeService: no authenticated user');
-    await supabase
-        .from('event_likes')
-        .upsert({'user_id': uid, 'event_id': eventId});
+    await supabase.from('event_likes').upsert({
+      'user_id': uid,
+      'event_id': eventId,
+    });
   }
 
   static Future<void> unlikeEvent(String eventId) async {
