@@ -141,7 +141,6 @@ class PushService {
       case 'event_live':
       case 'event_ended':
       case 'operator_assigned':
-      case 'replay_ready':
         if (entityId == null) return;
         final event = await EventService.fetchById(entityId);
         if (event == null) return;

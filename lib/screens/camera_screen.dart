@@ -575,8 +575,6 @@ class _CameraScreenState extends State<CameraScreen> {
   Future<void> _endStream() async {
     if (_eventId != null) {
       EventService.end(_eventId!).catchError((_) {});
-      // Stop the replay egress so the recording finalizes. Best-effort.
-      LivekitService.stopEgress(eventId: _eventId!).catchError((_) {});
     }
     await _teardownRoom();
   }

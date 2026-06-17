@@ -12,9 +12,7 @@
 //   list-cameras      host    → { cameras: [{ identity, name, cameraName, cameraId }] }
 //   set-master-audio  host    → { success: true }
 //   set-ready         crew    → { success: true }   ← flags caller's feed ready
-//   start-show        host    → { success: true }   ← stamps showStartedAt anchor + starts replay egress
-//   stop-egress       host    → { success: true }   ← stops replay egress on show end
-//   replay-url        viewer  → { url, durationMs } ← signed playback URL (ticket-gated)
+//   start-show        host    → { success: true }   ← stamps showStartedAt anchor
 //   viewer-token      viewer  → { mode: "webrtc", token, wsUrl }   ← typed descriptor (3.2)
 //
 // Auth (section 3.3): verify-jwt is ON at the gateway. Every action requires a
@@ -34,11 +32,7 @@ import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import {
   AccessToken,
-  EgressClient,
-  EncodedFileOutput,
-  EncodedFileType,
   RoomServiceClient,
-  S3Upload,
 } from "https://esm.sh/livekit-server-sdk@2.9.7?target=deno";
 
 const LIVEKIT_URL = Deno.env.get("LIVEKIT_URL")!;
@@ -52,18 +46,6 @@ const roomService = new RoomServiceClient(
   LIVEKIT_API_KEY,
   LIVEKIT_API_SECRET,
 );
-const egressClient = new EgressClient(LIVEKIT_HTTP_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET);
-
-// Replay egress → Supabase Storage 'replays' bucket via its S3-compatible
-// endpoint. These secrets are set alongside the LiveKit ones (see header §3.4):
-//   REPLAYS_S3_ENDPOINT   = https://<project-ref>.storage.supabase.co/storage/v1/s3
-//   REPLAYS_S3_REGION     = e.g. us-east-1 (Supabase storage region)
-//   REPLAYS_S3_ACCESS_KEY / REPLAYS_S3_SECRET_KEY  (Supabase storage S3 access keys)
-const REPLAYS_S3_ENDPOINT = Deno.env.get("REPLAYS_S3_ENDPOINT") ?? "";
-const REPLAYS_S3_REGION = Deno.env.get("REPLAYS_S3_REGION") ?? "us-east-1";
-const REPLAYS_S3_ACCESS_KEY = Deno.env.get("REPLAYS_S3_ACCESS_KEY") ?? "";
-const REPLAYS_S3_SECRET_KEY = Deno.env.get("REPLAYS_S3_SECRET_KEY") ?? "";
-const REPLAYS_BUCKET = "replays";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -196,10 +178,6 @@ async function handle(req: Request, ctx: ReqCtx): Promise<Response> {
       return await setReady(body, user.id, admin);
     case "start-show":
       return await startShow(body, user.id, admin);
-    case "stop-egress":
-      return await stopEgress(body, user.id, admin);
-    case "replay-url":
-      return await replayUrl(body, user.id, admin);
     case "viewer-token":
       return await viewerToken(body, user.id, admin);
     default:
@@ -455,144 +433,12 @@ async function startShow(body: any, userId: string, admin: any): Promise<Respons
     // Room metadata unreadable — fall back to a bare anchor.
   }
 
-  const startedAt = Date.now();
   await roomService.updateRoomMetadata(
     roomName,
-    JSON.stringify({ ...meta, showStartedAt: startedAt }),
-  );
-
-  // Kick off the composited replay recording. Non-fatal: a failed egress must
-  // never block the live show, so we log and continue.
-  await startReplayEgress(gate.event.id, roomName, startedAt, admin).catch((err) =>
-    log("error", { reqId: "-", action: "start-egress", error: String(err) }),
+    JSON.stringify({ ...meta, showStartedAt: Date.now() }),
   );
 
   return json({ success: true });
-}
-
-// Start Room Composite Egress → an MP4 in the 'replays' bucket, and record the
-// pending replay row. One composited file (default layout = active-speaker mix).
-async function startReplayEgress(
-  eventPk: string,
-  roomName: string,
-  startedAt: number,
-  admin: any,
-): Promise<void> {
-  if (!REPLAYS_S3_ENDPOINT || !REPLAYS_S3_ACCESS_KEY) {
-    log("warn", { action: "start-egress", note: "replay storage not configured; skipping" });
-    return;
-  }
-
-  // Object path inside the bucket: <eventPk>/<startedAt>.mp4
-  const filepath = `${eventPk}/${startedAt}.mp4`;
-  const output = new EncodedFileOutput({
-    fileType: EncodedFileType.MP4,
-    filepath,
-    output: {
-      case: "s3",
-      value: new S3Upload({
-        endpoint: REPLAYS_S3_ENDPOINT,
-        region: REPLAYS_S3_REGION,
-        bucket: REPLAYS_BUCKET,
-        accessKey: REPLAYS_S3_ACCESS_KEY,
-        secret: REPLAYS_S3_SECRET_KEY,
-        forcePathStyle: true, // Supabase S3 endpoint requires path-style
-      }),
-    },
-  });
-
-  // opts.layout = "speaker" → active-speaker composite. RoomCompositeOptions is
-  // a plain options object (interface), not a constructed class.
-  const info = await egressClient.startRoomCompositeEgress(
-    roomName,
-    { file: output },
-    { layout: "speaker" },
-  );
-
-  await admin.from("replays").insert({
-    event_id: eventPk,
-    egress_id: info.egressId,
-    status: "recording",
-    playback_path: filepath,
-    started_at: new Date(startedAt).toISOString(),
-  });
-}
-
-// stop-egress — host ends the show; stop the active egress so the file
-// finalizes. The egress_ended webhook flips the replay row to ready/failed.
-async function stopEgress(body: any, userId: string, admin: any): Promise<Response> {
-  const { eventId } = body;
-  if (!eventId) return json({ error: "eventId is required" }, 400);
-
-  const gate = await requireOperator(eventId, userId, admin);
-  if (gate instanceof Response) return gate;
-
-  const { data: replay } = await admin
-    .from("replays")
-    .select("egress_id")
-    .eq("event_id", gate.event.id)
-    .eq("status", "recording")
-    .order("created_at", { ascending: false })
-    .maybeSingle();
-
-  if (replay?.egress_id) {
-    await egressClient.stopEgress(replay.egress_id).catch((err) =>
-      log("warn", { action: "stop-egress", error: String(err) }),
-    );
-  }
-
-  return json({ success: true });
-}
-
-// replay-url — mint a short-lived signed playback URL for a ready replay, after
-// the SAME paid-ticket gate as viewer-token. `eventId` is the LiveKit slug.
-async function replayUrl(body: any, userId: string, admin: any): Promise<Response> {
-  const { eventId } = body;
-  if (!eventId) return json({ error: "eventId is required" }, 400);
-
-  const { data: event, error } = await admin
-    .from("events")
-    .select("id, host_id, price")
-    .eq("livekit_room", eventId)
-    .maybeSingle();
-  if (error || !event) return json({ error: "Event not found" }, 404);
-
-  // Paid-event gate (host/operator/paid-ticket), identical to viewer-token.
-  if (event.price && event.price > 0) {
-    const isCrew = await isAuthorizedOperator(
-      { id: event.id, host_id: event.host_id },
-      userId,
-      admin,
-    );
-    if (!isCrew) {
-      const { data: ticket } = await admin
-        .from("tickets")
-        .select("status")
-        .eq("event_id", event.id)
-        .eq("buyer_id", userId)
-        .maybeSingle();
-      if (!ticket || ticket.status !== "paid") {
-        return json({ error: "A valid ticket is required to watch this replay" }, 403);
-      }
-    }
-  }
-
-  const { data: replay } = await admin
-    .from("replays")
-    .select("playback_path, duration_ms")
-    .eq("event_id", event.id)
-    .eq("status", "ready")
-    .order("created_at", { ascending: false })
-    .maybeSingle();
-  if (!replay?.playback_path) return json({ error: "No replay available" }, 404);
-
-  // Signed URL valid for 4h — long enough to watch, short enough to not leak.
-  const { data: signed, error: signErr } = await admin.storage
-    .from(REPLAYS_BUCKET)
-    .createSignedUrl(replay.playback_path, 60 * 60 * 4);
-  if (signErr || !signed) return json({ error: "Could not sign replay URL" }, 500);
-
-  return json({ url: signed.signedUrl, durationMs: replay.duration_ms ?? null });
 }
 
 // viewer-token (was POST /api/viewer-token) — JWT-derived identity + mode seam

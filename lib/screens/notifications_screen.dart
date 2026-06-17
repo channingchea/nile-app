@@ -116,7 +116,6 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
       case NotificationType.eventLive:
       case NotificationType.eventEnded:
       case NotificationType.operatorAssigned:
-      case NotificationType.replayReady:
         if (n.entityId == null) return;
         final event = await EventService.fetchById(n.entityId!);
         if (!mounted || event == null) return;
@@ -239,8 +238,6 @@ class _NotificationTile extends StatelessWidget {
       '@${notification.actorUsername} added you as a camera operator',
     NotificationType.newMessage =>
       '@${notification.actorUsername} sent you a message',
-    NotificationType.replayReady =>
-      '@${notification.actorUsername}’s replay is ready to watch',
   };
 
   IconData _icon() => switch (notification.type) {
@@ -252,7 +249,6 @@ class _NotificationTile extends StatelessWidget {
     NotificationType.eventEnded => Icons.replay,
     NotificationType.operatorAssigned => Icons.videocam,
     NotificationType.newMessage => Icons.send_rounded,
-    NotificationType.replayReady => Icons.play_circle_fill,
   };
 
   Color _iconColor() => switch (notification.type) {
@@ -264,7 +260,6 @@ class _NotificationTile extends StatelessWidget {
     NotificationType.eventEnded => NileColors.txtSecondary,
     NotificationType.operatorAssigned => NileColors.azure,
     NotificationType.newMessage => NileColors.volt,
-    NotificationType.replayReady => NileColors.volt,
   };
 
   String _timeAgo(DateTime dt) {

@@ -85,25 +85,6 @@ class LivekitService {
   static Future<void> startShow({required String eventId}) =>
       _invoke<Map>({'action': 'start-show', 'eventId': eventId});
 
-  /// Host: stop the replay egress so the recording finalizes. Call when ending
-  /// the show. Best-effort — the live show already ended via EventService.end.
-  static Future<void> stopEgress({required String eventId}) =>
-      _invoke<Map>({'action': 'stop-egress', 'eventId': eventId});
-
-  /// Viewer: signed playback URL for a ready replay (ticket-gated). Returns null
-  /// if no replay is available or the user isn't authorized.
-  static Future<ReplayPlayback?> replayUrl({required String eventId}) async {
-    try {
-      final d = await _invoke<Map>({'action': 'replay-url', 'eventId': eventId});
-      final url = d['url'] as String?;
-      if (url == null) return null;
-      return ReplayPlayback(url: url, durationMs: (d['durationMs'] as num?)?.toInt());
-    } catch (_) {
-      // 403/404 → no replay for this user; treat as "not available".
-      return null;
-    }
-  }
-
   /// Viewer: ticket-gated connection descriptor. Identity comes from the JWT.
   /// Today `mode` is always "webrtc"; the seam allows "hls" at much higher scale.
   static Future<ViewerConnection> viewerToken({required String eventId}) async {
@@ -139,10 +120,4 @@ class ViewerConnection {
     required this.token,
     required this.wsUrl,
   });
-}
-
-class ReplayPlayback {
-  final String url; // short-lived signed URL to the composited replay MP4
-  final int? durationMs;
-  const ReplayPlayback({required this.url, this.durationMs});
 }
