@@ -130,6 +130,12 @@ class _NotificationPreferencesScreenState
           (v) => _set(p.copyWith(eventEnded: v), p),
         ),
         _toggle(
+          'Replay ready',
+          'When an event’s replay is ready to watch',
+          p.replayReady,
+          (v) => _set(p.copyWith(replayReady: v), p),
+        ),
+        _toggle(
           'Crew invites',
           'When a host adds you as a camera operator',
           p.operatorAssigned,

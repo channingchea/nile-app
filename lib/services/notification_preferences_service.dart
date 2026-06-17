@@ -10,6 +10,7 @@ class NotificationPreferences {
   final bool eventEnded;
   final bool operatorAssigned;
   final bool newMessage;
+  final bool replayReady;
 
   const NotificationPreferences({
     this.postLike = true,
@@ -20,6 +21,7 @@ class NotificationPreferences {
     this.eventEnded = true,
     this.operatorAssigned = true,
     this.newMessage = true,
+    this.replayReady = true,
   });
 
   factory NotificationPreferences.fromJson(Map<String, dynamic> j) =>
@@ -32,6 +34,7 @@ class NotificationPreferences {
         eventEnded: j['event_ended'] as bool? ?? true,
         operatorAssigned: j['operator_assigned'] as bool? ?? true,
         newMessage: j['new_message'] as bool? ?? true,
+        replayReady: j['replay_ready'] as bool? ?? true,
       );
 
   NotificationPreferences copyWith({
@@ -43,6 +46,7 @@ class NotificationPreferences {
     bool? eventEnded,
     bool? operatorAssigned,
     bool? newMessage,
+    bool? replayReady,
   }) => NotificationPreferences(
     postLike: postLike ?? this.postLike,
     postComment: postComment ?? this.postComment,
@@ -52,6 +56,7 @@ class NotificationPreferences {
     eventEnded: eventEnded ?? this.eventEnded,
     operatorAssigned: operatorAssigned ?? this.operatorAssigned,
     newMessage: newMessage ?? this.newMessage,
+    replayReady: replayReady ?? this.replayReady,
   );
 
   Map<String, dynamic> toColumns() => {
@@ -63,6 +68,7 @@ class NotificationPreferences {
     'event_ended': eventEnded,
     'operator_assigned': operatorAssigned,
     'new_message': newMessage,
+    'replay_ready': replayReady,
   };
 }
 

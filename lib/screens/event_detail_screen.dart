@@ -11,6 +11,7 @@ import '../services/crew_service.dart';
 import '../services/share_urls.dart';
 import '../services/event_service.dart';
 import '../services/follow_service.dart';
+import '../services/livekit_service.dart';
 import '../services/report_service.dart';
 import '../services/supabase_client.dart';
 import '../services/ticket_service.dart';
@@ -24,6 +25,7 @@ import 'crew_setup_screen.dart';
 import 'widgets/moderation_menu.dart';
 import 'edit_event_screen.dart';
 import 'profile_screen.dart';
+import 'replay_screen.dart';
 import 'viewer_screen.dart';
 
 /// Detail screen for a single event (scheduled, live, or ended).
@@ -73,6 +75,9 @@ class _EventDetailScreenState extends State<EventDetailScreen>
   // Crew: assigned camera operators get free access to the event.
   bool _isOperator = false;
   MyOperatorAssignment? _assignment;
+
+  // Replay/VOD: true once an ended event has a ready, viewable replay.
+  bool _replayAvailable = false;
 
   // Countdown
   Timer? _ticker;
@@ -200,6 +205,7 @@ class _EventDetailScreenState extends State<EventDetailScreen>
 
       _initCountdown();
       _initRealtime();
+      _checkReplay();
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -221,6 +227,27 @@ class _EventDetailScreenState extends State<EventDetailScreen>
     final diff = target.difference(DateTime.now());
     if (!mounted) return;
     setState(() => _remaining = diff.isNegative ? Duration.zero : diff);
+  }
+
+  /// For ended events, probe whether a ready replay exists for this user. The
+  /// replay-url action returns null (and we hide the CTA) if none is ready or
+  /// the user isn't ticket-authorized.
+  Future<void> _checkReplay() async {
+    final event = _event;
+    if (event == null || !event.isEnded) return;
+    final slug = event.liveKitEventId ?? event.id;
+    final playback = await LivekitService.replayUrl(eventId: slug);
+    if (!mounted) return;
+    setState(() => _replayAvailable = playback != null);
+  }
+
+  void _watchReplay() {
+    final event = _event;
+    if (event == null) return;
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => ReplayScreen(event: event)),
+    );
   }
 
   void _initRealtime() {
@@ -615,9 +642,11 @@ class _EventDetailScreenState extends State<EventDetailScreen>
                 isAudioOperator: _assignment?.isAudioOperator ?? false,
                 ticketBusy: _ticketBusy,
                 ticketsRemaining: _ticketsRemaining,
+                replayAvailable: _replayAvailable,
                 onWatch: _watch,
                 onBuyTicket: _buyTicket,
                 onEnterAsCamera: _enterAsCamera,
+                onWatchReplay: _watchReplay,
               ),
             ],
           ),
@@ -991,9 +1020,11 @@ class _PrimaryCta extends StatelessWidget {
   final bool isAudioOperator;
   final bool ticketBusy;
   final int? ticketsRemaining;
+  final bool replayAvailable;
   final VoidCallback onWatch;
   final VoidCallback onBuyTicket;
   final VoidCallback onEnterAsCamera;
+  final VoidCallback onWatchReplay;
 
   const _PrimaryCta({
     required this.event,
@@ -1004,9 +1035,11 @@ class _PrimaryCta extends StatelessWidget {
     this.isAudioOperator = false,
     required this.ticketBusy,
     required this.ticketsRemaining,
+    required this.replayAvailable,
     required this.onWatch,
     required this.onBuyTicket,
     required this.onEnterAsCamera,
+    required this.onWatchReplay,
   });
 
   bool get _isPaid => event.price != null && event.price! > 0;
@@ -1117,6 +1150,32 @@ class _PrimaryCta extends StatelessWidget {
     }
 
     if (event.isEnded) {
+      // A ready replay → primary "Watch Replay" CTA (gated upstream by the same
+      // ticket rule). Otherwise the inert "Stream Ended" state.
+      if (replayAvailable && _canWatch) {
+        return SizedBox(
+          width: double.infinity,
+          child: FilledButton.icon(
+            onPressed: onWatchReplay,
+            style: FilledButton.styleFrom(
+              padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
+              backgroundColor: NileColors.volt,
+              foregroundColor: NileColors.bgPage,
+            ),
+            icon: const Icon(Icons.play_arrow),
+            label: const Text('Watch Replay'),
+          ),
+        );
+      }
+      // Paid event, no ticket → still let them buy to unlock the replay.
+      if (replayAvailable && _isPaid && !_canWatch) {
+        return _GetTicketButton(
+          priceCents: event.price!,
+          soldOut: _soldOut,
+          busy: ticketBusy,
+          onBuy: onBuyTicket,
+        );
+      }
       return SizedBox(
         width: double.infinity,
         child: OutlinedButton.icon(
