@@ -52,6 +52,8 @@ function buildMessage(p: Payload): { title: string; body: string } {
       return { title: "You're on the crew", body: `${who} added you as a camera operator` };
     case "new_message":
       return { title: who, body: "Sent you a message" };
+    case "message_reaction":
+      return { title: who, body: "Reacted to your message" };
     default:
       return { title: "Nile", body: "You have a new notification" };
   }

@@ -12,6 +12,7 @@ enum NotificationType {
   eventEnded,
   operatorAssigned,
   newMessage,
+  messageReaction,
 }
 
 class AppNotification {
@@ -65,6 +66,7 @@ class AppNotification {
     'event_ended' => NotificationType.eventEnded,
     'operator_assigned' => NotificationType.operatorAssigned,
     'new_message' => NotificationType.newMessage,
+    'message_reaction' => NotificationType.messageReaction,
     _ => NotificationType.follow,
   };
 }

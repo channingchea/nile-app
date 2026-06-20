@@ -3,7 +3,6 @@ import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../services/block_service.dart';
 import '../services/share_urls.dart';
-import '../services/event_repost_service.dart';
 import '../services/event_service.dart';
 import '../services/follow_service.dart';
 import '../services/message_service.dart';
@@ -13,14 +12,15 @@ import '../services/profile_service.dart';
 import '../services/report_service.dart';
 import '../services/repost_service.dart';
 import '../theme.dart';
+import '../widgets/event_cover_pill.dart';
+import '../widgets/nile_glass_app_bar.dart';
 import '../widgets/event_link_card.dart';
+import '../widgets/nile_glass_nav_bar.dart';
 import '../widgets/nile_skeleton.dart';
 import '../widgets/share_to_sheet.dart';
 import 'widgets/moderation_menu.dart';
 import 'post_detail_screen.dart';
 import 'settings_screen.dart';
-import 'create_event_flow.dart';
-import 'create_post_screen.dart';
 import 'edit_event_screen.dart';
 import 'edit_post_screen.dart';
 import 'edit_profile_screen.dart';
@@ -415,54 +415,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
     }
   }
 
-  Future<void> _toggleEventLike(Event event) async {
-    final wasLiked = event.likedByMe;
-    final delta = wasLiked ? -1 : 1;
-    _replaceEvent(
-      event.copyWith(
-        likedByMe: !wasLiked,
-        likeCount: (event.likeCount + delta).clamp(0, 1 << 30),
-      ),
-    );
-    try {
-      wasLiked
-          ? await LikeService.unlikeEvent(event.id)
-          : await LikeService.likeEvent(event.id);
-    } catch (_) {
-      _replaceEvent(event);
-    }
-  }
-
-  Future<void> _toggleEventRepost(Event event) async {
-    final was = event.repostedByMe;
-    final delta = was ? -1 : 1;
-    _replaceEvent(
-      event.copyWith(
-        repostedByMe: !was,
-        repostCount: (event.repostCount + delta).clamp(0, 1 << 30),
-      ),
-    );
-    try {
-      was
-          ? await EventRepostService.unrepost(event.id)
-          : await EventRepostService.repost(event.id);
-      if (_isOwnProfile && _profile != null) _loadEvents(_profile!.id);
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(was ? 'Removed repost' : 'Reposted to your profile'),
-          duration: const Duration(seconds: 2),
-        ),
-      );
-    } catch (_) {
-      _replaceEvent(event);
-      if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('Failed to repost')));
-    }
-  }
-
   /// The active tab's list sorted by recency (Posts incl. post reposts;
   /// Events incl. event reposts). Live events pin to top.
   List<_ProfileItem>? get _allItems {
@@ -501,71 +453,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
   bool _isOwnProfileFor(UserProfile p) {
     final myId = Supabase.instance.client.auth.currentUser?.id;
     return myId != null && p.id == myId;
-  }
-
-  void _showCreateSheet() {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: NileColors.bgSurface,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(
-          top: Radius.circular(NileRadius.lg),
-        ),
-      ),
-      builder: (_) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(NileSpacing.s24, NileSpacing.s16, NileSpacing.s24, NileSpacing.s24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Center(
-                child: Container(
-                  width: 36,
-                  height: 4,
-                  decoration: BoxDecoration(
-                    color: NileColors.border,
-                    borderRadius: BorderRadius.circular(NileRadius.pill),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 20),
-              Text('Create', style: NileTextStyles.headingMd()),
-              const SizedBox(height: 16),
-              FilledButton.icon(
-                onPressed: () {
-                  Navigator.pop(context);
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(builder: (_) => const CreatePostScreen()),
-                  ).then((_) {
-                    if (_profile != null) _loadEvents(_profile!.id);
-                  });
-                },
-                icon: const Icon(Icons.edit_outlined),
-                label: const Text('Create Post'),
-              ),
-              const SizedBox(height: 12),
-              OutlinedButton.icon(
-                onPressed: () {
-                  Navigator.pop(context);
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(builder: (_) => const CreateEventFlow()),
-                  ).then((_) {
-                    if (_profile != null) _loadEvents(_profile!.id);
-                    // A new event may have been saved as a draft.
-                    if (_drafts != null) _loadDrafts();
-                  });
-                },
-                icon: const Icon(Icons.add_circle_outline),
-                label: const Text('Create Event'),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
   }
 
   Future<void> _openEdit() async {
@@ -683,7 +570,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
   @override
   Widget build(BuildContext context) {
     if (_loading) {
-      return const Scaffold(
+      final heroTag = 'avatar-${widget.userId ?? Supabase.instance.client.auth.currentUser?.id}';
+      return Scaffold(
         backgroundColor: NileColors.bgPage,
         body: NileMaxWidth(
           child: SingleChildScrollView(
@@ -692,22 +580,25 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   // Cover strip
-                  NileSkeleton(width: double.infinity, height: 120, radius: 0),
+                  const NileSkeleton(width: double.infinity, height: 120, radius: 0),
                   Padding(
-                    padding: EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s16, NileSpacing.s16, 0),
+                    padding: const EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s16, NileSpacing.s16, 0),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        NileSkeleton.circle(size: 72),
-                        SizedBox(height: 12),
-                        NileSkeleton(width: 160, height: 16),
-                        SizedBox(height: 8),
-                        NileSkeleton(width: 100),
+                        Hero(
+                          tag: heroTag,
+                          child: const NileSkeleton.circle(size: 72),
+                        ),
+                        const SizedBox(height: 12),
+                        const NileSkeleton(width: 160, height: 16),
+                        const SizedBox(height: 8),
+                        const NileSkeleton(width: 100),
                       ],
                     ),
                   ),
-                  SizedBox(height: 20),
-                  NileSkeletonList(count: 2),
+                  const SizedBox(height: 20),
+                  const NileSkeletonList(count: 2),
                 ],
               ),
             ),
@@ -741,9 +632,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
     return Scaffold(
       backgroundColor: NileColors.bgPage,
+      // Content scrolls behind the translucent glass app bar.
+      extendBodyBehindAppBar: true,
       // AppBar sits above the cover — keep it minimal.
-      appBar: AppBar(
-        backgroundColor: NileColors.bgPage,
+      appBar: NileGlassBar.appBar(
         title: Text('@${p.username}', style: NileTextStyles.headingSm()),
         actions: [
           IconButton(
@@ -790,14 +682,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
             ),
         ],
       ),
-      floatingActionButton: _isOwnProfile
-          ? FloatingActionButton(
-              onPressed: _showCreateSheet,
-              backgroundColor: NileColors.volt,
-              foregroundColor: NileColors.bgPage,
-              child: const Icon(Icons.add),
-            )
-          : null,
+      // Create "+" now lives in the glass nav bar (see home_screen.dart),
+      // so the profile no longer renders its own FAB.
       body: NileMaxWidth(
         child: RefreshIndicator(
           color: NileColors.volt,
@@ -805,10 +691,14 @@ class _ProfileScreenState extends State<ProfileScreen> {
           child: CustomScrollView(
             controller: _scroll,
             slivers: [
-              SliverToBoxAdapter(child: _buildHeader(p)),
-              const SliverToBoxAdapter(
-                child: Divider(color: NileColors.border, height: 1),
+              // Spacer so the cover starts below the glass bar (not cut by it),
+              // matching the home feed; content still scrolls up behind it.
+              SliverToBoxAdapter(
+                child: SizedBox(
+                  height: MediaQuery.of(context).padding.top + kToolbarHeight,
+                ),
               ),
+              SliverToBoxAdapter(child: _buildHeader(p)),
               SliverToBoxAdapter(child: _buildTabToggle()),
               if (_isOwnProfile && _tab == _ProfileTab.drafts)
                 _buildDraftsFeed()
@@ -827,177 +717,189 @@ class _ProfileScreenState extends State<ProfileScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // ── Cover + avatar overlap ──────────────────────────────────────────
-        Stack(
-          clipBehavior: Clip.none,
-          children: [
-            // Cover photo
-            CoverPhoto(url: p.coverUrl, height: _coverHeight),
+        // ── Cover photo ─────────────────────────────────────────────────────
+        // The avatar is rendered AFTER the cover (in the row below, pulled up),
+        // so the cover never overlaps the avatar.
+        CoverPhoto(url: p.coverUrl, height: _coverHeight),
 
-            // Avatar pinned to bottom-left, half overhanging the cover
-            Positioned(
-              bottom: -_avatarRadius,
-              left: 20,
-              child: Container(
-                padding: const EdgeInsets.all(NileSpacing.s2),
-                decoration: const BoxDecoration(
-                  color: NileColors.bgPage,
-                  shape: BoxShape.circle,
-                ),
-                child: CircleAvatar(
-                  radius: _avatarRadius,
-                  backgroundColor: NileColors.bgRaised,
-                  backgroundImage: p.avatarUrl != null
-                      ? nileAvatarImage(p.avatarUrl!, _avatarRadius)
-                      : null,
-                  child: p.avatarUrl == null
-                      ? Icon(
-                          Icons.person,
-                          size: _avatarRadius,
-                          color: NileColors.txtTertiary,
-                        )
-                      : null,
-                ),
-              ),
-            ),
-          ],
-        ),
-
-        // ── Stats row (right-aligned to leave room for avatar) ──────────────
-        Padding(
-          padding: const EdgeInsets.fromLTRB(NileSpacing.s16, 0, NileSpacing.s16, 0),
-          child: SizedBox(
-            height: _avatarRadius + 12, // fill the avatar overhang space
+        // ── Avatar + primary action, straddling the cover's bottom edge ─────
+        Transform.translate(
+          offset: const Offset(0, -_avatarRadius),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 0, NileSpacing.s16, 0),
             child: Row(
+              crossAxisAlignment: CrossAxisAlignment.end,
               children: [
-                // Spacer matching avatar diameter + gap
-                const SizedBox(width: _avatarRadius * 2 + 20),
-                Expanded(
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                    children: [
-                      _StatCol(
-                        label: 'Posts',
-                        value: _fmt(
-                          (_events?.length ?? 0) + (_posts?.length ?? 0),
-                        ),
-                      ),
-                      _StatCol(
-                        label: 'Followers',
-                        value: _fmt(p.followerCount),
-                        onTap: () => Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder: (_) => FollowListScreen(
-                              userId: p.id,
-                              displayName: p.username,
-                              mode: FollowListMode.followers,
-                            ),
-                          ),
-                        ),
-                      ),
-                      _StatCol(
-                        label: 'Following',
-                        value: _fmt(p.followingCount),
-                        onTap: () => Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder: (_) => FollowListScreen(
-                              userId: p.id,
-                              displayName: p.username,
-                              mode: FollowListMode.following,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ],
+                Container(
+                  padding: const EdgeInsets.all(NileSpacing.s4),
+                  decoration: const BoxDecoration(
+                    color: NileColors.bgPage,
+                    shape: BoxShape.circle,
                   ),
+                  child: Hero(
+                    tag: 'avatar-${p.id}',
+                    child: CircleAvatar(
+                      radius: _avatarRadius,
+                      backgroundColor: NileColors.bgRaised,
+                      backgroundImage: p.avatarUrl != null
+                          ? nileAvatarImage(p.avatarUrl!, _avatarRadius)
+                          : null,
+                      child: p.avatarUrl == null
+                          ? Icon(
+                              Icons.person,
+                              size: _avatarRadius,
+                              color: NileColors.txtTertiary,
+                            )
+                          : null,
+                    ),
+                  ),
+                ),
+                const Spacer(),
+                // Action button sits at the avatar's baseline (its bottom),
+                // matching the "Edit profile" placement in the design.
+                Padding(
+                  padding: const EdgeInsets.only(bottom: NileSpacing.s8),
+                  child: _headerAction(p),
                 ),
               ],
             ),
           ),
         ),
 
-        // ── Name, bio, action button ────────────────────────────────────────
-        Padding(
-          padding: const EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s8, NileSpacing.s16, NileSpacing.s16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(p.displayName, style: NileTextStyles.headingSm()),
-              if (p.bio != null && p.bio!.isNotEmpty) ...[
-                const SizedBox(height: 4),
-                Text(p.bio!, style: NileTextStyles.bodySm()),
-              ],
-              const SizedBox(height: 16),
-              if (_isOwnProfile)
-                SizedBox(
-                  width: double.infinity,
-                  child: OutlinedButton(
-                    onPressed: _openEdit,
-                    child: const Text('Edit Profile'),
+        // ── Name, handle, bio, inline follow counts ─────────────────────────
+        // Negative top margin claws back the avatar's translate so content
+        // sits directly under it.
+        Transform.translate(
+          offset: const Offset(0, -_avatarRadius + NileSpacing.s4),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(NileSpacing.s16, 0, NileSpacing.s16, NileSpacing.s4),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(p.displayName, style: NileTextStyles.displayMd()),
+                const SizedBox(height: 2),
+                Text(
+                  '@${p.username}',
+                  style: NileTextStyles.bodyMd().copyWith(
+                    color: NileColors.txtSecondary,
                   ),
-                )
-              else
-                Row(
-                  children: [
-                    Expanded(
-                      child: _isFollowing
-                          ? OutlinedButton(
-                              onPressed: _followLoading ? null : _toggleFollow,
-                              style: OutlinedButton.styleFrom(
-                                side: const BorderSide(
-                                  color: NileColors.border,
-                                ),
-                                foregroundColor: NileColors.txtPrimary,
-                              ),
-                              child: _followLoading
-                                  ? const SizedBox(
-                                      width: 14,
-                                      height: 14,
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 2,
-                                        color: NileColors.txtPrimary,
-                                      ),
-                                    )
-                                  : const Text('Following'),
-                            )
-                          : FilledButton(
-                              onPressed: _followLoading ? null : _toggleFollow,
-                              style: FilledButton.styleFrom(
-                                backgroundColor: NileColors.volt,
-                                foregroundColor: NileColors.bgPage,
-                              ),
-                              child: _followLoading
-                                  ? const SizedBox(
-                                      width: 14,
-                                      height: 14,
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 2,
-                                        color: NileColors.bgPage,
-                                      ),
-                                    )
-                                  : const Text('Follow'),
-                            ),
-                    ),
-                    const SizedBox(width: 8),
-                    OutlinedButton(
-                      onPressed: _openDm,
-                      style: OutlinedButton.styleFrom(
-                        side: const BorderSide(color: NileColors.border),
-                        foregroundColor: NileColors.txtPrimary,
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: NileSpacing.s16,
-                          vertical: NileSpacing.s12,
-                        ),
-                      ),
-                      child: const Icon(Icons.send_outlined, size: 18),
-                    ),
-                  ],
                 ),
+                if (p.bio != null && p.bio!.isNotEmpty) ...[
+                  const SizedBox(height: 12),
+                  Text(p.bio!, style: NileTextStyles.bodyMd()),
+                ],
+                const SizedBox(height: 16),
+                _followCounts(p),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// Primary header action: "Edit profile" for the owner, Follow + DM otherwise.
+  Widget _headerAction(UserProfile p) {
+    if (_isOwnProfile) {
+      return OutlinedButton.icon(
+        onPressed: _openEdit,
+        icon: const Icon(Icons.edit_outlined, size: 16),
+        label: const Text('Edit profile'),
+      );
+    }
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _isFollowing
+            ? OutlinedButton(
+                onPressed: _followLoading ? null : _toggleFollow,
+                child: _followLoading
+                    ? const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: NileColors.txtPrimary,
+                        ),
+                      )
+                    : const Text('Following'),
+              )
+            : FilledButton(
+                onPressed: _followLoading ? null : _toggleFollow,
+                child: _followLoading
+                    ? const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: NileColors.bgPage,
+                        ),
+                      )
+                    : const Text('Follow'),
+              ),
+        const SizedBox(width: 8),
+        OutlinedButton(
+          onPressed: _openDm,
+          style: OutlinedButton.styleFrom(
+            padding: const EdgeInsets.symmetric(
+              horizontal: NileSpacing.s12,
+              vertical: NileSpacing.s12,
+            ),
+          ),
+          child: const Icon(Icons.send_outlined, size: 18),
+        ),
+      ],
+    );
+  }
+
+  /// Inline "X following · Y followers", each segment tappable.
+  Widget _followCounts(UserProfile p) {
+    Widget seg(String value, String label, FollowListMode mode) {
+      return GestureDetector(
+        onTap: () => Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => FollowListScreen(
+              userId: p.id,
+              displayName: p.username,
+              mode: mode,
+            ),
+          ),
+        ),
+        child: RichText(
+          text: TextSpan(
+            children: [
+              TextSpan(
+                text: value,
+                style: NileTextStyles.labelMd().copyWith(
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              TextSpan(
+                text: ' $label',
+                style: NileTextStyles.bodyMd().copyWith(
+                  color: NileColors.txtSecondary,
+                ),
+              ),
             ],
           ),
         ),
+      );
+    }
+
+    return Row(
+      children: [
+        seg(_fmt(p.followingCount), 'following', FollowListMode.following),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s12),
+          child: Text(
+            '·',
+            style: NileTextStyles.bodyMd().copyWith(
+              color: NileColors.txtTertiary,
+            ),
+          ),
+        ),
+        seg(_fmt(p.followerCount), 'followers', FollowListMode.followers),
       ],
     );
   }
@@ -1005,60 +907,68 @@ class _ProfileScreenState extends State<ProfileScreen> {
   // ─── Tab toggle (Posts / Events for all; Drafts owner-only) ───────────────
 
   Widget _buildTabToggle() {
+    // Underline tab: volt label + volt underline when active, muted otherwise.
     Widget seg(String label, bool selected, VoidCallback onTap) {
-      return Expanded(
-        child: InkWell(
-          onTap: onTap,
-          borderRadius: BorderRadius.circular(NileRadius.sm),
-          child: Container(
-            alignment: Alignment.center,
-            padding: const EdgeInsets.symmetric(vertical: NileSpacing.s12),
-            decoration: BoxDecoration(
-              color: selected ? NileColors.volt : Colors.transparent,
-              borderRadius: BorderRadius.circular(NileRadius.sm),
-            ),
-            child: Text(
-              label,
-              style: NileTextStyles.labelMd().copyWith(
-                color: selected ? NileColors.bgPage : NileColors.txtSecondary,
+      return InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.only(right: NileSpacing.s24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: NileSpacing.s12),
+                child: Text(
+                  label,
+                  style: NileTextStyles.labelMd().copyWith(
+                    color: selected
+                        ? NileColors.txtPrimary
+                        : NileColors.txtTertiary,
+                    fontWeight:
+                        selected ? FontWeight.w700 : FontWeight.w500,
+                  ),
+                ),
               ),
-            ),
+              AnimatedContainer(
+                duration: NileMotion.fast,
+                height: 2,
+                width: 28,
+                color: selected ? NileColors.volt : Colors.transparent,
+              ),
+            ],
           ),
         ),
       );
     }
 
     final draftCount = _drafts?.length;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s16, NileSpacing.s16, 0),
-      child: Container(
-        decoration: BoxDecoration(
-          color: NileColors.bgSurface,
-          border: Border.all(color: NileColors.border),
-          borderRadius: BorderRadius.circular(NileRadius.sm),
-        ),
-        child: Row(
-          children: [
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s16),
+      decoration: const BoxDecoration(
+        border: Border(bottom: BorderSide(color: NileColors.border)),
+      ),
+      child: Row(
+        children: [
+          seg(
+            'Events',
+            _tab == _ProfileTab.events,
+            () => _selectTab(_ProfileTab.events),
+          ),
+          seg(
+            'Posts',
+            _tab == _ProfileTab.posts,
+            () => _selectTab(_ProfileTab.posts),
+          ),
+          if (_isOwnProfile)
             seg(
-              'Posts',
-              _tab == _ProfileTab.posts,
-              () => _selectTab(_ProfileTab.posts),
+              draftCount != null && draftCount > 0
+                  ? 'Drafts ($draftCount)'
+                  : 'Drafts',
+              _tab == _ProfileTab.drafts,
+              () => _selectTab(_ProfileTab.drafts),
             ),
-            seg(
-              'Events',
-              _tab == _ProfileTab.events,
-              () => _selectTab(_ProfileTab.events),
-            ),
-            if (_isOwnProfile)
-              seg(
-                draftCount != null && draftCount > 0
-                    ? 'Drafts ($draftCount)'
-                    : 'Drafts',
-                _tab == _ProfileTab.drafts,
-                () => _selectTab(_ProfileTab.drafts),
-              ),
-          ],
-        ),
+        ],
       ),
     );
   }
@@ -1117,18 +1027,21 @@ class _ProfileScreenState extends State<ProfileScreen> {
       );
     }
     return SliverPadding(
-      padding: const EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s16, NileSpacing.s16, NileSpacing.s32),
-      sliver: SliverList.separated(
-        itemCount: drafts.length + (_draftsHasMore ? 1 : 0),
-        separatorBuilder: (_, _) => const SizedBox(height: 12),
-        itemBuilder: (_, i) {
-          if (i >= drafts.length) return const LoadMoreFooter();
+      padding: EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s16, NileSpacing.s16, NileGlassNavBar.reservedHeight + NileSpacing.s16),
+      sliver: SliverGrid(
+        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+          crossAxisCount: 2,
+          mainAxisSpacing: 12,
+          crossAxisSpacing: 12,
+          childAspectRatio: 0.82,
+        ),
+        delegate: SliverChildBuilderDelegate((_, i) {
           final draft = drafts[i];
-          return _ProfileEventCard(
+          return _ProfileEventTile(
             event: draft,
             onTap: () => _openDraft(draft),
           );
-        },
+        }, childCount: drafts.length),
       ),
     );
   }
@@ -1194,32 +1107,45 @@ class _ProfileScreenState extends State<ProfileScreen> {
         ),
       );
     }
+    // Events tab → 2-column grid of cover tiles. Posts tab → full-width cards.
+    if (_tab == _ProfileTab.events) {
+      return SliverPadding(
+        padding: EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s16, NileSpacing.s16, NileGlassNavBar.reservedHeight + NileSpacing.s16),
+        sliver: SliverGrid(
+          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: 2,
+            mainAxisSpacing: 12,
+            crossAxisSpacing: 12,
+            childAspectRatio: 0.82,
+          ),
+          delegate: SliverChildBuilderDelegate((_, i) {
+            final it = items[i] as _ProfileEventItem;
+            return _ProfileEventTile(
+              event: it.event,
+              onTap: () => _openEvent(it.event),
+            );
+          }, childCount: items.length),
+        ),
+      );
+    }
     return SliverPadding(
-      padding: const EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s16, NileSpacing.s16, NileSpacing.s32),
+      padding: EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s16, NileSpacing.s16, NileGlassNavBar.reservedHeight + NileSpacing.s16),
       sliver: SliverList.separated(
         itemCount: items.length + (_hasMore ? 1 : 0),
         separatorBuilder: (_, _) => const SizedBox(height: 12),
         itemBuilder: (_, i) {
           if (i >= items.length) return const LoadMoreFooter();
-          final it = items[i];
-          return switch (it) {
-            _ProfileEventItem(:final event) => _ProfileEventCard(
-              event: event,
-              onTap: () => _openEvent(event),
-              onEdited: _isOwnProfile ? (e) => _replaceEvent(e) : null,
-              onLikeToggle: () => _toggleEventLike(event),
-              onRepostToggle: () => _toggleEventRepost(event),
-            ),
-            _ProfilePostItem(:final post) => _ProfilePostCard(
-              post: post,
-              onEdited: _isOwnProfile ? (p) => _replacePost(p) : null,
-              onDeleted: _isOwnProfile ? () => _removePost(post.id) : null,
-              onLikeToggle: () => _togglePostLike(post),
-              onRepostToggle: () => _togglePostRepost(post),
-              onUpdated: _replacePost,
-              profileId: _profile?.id,
-            ),
-          };
+          final it = items[i] as _ProfilePostItem;
+          final post = it.post;
+          return _ProfilePostCard(
+            post: post,
+            onEdited: _isOwnProfile ? (p) => _replacePost(p) : null,
+            onDeleted: _isOwnProfile ? () => _removePost(post.id) : null,
+            onLikeToggle: () => _togglePostLike(post),
+            onRepostToggle: () => _togglePostRepost(post),
+            onUpdated: _replacePost,
+            profileId: _profile?.id,
+          );
         },
       ),
     );
@@ -1239,19 +1165,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
   void _removePost(String postId) => setState(() {
     _posts?.removeWhere((p) => p.id == postId);
     _reposts.removeWhere((r) => r.post.id == postId);
-  });
-
-  void _replaceEvent(Event updated) => setState(() {
-    final i = _events?.indexWhere((e) => e.id == updated.id) ?? -1;
-    if (i >= 0) _events![i] = updated;
-    for (var j = 0; j < _eventReposts.length; j++) {
-      if (_eventReposts[j].event.id == updated.id) {
-        _eventReposts[j] = (
-          event: updated,
-          repostedAt: _eventReposts[j].repostedAt,
-        );
-      }
-    }
   });
 
   void _openEvent(Event e) {
@@ -1743,315 +1656,61 @@ class _LikeRow extends StatelessWidget {
   }
 }
 
-// ─── Event card (profile feed) ───────────────────────────────────────────────
+// ─── Event tile (profile grid) ───────────────────────────────────────────────
 
-class _ProfileEventCard extends StatelessWidget {
+class _ProfileEventTile extends StatelessWidget {
   final Event event;
   final VoidCallback onTap;
-  final void Function(Event)? onEdited;
-  final VoidCallback? onLikeToggle;
-  final VoidCallback? onRepostToggle;
-
-  const _ProfileEventCard({
-    required this.event,
-    required this.onTap,
-    this.onEdited,
-    this.onLikeToggle,
-    this.onRepostToggle,
-  });
-
-  String _shareText() => ShareUrls.eventCaption(
-    id: event.id,
-    title: event.title,
-    hostUsername: event.hostUsername,
-  );
-
-  String _timeAgo(DateTime dt) {
-    final d = DateTime.now().difference(dt);
-    if (d.inDays > 0) return '${d.inDays}d ago';
-    if (d.inHours > 0) return '${d.inHours}h ago';
-    if (d.inMinutes > 0) return '${d.inMinutes}m ago';
-    return 'just now';
-  }
-
-  String? _scheduledLabel() {
-    final s = event.scheduledAt;
-    if (s == null) return null;
-    const months = [
-      'Jan',
-      'Feb',
-      'Mar',
-      'Apr',
-      'May',
-      'Jun',
-      'Jul',
-      'Aug',
-      'Sep',
-      'Oct',
-      'Nov',
-      'Dec',
-    ];
-    final t =
-        '${s.hour.toString().padLeft(2, '0')}:${s.minute.toString().padLeft(2, '0')}';
-    return '${months[s.month - 1]} ${s.day} · $t';
-  }
+  const _ProfileEventTile({required this.event, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
     final cover = event.coverImageUrl;
     return Material(
       color: NileColors.bgSurface,
-      borderRadius: BorderRadius.circular(NileRadius.md),
+      borderRadius: BorderRadius.circular(NileRadius.lg),
       clipBehavior: Clip.antiAlias,
       child: InkWell(
         onTap: onTap,
-        child: IntrinsicHeight(
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              SizedBox(
-                width: 128,
-                height: 72,
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    if (cover != null)
-                      Image.network(
-                        cover,
-                        cacheWidth: nileDecodeWidth(128),
-                        fit: BoxFit.cover,
-                        errorBuilder: (_, _, _) => const ColoredBox(
-                          color: NileColors.bgRaised,
-                          child: Icon(Icons.live_tv, color: NileColors.border),
-                        ),
-                      )
-                    else
-                      const ColoredBox(
-                        color: NileColors.bgRaised,
-                        child: Icon(Icons.live_tv, color: NileColors.border),
-                      ),
-                    Positioned(
-                      top: 6,
-                      left: 6,
-                      child: _StatusPill(event: event),
-                    ),
-                  ],
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            // Cover photo, or a gradient placeholder when none was set.
+            if (cover != null)
+              Image.network(
+                cover,
+                cacheWidth: nileDecodeWidth(300),
+                fit: BoxFit.cover,
+                errorBuilder: (_, _, _) =>
+                    EventCoverPlaceholder(seed: event.id),
+              )
+            else
+              EventCoverPlaceholder(seed: event.id),
+            const DecoratedBox(decoration: NileEffects.coverScrim),
+            // Status / date pill, top-left.
+            Positioned(
+              top: NileSpacing.s12,
+              left: NileSpacing.s12,
+              child: EventCoverPill(event: event),
+            ),
+            // Title overlaid at the bottom.
+            Positioned(
+              left: NileSpacing.s12,
+              right: NileSpacing.s12,
+              bottom: NileSpacing.s12,
+              child: Text(
+                event.title,
+                style: NileTextStyles.headingSm().copyWith(
+                  color: Colors.white,
                 ),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
               ),
-              Expanded(
-                child: Padding(
-                  padding: const EdgeInsets.all(NileSpacing.s12),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          if (event.repostedByUsername != null) ...[
-                            _ProfileRepostHeader(
-                              username: event.repostedByUsername!,
-                            ),
-                            const SizedBox(height: 4),
-                          ],
-                          Text(
-                            event.title,
-                            style: NileTextStyles.headingSm(),
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          if (event.description != null &&
-                              event.description!.isNotEmpty) ...[
-                            const SizedBox(height: 4),
-                            Text(
-                              event.description!,
-                              style: NileTextStyles.bodySm(),
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ],
-                        ],
-                      ),
-                      const SizedBox(height: 6),
-                      Row(
-                        children: [
-                          if (event.isLive) ...[
-                            const Icon(
-                              Icons.visibility,
-                              size: 13,
-                              color: NileColors.txtTertiary,
-                            ),
-                            const SizedBox(width: 4),
-                            Flexible(
-                              child: Text(
-                                '${event.viewerCount}',
-                                style: NileTextStyles.caption().tabular,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                          ] else if (_scheduledLabel() != null) ...[
-                            const Icon(
-                              Icons.calendar_today,
-                              size: 12,
-                              color: NileColors.txtTertiary,
-                            ),
-                            const SizedBox(width: 4),
-                            Flexible(
-                              child: Text(
-                                _scheduledLabel()!,
-                                style: NileTextStyles.caption(),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                          ] else
-                            Flexible(
-                              child: Text(
-                                _timeAgo(event.createdAt),
-                                style: NileTextStyles.caption(),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                          if (onLikeToggle != null) ...[
-                            const SizedBox(width: 12),
-                            _LikeRow(
-                              liked: event.likedByMe,
-                              count: event.likeCount,
-                              onTap: onLikeToggle!,
-                            ),
-                          ],
-                          if (onRepostToggle != null) ...[
-                            const SizedBox(width: 12),
-                            _RepostRow(
-                              reposted: event.repostedByMe,
-                              count: event.repostCount,
-                              onTap: onRepostToggle!,
-                            ),
-                          ],
-                          const SizedBox(width: 12),
-                          InkWell(
-                            onTap: () => ShareToSheet.showEvent(
-                              context,
-                              eventId: event.id,
-                              shareText: _shareText(),
-                            ),
-                            borderRadius: BorderRadius.circular(NileRadius.sm),
-                            child: const Padding(
-                              padding: EdgeInsets.symmetric(
-                                horizontal: NileSpacing.s4,
-                                vertical: NileSpacing.s4,
-                              ),
-                              child: Icon(
-                                Icons.send_outlined,
-                                size: 18,
-                                color: NileColors.txtSecondary,
-                              ),
-                            ),
-                          ),
-                          const Spacer(),
-                          if (event.price != null && event.price! > 0)
-                            Text(
-                              '\$${(event.price! / 100).toStringAsFixed(2)}',
-                              style: NileTextStyles.labelSm().copyWith(
-                                color: NileColors.txtPrimary,
-                              ),
-                            ),
-                          if (onEdited != null)
-                            _ProfileContentMenu(
-                              onEdit: () async {
-                                final updated = await Navigator.push<Event>(
-                                  context,
-                                  MaterialPageRoute(
-                                    builder: (_) =>
-                                        EditEventScreen(event: event),
-                                  ),
-                                );
-                                if (updated != null) onEdited!(updated);
-                              },
-                            ),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ],
-          ),
+            ),
+          ],
         ),
       ),
     );
-  }
-}
-
-class _StatusPill extends StatelessWidget {
-  final Event event;
-  const _StatusPill({required this.event});
-
-  @override
-  Widget build(BuildContext context) {
-    late final Color bg;
-    late final Color fg;
-    late final String label;
-    if (event.isLive) {
-      bg = NileColors.coral;
-      fg = Colors.white;
-      label = 'LIVE';
-    } else if (event.isDraft) {
-      bg = Colors.black54;
-      fg = NileColors.txtSecondary;
-      label = 'DRAFT';
-    } else if (event.isEnded) {
-      bg = Colors.black54;
-      fg = Colors.white;
-      label = 'ENDED';
-    } else {
-      bg = Colors.black54;
-      fg = Colors.white;
-      label = 'SCHEDULED';
-    }
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s6, vertical: NileSpacing.s2),
-      decoration: BoxDecoration(
-        color: bg,
-        borderRadius: BorderRadius.circular(NileRadius.xs),
-      ),
-      child: Text(
-        label,
-        style: NileTextStyles.caption().copyWith(
-          color: fg,
-          fontWeight: FontWeight.w700,
-          letterSpacing: 1.0,
-        ),
-      ),
-    );
-  }
-}
-
-// ─── Stat column ──────────────────────────────────────────────────────────────
-
-class _StatCol extends StatelessWidget {
-  final String label;
-  final String value;
-  final VoidCallback? onTap;
-
-  const _StatCol({required this.label, required this.value, this.onTap});
-
-  @override
-  Widget build(BuildContext context) {
-    final col = Column(
-      mainAxisSize: MainAxisSize.min,
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        Text(value, style: NileTextStyles.headingMd()),
-        const SizedBox(height: 2),
-        Text(label, style: NileTextStyles.caption()),
-      ],
-    );
-
-    if (onTap == null) return col;
-    return GestureDetector(onTap: onTap, child: col);
   }
 }
 

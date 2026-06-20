@@ -3,6 +3,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import '../services/message_service.dart';
 import '../theme.dart';
 import '../widgets/empty_state.dart';
+import '../widgets/nile_glass_nav_bar.dart';
 import 'conversation_screen.dart';
 
 class MessagesScreen extends StatefulWidget {
@@ -98,6 +99,8 @@ class _MessagesScreenState extends State<MessagesScreen> {
       backgroundColor: NileColors.bgPage,
       body: NileMaxWidth(
         child: SafeArea(
+          // bottom:false lets the list scroll behind the translucent glass bar.
+          bottom: false,
           child: RefreshIndicator(
             color: NileColors.volt,
             backgroundColor: NileColors.bgSurface,
@@ -138,25 +141,30 @@ class _MessagesScreenState extends State<MessagesScreen> {
                     child: _NoMatchesView(),
                   )
                 else
-                  SliverList.separated(
-                    itemCount: _filtered.length,
-                    separatorBuilder: (_, _) => const Divider(
-                      height: 1,
-                      indent: 72,
-                      color: NileColors.border,
+                  SliverPadding(
+                    padding: EdgeInsets.only(
+                      bottom: NileGlassNavBar.reservedHeight,
                     ),
-                    itemBuilder: (_, i) => _ConversationTile(
-                      conv: _filtered[i],
-                      onTap: () async {
-                        await Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder: (_) =>
-                                ConversationScreen(conversation: _filtered[i]),
-                          ),
-                        );
-                        _load(); // Refresh unread counts on return.
-                      },
+                    sliver: SliverList.separated(
+                      itemCount: _filtered.length,
+                      separatorBuilder: (_, _) => const Divider(
+                        height: 1,
+                        indent: 72,
+                        color: NileColors.border,
+                      ),
+                      itemBuilder: (_, i) => _ConversationTile(
+                        conv: _filtered[i],
+                        onTap: () async {
+                          await Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) =>
+                                  ConversationScreen(conversation: _filtered[i]),
+                            ),
+                          );
+                          _load(); // Refresh unread counts on return.
+                        },
+                      ),
                     ),
                   ),
               ],

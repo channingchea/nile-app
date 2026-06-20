@@ -142,6 +142,12 @@ class _NotificationPreferencesScreenState
           p.newMessage,
           (v) => _set(p.copyWith(newMessage: v), p),
         ),
+        _toggle(
+          'Reactions',
+          'When someone reacts to your message',
+          p.messageReaction,
+          (v) => _set(p.copyWith(messageReaction: v), p),
+        ),
       ],
     );
   }

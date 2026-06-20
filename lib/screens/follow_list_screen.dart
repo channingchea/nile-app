@@ -287,20 +287,23 @@ class _UserTile extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s16, vertical: NileSpacing.s12),
         child: Row(
           children: [
-            CircleAvatar(
-              radius: 24,
-              backgroundColor: NileColors.bgRaised,
-              backgroundImage: user.avatarUrl != null
-                  ? nileAvatarImage(user.avatarUrl!, 24)
-                  : null,
-              child: user.avatarUrl == null
-                  ? Text(
-                      user.username[0].toUpperCase(),
-                      style: NileTextStyles.headingSm().copyWith(
-                        color: NileColors.txtSecondary,
-                      ),
-                    )
-                  : null,
+            Hero(
+              tag: 'avatar-${user.id}',
+              child: CircleAvatar(
+                radius: 24,
+                backgroundColor: NileColors.bgRaised,
+                backgroundImage: user.avatarUrl != null
+                    ? nileAvatarImage(user.avatarUrl!, 24)
+                    : null,
+                child: user.avatarUrl == null
+                    ? Text(
+                        user.username[0].toUpperCase(),
+                        style: NileTextStyles.headingSm().copyWith(
+                          color: NileColors.txtSecondary,
+                        ),
+                      )
+                    : null,
+              ),
             ),
             const SizedBox(width: 12),
             Expanded(

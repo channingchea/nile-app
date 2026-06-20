@@ -68,6 +68,21 @@ class Conversation {
   }
 }
 
+/// A single reaction on a message. One row per (message, user); DMs being 1:1,
+/// the screen renders distinct emojis without counts.
+class MessageReaction {
+  final String userId;
+  final String emoji;
+
+  const MessageReaction({required this.userId, required this.emoji});
+
+  factory MessageReaction.fromJson(Map<String, dynamic> json) =>
+      MessageReaction(
+        userId: json['user_id'] as String,
+        emoji: json['emoji'] as String,
+      );
+}
+
 class Message {
   final String id;
   final String conversationId;
@@ -75,6 +90,9 @@ class Message {
   final String content;
   final DateTime? readAt;
   final DateTime createdAt;
+
+  /// Reactions on this message (one per user). Empty when none.
+  final List<MessageReaction> reactions;
 
   /// Public URL of an attached image, when this is an image message.
   final String? imageUrl;
@@ -105,15 +123,28 @@ class Message {
     this.sharedPost,
     this.sharedEventId,
     this.sharedEvent,
+    this.reactions = const [],
   });
 
   bool get isRead => readAt != null;
+
+  /// The given user's current reaction emoji, or null if they haven't reacted.
+  String? reactionOf(String userId) {
+    for (final r in reactions) {
+      if (r.userId == userId) return r.emoji;
+    }
+    return null;
+  }
   bool get isImage => imageUrl != null && imageUrl!.isNotEmpty;
   bool get isSharedPost => sharedPostId != null;
   bool get isSharedEvent => sharedEventId != null;
 
-  Message copyWith({DateTime? readAt, Post? sharedPost, Event? sharedEvent}) =>
-      Message(
+  Message copyWith({
+    DateTime? readAt,
+    Post? sharedPost,
+    Event? sharedEvent,
+    List<MessageReaction>? reactions,
+  }) => Message(
     id: id,
     conversationId: conversationId,
     senderId: senderId,
@@ -125,12 +156,20 @@ class Message {
     sharedPost: sharedPost ?? this.sharedPost,
     sharedEventId: sharedEventId,
     sharedEvent: sharedEvent ?? this.sharedEvent,
+    reactions: reactions ?? this.reactions,
   );
 
   factory Message.fromJson(Map<String, dynamic> json) {
     final sp = json['shared_post'] as Map<String, dynamic>?;
     final se = json['shared_event'] as Map<String, dynamic>?;
+    final rx = json['message_reactions'] as List?;
     return Message(
+      reactions: rx == null
+          ? const <MessageReaction>[]
+          : rx
+                .map((r) =>
+                    MessageReaction.fromJson(r as Map<String, dynamic>))
+                .toList(),
       id: json['id'] as String,
       conversationId: json['conversation_id'] as String,
       senderId: json['sender_id'] as String,
@@ -155,12 +194,14 @@ class MessageService {
       '*, profile_a:profiles!participant_a(username, avatar_url), '
       'profile_b:profiles!participant_b(username, avatar_url)';
 
-  // Joins the shared post/event (+ author/host) for rich card rendering.
+  // Joins the shared post/event (+ author/host) for rich card rendering, plus
+  // this message's reactions (one row per user) for chip rendering.
   static const _msgSelect =
       '*, shared_post:posts!messages_shared_post_id_fkey('
       '*, profiles!posts_user_id_fkey(username, avatar_url)), '
       'shared_event:events!messages_shared_event_id_fkey('
-      '*, profiles!events_host_id_fkey(username, avatar_url))';
+      '*, profiles!events_host_id_fkey(username, avatar_url)), '
+      'message_reactions(user_id, emoji)';
 
   static String _requireUid() {
     final uid = supabase.auth.currentUser?.id;
@@ -375,6 +416,96 @@ class MessageService {
         .eq('conversation_id', conversationId)
         .neq('sender_id', myId)
         .isFilter('read_at', null);
+  }
+
+  // ── Reactions ───────────────────────────────────────────────────────────────
+
+  /// Sets the current user's reaction on [messageId] to [emoji], replacing any
+  /// existing one (upsert on the (message_id, user_id) unique key). [conversationId]
+  /// is denormalized onto the row so realtime can filter by it.
+  static Future<void> setReaction(
+    String messageId,
+    String conversationId,
+    String emoji,
+  ) async {
+    final myId = _requireUid();
+    await supabase.from('message_reactions').upsert({
+      'message_id': messageId,
+      'conversation_id': conversationId,
+      'user_id': myId,
+      'emoji': emoji,
+    }, onConflict: 'message_id,user_id');
+  }
+
+  /// Removes the current user's reaction on [messageId] (toggle off).
+  static Future<void> removeReaction(String messageId) async {
+    final myId = _requireUid();
+    await supabase
+        .from('message_reactions')
+        .delete()
+        .eq('message_id', messageId)
+        .eq('user_id', myId);
+  }
+
+  /// Fetches the current set of reactions for [messageId]. Used to reconcile a
+  /// single message after a realtime reaction event (payloads carry only the
+  /// changed row, so we re-read the authoritative set).
+  static Future<List<MessageReaction>> fetchReactions(String messageId) async {
+    final rows = await supabase
+        .from('message_reactions')
+        .select('user_id, emoji')
+        .eq('message_id', messageId);
+    return (rows as List)
+        .map((r) => MessageReaction.fromJson(r as Map<String, dynamic>))
+        .toList();
+  }
+
+  /// Subscribes to reaction changes (insert/update/delete) in [conversationId],
+  /// filtered by the denormalized conversation_id (mirrors [subscribeToMessages]).
+  /// Each payload carries only the changed row, so [onChange] is handed the
+  /// affected message_id; the screen re-fetches that message's reactions and
+  /// patches its in-memory copy. Call [cancel] on the channel to unsubscribe.
+  static RealtimeChannel subscribeToReactions(
+    String conversationId,
+    void Function(String messageId) onChange,
+  ) {
+    final filter = PostgresChangeFilter(
+      type: PostgresChangeFilterType.eq,
+      column: 'conversation_id',
+      value: conversationId,
+    );
+    void emit(PostgresChangePayload payload) {
+      // INSERT/UPDATE carry newRecord; DELETE carries oldRecord.
+      final id = (payload.newRecord['message_id'] ??
+          payload.oldRecord['message_id']) as String?;
+      if (id != null) onChange(id);
+    }
+
+    return supabase
+        .channel('reactions:$conversationId')
+        .onPostgresChanges(
+          event: PostgresChangeEvent.insert,
+          schema: 'public',
+          table: 'message_reactions',
+          filter: filter,
+          callback: emit,
+        )
+        .onPostgresChanges(
+          event: PostgresChangeEvent.update,
+          schema: 'public',
+          table: 'message_reactions',
+          filter: filter,
+          callback: emit,
+        )
+        .onPostgresChanges(
+          // DELETE old records carry only the PK; the conversation_id filter
+          // isn't applied to deletes, so the screen ignores unknown message_ids.
+          event: PostgresChangeEvent.delete,
+          schema: 'public',
+          table: 'message_reactions',
+          callback: emit,
+        )
+        .subscribe();
   }
 
   /// Subscribes to new, updated, and deleted messages in [conversationId].

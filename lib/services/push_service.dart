@@ -152,7 +152,9 @@ class PushService {
           ),
         );
       case 'new_message':
-        // actor_id is the sender; resolve (or reuse) the conversation by it.
+      case 'message_reaction':
+        // actor_id is the sender/reactor; resolve (or reuse) the conversation
+        // by it.
         if (actorId == null) return;
         final conv = await MessageService.getOrCreate(actorId);
         pushFresh(

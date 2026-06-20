@@ -3,6 +3,8 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import '../services/account_service.dart';
 import '../services/profile_service.dart';
 import '../theme.dart';
+import '../widgets/nile_glass_app_bar.dart';
+import '../widgets/pressable.dart';
 import 'auth/interest_picker_screen.dart';
 import 'blocked_accounts_screen.dart';
 import 'edit_profile_screen.dart';
@@ -112,12 +114,14 @@ class SettingsScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final topInset = MediaQuery.of(context).padding.top + kToolbarHeight;
     return Scaffold(
       backgroundColor: NileColors.bgPage,
-      appBar: AppBar(title: const Text('Settings')),
+      extendBodyBehindAppBar: true,
+      appBar: NileGlassBar.appBar(title: const Text('Settings')),
       body: NileMaxWidth(
         child: ListView(
-          padding: const EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s16, NileSpacing.s16, NileSpacing.s32),
+          padding: EdgeInsets.fromLTRB(NileSpacing.s16, topInset + NileSpacing.s16, NileSpacing.s16, NileSpacing.s32),
           children: [
             _SettingsTile(
               icon: Icons.edit_outlined,
@@ -249,32 +253,37 @@ class _SettingsTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = color ?? NileColors.txtPrimary;
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(NileRadius.lg),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s16, vertical: NileSpacing.s16),
-        decoration: BoxDecoration(
-          color: NileColors.bgSurface,
-          borderRadius: BorderRadius.circular(NileRadius.lg),
-        ),
-        child: Row(
-          children: [
-            Icon(icon, color: c, size: 22),
-            const SizedBox(width: 14),
-            Expanded(
-              child: Text(
-                label,
-                style: NileTextStyles.labelLg().copyWith(color: c),
-              ),
+    return NilePressable(
+      child: Material(
+        color: NileColors.bgSurface,
+        borderRadius: BorderRadius.circular(NileRadius.lg),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onTap,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(
+              horizontal: NileSpacing.s16,
+              vertical: NileSpacing.s16,
             ),
-            if (color == null)
-              const Icon(
-                Icons.chevron_right,
-                color: NileColors.txtTertiary,
-                size: 20,
-              ),
-          ],
+            child: Row(
+              children: [
+                Icon(icon, color: c, size: 22),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Text(
+                    label,
+                    style: NileTextStyles.labelLg().copyWith(color: c),
+                  ),
+                ),
+                if (color == null)
+                  const Icon(
+                    Icons.chevron_right,
+                    color: NileColors.txtTertiary,
+                    size: 20,
+                  ),
+              ],
+            ),
+          ),
         ),
       ),
     );

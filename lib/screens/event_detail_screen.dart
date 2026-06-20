@@ -744,18 +744,21 @@ class _HostRow extends StatelessWidget {
         InkWell(
           onTap: onTapHost,
           borderRadius: BorderRadius.circular(NileRadius.pill),
-          child: CircleAvatar(
-            radius: 22,
-            backgroundColor: NileColors.bgRaised,
-            backgroundImage: event.hostAvatarUrl != null
-                ? nileAvatarImage(event.hostAvatarUrl!, 22)
-                : null,
-            child: event.hostAvatarUrl == null
-                ? Text(
-                    event.hostUsername[0].toUpperCase(),
-                    style: NileTextStyles.headingSm(),
-                  )
-                : null,
+          child: Hero(
+            tag: 'avatar-${event.hostId}',
+            child: CircleAvatar(
+              radius: 22,
+              backgroundColor: NileColors.bgRaised,
+              backgroundImage: event.hostAvatarUrl != null
+                  ? nileAvatarImage(event.hostAvatarUrl!, 22)
+                  : null,
+              child: event.hostAvatarUrl == null
+                  ? Text(
+                      event.hostUsername[0].toUpperCase(),
+                      style: NileTextStyles.headingSm(),
+                    )
+                  : null,
+            ),
           ),
         ),
         const SizedBox(width: 12),

@@ -103,7 +103,9 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
           MaterialPageRoute(builder: (_) => ProfileScreen(userId: n.actorId)),
         );
       case NotificationType.newMessage:
-        // actor_id is the sender; resolve (or reuse) the conversation by it.
+      case NotificationType.messageReaction:
+        // actor_id is the sender/reactor (the other participant); resolve (or
+        // reuse) the conversation by it.
         final conv = await MessageService.getOrCreate(n.actorId);
         if (!mounted) return;
         Navigator.push(
@@ -238,6 +240,8 @@ class _NotificationTile extends StatelessWidget {
       '@${notification.actorUsername} added you as a camera operator',
     NotificationType.newMessage =>
       '@${notification.actorUsername} sent you a message',
+    NotificationType.messageReaction =>
+      '@${notification.actorUsername} reacted to your message',
   };
 
   IconData _icon() => switch (notification.type) {
@@ -249,6 +253,7 @@ class _NotificationTile extends StatelessWidget {
     NotificationType.eventEnded => Icons.replay,
     NotificationType.operatorAssigned => Icons.videocam,
     NotificationType.newMessage => Icons.send_rounded,
+    NotificationType.messageReaction => Icons.favorite,
   };
 
   Color _iconColor() => switch (notification.type) {
@@ -260,6 +265,7 @@ class _NotificationTile extends StatelessWidget {
     NotificationType.eventEnded => NileColors.txtSecondary,
     NotificationType.operatorAssigned => NileColors.azure,
     NotificationType.newMessage => NileColors.volt,
+    NotificationType.messageReaction => NileColors.coral,
   };
 
   String _timeAgo(DateTime dt) {
@@ -295,21 +301,24 @@ class _NotificationTile extends StatelessWidget {
                           ProfileScreen(userId: notification.actorId),
                     ),
                   ),
-                  child: CircleAvatar(
-                    radius: 20,
-                    backgroundColor: NileColors.bgRaised,
-                    backgroundImage: notification.actorAvatarUrl != null
-                        ? nileAvatarImage(notification.actorAvatarUrl!, 20)
-                        : null,
-                    child: notification.actorAvatarUrl == null
-                        ? Text(
-                            notification.actorUsername[0].toUpperCase(),
-                            style: NileTextStyles.labelSm().copyWith(
-                              color: NileColors.txtPrimary,
-                              letterSpacing: 0,
-                            ),
-                          )
-                        : null,
+                  child: Hero(
+                    tag: 'avatar-${notification.actorId}',
+                    child: CircleAvatar(
+                      radius: 20,
+                      backgroundColor: NileColors.bgRaised,
+                      backgroundImage: notification.actorAvatarUrl != null
+                          ? nileAvatarImage(notification.actorAvatarUrl!, 20)
+                          : null,
+                      child: notification.actorAvatarUrl == null
+                          ? Text(
+                              notification.actorUsername[0].toUpperCase(),
+                              style: NileTextStyles.labelSm().copyWith(
+                                color: NileColors.txtPrimary,
+                                letterSpacing: 0,
+                              ),
+                            )
+                          : null,
+                    ),
                   ),
                 ),
                 Positioned(

@@ -352,21 +352,24 @@ class _PostBody extends StatelessWidget {
                     ),
               child: Row(
                 children: [
-                  CircleAvatar(
-                    radius: 14,
-                    backgroundColor: NileColors.bgRaised,
-                    backgroundImage: post.authorAvatarUrl != null
-                        ? nileAvatarImage(post.authorAvatarUrl!, 14)
-                        : null,
-                    child: post.authorAvatarUrl == null
-                        ? Text(
-                            post.authorUsername[0].toUpperCase(),
-                            style: NileTextStyles.labelSm().copyWith(
-                              color: NileColors.txtPrimary,
-                              letterSpacing: 0,
-                            ),
-                          )
-                        : null,
+                  Hero(
+                    tag: 'avatar-${post.authorId}',
+                    child: CircleAvatar(
+                      radius: 14,
+                      backgroundColor: NileColors.bgRaised,
+                      backgroundImage: post.authorAvatarUrl != null
+                          ? nileAvatarImage(post.authorAvatarUrl!, 14)
+                          : null,
+                      child: post.authorAvatarUrl == null
+                          ? Text(
+                              post.authorUsername[0].toUpperCase(),
+                              style: NileTextStyles.labelSm().copyWith(
+                                color: NileColors.txtPrimary,
+                                letterSpacing: 0,
+                              ),
+                            )
+                          : null,
+                    ),
                   ),
                   const SizedBox(width: 8),
                   Expanded(
@@ -531,20 +534,23 @@ class _CommentTile extends StatelessWidget {
                       builder: (_) => ProfileScreen(userId: comment.authorId),
                     ),
                   ),
-            child: CircleAvatar(
-              radius: 16,
-              backgroundColor: NileColors.bgRaised,
-              backgroundImage: comment.authorAvatarUrl != null
-                  ? nileAvatarImage(comment.authorAvatarUrl!, 16)
-                  : null,
-              child: comment.authorAvatarUrl == null
-                  ? Text(
-                      comment.authorUsername[0].toUpperCase(),
-                      style: NileTextStyles.labelSm().copyWith(
-                        letterSpacing: 0,
-                      ),
-                    )
-                  : null,
+            child: Hero(
+              tag: 'avatar-${comment.authorId}',
+              child: CircleAvatar(
+                radius: 16,
+                backgroundColor: NileColors.bgRaised,
+                backgroundImage: comment.authorAvatarUrl != null
+                    ? nileAvatarImage(comment.authorAvatarUrl!, 16)
+                    : null,
+                child: comment.authorAvatarUrl == null
+                    ? Text(
+                        comment.authorUsername[0].toUpperCase(),
+                        style: NileTextStyles.labelSm().copyWith(
+                          letterSpacing: 0,
+                        ),
+                      )
+                    : null,
+              ),
             ),
           ),
           const SizedBox(width: 10),

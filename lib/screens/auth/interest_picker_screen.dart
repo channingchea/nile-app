@@ -93,11 +93,16 @@ class _InterestPickerState extends State<InterestPicker> {
       );
     }
     return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(NileSpacing.s24, NileSpacing.s8, NileSpacing.s24, NileSpacing.s40),
+      padding: const EdgeInsets.fromLTRB(
+        NileSpacing.s24,
+        NileSpacing.s8,
+        NileSpacing.s24,
+        NileSpacing.s40,
+      ),
       child: Column(
         children: [
           Text(
-            'Tap a bubble to grow it — the bigger it is, the more of it '
+            'Tap a bubble to grow it. The bigger it is, the more of it '
             'you\'ll see.',
             textAlign: TextAlign.center,
             style: NileTextStyles.bodySm(),

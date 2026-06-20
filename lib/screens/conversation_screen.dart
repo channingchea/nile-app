@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:ui' show ImageFilter;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -22,6 +23,9 @@ class ConversationScreen extends StatefulWidget {
   State<ConversationScreen> createState() => _ConversationScreenState();
 }
 
+/// Quick-reaction emojis shown in the long-press bar (a `+` opens the picker).
+const _kQuickReactions = ['❤️', '😂', '👍', '😮', '😢', '🔥'];
+
 class _ConversationScreenState extends State<ConversationScreen> {
   final _input = TextEditingController();
   final _scroll = ScrollController();
@@ -33,6 +37,7 @@ class _ConversationScreenState extends State<ConversationScreen> {
   bool _hasMore = false;
   String? _cursor;
   RealtimeChannel? _channel;
+  RealtimeChannel? _reactionChannel;
 
   // Typing indicator state.
   RealtimeChannel? _typingChannel;
@@ -56,6 +61,7 @@ class _ConversationScreenState extends State<ConversationScreen> {
     super.initState();
     _loadHistory();
     _subscribeRealtime();
+    _subscribeReactions();
     _subscribeTyping();
     _input.addListener(_onInputChanged);
     MessageService.markRead(_conv.id);
@@ -67,6 +73,7 @@ class _ConversationScreenState extends State<ConversationScreen> {
     _otherTypingTimeout?.cancel();
     _stopTyping();
     _typingChannel?.unsubscribe();
+    _reactionChannel?.unsubscribe();
     _channel?.unsubscribe();
     _input.removeListener(_onInputChanged);
     _input.dispose();
@@ -187,52 +194,111 @@ class _ConversationScreenState extends State<ConversationScreen> {
     );
   }
 
-  void _showMessageActions(Message msg) {
+  void _subscribeReactions() {
+    _reactionChannel = MessageService.subscribeToReactions(_conv.id, (
+      messageId,
+    ) async {
+      if (!mounted) return;
+      // Only reconcile messages we're showing.
+      if (!_messages.any((m) => m.id == messageId)) return;
+      try {
+        final reactions = await MessageService.fetchReactions(messageId);
+        if (!mounted) return;
+        final i = _messages.indexWhere((m) => m.id == messageId);
+        if (i < 0) return;
+        setState(() => _messages[i] = _messages[i].copyWith(reactions: reactions));
+      } catch (_) {}
+    });
+  }
+
+  /// Applies [emoji] to [msg]: toggles off if it's already the user's reaction,
+  /// otherwise sets/replaces it. Optimistic — the realtime echo reconciles.
+  Future<void> _toggleReaction(Message msg, String emoji) async {
+    final i = _messages.indexWhere((m) => m.id == msg.id);
+    if (i < 0) return;
+    final current = _messages[i].reactionOf(_myId);
+    final isToggleOff = current == emoji;
+
+    // Optimistic local update: drop my old reaction, add the new one (unless off).
+    final next = [
+      ..._messages[i].reactions.where((r) => r.userId != _myId),
+      if (!isToggleOff) MessageReaction(userId: _myId, emoji: emoji),
+    ];
+    setState(() => _messages[i] = _messages[i].copyWith(reactions: next));
+    HapticFeedback.lightImpact();
+
+    try {
+      if (isToggleOff) {
+        await MessageService.removeReaction(msg.id);
+      } else {
+        await MessageService.setReaction(msg.id, _conv.id, emoji);
+      }
+    } catch (_) {
+      // Reconcile from the server on failure.
+      if (!mounted) return;
+      try {
+        final reactions = await MessageService.fetchReactions(msg.id);
+        if (!mounted) return;
+        final j = _messages.indexWhere((m) => m.id == msg.id);
+        if (j >= 0) {
+          setState(
+            () => _messages[j] = _messages[j].copyWith(reactions: reactions),
+          );
+        }
+      } catch (_) {}
+    }
+  }
+
+  /// Long-press menu anchored to the pressed bubble (iMessage-style): the thread
+  /// dims/blurs behind a floating copy of the message, an emoji reaction pill
+  /// sits just above it, and Copy/Delete sit just below. [bubbleRect] is the
+  /// bubble's global rect captured at press time.
+  Future<void> _showReactionMenu(Message msg, Rect bubbleRect) async {
     final isMine = msg.senderId == _myId;
     // Shared cards / images have a label as content; only offer Copy for
     // plain text messages.
     final canCopy = !msg.isSharedPost && !msg.isSharedEvent && !msg.isImage;
-    if (!canCopy && !isMine) return;
-    showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: NileColors.bgSurface,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(NileRadius.lg)),
-      ),
-      builder: (sheetCtx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (canCopy)
-              ListTile(
-                leading: const Icon(Icons.copy_rounded,
-                    color: NileColors.txtPrimary),
-                title: Text('Copy', style: NileTextStyles.bodyMd()),
-                onTap: () {
-                  Clipboard.setData(ClipboardData(text: msg.content));
-                  Navigator.pop(sheetCtx);
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('Copied to clipboard')),
-                  );
-                },
-              ),
-            if (isMine)
-              ListTile(
-                leading: const Icon(Icons.delete_outline_rounded,
-                    color: NileColors.coral),
-                title: Text('Delete',
-                    style: NileTextStyles.bodyMd()
-                        .copyWith(color: NileColors.coral)),
-                onTap: () {
-                  Navigator.pop(sheetCtx);
-                  _confirmDelete(msg);
-                },
-              ),
-          ],
-        ),
+
+    final result = await Navigator.of(context).push<_ReactionMenuResult>(
+      _ReactionMenuRoute(
+        bubbleRect: bubbleRect,
+        isMine: isMine,
+        myReaction: msg.reactionOf(_myId),
+        canCopy: canCopy,
+        // The floating bubble is a non-interactive snapshot of the real one.
+        bubble: _MessageBubbleVisual(message: msg, isMe: isMine),
       ),
     );
+    if (result == null || !mounted) return;
+
+    switch (result.kind) {
+      case _ReactionMenuKind.react:
+        _toggleReaction(msg, result.emoji!);
+      case _ReactionMenuKind.more:
+        final emoji = await _pickEmoji();
+        if (emoji != null) _toggleReaction(msg, emoji);
+      case _ReactionMenuKind.copy:
+        Clipboard.setData(ClipboardData(text: msg.content));
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Copied to clipboard')),
+          );
+        }
+      case _ReactionMenuKind.delete:
+        _confirmDelete(msg);
+    }
   }
+
+  /// Opens a lightweight emoji grid and returns the chosen emoji (or null).
+  /// A custom grid keeps the bundle lean and on-brand vs. a picker dependency.
+  Future<String?> _pickEmoji() => showModalBottomSheet<String>(
+    context: context,
+    backgroundColor: NileColors.bgSurface,
+    shape: const RoundedRectangleBorder(
+      borderRadius: BorderRadius.vertical(top: Radius.circular(NileRadius.lg)),
+    ),
+    builder: (_) => const _EmojiPickerSheet(),
+  );
 
   Future<void> _confirmDelete(Message msg) async {
     final ok = await showDialog<bool>(
@@ -542,6 +608,7 @@ class _ConversationScreenState extends State<ConversationScreen> {
                             return _MessageBubble(
                               message: msg,
                               isMe: isMe,
+                              myId: _myId,
                               isFirstInGroup: isFirstInGroup,
                               isLastInGroup: isLastInGroup,
                               showDateSeparator: showDateSeparator,
@@ -549,7 +616,12 @@ class _ConversationScreenState extends State<ConversationScreen> {
                               onLongPress:
                                   msg.id.startsWith('opt_')
                                   ? null
-                                  : () => _showMessageActions(msg),
+                                  : (rect) => _showReactionMenu(msg, rect),
+                              // Tapping a chip toggles that emoji (off if it's
+                              // your own active reaction).
+                              onReactionTap: msg.id.startsWith('opt_')
+                                  ? null
+                                  : (emoji) => _toggleReaction(msg, emoji),
                             );
                           },
                         ),
@@ -641,20 +713,33 @@ class _AppBar extends StatelessWidget {
 class _MessageBubble extends StatelessWidget {
   final Message message;
   final bool isMe;
+  final String myId;
   final bool isFirstInGroup;
   final bool isLastInGroup;
   final bool showDateSeparator;
   final bool isLastSent;
-  final VoidCallback? onLongPress;
+  // Receives the pressed bubble's global rect so the menu can anchor to it.
+  final void Function(Rect bubbleRect)? onLongPress;
+  final void Function(String emoji)? onReactionTap;
   const _MessageBubble({
     required this.message,
     required this.isMe,
+    required this.myId,
     required this.isFirstInGroup,
     required this.isLastInGroup,
     required this.showDateSeparator,
     this.isLastSent = false,
     this.onLongPress,
+    this.onReactionTap,
   });
+
+  // Reads the pressed bubble's on-screen rect from [ctx] (the GestureDetector's
+  // own context) so the long-press menu can anchor to it.
+  void _handleLongPress(BuildContext ctx) {
+    final box = ctx.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize) return;
+    onLongPress?.call(box.localToGlobal(Offset.zero) & box.size);
+  }
 
   String _formatTime(DateTime dt) {
     final h = dt.hour % 12 == 0 ? 12 : dt.hour % 12;
@@ -724,8 +809,11 @@ class _MessageBubble extends StatelessWidget {
                 ? MainAxisAlignment.end
                 : MainAxisAlignment.start,
             children: [
-              GestureDetector(
-                onLongPress: onLongPress,
+              Builder(
+                builder: (bubbleCtx) => GestureDetector(
+                onLongPress: onLongPress == null
+                    ? null
+                    : () => _handleLongPress(bubbleCtx),
                 child: ConstrainedBox(
                 constraints: BoxConstraints(maxWidth: maxBubble),
                 child: message.isImage
@@ -763,10 +851,22 @@ class _MessageBubble extends StatelessWidget {
                       ),
                 ),
               ),
+              ),
             ],
               );
             },
           ),
+          // Reaction chips: distinct emojis (no counts — DMs are 1:1). The
+          // user's own reaction is highlighted; tapping it toggles it off.
+          if (message.reactions.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: NileSpacing.s4),
+              child: _ReactionChips(
+                reactions: message.reactions,
+                myId: myId,
+                onTap: onReactionTap,
+              ),
+            ),
           // Time + receipt only under the last bubble of a group.
           if (isLastInGroup)
             Padding(
@@ -785,6 +885,463 @@ class _MessageBubble extends StatelessWidget {
               ),
             ),
         ],
+      ),
+    );
+  }
+}
+
+// ── Reaction chips (on the bubble) ──────────────────────────────────────────────
+
+/// Distinct reaction emojis under a bubble (no counts — DMs are 1:1). The chip
+/// matching the current user's reaction is highlighted; tapping it toggles off.
+class _ReactionChips extends StatelessWidget {
+  final List<MessageReaction> reactions;
+  final String myId;
+  final void Function(String emoji)? onTap;
+  const _ReactionChips({
+    required this.reactions,
+    required this.myId,
+    this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final mine = reactions
+        .firstWhere(
+          (r) => r.userId == myId,
+          orElse: () => const MessageReaction(userId: '', emoji: ''),
+        )
+        .emoji;
+    // Distinct emojis, preserving insertion order.
+    final seen = <String>{};
+    final distinct = <String>[];
+    for (final r in reactions) {
+      if (seen.add(r.emoji)) distinct.add(r.emoji);
+    }
+    return Wrap(
+      spacing: NileSpacing.s4,
+      runSpacing: NileSpacing.s4,
+      children: [
+        for (final emoji in distinct)
+          GestureDetector(
+            onTap: onTap == null ? null : () => onTap!(emoji),
+            child: Container(
+              padding: const EdgeInsets.symmetric(
+                horizontal: NileSpacing.s8,
+                vertical: NileSpacing.s2,
+              ),
+              decoration: BoxDecoration(
+                color: emoji == mine
+                    ? NileColors.volt.withValues(alpha: 0.18)
+                    : NileColors.bgSurface,
+                borderRadius: BorderRadius.circular(NileRadius.pill),
+                border: Border.all(
+                  color: emoji == mine ? NileColors.volt : NileColors.border,
+                ),
+              ),
+              child: Text(emoji, style: const TextStyle(fontSize: 14)),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+// ── Emoji picker sheet (the `+` full picker) ────────────────────────────────────
+
+/// A compact, dependency-free emoji grid. Pops the chosen emoji. Covers the
+/// common reaction emojis across a few rows; the quick bar handles the top six.
+class _EmojiPickerSheet extends StatelessWidget {
+  const _EmojiPickerSheet();
+
+  static const _emojis = [
+    '❤️', '😂', '👍', '😮', '😢', '🔥', '👎', '😍',
+    '🥰', '😭', '😡', '🎉', '👏', '🙏', '💯', '😎',
+    '🤔', '😅', '😬', '🤯', '🥳', '😤', '😴', '🤩',
+    '😇', '🙄', '😏', '😶', '💀', '👀', '✨', '⚡',
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(
+          NileSpacing.s16,
+          NileSpacing.s16,
+          NileSpacing.s16,
+          NileSpacing.s24,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.only(bottom: NileSpacing.s12),
+              child: Text('React', style: NileTextStyles.headingSm()),
+            ),
+            GridView.count(
+              crossAxisCount: 8,
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              mainAxisSpacing: NileSpacing.s4,
+              crossAxisSpacing: NileSpacing.s4,
+              children: [
+                for (final emoji in _emojis)
+                  GestureDetector(
+                    onTap: () => Navigator.pop(context, emoji),
+                    child: Container(
+                      alignment: Alignment.center,
+                      child: Text(emoji, style: const TextStyle(fontSize: 24)),
+                    ),
+                  ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ── Non-interactive bubble snapshot (floats in the long-press menu) ──────────────
+
+/// A static copy of a message bubble's content, used as the floating element in
+/// the anchored long-press menu. Fully-rounded corners (no group tail).
+class _MessageBubbleVisual extends StatelessWidget {
+  final Message message;
+  final bool isMe;
+  const _MessageBubbleVisual({required this.message, required this.isMe});
+
+  @override
+  Widget build(BuildContext context) {
+    // Wrap in a Material so unparented Text doesn't get the debug "missing
+    // Material" underline (this snapshot floats in an overlay, outside the
+    // thread's Material ancestor).
+    return Material(
+      type: MaterialType.transparency,
+      child: _content(),
+    );
+  }
+
+  Widget _content() {
+    if (message.isImage) {
+      return _ImageBubble(imageUrl: message.imageUrl!, maxWidth: 280);
+    }
+    if (message.isSharedPost) return _SharedPostBubble(post: message.sharedPost);
+    if (message.isSharedEvent) {
+      return _SharedEventBubble(event: message.sharedEvent);
+    }
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: NileSpacing.s12,
+        vertical: NileSpacing.s8,
+      ),
+      decoration: BoxDecoration(
+        color: isMe ? NileColors.volt : NileColors.bgSurface,
+        borderRadius: BorderRadius.circular(NileRadius.lg),
+      ),
+      child: Text(
+        message.content,
+        style: NileTextStyles.bodyMd().copyWith(
+          color: isMe ? NileColors.bgPage : NileColors.txtPrimary,
+        ),
+      ),
+    );
+  }
+}
+
+// ── Anchored long-press reaction menu (iMessage-style) ───────────────────────────
+
+enum _ReactionMenuKind { react, more, copy, delete }
+
+class _ReactionMenuResult {
+  final _ReactionMenuKind kind;
+  final String? emoji; // set when kind == react
+  const _ReactionMenuResult(this.kind, [this.emoji]);
+}
+
+/// Transparent route that dims+blurs the thread, floats a snapshot of the
+/// pressed bubble at its original position, and anchors the emoji pill above it
+/// and the Copy/Delete card below. Pops a [_ReactionMenuResult] (or null on
+/// dismiss). Positions are clamped so nothing runs off-screen.
+class _ReactionMenuRoute extends PopupRoute<_ReactionMenuResult> {
+  final Rect bubbleRect;
+  final bool isMine;
+  final String? myReaction;
+  final bool canCopy;
+  final Widget bubble;
+
+  _ReactionMenuRoute({
+    required this.bubbleRect,
+    required this.isMine,
+    required this.myReaction,
+    required this.canCopy,
+    required this.bubble,
+  });
+
+  @override
+  Color? get barrierColor => Colors.black.withValues(alpha: 0.45);
+  @override
+  bool get barrierDismissible => true;
+  @override
+  String? get barrierLabel => 'Dismiss';
+  @override
+  Duration get transitionDuration => NileMotion.fast;
+
+  @override
+  Widget buildPage(
+    BuildContext context,
+    Animation<double> animation,
+    Animation<double> secondaryAnimation,
+  ) {
+    final media = MediaQuery.of(context);
+    final size = media.size;
+    final safeTop = media.padding.top + NileSpacing.s8;
+    final safeBottom = size.height - media.padding.bottom - NileSpacing.s8;
+
+    const pillHeight = 56.0;
+    const gap = NileSpacing.s8;
+    // Menu width estimate: 6 emojis + '+' at ~44px each, padded.
+    const menuWidth = 320.0;
+    final actionCount = (canCopy ? 1 : 0) + (isMine ? 1 : 0);
+    final menuHeight = actionCount * 52.0;
+
+    // Clamp the floating bubble vertically so the pill (above) and the actions
+    // card (below) both stay on-screen.
+    final minTop = safeTop + pillHeight + gap;
+    final maxTop = safeBottom - menuHeight - gap - bubbleRect.height;
+    final bubbleTop = bubbleRect.top.clamp(
+      minTop,
+      maxTop < minTop ? minTop : maxTop,
+    );
+
+    // Horizontal anchor: pill/menu align to the bubble's side, clamped to edges.
+    double clampX(double left, double width) =>
+        left.clamp(NileSpacing.s8, size.width - width - NileSpacing.s8);
+    final pillLeft = clampX(
+      isMine ? bubbleRect.right - menuWidth : bubbleRect.left,
+      menuWidth,
+    );
+
+    return FadeTransition(
+      opacity: animation,
+      child: Stack(
+        children: [
+          // Blur layer behind everything (tap to dismiss).
+          Positioned.fill(
+            child: GestureDetector(
+              onTap: () => Navigator.pop(context),
+              child: BackdropFilter(
+                filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
+                child: const ColoredBox(color: Colors.transparent),
+              ),
+            ),
+          ),
+          // Emoji reaction pill, just above the (possibly shifted) bubble.
+          Positioned(
+            left: pillLeft,
+            top: bubbleTop - pillHeight - gap,
+            width: menuWidth,
+            child: Align(
+              alignment: isMine ? Alignment.centerRight : Alignment.centerLeft,
+              child: _ReactionPill(
+                selected: myReaction,
+                onSelect: (e) => Navigator.pop(
+                  context,
+                  _ReactionMenuResult(_ReactionMenuKind.react, e),
+                ),
+                onMore: () => Navigator.pop(
+                  context,
+                  const _ReactionMenuResult(_ReactionMenuKind.more),
+                ),
+              ),
+            ),
+          ),
+          // Floating snapshot of the pressed bubble.
+          Positioned(
+            left: bubbleRect.left,
+            top: bubbleTop,
+            width: bubbleRect.width,
+            child: IgnorePointer(child: bubble),
+          ),
+          // Actions card, just below the bubble.
+          if (actionCount > 0)
+            Positioned(
+              left: clampX(
+                isMine ? bubbleRect.right - 200 : bubbleRect.left,
+                200,
+              ),
+              top: bubbleTop + bubbleRect.height + gap,
+              width: 200,
+              child: _ReactionActionsCard(
+                canCopy: canCopy,
+                isMine: isMine,
+                onCopy: () => Navigator.pop(
+                  context,
+                  const _ReactionMenuResult(_ReactionMenuKind.copy),
+                ),
+                onDelete: () => Navigator.pop(
+                  context,
+                  const _ReactionMenuResult(_ReactionMenuKind.delete),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// The rounded emoji pill: 6 quick reactions + a `+`. Highlights [selected].
+class _ReactionPill extends StatelessWidget {
+  final String? selected;
+  final void Function(String emoji) onSelect;
+  final VoidCallback onMore;
+  const _ReactionPill({
+    required this.selected,
+    required this.onSelect,
+    required this.onMore,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      child: Container(
+        padding: const EdgeInsets.symmetric(
+          horizontal: NileSpacing.s8,
+          vertical: NileSpacing.s4,
+        ),
+        decoration: BoxDecoration(
+          color: NileColors.bgSurface,
+          borderRadius: BorderRadius.circular(NileRadius.pill),
+          border: Border.all(color: NileColors.border),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (final emoji in _kQuickReactions)
+              _PillButton(
+                highlighted: selected == emoji,
+                onTap: () => onSelect(emoji),
+                child: Text(emoji, style: const TextStyle(fontSize: 24)),
+              ),
+            _PillButton(
+              highlighted: false,
+              onTap: onMore,
+              child: const Icon(
+                Icons.add_rounded,
+                color: NileColors.txtSecondary,
+                size: 22,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _PillButton extends StatelessWidget {
+  final Widget child;
+  final bool highlighted;
+  final VoidCallback onTap;
+  const _PillButton({
+    required this.child,
+    required this.highlighted,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        width: 40,
+        height: 40,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: highlighted ? NileColors.bgRaised : Colors.transparent,
+          shape: BoxShape.circle,
+        ),
+        child: child,
+      ),
+    );
+  }
+}
+
+/// The small Copy/Delete card shown below the bubble in the long-press menu.
+class _ReactionActionsCard extends StatelessWidget {
+  final bool canCopy;
+  final bool isMine;
+  final VoidCallback onCopy;
+  final VoidCallback onDelete;
+  const _ReactionActionsCard({
+    required this.canCopy,
+    required this.isMine,
+    required this.onCopy,
+    required this.onDelete,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: NileColors.bgSurface,
+      borderRadius: BorderRadius.circular(NileRadius.md),
+      clipBehavior: Clip.antiAlias,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (canCopy)
+            _ActionRow(
+              icon: Icons.copy_rounded,
+              label: 'Copy',
+              color: NileColors.txtPrimary,
+              onTap: onCopy,
+            ),
+          if (canCopy && isMine)
+            const Divider(height: 1, color: NileColors.border),
+          if (isMine)
+            _ActionRow(
+              icon: Icons.delete_outline_rounded,
+              label: 'Delete',
+              color: NileColors.coral,
+              onTap: onDelete,
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ActionRow extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final Color color;
+  final VoidCallback onTap;
+  const _ActionRow({
+    required this.icon,
+    required this.label,
+    required this.color,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: NileSpacing.s16,
+          vertical: NileSpacing.s12,
+        ),
+        child: Row(
+          children: [
+            Icon(icon, color: color, size: 20),
+            const SizedBox(width: NileSpacing.s12),
+            Text(label, style: NileTextStyles.bodyMd().copyWith(color: color)),
+          ],
+        ),
       ),
     );
   }

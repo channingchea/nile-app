@@ -11,9 +11,11 @@ import '../services/post_service.dart';
 import '../services/repost_service.dart';
 import '../services/search_service.dart';
 import '../theme.dart';
+import '../widgets/event_cover_pill.dart';
 import '../widgets/event_link_card.dart';
 import '../widgets/like_button.dart';
-import '../widgets/live_badge.dart';
+import '../widgets/nile_glass_app_bar.dart';
+import '../widgets/nile_glass_nav_bar.dart';
 import '../widgets/nile_skeleton.dart';
 import '../widgets/pressable.dart';
 import '../widgets/share_to_sheet.dart';
@@ -91,6 +93,8 @@ class _HomeScreenState extends State<HomeScreen> {
       },
       child: Scaffold(
         backgroundColor: NileColors.bgPage,
+        // Content flows behind the floating glass nav bar.
+        extendBody: true,
         body: NileMaxWidth(
           // IndexedStack keeps every tab built, so the same event can hold a
           // live Hero on two tabs at once — duplicate tags abort ALL hero
@@ -103,42 +107,59 @@ class _HomeScreenState extends State<HomeScreen> {
             ],
           ),
         ),
-        floatingActionButton: _selectedIndex == 0
-            ? FloatingActionButton(
-                onPressed: _showActionSheet,
-                backgroundColor: NileColors.volt,
-                foregroundColor: NileColors.bgPage,
-                child: const Icon(Icons.add),
-              )
-            : null,
-        bottomNavigationBar: NavigationBar(
-          backgroundColor: NileColors.bgSurface,
-          indicatorColor: NileColors.volt.withValues(alpha: 0.15),
+        // Liquid Glass nav. To revert: swap NileGlassNavBar → NileMaterialNavBar
+        // (lib/widgets/nile_material_nav_bar.dart), set extendBody: false above,
+        // restore the FloatingActionButton, and drop the reservedHeight bottom
+        // padding from the tab scroll views.
+        bottomNavigationBar: NileGlassNavBar(
           selectedIndex: _selectedIndex,
           onDestinationSelected: (i) => setState(() => _selectedIndex = i),
-          labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
+          // Create "+" sits on the same row as the nav pill, on every tab.
+          trailing: _CreateButton(onTap: _showActionSheet),
           destinations: const [
-            NavigationDestination(
-              icon: Icon(Icons.home_outlined),
-              selectedIcon: Icon(Icons.home, color: NileColors.volt),
+            NileGlassDestination(
+              icon: Icons.home_outlined,
+              selectedIcon: Icons.home,
               label: 'Home',
             ),
-            NavigationDestination(
-              icon: Icon(Icons.search_outlined),
-              selectedIcon: Icon(Icons.search, color: NileColors.volt),
+            NileGlassDestination(
+              icon: Icons.search_outlined,
+              selectedIcon: Icons.search,
               label: 'Discover',
             ),
-            NavigationDestination(
-              icon: Icon(Icons.send_outlined),
-              selectedIcon: Icon(Icons.send, color: NileColors.volt),
+            NileGlassDestination(
+              icon: Icons.send_outlined,
+              selectedIcon: Icons.send,
               label: 'Messages',
             ),
-            NavigationDestination(
-              icon: Icon(Icons.person_outline),
-              selectedIcon: Icon(Icons.person, color: NileColors.volt),
+            NileGlassDestination(
+              icon: Icons.person_outline,
+              selectedIcon: Icons.person,
               label: 'Profile',
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+// ── Create button (trailing "+" beside the glass nav) ────────────────────────
+
+class _CreateButton extends StatelessWidget {
+  const _CreateButton({required this.onTap});
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: NileColors.volt,
+      shape: const CircleBorder(),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        child: const Center(
+          child: Icon(Icons.add, color: NileColors.bgPage, size: 28),
         ),
       ),
     );
@@ -626,7 +647,9 @@ class _FeedTabState extends State<_FeedTab> {
 
   @override
   Widget build(BuildContext context) {
+    // bottom:false lets the feed scroll behind the translucent glass nav bar.
     return SafeArea(
+      bottom: false,
       child: RefreshIndicator(
         color: NileColors.volt,
         backgroundColor: NileColors.bgSurface,
@@ -635,9 +658,7 @@ class _FeedTabState extends State<_FeedTab> {
           controller: _scroll,
           physics: const AlwaysScrollableScrollPhysics(),
           slivers: [
-            SliverAppBar(
-              pinned: true,
-              backgroundColor: NileColors.bgPage,
+            NileGlassBar.sliverAppBar(
               title: Text(
                 'Nile',
                 style: NileTextStyles.displayLg().copyWith(
@@ -679,7 +700,12 @@ class _FeedTabState extends State<_FeedTab> {
                 builder: (_) {
                   final display = _interleaveRecs(_items!);
                   return SliverPadding(
-                    padding: const EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s8, NileSpacing.s16, 96),
+                    padding: EdgeInsets.fromLTRB(
+                      NileSpacing.s16,
+                      NileSpacing.s8,
+                      NileSpacing.s16,
+                      NileGlassNavBar.reservedHeight + NileSpacing.s16,
+                    ),
                     sliver: SliverList.separated(
                       itemCount: display.length + (_hasMore ? 1 : 0),
                       separatorBuilder: (_, _) => const SizedBox(height: 12),
@@ -857,10 +883,6 @@ class _EventCard extends StatelessWidget {
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
                     ),
-                    if (event.isScheduled) ...[
-                      const SizedBox(height: 4),
-                      Text('Scheduled', style: NileTextStyles.caption()),
-                    ],
                     const SizedBox(height: 8),
                     Row(
                       children: [
@@ -1247,29 +1269,17 @@ class _Thumbnail extends StatelessWidget {
   final bool hero;
   const _Thumbnail({required this.event, this.hero = true});
 
-  Widget _placeholder() => const DecoratedBox(
-    decoration: BoxDecoration(
-      gradient: LinearGradient(
-        begin: Alignment.topLeft,
-        end: Alignment.bottomRight,
-        colors: [NileColors.bgRaised, NileColors.bgSurface],
-      ),
-    ),
-    child: Center(
-      child: Icon(Icons.live_tv, size: 40, color: NileColors.border),
-    ),
-  );
-
   @override
   Widget build(BuildContext context) {
+    final placeholder = EventCoverPlaceholder(seed: event.id);
     final image = event.thumbnailUrl != null
         ? Image.network(
             event.thumbnailUrl!,
             cacheWidth: nileDecodeWidth(600),
             fit: BoxFit.cover,
-            errorBuilder: (_, _, _) => _placeholder(),
+            errorBuilder: (_, _, _) => placeholder,
           )
-        : _placeholder();
+        : placeholder;
     return AspectRatio(
       aspectRatio: 16 / 9,
       child: Stack(
@@ -1280,8 +1290,7 @@ class _Thumbnail extends StatelessWidget {
           else
             image,
           const DecoratedBox(decoration: NileEffects.coverScrim),
-          if (event.isLive)
-            const Positioned(top: 8, right: 8, child: LiveBadge()),
+          Positioned(top: 8, left: 8, child: EventCoverPill(event: event)),
         ],
       ),
     );

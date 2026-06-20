@@ -9,9 +9,10 @@ import '../services/post_service.dart';
 import '../services/profile_service.dart';
 import '../services/search_service.dart';
 import '../theme.dart';
+import '../widgets/event_cover_pill.dart';
 import '../widgets/event_link_card.dart';
 import '../widgets/like_button.dart';
-import '../widgets/live_badge.dart';
+import '../widgets/nile_glass_nav_bar.dart';
 import '../widgets/nile_skeleton.dart';
 import '../widgets/pressable.dart';
 import 'event_detail_screen.dart';
@@ -368,7 +369,9 @@ class _DiscoverScreenState extends State<DiscoverScreen>
 
   @override
   Widget build(BuildContext context) {
+    // bottom:false lets content scroll behind the translucent glass nav bar.
     return SafeArea(
+      bottom: false,
       child: Column(
         children: [
           _buildSearchBar(),
@@ -458,7 +461,7 @@ class _DiscoverScreenState extends State<DiscoverScreen>
       child: ListView.separated(
         controller: _scroll[_Tab.posts],
         physics: const AlwaysScrollableScrollPhysics(),
-        padding: const EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s12, NileSpacing.s16, NileSpacing.s24),
+        padding: EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s12, NileSpacing.s16, NileGlassNavBar.reservedHeight + NileSpacing.s24),
         itemCount: header + posts.length + (_hasMore[_Tab.posts]! ? 1 : 0),
         separatorBuilder: (_, i) =>
             SizedBox(height: showRail && i == 0 ? 20 : 12),
@@ -523,7 +526,7 @@ class _DiscoverScreenState extends State<DiscoverScreen>
       child: ListView.separated(
         controller: _scroll[_Tab.events],
         physics: const AlwaysScrollableScrollPhysics(),
-        padding: const EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s12, NileSpacing.s16, NileSpacing.s24),
+        padding: EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s12, NileSpacing.s16, NileGlassNavBar.reservedHeight + NileSpacing.s24),
         itemCount: header + events.length + (_hasMore[_Tab.events]! ? 1 : 0),
         separatorBuilder: (_, i) =>
             SizedBox(height: showRail && i == 0 ? 20 : 12),
@@ -571,7 +574,7 @@ class _DiscoverScreenState extends State<DiscoverScreen>
       child: ListView.separated(
         controller: _scroll[_Tab.people],
         physics: const AlwaysScrollableScrollPhysics(),
-        padding: const EdgeInsets.only(top: NileSpacing.s4, bottom: NileSpacing.s24),
+        padding: EdgeInsets.only(top: NileSpacing.s4, bottom: NileGlassNavBar.reservedHeight + NileSpacing.s24),
         itemCount: users.length + (_hasMore[_Tab.people]! ? 1 : 0),
         separatorBuilder: (_, i) => i >= users.length - 1
             ? const SizedBox.shrink()
@@ -635,20 +638,23 @@ class _UserTile extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s16, vertical: NileSpacing.s12),
         child: Row(
           children: [
-            CircleAvatar(
-              radius: 24,
-              backgroundColor: NileColors.bgRaised,
-              backgroundImage: user.avatarUrl != null
-                  ? nileAvatarImage(user.avatarUrl!, 24)
-                  : null,
-              child: user.avatarUrl == null
-                  ? Text(
-                      user.username[0].toUpperCase(),
-                      style: NileTextStyles.headingSm().copyWith(
-                        color: NileColors.txtSecondary,
-                      ),
-                    )
-                  : null,
+            Hero(
+              tag: 'avatar-${user.id}',
+              child: CircleAvatar(
+                radius: 24,
+                backgroundColor: NileColors.bgRaised,
+                backgroundImage: user.avatarUrl != null
+                    ? nileAvatarImage(user.avatarUrl!, 24)
+                    : null,
+                child: user.avatarUrl == null
+                    ? Text(
+                        user.username[0].toUpperCase(),
+                        style: NileTextStyles.headingSm().copyWith(
+                          color: NileColors.txtSecondary,
+                        ),
+                      )
+                    : null,
+              ),
             ),
             const SizedBox(width: 12),
             Expanded(
@@ -961,10 +967,6 @@ class _DiscoverEventCard extends StatelessWidget {
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
                     ),
-                    if (event.isScheduled) ...[
-                      const SizedBox(height: 4),
-                      Text('Scheduled', style: NileTextStyles.caption()),
-                    ],
                     if (onLikeToggle != null) ...[
                       const SizedBox(height: 8),
                       LikeButton(
@@ -1002,19 +1004,15 @@ class _EventThumbnail extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final placeholder = EventCoverPlaceholder(seed: event.id);
     final image = event.coverImageUrl != null
         ? Image.network(
             event.coverImageUrl!,
             cacheWidth: nileDecodeWidth(600),
             fit: BoxFit.cover,
-            errorBuilder: (_, _, _) => Container(color: NileColors.bgRaised),
+            errorBuilder: (_, _, _) => placeholder,
           )
-        : Container(
-            color: NileColors.bgRaised,
-            child: const Center(
-              child: Icon(Icons.event, color: NileColors.border, size: 32),
-            ),
-          );
+        : placeholder;
     final stack = Stack(
       fit: StackFit.expand,
       children: [
@@ -1023,7 +1021,7 @@ class _EventThumbnail extends StatelessWidget {
         else
           image,
         const DecoratedBox(decoration: NileEffects.coverScrim),
-        if (event.isLive) const Positioned(top: 8, left: 8, child: LiveBadge()),
+        Positioned(top: 8, left: 8, child: EventCoverPill(event: event)),
       ],
     );
     return flexible
