@@ -20,6 +20,7 @@ import '../widgets/live_badge.dart';
 import '../widgets/rolling_number.dart';
 import 'attendee_list_screen.dart';
 import 'audio_screen.dart';
+import 'boost_performance_screen.dart';
 import 'camera_screen.dart';
 import 'crew_setup_screen.dart';
 import 'widgets/moderation_menu.dart';
@@ -382,6 +383,16 @@ class _EventDetailScreenState extends State<EventDetailScreen>
     }
   }
 
+  /// Host-only (Phase A-3): the host's boost campaigns with impressions,
+  /// clicks, CTR, and spend.
+  void _openBoostPerformance() {
+    if (!_isOwnEvent) return;
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const BoostPerformanceScreen()),
+    );
+  }
+
   void _watch() {
     // Allow entry once the show is live OR while the host is in Sound Check
     // (the viewer lands in the Lobby until Start Show).
@@ -686,6 +697,14 @@ class _EventDetailScreenState extends State<EventDetailScreen>
                       padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
                       shape: const StadiumBorder(),
                     ),
+                  ),
+                ),
+                TextButton.icon(
+                  onPressed: _openBoostPerformance,
+                  icon: const Icon(Icons.insights_outlined, size: 18),
+                  label: const Text('View boost performance'),
+                  style: TextButton.styleFrom(
+                    foregroundColor: NileColors.txtSecondary,
                   ),
                 ),
               ],

@@ -12,6 +12,49 @@ class FeedAd {
   const FeedAd({required this.campaignId, this.event, this.post});
 }
 
+/// One campaign's lifetime performance (Phase A-3), as returned by the
+/// get_boost_performance RPC. Spend/budget are cents; [ctr] is 0–1.
+class BoostStats {
+  final String campaignId;
+  final String name;
+  final String? eventId;
+  final String status;
+  final int budgetCents;
+  final int spentCents;
+  final DateTime startsAt;
+  final DateTime endsAt;
+  final int impressions;
+  final int clicks;
+
+  const BoostStats({
+    required this.campaignId,
+    required this.name,
+    required this.eventId,
+    required this.status,
+    required this.budgetCents,
+    required this.spentCents,
+    required this.startsAt,
+    required this.endsAt,
+    required this.impressions,
+    required this.clicks,
+  });
+
+  double get ctr => impressions == 0 ? 0 : clicks / impressions;
+
+  factory BoostStats.fromJson(Map<String, dynamic> j) => BoostStats(
+        campaignId: j['campaign_id'] as String,
+        name: j['name'] as String,
+        eventId: j['event_id'] as String?,
+        status: j['status'] as String,
+        budgetCents: (j['budget_cents'] as num).toInt(),
+        spentCents: (j['spent_cents'] as num).toInt(),
+        startsAt: DateTime.parse(j['starts_at'] as String),
+        endsAt: DateTime.parse(j['ends_at'] as String),
+        impressions: (j['impressions'] as num).toInt(),
+        clicks: (j['clicks'] as num).toInt(),
+      );
+}
+
 /// Serves and logs in-feed sponsored content (Phase A-1). Mirrors the
 /// recommend_* pattern in [SearchService]: the get_feed_ads RPC returns the
 /// campaign + target ids, and we hydrate the existing event/post card payloads.
@@ -95,4 +138,13 @@ class AdService {
 
   static Future<void> logImpression(String campaignId) => _log(campaignId, 'impression');
   static Future<void> logClick(String campaignId) => _log(campaignId, 'click');
+
+  /// The calling host's boost campaigns with lifetime performance (Phase A-3),
+  /// newest first. Scoped server-side to auth.uid()'s own campaigns.
+  static Future<List<BoostStats>> boostPerformance() async {
+    final rows = await supabase.rpc('get_boost_performance');
+    return (rows as List)
+        .map((r) => BoostStats.fromJson(r as Map<String, dynamic>))
+        .toList();
+  }
 }
