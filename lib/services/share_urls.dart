@@ -24,6 +24,11 @@ class ShareUrls {
   static String post(String id) => '$_base/p/$id';
   static String profile(String username) => '$_base/u/$username';
 
+  /// Web ad-portal boost flow for an event (Phase A-2). Opened in the EXTERNAL
+  /// browser from the in-app host CTA — all checkout happens on the web, never
+  /// in-app, so there's no iOS IAP path. Served by the static boost portal.
+  static String boost(String eventId) => '$_base/boost?event=$eventId';
+
   // ── Pre-formatted share captions (link on its own line so unfurlers grab it) ──
 
   static String eventCaption({

@@ -43,16 +43,29 @@ serve(async (req) => {
 
   if (event.type === "checkout.session.completed") {
     const session = event.data.object as Stripe.Checkout.Session;
-    // The pending row was stored under session.id (PaymentIntent is null at
-    // session creation). Mark paid by session.id and record the real PI id so
-    // a later refund (which only carries the PI id) can match.
-    await adminClient
-      .from("tickets")
-      .update({
-        status: "paid",
-        stripe_payment_intent_id: (session.payment_intent as string) ?? session.id,
-      })
-      .eq("stripe_payment_intent_id", session.id);
+    const piId = (session.payment_intent as string) ?? session.id;
+
+    // Ad-platform boost (A-2): the host paid to boost an event. Activate the
+    // campaign and record the real PI id. Branched by create-ad-payment's
+    // metadata.type so it never collides with ticket sales.
+    if (session.metadata?.type === "ad_campaign") {
+      const campaignId = session.metadata.campaign_id;
+      if (campaignId) {
+        await adminClient
+          .from("ad_campaigns")
+          .update({ status: "active", stripe_payment_intent_id: piId })
+          .eq("id", campaignId);
+      }
+    } else {
+      // Ticket sale (default). The pending row was stored under session.id
+      // (PaymentIntent is null at session creation). Mark paid by session.id and
+      // record the real PI id so a later refund (which carries only the PI id)
+      // can match.
+      await adminClient
+        .from("tickets")
+        .update({ status: "paid", stripe_payment_intent_id: piId })
+        .eq("stripe_payment_intent_id", session.id);
+    }
   }
 
   if (event.type === "charge.refunded") {

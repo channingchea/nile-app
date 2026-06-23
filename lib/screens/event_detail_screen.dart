@@ -11,6 +11,7 @@ import '../services/crew_service.dart';
 import '../services/share_urls.dart';
 import '../services/event_service.dart';
 import '../services/follow_service.dart';
+import '../services/livekit_service.dart';
 import '../services/report_service.dart';
 import '../services/supabase_client.dart';
 import '../services/ticket_service.dart';
@@ -24,6 +25,7 @@ import 'crew_setup_screen.dart';
 import 'widgets/moderation_menu.dart';
 import 'edit_event_screen.dart';
 import 'profile_screen.dart';
+import 'replay_screen.dart';
 import 'viewer_screen.dart';
 
 /// Detail screen for a single event (scheduled, live, or ended).
@@ -73,6 +75,12 @@ class _EventDetailScreenState extends State<EventDetailScreen>
   // Crew: assigned camera operators get free access to the event.
   bool _isOperator = false;
   MyOperatorAssignment? _assignment;
+
+  // Replay/VOD. _replayWatchable: a ready replay this user may watch now (→
+  // "Watch Replay"). _replayLockedByTicket: a ready replay exists but the user
+  // lacks a ticket on a paid event (→ "buy a ticket to watch the replay").
+  bool _replayWatchable = false;
+  bool _replayLockedByTicket = false;
 
   // Countdown
   Timer? _ticker;
@@ -200,6 +208,7 @@ class _EventDetailScreenState extends State<EventDetailScreen>
 
       _initCountdown();
       _initRealtime();
+      _checkReplay();
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -221,6 +230,31 @@ class _EventDetailScreenState extends State<EventDetailScreen>
     final diff = target.difference(DateTime.now());
     if (!mounted) return;
     setState(() => _remaining = diff.isNegative ? Duration.zero : diff);
+  }
+
+  /// For ended events, probe whether a ready replay exists and whether this user
+  /// may watch it. We key off `replay-exists` (not `replay-url`) so a paid-event
+  /// viewer WITHOUT a ticket is distinguished from "no replay at all" — the
+  /// former still gets a buy-ticket CTA. (fix 1)
+  Future<void> _checkReplay() async {
+    final event = _event;
+    if (event == null || !event.isEnded) return;
+    final slug = event.liveKitEventId ?? event.id;
+    final r = await LivekitService.replayExists(eventId: slug);
+    if (!mounted) return;
+    setState(() {
+      _replayWatchable = r.available;
+      _replayLockedByTicket = r.hasReplay && !r.authorized;
+    });
+  }
+
+  void _watchReplay() {
+    final event = _event;
+    if (event == null) return;
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => ReplayScreen(event: event)),
+    );
   }
 
   void _initRealtime() {
@@ -331,6 +365,20 @@ class _EventDetailScreenState extends State<EventDetailScreen>
       ).showSnackBar(SnackBar(content: Text('Couldn\'t start checkout: $e')));
     } finally {
       if (mounted) setState(() => _ticketBusy = false);
+    }
+  }
+
+  /// Opens the web ad portal's boost flow for this event in the EXTERNAL
+  /// browser (not an in-app webview). All checkout happens on the web, so there
+  /// is no in-app purchase path — this CTA is just a link out, never a buy button.
+  Future<void> _boost() async {
+    if (_event == null || !_isOwnEvent || _event!.isEnded) return;
+    final uri = Uri.parse(ShareUrls.boost(_event!.id));
+    if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Could not open the boost page')));
     }
   }
 
@@ -615,10 +663,32 @@ class _EventDetailScreenState extends State<EventDetailScreen>
                 isAudioOperator: _assignment?.isAudioOperator ?? false,
                 ticketBusy: _ticketBusy,
                 ticketsRemaining: _ticketsRemaining,
+                replayWatchable: _replayWatchable,
+                replayLockedByTicket: _replayLockedByTicket,
                 onWatch: _watch,
                 onBuyTicket: _buyTicket,
                 onEnterAsCamera: _enterAsCamera,
+                onWatchReplay: _watchReplay,
               ),
+              // Host-only: promote this event via the web ad portal. Opens in
+              // the external browser — a link out, not an in-app purchase.
+              if (_isOwnEvent && !_event!.isEnded) ...[
+                const SizedBox(height: 12),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: _boost,
+                    icon: const Icon(Icons.campaign_outlined),
+                    label: const Text('Boost this event'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: NileColors.txtPrimary,
+                      side: const BorderSide(color: NileColors.border),
+                      padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
+                      shape: const StadiumBorder(),
+                    ),
+                  ),
+                ),
+              ],
             ],
           ),
         ),
@@ -994,9 +1064,12 @@ class _PrimaryCta extends StatelessWidget {
   final bool isAudioOperator;
   final bool ticketBusy;
   final int? ticketsRemaining;
+  final bool replayWatchable;
+  final bool replayLockedByTicket;
   final VoidCallback onWatch;
   final VoidCallback onBuyTicket;
   final VoidCallback onEnterAsCamera;
+  final VoidCallback onWatchReplay;
 
   const _PrimaryCta({
     required this.event,
@@ -1007,9 +1080,12 @@ class _PrimaryCta extends StatelessWidget {
     this.isAudioOperator = false,
     required this.ticketBusy,
     required this.ticketsRemaining,
+    required this.replayWatchable,
+    required this.replayLockedByTicket,
     required this.onWatch,
     required this.onBuyTicket,
     required this.onEnterAsCamera,
+    required this.onWatchReplay,
   });
 
   bool get _isPaid => event.price != null && event.price! > 0;
@@ -1120,6 +1196,34 @@ class _PrimaryCta extends StatelessWidget {
     }
 
     if (event.isEnded) {
+      // A ready replay this user may watch → primary "Watch Replay" CTA.
+      if (replayWatchable) {
+        return SizedBox(
+          width: double.infinity,
+          child: FilledButton.icon(
+            onPressed: onWatchReplay,
+            style: FilledButton.styleFrom(
+              padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
+              backgroundColor: NileColors.volt,
+              foregroundColor: NileColors.bgPage,
+            ),
+            icon: const Icon(Icons.play_arrow),
+            label: const Text('Watch Replay'),
+          ),
+        );
+      }
+      // A replay exists but this user lacks a ticket on a paid event → let them
+      // buy in to unlock it. (fix 1: this is keyed off replayLockedByTicket, not
+      // off replay-url succeeding — which it never would for an unticketed user.)
+      if (replayLockedByTicket) {
+        return _GetTicketButton(
+          priceCents: event.price!,
+          soldOut: _soldOut,
+          busy: ticketBusy,
+          onBuy: onBuyTicket,
+        );
+      }
+      // No replay (or none yet) → inert ended state.
       return SizedBox(
         width: double.infinity,
         child: OutlinedButton.icon(

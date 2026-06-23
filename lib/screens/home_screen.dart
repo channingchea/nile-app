@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:visibility_detector/visibility_detector.dart';
+import '../services/ad_service.dart';
 import '../services/event_repost_service.dart';
 import '../services/share_urls.dart';
 import '../services/event_service.dart';
@@ -258,16 +260,28 @@ class _FeedTab extends StatefulWidget {
 sealed class _FeedItem {
   DateTime get sortKey;
   bool get fromNetwork;
+
+  /// Set on sponsored (paid) items, which carry an ad campaign id for
+  /// impression/click logging and render with a "Sponsored" disclosure.
+  String? get adCampaignId;
+  bool get isSponsored => adCampaignId != null;
 }
 
 class _EventFeedItem extends _FeedItem {
   final Event event;
   @override
   final bool fromNetwork;
+  @override
+  final String? adCampaignId;
 
   /// When set (reposts), sorts by repost time instead of scheduled/created.
   final DateTime? sortOverride;
-  _EventFeedItem(this.event, {this.fromNetwork = false, this.sortOverride});
+  _EventFeedItem(
+    this.event, {
+    this.fromNetwork = false,
+    this.sortOverride,
+    this.adCampaignId,
+  });
   @override
   DateTime get sortKey => sortOverride ?? event.scheduledAt ?? event.createdAt;
 }
@@ -276,11 +290,18 @@ class _PostFeedItem extends _FeedItem {
   final Post post;
   @override
   final bool fromNetwork;
+  @override
+  final String? adCampaignId;
 
   /// When set (reposts), the item sorts by repost time instead of the original
   /// post's createdAt, so a fresh repost surfaces near the top of the feed.
   final DateTime? sortOverride;
-  _PostFeedItem(this.post, {this.fromNetwork = false, this.sortOverride});
+  _PostFeedItem(
+    this.post, {
+    this.fromNetwork = false,
+    this.sortOverride,
+    this.adCampaignId,
+  });
   @override
   DateTime get sortKey => sortOverride ?? post.createdAt;
 }
@@ -295,6 +316,16 @@ class _FeedTabState extends State<_FeedTab> {
   // [_recInterval] items. Loaded once per [_load]; not part of pagination.
   List<_FeedItem> _recs = [];
   static const _recInterval = 6;
+
+  // Sponsored items, injected after recs at a rarer cadence than recs so ads
+  // stay sparse. Loaded once per [_load]; not part of pagination. Impressions
+  // already counted this session are tracked so we log at most one per card.
+  List<_FeedItem> _ads = [];
+  static const _adInterval = 8;
+  // Per-card impression guard, keyed 'ad-<campaignId>-<itemId>'. An entry is
+  // added when a card logs an impression and removed when it scrolls fully out
+  // of view, so each distinct viewing counts once.
+  final Set<String> _loggedImpressions = {};
 
   // Pagination — independent cursors per source, merged into [_items].
   final _scroll = ScrollController();
@@ -332,7 +363,11 @@ class _FeedTabState extends State<_FeedTab> {
 
   void _replacePost(Post updated) => _mutate(
     (it) => it is _PostFeedItem && it.post.id == updated.id,
-    (it) => _PostFeedItem(updated, fromNetwork: it.fromNetwork),
+    (it) => _PostFeedItem(
+      updated,
+      fromNetwork: it.fromNetwork,
+      adCampaignId: it.adCampaignId,
+    ),
   );
 
   void _removePost(String postId) =>
@@ -340,7 +375,11 @@ class _FeedTabState extends State<_FeedTab> {
 
   void _replaceEvent(Event updated) => _mutate(
     (it) => it is _EventFeedItem && it.event.id == updated.id,
-    (it) => _EventFeedItem(updated, fromNetwork: it.fromNetwork),
+    (it) => _EventFeedItem(
+      updated,
+      fromNetwork: it.fromNetwork,
+      adCampaignId: it.adCampaignId,
+    ),
   );
 
   void _removeEvent(String eventId) =>
@@ -498,6 +537,26 @@ class _FeedTabState extends State<_FeedTab> {
     return out;
   }
 
+  /// Injects sponsored items into [feed] (already rec-interleaved): one ad after
+  /// every [_adInterval] items. Ads whose content already appears in the feed
+  /// are skipped, and ads keep their serving order. Runs after [_interleaveRecs]
+  /// so ads are rarer than recs. Returns a new list; input ordering is untouched.
+  List<_FeedItem> _injectAds(List<_FeedItem> feed) {
+    if (_ads.isEmpty) return feed;
+    final seen = feed.map(_idOf).toSet();
+    final ads = _ads.where((a) => seen.add(_idOf(a))).toList();
+    if (ads.isEmpty) return feed;
+
+    final out = <_FeedItem>[];
+    var a = 0;
+    for (var i = 0; i < feed.length; i++) {
+      out.add(feed[i]);
+      if ((i + 1) % _adInterval == 0 && a < ads.length) out.add(ads[a++]);
+    }
+    out.addAll(ads.sublist(a));
+    return out;
+  }
+
   /// Sorts the unified feed: live events pinned, then by recency.
   void _sortItems(List<_FeedItem> items) {
     items.sort((a, b) {
@@ -620,21 +679,31 @@ class _FeedTabState extends State<_FeedTab> {
         ),
       ];
       _sortItems(items);
-      // Recs are best-effort: a failure here must not break the feed.
+      // Recs and ads are best-effort: a failure here must not break the feed.
       List<_FeedItem> recs = [];
+      List<_FeedItem> ads = [];
       try {
-        final (rEvents, rPosts) = await (
+        final (rEvents, rPosts, feedAds) = await (
           SearchService.recommendedEvents(),
           SearchService.recommendedPosts(),
+          AdService.feedAds(),
         ).wait;
         recs = [
           ...rEvents.map((e) => _EventFeedItem(e, fromNetwork: true)),
           ...rPosts.map((p) => _PostFeedItem(p, fromNetwork: true)),
         ];
+        ads = [
+          for (final ad in feedAds)
+            if (ad.event != null)
+              _EventFeedItem(ad.event!, adCampaignId: ad.campaignId)
+            else if (ad.post != null)
+              _PostFeedItem(ad.post!, adCampaignId: ad.campaignId),
+        ];
       } catch (_) {}
       setState(() {
         _items = items;
         _recs = recs;
+        _ads = ads;
         _eventCursor = eventPage.nextCursor;
         _postCursor = postPage.nextCursor;
         _eventsHasMore = eventPage.hasMore;
@@ -698,7 +767,7 @@ class _FeedTabState extends State<_FeedTab> {
             else
               Builder(
                 builder: (_) {
-                  final display = _interleaveRecs(_items!);
+                  final display = _injectAds(_interleaveRecs(_items!));
                   return SliverPadding(
                     padding: EdgeInsets.fromLTRB(
                       NileSpacing.s16,
@@ -714,14 +783,20 @@ class _FeedTabState extends State<_FeedTab> {
                         final it = display[i];
                         final myId =
                             Supabase.instance.client.auth.currentUser?.id;
-                        final card = switch (it) {
+                        final campaignId = it.adCampaignId;
+                        // Sponsored cards suppress owner edit/delete affordances.
+                        Widget card = switch (it) {
                           _EventFeedItem(:final event) => _EventCard(
                             event: event,
                             fromNetwork: it.fromNetwork,
-                            onEdited: myId == event.hostId
+                            isSponsored: it.isSponsored,
+                            onTapAd: campaignId == null
+                                ? null
+                                : () => AdService.logClick(campaignId),
+                            onEdited: myId == event.hostId && campaignId == null
                                 ? (e) => _replaceEvent(e)
                                 : null,
-                            onDeleted: myId == event.hostId
+                            onDeleted: myId == event.hostId && campaignId == null
                                 ? () => _removeEvent(event.id)
                                 : null,
                             onLikeToggle: () => _toggleEventLike(event),
@@ -730,10 +805,14 @@ class _FeedTabState extends State<_FeedTab> {
                           _PostFeedItem(:final post) => _PostCard(
                             post: post,
                             fromNetwork: it.fromNetwork,
-                            onEdited: myId == post.authorId
+                            isSponsored: it.isSponsored,
+                            onTapAd: campaignId == null
+                                ? null
+                                : () => AdService.logClick(campaignId),
+                            onEdited: myId == post.authorId && campaignId == null
                                 ? (p) => _replacePost(p)
                                 : null,
-                            onDeleted: myId == post.authorId
+                            onDeleted: myId == post.authorId && campaignId == null
                                 ? () => _removePost(post.id)
                                 : null,
                             onLikeToggle: () => _togglePostLike(post),
@@ -741,6 +820,27 @@ class _FeedTabState extends State<_FeedTab> {
                             onUpdated: (updated) => _replacePost(updated),
                           ),
                         };
+                        // Count an honest CPM impression: log once each time the
+                        // card scrolls ≥50% into view, re-arming when it leaves so
+                        // repeat views (and post-refresh re-renders) each count.
+                        if (campaignId != null) {
+                          final impressionKey = 'ad-$campaignId-${_idOf(it)}';
+                          card = VisibilityDetector(
+                            key: ValueKey(impressionKey),
+                            onVisibilityChanged: (info) {
+                              // Re-arm as soon as the card drops below a quarter
+                              // visible; waiting for an exact 0 is unreliable since
+                              // the card is often recycled before reporting 0.0.
+                              if (info.visibleFraction < 0.25) {
+                                _loggedImpressions.remove(impressionKey);
+                              } else if (info.visibleFraction >= 0.5 &&
+                                  _loggedImpressions.add(impressionKey)) {
+                                AdService.logImpression(campaignId);
+                              }
+                            },
+                            child: card,
+                          );
+                        }
                         return NileStaggeredFadeIn(index: i, child: card);
                       },
                     ),
@@ -759,6 +859,8 @@ class _FeedTabState extends State<_FeedTab> {
 class _EventCard extends StatelessWidget {
   final Event event;
   final bool fromNetwork;
+  final bool isSponsored;
+  final VoidCallback? onTapAd;
   final void Function(Event)? onEdited;
   final VoidCallback? onDeleted;
   final VoidCallback? onLikeToggle;
@@ -766,6 +868,8 @@ class _EventCard extends StatelessWidget {
   const _EventCard({
     required this.event,
     this.fromNetwork = false,
+    this.isSponsored = false,
+    this.onTapAd,
     this.onEdited,
     this.onDeleted,
     this.onLikeToggle,
@@ -795,6 +899,7 @@ class _EventCard extends StatelessWidget {
         clipBehavior: Clip.antiAlias,
         child: InkWell(
           onTap: () async {
+            onTapAd?.call();
             final result = await Navigator.push(
               context,
               MaterialPageRoute(
@@ -808,7 +913,8 @@ class _EventCard extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              if (fromNetwork) const _NetworkTag(padded: true),
+              if (isSponsored) const _SponsoredTag(padded: true),
+              if (fromNetwork && !isSponsored) const _NetworkTag(padded: true),
               if (event.repostedByUsername != null)
                 Padding(
                   padding: const EdgeInsets.fromLTRB(NileSpacing.s12, NileSpacing.s8, NileSpacing.s12, 0),
@@ -963,11 +1069,47 @@ class _NetworkTag extends StatelessWidget {
   }
 }
 
+// ── "Sponsored" tag ──────────────────────────────────────────────────────────
+
+/// Ad disclosure marking a paid (sponsored) feed item. Deliberately muted, not
+/// Volt, so it reads as a disclosure and not a CTA — and FTC/app-store rules
+/// require it to be unambiguous. Layout mirrors [_NetworkTag].
+class _SponsoredTag extends StatelessWidget {
+  final bool padded;
+  const _SponsoredTag({this.padded = false});
+
+  @override
+  Widget build(BuildContext context) {
+    final row = Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        const Icon(
+          Icons.campaign_outlined,
+          size: 14,
+          color: NileColors.txtTertiary,
+        ),
+        const SizedBox(width: 4),
+        Text(
+          'Sponsored',
+          style: NileTextStyles.caption().copyWith(
+            color: NileColors.txtTertiary,
+          ),
+        ),
+      ],
+    );
+    return padded
+        ? Padding(padding: const EdgeInsets.fromLTRB(NileSpacing.s12, NileSpacing.s12, NileSpacing.s12, 0), child: row)
+        : row;
+  }
+}
+
 // ── Post card ─────────────────────────────────────────────────────────────────
 
 class _PostCard extends StatelessWidget {
   final Post post;
   final bool fromNetwork;
+  final bool isSponsored;
+  final VoidCallback? onTapAd;
   final void Function(Post)? onEdited;
   final VoidCallback? onDeleted;
   final VoidCallback? onLikeToggle;
@@ -976,6 +1118,8 @@ class _PostCard extends StatelessWidget {
   const _PostCard({
     required this.post,
     this.fromNetwork = false,
+    this.isSponsored = false,
+    this.onTapAd,
     this.onEdited,
     this.onDeleted,
     this.onLikeToggle,
@@ -987,6 +1131,7 @@ class _PostCard extends StatelessWidget {
       ShareUrls.postCaption(id: post.id, authorUsername: post.authorUsername);
 
   Future<void> _openDetail(BuildContext context) async {
+    onTapAd?.call();
     final updated = await Navigator.push<Post>(
       context,
       MaterialPageRoute(builder: (_) => PostDetailScreen(post: post)),
@@ -1016,7 +1161,10 @@ class _PostCard extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                if (fromNetwork) ...[
+                if (isSponsored) ...[
+                  const _SponsoredTag(),
+                  const SizedBox(height: 8),
+                ] else if (fromNetwork) ...[
                   const _NetworkTag(),
                   const SizedBox(height: 8),
                 ],
