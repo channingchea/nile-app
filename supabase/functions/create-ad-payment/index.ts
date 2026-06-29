@@ -8,8 +8,8 @@
 //
 // Setup:
 //   supabase secrets set STRIPE_SECRET_KEY=sk_test_...
-//   supabase secrets set AD_SUCCESS_URL=https://links.nile.app/boost-success
-//   supabase secrets set AD_CANCEL_URL=https://links.nile.app/boost
+//   supabase secrets set AD_SUCCESS_URL=https://links.joinnile.com/boost-success
+//   supabase secrets set AD_CANCEL_URL=https://links.joinnile.com/boost
 //   supabase functions deploy create-ad-payment        (KEEP JWT on — reads the user session)
 //
 // Request (POST, Bearer = user JWT):

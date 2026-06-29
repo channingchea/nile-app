@@ -7,7 +7,7 @@
 <title>Boost your event · Nile</title>
 <!--
   Nile ad portal — Phase A-2 host-boost checkout (web only, off the App Store).
-  Standalone page hosted at https://links.nile.app/boost. The in-app "Boost"
+  Standalone page hosted at https://links.joinnile.com/boost. The in-app "Boost"
   button deep-links here in the EXTERNAL browser (no in-app webview), so no
   iOS IAP path exists. Host signs in, picks a $10/$25/$50 budget + duration,
   and is redirected to Stripe Checkout via the create-ad-payment Edge Function.
@@ -110,7 +110,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 // ── CONFIG (fill at deploy time; anon key is public-safe) ───────────────────
 const CONFIG = {
   SUPABASE_URL: "https://jelmkkvyrliywcdkzhuu.supabase.co",
-  SUPABASE_ANON_KEY: "%%SUPABASE_ANON_KEY%%",   // replace before hosting
+  SUPABASE_ANON_KEY: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplbG1ra3Z5cmxpeXdjZGt6aHV1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk4NDM4NDMsImV4cCI6MjA5NTQxOTg0M30.fJVkmkQ699JvYZl9PySXWWiMlfMQNv1fZcYOttC5vbI",
   FUNCTION_URL: "https://jelmkkvyrliywcdkzhuu.functions.supabase.co/create-ad-payment",
 };
 

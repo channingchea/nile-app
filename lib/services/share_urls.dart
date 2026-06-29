@@ -18,7 +18,14 @@ class ShareUrls {
   /// native config: iOS associated-domains + AASA, Android assetlinks.json).
   static const String shareDomain = 'links.nile.app';
 
+  /// The boost/checkout portal host (Phase A-2). Separate from [shareDomain] so
+  /// the marketing/checkout surface can live on the public brand domain WITHOUT
+  /// touching Universal Links — repointing [shareDomain] would break AASA /
+  /// assetlinks, but the boost path has no native deep-link binding.
+  static const String boostDomain = 'links.joinnile.com';
+
   static const String _base = 'https://$shareDomain';
+  static const String _boostBase = 'https://$boostDomain';
 
   static String event(String id) => '$_base/e/$id';
   static String post(String id) => '$_base/p/$id';
@@ -27,7 +34,7 @@ class ShareUrls {
   /// Web ad-portal boost flow for an event (Phase A-2). Opened in the EXTERNAL
   /// browser from the in-app host CTA — all checkout happens on the web, never
   /// in-app, so there's no iOS IAP path. Served by the static boost portal.
-  static String boost(String eventId) => '$_base/boost?event=$eventId';
+  static String boost(String eventId) => '$_boostBase/boost?event=$eventId';
 
   // ── Pre-formatted share captions (link on its own line so unfurlers grab it) ──
 
