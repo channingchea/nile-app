@@ -8,6 +8,8 @@ import '../services/supabase_client.dart';
 import '../services/crew_service.dart';
 import '../services/event_service.dart';
 import '../services/livekit_service.dart';
+import '../widgets/audio_meter.dart';
+import '../widgets/viewer_preview_overlay.dart';
 import '../theme.dart';
 
 class CameraScreen extends StatefulWidget {
@@ -88,11 +90,20 @@ class _CameraScreenState extends State<CameraScreen> {
     }
   }
 
+  /// This camera is the broadcast audio source only when it holds the
+  /// master-audio flag AND no dedicated Stream Audio operator is publishing.
+  /// A live Stream Audio feed always wins, so every camera mutes in its favour.
+  bool get _isMainAudioSource => _isMasterAudio && !_streamAudioActive;
+
   /// (Re)publish the local mic to match [_disableAgc]. When off, uses the default
   /// mic path (WebRTC AGC/denoise/echo-cancel on). When on, publishes a track
   /// with that processing disabled so an external mic's own tuning passes
   /// through. Called at connect and whenever the setting changes mid-session;
   /// the unpublish→publish swap causes a brief (sub-second) audio gap.
+  ///
+  /// After (re)publishing we immediately reconcile the mute state so a camera
+  /// that isn't the main audio source never broadcasts — this is what stops the
+  /// feedback from multiple open mics in the room.
   Future<void> _applyMicProcessing(LocalParticipant? participant) async {
     if (participant == null) return;
 
@@ -114,6 +125,45 @@ class _CameraScreenState extends State<CameraScreen> {
     } else {
       await participant.setMicrophoneEnabled(true);
     }
+    await _syncMicEnabled();
+  }
+
+  /// Mute every camera that isn't the active broadcast audio source; unmute the
+  /// one that is. The capture track keeps running either way (so the local meter
+  /// still moves), but a muted track sends silence — only the main source's
+  /// audio reaches viewers, which kills the multi-mic feedback. Called on
+  /// connect and whenever the source reassigns (metadata / participant changes).
+  Future<void> _syncMicEnabled() async {
+    final pub = _room?.localParticipant?.audioTrackPublications.firstOrNull;
+    final track = pub?.track;
+    if (track == null) return;
+    try {
+      // While the host monitors the viewer preview, their own mic stays muted
+      // regardless of the broadcast rule — otherwise a host who IS the audio
+      // source would feed their decoded monitor back into the stream.
+      if (_isMainAudioSource && !_viewerPreviewOpen) {
+        await track.unmute();
+      } else {
+        await track.mute();
+      }
+    } catch (_) {
+      // Mute/unmute can race a republish; the next sync call will settle it.
+    }
+  }
+
+  /// Host taps "View as Viewer": mute the host's own publishing mic (feedback
+  /// guard, covers the host-is-source case too) then open the viewer preview
+  /// overlay over the camera screen, which keeps publishing underneath.
+  Future<void> _openViewerPreview() async {
+    setState(() => _viewerPreviewOpen = true);
+    await _syncMicEnabled();
+  }
+
+  /// Dismiss the viewer preview and restore the mic to the state the broadcast
+  /// rule dictates (active-source → unmuted, otherwise muted).
+  Future<void> _closeViewerPreview() async {
+    setState(() => _viewerPreviewOpen = false);
+    await _syncMicEnabled();
   }
 
   /// Update the external-mic setting. If a session is live, republish the mic
@@ -183,6 +233,10 @@ class _CameraScreenState extends State<CameraScreen> {
   // Non-host: the host starts/ends the show, so this screen follows the DB
   // status (the single source of truth) via realtime.
   RealtimeChannel? _statusChannel;
+
+  // Host Sound Check: "View as Viewer" overlay is open. The host's publishing
+  // mic is force-muted for its lifetime (feedback guard) and restored on close.
+  bool _viewerPreviewOpen = false;
 
   @override
   void dispose() {
@@ -272,6 +326,8 @@ class _CameraScreenState extends State<CameraScreen> {
             }
             _applyReadyMeta(meta);
           });
+          // The master-audio flag may have moved to/from this camera.
+          _syncMicEnabled();
         } catch (_) {}
       });
 
@@ -282,6 +338,8 @@ class _CameraScreenState extends State<CameraScreen> {
             if (meta['role'] == 'master-audio') _streamAudioActive = true;
             _applyReadyMeta(meta);
           });
+          // A Stream Audio device joining makes it the source — mute cameras.
+          if (meta['role'] == 'master-audio') _syncMicEnabled();
         } catch (_) {}
       });
 
@@ -295,6 +353,8 @@ class _CameraScreenState extends State<CameraScreen> {
             final userId = meta['userId'] as String?;
             if (userId != null) _crewReady[userId] = false;
           });
+          // Stream Audio left — a master-audio camera may now be the source.
+          if (meta['role'] == 'master-audio') _syncMicEnabled();
         } catch (_) {}
       });
 
@@ -349,6 +409,10 @@ class _CameraScreenState extends State<CameraScreen> {
         _ready = false; // metadata always starts ready: false at token-issue
         _state = CameraState.soundCheck;
       });
+
+      // Reconcile mute now that the real master-audio/Stream-Audio state is set
+      // (the sync inside _applyMicProcessing ran before this setState).
+      await _syncMicEnabled();
 
       // Enter Sound Check in Supabase — best-effort, no-op if not in DB.
       // The show only goes live when Start Show is pressed (_startShow).
@@ -575,6 +639,8 @@ class _CameraScreenState extends State<CameraScreen> {
   Future<void> _endStream() async {
     if (_eventId != null) {
       EventService.end(_eventId!).catchError((_) {});
+      // Stop the replay egress so the recording finalizes. Best-effort.
+      LivekitService.stopEgress(eventId: _eventId!).catchError((_) {});
     }
     await _teardownRoom();
   }
@@ -594,6 +660,7 @@ class _CameraScreenState extends State<CameraScreen> {
       _ready = false;
       _crewReady.clear();
       _joinedLiveShow = false;
+      _viewerPreviewOpen = false;
       _state = CameraState.idle;
     });
   }
@@ -776,19 +843,32 @@ class _CameraScreenState extends State<CameraScreen> {
           ),
         ],
       ),
-      body: Column(
+      body: Stack(
         children: [
-          if (_externalMicConnected &&
-              !_disableAgc &&
-              !_externalMicPromptDismissed)
-            _buildExternalMicBanner(),
-          Expanded(
-            child: switch (_state) {
-              CameraState.idle => _buildForm(),
-              CameraState.connecting => _buildConnecting(),
-              CameraState.soundCheck || CameraState.live => _buildLive(),
-            },
+          Column(
+            children: [
+              if (_externalMicConnected &&
+                  !_disableAgc &&
+                  !_externalMicPromptDismissed)
+                _buildExternalMicBanner(),
+              Expanded(
+                child: switch (_state) {
+                  CameraState.idle => _buildForm(),
+                  CameraState.connecting => _buildConnecting(),
+                  CameraState.soundCheck || CameraState.live => _buildLive(),
+                },
+              ),
+            ],
           ),
+          // Viewer-preview overlay — host camera keeps publishing underneath so
+          // toggling back is instant. Only reachable in host Sound Check.
+          if (_viewerPreviewOpen && _eventId != null)
+            Positioned.fill(
+              child: ViewerPreviewOverlay(
+                eventId: _eventId!,
+                onClose: _closeViewerPreview,
+              ),
+            ),
         ],
       ),
     );
@@ -976,6 +1056,30 @@ class _CameraScreenState extends State<CameraScreen> {
     );
   }
 
+  /// Compact audio meter shown on the live camera view. Fed by this camera's own
+  /// mic; greyed and labelled "MUTED" when this feed isn't the broadcast source.
+  Widget _buildCameraMeter() {
+    final source = _isMainAudioSource;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        AudioMeter(
+          participant: _room!.localParticipant!,
+          height: 140,
+          active: source,
+        ),
+        const SizedBox(height: 8),
+        Text(
+          source ? 'STREAM AUDIO' : 'MUTED',
+          style: NileTextStyles.labelSm().copyWith(
+            color: source ? NileColors.volt : NileColors.txtTertiary,
+            letterSpacing: 1.2,
+          ),
+        ),
+      ],
+    );
+  }
+
   Widget _buildLive() {
     return Stack(
       children: [
@@ -1009,6 +1113,20 @@ class _CameraScreenState extends State<CameraScreen> {
                 ],
               ),
             ),
+          ),
+
+        // ── Audio meter — right edge, vertically centred ───────────────
+        // Every camera shows the same meter the Stream Audio screen uses, fed
+        // by this device's own mic so the operator can confirm it's picking up
+        // sound. Greyed/frozen unless this camera is the broadcast audio source
+        // (i.e. it holds Master Audio and no dedicated Stream Audio is live) —
+        // a muted feed reads as visibly off.
+        if (_room?.localParticipant != null)
+          Positioned(
+            top: 0,
+            bottom: 0,
+            right: 16,
+            child: Center(child: _buildCameraMeter()),
           ),
 
         // ── Status badge — top left ─────────────────────────────────────
@@ -1150,6 +1268,25 @@ class _CameraScreenState extends State<CameraScreen> {
                   _buildCrewPanel(),
                   const SizedBox(height: 12),
                 ],
+                // Open a real viewer connection to check the broadcast audio
+                // path (and video) exactly as a viewer hears it before going
+                // live. Host-only, Sound Check only.
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: _openViewerPreview,
+                    icon: const Icon(Icons.headphones),
+                    label: const Text('View as Viewer'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: NileColors.volt,
+                      side: const BorderSide(color: NileColors.volt),
+                      padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
+                      textStyle: NileTextStyles.labelLg(),
+                      shape: const StadiumBorder(),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
                 SizedBox(
                   width: double.infinity,
                   child: FilledButton.icon(

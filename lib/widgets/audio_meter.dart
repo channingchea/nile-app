@@ -15,7 +15,16 @@ class AudioMeter extends StatefulWidget {
   final Participant participant;
   final double height;
 
-  const AudioMeter({super.key, required this.participant, this.height = 220});
+  /// When false the meter is greyed and frozen at zero — used on a camera whose
+  /// mic isn't the broadcast audio source, so it's clear this feed isn't live.
+  final bool active;
+
+  const AudioMeter({
+    super.key,
+    required this.participant,
+    this.height = 220,
+    this.active = true,
+  });
 
   @override
   State<AudioMeter> createState() => _AudioMeterState();
@@ -46,6 +55,19 @@ class _AudioMeterState extends State<AudioMeter> {
   }
 
   void _tick() {
+    // Inactive (muted, not the broadcast source): hold everything at zero so the
+    // meter reads as visibly off rather than just quiet.
+    if (!widget.active) {
+      if (_level != 0 || _peak != 0 || _clipping) {
+        if (!mounted) return;
+        setState(() {
+          _level = 0;
+          _peak = 0;
+          _clipping = false;
+        });
+      }
+      return;
+    }
     final raw = widget.participant.audioLevel.clamp(0.0, 1.0);
     // light smoothing for the bar, instant for clip detection
     final smoothed = _level + (raw - _level) * 0.5;
@@ -85,7 +107,11 @@ class _AudioMeterState extends State<AudioMeter> {
             border: Border.all(color: NileColors.border),
           ),
           child: CustomPaint(
-            painter: _MeterPainter(level: _level, peak: _peak),
+            painter: _MeterPainter(
+              level: _level,
+              peak: _peak,
+              active: widget.active,
+            ),
             size: Size.infinite,
           ),
         ),
@@ -117,7 +143,8 @@ class _AudioMeterState extends State<AudioMeter> {
 class _MeterPainter extends CustomPainter {
   final double level;
   final double peak;
-  _MeterPainter({required this.level, required this.peak});
+  final bool active;
+  _MeterPainter({required this.level, required this.peak, this.active = true});
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -131,9 +158,12 @@ class _MeterPainter extends CustomPainter {
     final fillH = size.height * level;
     final top = size.height - fillH;
 
-    // color zones by level: green < 0.7, amber < 0.9, coral above
+    // color zones by level: green < 0.7, amber < 0.9, coral above. Greyed when
+    // inactive (this camera isn't the broadcast audio source).
     Color barColor;
-    if (level >= 0.9) {
+    if (!active) {
+      barColor = NileColors.txtTertiary;
+    } else if (level >= 0.9) {
       barColor = NileColors.coral;
     } else if (level >= 0.7) {
       barColor = NileColors.amber;
@@ -161,5 +191,5 @@ class _MeterPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_MeterPainter old) =>
-      old.level != level || old.peak != peak;
+      old.level != level || old.peak != peak || old.active != active;
 }
