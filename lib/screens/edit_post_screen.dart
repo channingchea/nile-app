@@ -16,11 +16,18 @@ class EditPostScreen extends StatefulWidget {
   State<EditPostScreen> createState() => _EditPostScreenState();
 }
 
+/// One slot in the edit screen's image set: either an already-uploaded [url]
+/// or freshly-picked [bytes] awaiting upload.
+class _ImageSlot {
+  final String? url;
+  final Uint8List? bytes;
+  const _ImageSlot.existing(this.url) : bytes = null;
+  const _ImageSlot.fresh(this.bytes) : url = null;
+}
+
 class _EditPostScreenState extends State<EditPostScreen> {
   late final TextEditingController _captionController;
-  Uint8List? _newImageBytes;
-  String? _existingImageUrl;
-  bool _imageCleared = false;
+  final List<_ImageSlot> _slots = [];
   bool _pickingImage = false;
   bool _saving = false;
   String? _error;
@@ -32,7 +39,7 @@ class _EditPostScreenState extends State<EditPostScreen> {
     super.initState();
     _captionController = TextEditingController(text: widget.post.content ?? '');
     _captionController.addListener(() => setState(() {}));
-    _existingImageUrl = widget.post.imageUrl;
+    _slots.addAll(widget.post.images.map(_ImageSlot.existing));
   }
 
   @override
@@ -41,28 +48,26 @@ class _EditPostScreenState extends State<EditPostScreen> {
     super.dispose();
   }
 
-  bool get _hasImage =>
-      _newImageBytes != null || (_existingImageUrl != null && !_imageCleared);
+  bool get _canAddImage => _slots.length < PostService.maxImages;
 
   bool get _canSave {
     final hasCaption = _captionController.text.trim().isNotEmpty;
-    return (_hasImage || hasCaption) && !_saving;
+    return (_slots.isNotEmpty || hasCaption) && !_saving;
   }
 
   Future<void> _pickImage() async {
+    if (!_canAddImage) return;
     setState(() => _pickingImage = true);
     try {
-      final bytes = await ProfileService.pickImageBytes(
+      final picked = await ProfileService.pickMultiImageBytes(
         context,
         maxWidth: 1600,
         maxHeight: 1200,
+        limit: PostService.maxImages - _slots.length,
         allowedAspectRatios: [const CropAspectRatio(width: 4, height: 3)],
       );
-      if (bytes != null && mounted) {
-        setState(() {
-          _newImageBytes = bytes;
-          _imageCleared = false;
-        });
+      if (picked.isNotEmpty && mounted) {
+        setState(() => _slots.addAll(picked.map(_ImageSlot.fresh)));
       }
     } catch (e) {
       if (mounted) {
@@ -75,11 +80,7 @@ class _EditPostScreenState extends State<EditPostScreen> {
     }
   }
 
-  void _removeImage() => setState(() {
-    _newImageBytes = null;
-    _existingImageUrl = null;
-    _imageCleared = true;
-  });
+  void _removeImage(int index) => setState(() => _slots.removeAt(index));
 
   Future<void> _save() async {
     if (!_canSave) return;
@@ -89,16 +90,13 @@ class _EditPostScreenState extends State<EditPostScreen> {
     });
 
     try {
-      String? newImageUrl;
-      if (_newImageBytes != null) {
-        try {
-          newImageUrl = await PostService.uploadImageBytes(_newImageBytes!);
-        } catch (e) {
-          if (mounted) {
-            ScaffoldMessenger.of(
-              context,
-            ).showSnackBar(SnackBar(content: Text('Image upload failed: $e')));
-          }
+      // Resolve each slot to a URL, uploading fresh bytes in order.
+      final imageUrls = <String>[];
+      for (final slot in _slots) {
+        if (slot.url != null) {
+          imageUrls.add(slot.url!);
+        } else if (slot.bytes != null) {
+          imageUrls.add(await PostService.uploadImageBytes(slot.bytes!));
         }
       }
 
@@ -106,8 +104,8 @@ class _EditPostScreenState extends State<EditPostScreen> {
       final updated = await PostService.update(
         postId: widget.post.id,
         content: caption != (widget.post.content ?? '') ? caption : null,
-        imageUrl: newImageUrl,
-        clearImage: _imageCleared,
+        imageUrls: imageUrls,
+        clearImage: imageUrls.isEmpty,
       );
 
       if (!mounted) return;
@@ -181,12 +179,12 @@ class _EditPostScreenState extends State<EditPostScreen> {
                   ),
                 ),
                 const SizedBox(height: 12),
-                if (_hasImage)
-                  _ImageEditor(
-                    bytes: _newImageBytes,
-                    url: _existingImageUrl,
+                if (_slots.isNotEmpty)
+                  _ImageStrip(
+                    slots: _slots,
+                    canAdd: _canAddImage,
                     busy: _pickingImage,
-                    onReplace: _pickingImage ? null : _pickImage,
+                    onAdd: _pickImage,
                     onRemove: _removeImage,
                   )
                 else
@@ -244,88 +242,110 @@ class _EditPostScreenState extends State<EditPostScreen> {
   }
 }
 
-// ── Image editor (shows existing/new image with replace + remove controls) ────
+// ── Image strip (existing + freshly-picked thumbs, remove + add tile) ─────────
 
-class _ImageEditor extends StatelessWidget {
-  final Uint8List? bytes;
-  final String? url;
+class _ImageStrip extends StatelessWidget {
+  final List<_ImageSlot> slots;
+  final bool canAdd;
   final bool busy;
-  final VoidCallback? onReplace;
-  final VoidCallback onRemove;
+  final VoidCallback onAdd;
+  final ValueChanged<int> onRemove;
 
-  const _ImageEditor({
-    required this.bytes,
-    required this.url,
+  const _ImageStrip({
+    required this.slots,
+    required this.canAdd,
     required this.busy,
-    required this.onReplace,
+    required this.onAdd,
     required this.onRemove,
   });
 
   @override
   Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          height: 96,
+          child: ListView.separated(
+            scrollDirection: Axis.horizontal,
+            itemCount: slots.length + (canAdd ? 1 : 0),
+            separatorBuilder: (_, _) => const SizedBox(width: NileSpacing.s8),
+            itemBuilder: (_, i) {
+              if (i == slots.length) return _addTile();
+              return _thumb(slots[i], i);
+            },
+          ),
+        ),
+        const SizedBox(height: 6),
+        Text(
+          '${slots.length}/${PostService.maxImages} photos',
+          style: NileTextStyles.caption(),
+        ),
+      ],
+    );
+  }
+
+  Widget _thumb(_ImageSlot slot, int index) {
     return ClipRRect(
-      borderRadius: BorderRadius.circular(NileRadius.md),
+      borderRadius: BorderRadius.circular(NileRadius.sm),
       child: Stack(
         children: [
-          if (bytes != null)
-            Image.memory(bytes!, fit: BoxFit.cover, width: double.infinity)
-          else if (url != null)
-            Image.network(url!, fit: BoxFit.cover, width: double.infinity, cacheWidth: nileDecodeWidth(600)),
-          if (busy)
-            Positioned.fill(
-              child: ColoredBox(
-                color: Colors.black54,
-                child: const Center(
-                  child: CircularProgressIndicator(color: NileColors.volt),
-                ),
-              ),
+          if (slot.bytes != null)
+            Image.memory(slot.bytes!, width: 96, height: 96, fit: BoxFit.cover)
+          else
+            Image.network(
+              slot.url!,
+              width: 96,
+              height: 96,
+              fit: BoxFit.cover,
+              cacheWidth: nileDecodeWidth(200),
             ),
           Positioned(
-            top: 8,
-            right: 8,
+            top: 2,
+            right: 2,
             child: Material(
               color: Colors.black54,
               shape: const CircleBorder(),
               child: IconButton(
-                icon: const Icon(Icons.close, size: 18, color: Colors.white),
-                onPressed: onRemove,
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+                icon: const Icon(Icons.close, size: 16, color: Colors.white),
+                onPressed: () => onRemove(index),
                 tooltip: 'Remove photo',
               ),
             ),
           ),
-          if (!busy)
-            Positioned(
-              bottom: 8,
-              right: 8,
-              child: Material(
-                color: Colors.black54,
-                shape: const StadiumBorder(),
-                child: InkWell(
-                  onTap: onReplace,
-                  customBorder: const StadiumBorder(),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: NileSpacing.s12,
-                      vertical: NileSpacing.s6,
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const Icon(Icons.edit, size: 14, color: Colors.white),
-                        const SizedBox(width: 4),
-                        Text(
-                          'Replace',
-                          style: NileTextStyles.caption().copyWith(
-                            color: Colors.white,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-            ),
         ],
+      ),
+    );
+  }
+
+  Widget _addTile() {
+    return InkWell(
+      onTap: busy ? null : onAdd,
+      borderRadius: BorderRadius.circular(NileRadius.sm),
+      child: Container(
+        width: 96,
+        height: 96,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(NileRadius.sm),
+          border: Border.all(color: NileColors.border),
+        ),
+        child: Center(
+          child: busy
+              ? const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: NileColors.volt,
+                  ),
+                )
+              : const Icon(
+                  Icons.add_photo_alternate_outlined,
+                  color: NileColors.txtTertiary,
+                ),
+        ),
       ),
     );
   }

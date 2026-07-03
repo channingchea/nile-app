@@ -8,6 +8,7 @@ import '../services/report_service.dart';
 import '../theme.dart';
 import '../widgets/event_link_card.dart';
 import '../widgets/like_button.dart';
+import '../widgets/post_image_carousel.dart';
 import 'profile_screen.dart';
 import 'widgets/load_more_footer.dart';
 import 'widgets/moderation_menu.dart';
@@ -392,26 +393,7 @@ class _PostBody extends StatelessWidget {
             ],
             if (post.hasImage) ...[
               const SizedBox(height: 10),
-              ClipRRect(
-                borderRadius: BorderRadius.circular(NileRadius.sm),
-                child: AspectRatio(
-                  aspectRatio: 4 / 3,
-                  child: Image.network(
-                    post.imageUrl!,
-                    cacheWidth: nileDecodeWidth(600),
-                    fit: BoxFit.cover,
-                    errorBuilder: (_, _, _) => Container(
-                      color: NileColors.bgRaised,
-                      child: const Center(
-                        child: Icon(
-                          Icons.broken_image,
-                          color: NileColors.border,
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
+              PostImageCarousel(imageUrls: post.images),
             ],
             if (post.eventId != null) ...[
               const SizedBox(height: 10),

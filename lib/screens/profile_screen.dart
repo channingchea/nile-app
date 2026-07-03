@@ -17,6 +17,7 @@ import '../widgets/nile_glass_app_bar.dart';
 import '../widgets/event_link_card.dart';
 import '../widgets/nile_glass_nav_bar.dart';
 import '../widgets/nile_skeleton.dart';
+import '../widgets/post_image_carousel.dart';
 import '../widgets/share_to_sheet.dart';
 import 'widgets/moderation_menu.dart';
 import 'post_detail_screen.dart';
@@ -1461,26 +1462,7 @@ class _ProfilePostCard extends StatelessWidget {
               ],
               if (post.hasImage) ...[
                 const SizedBox(height: 10),
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(NileRadius.sm),
-                  child: AspectRatio(
-                    aspectRatio: 4 / 3,
-                    child: Image.network(
-                      post.imageUrl!,
-                      cacheWidth: nileDecodeWidth(600),
-                      fit: BoxFit.cover,
-                      errorBuilder: (_, _, _) => Container(
-                        color: NileColors.bgRaised,
-                        child: const Center(
-                          child: Icon(
-                            Icons.broken_image,
-                            color: NileColors.border,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
+                PostImageCarousel(imageUrls: post.images),
               ],
               if (post.eventId != null) ...[
                 const SizedBox(height: 10),

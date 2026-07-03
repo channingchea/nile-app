@@ -12,6 +12,7 @@ import '../theme.dart';
 import '../widgets/event_cover_pill.dart';
 import '../widgets/event_link_card.dart';
 import '../widgets/like_button.dart';
+import '../widgets/post_image_carousel.dart';
 import '../widgets/nile_glass_nav_bar.dart';
 import '../widgets/nile_skeleton.dart';
 import '../widgets/pressable.dart';
@@ -829,26 +830,7 @@ class _DiscoverPostCard extends StatelessWidget {
               ],
               if (post.hasImage) ...[
                 const SizedBox(height: 8),
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(NileRadius.sm),
-                  child: AspectRatio(
-                    aspectRatio: 4 / 3,
-                    child: Image.network(
-                      post.imageUrl!,
-                      cacheWidth: nileDecodeWidth(600),
-                      fit: BoxFit.cover,
-                      errorBuilder: (_, _, _) => Container(
-                        color: NileColors.bgRaised,
-                        child: const Center(
-                          child: Icon(
-                            Icons.broken_image,
-                            color: NileColors.border,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
+                PostImageCarousel(imageUrls: post.images),
               ],
               if (post.eventId != null) ...[
                 const SizedBox(height: 8),

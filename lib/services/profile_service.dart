@@ -283,10 +283,59 @@ class ProfileService {
     if (picked == null) return null;
 
     final pickedBytes = await picked.readAsBytes();
-
-    // Attempt crop — returns null if user cancels.
     if (!context.mounted) return null;
+    return _cropBytes(
+      context,
+      pickedBytes,
+      cropPathFn: cropPathFn,
+      allowedAspectRatios: allowedAspectRatios,
+    );
+  }
 
+  /// Opens the gallery picker in multi-select mode and crops each picked image
+  /// in turn (same crop UI as [pickImageBytes]). Returns the cropped bytes in
+  /// pick order. [limit] caps how many images are processed; extras are
+  /// dropped. Skips any image the user cancels out of during cropping.
+  static Future<List<Uint8List>> pickMultiImageBytes(
+    BuildContext context, {
+    double maxWidth = 512,
+    double maxHeight = 512,
+    int? limit,
+    CropShapeFn? cropPathFn,
+    List<CropAspectRatio?>? allowedAspectRatios,
+  }) async {
+    final picker = ImagePicker();
+    final picked = await picker.pickMultiImage(
+      maxWidth: maxWidth,
+      maxHeight: maxHeight,
+      imageQuality: 85,
+    );
+    if (picked.isEmpty) return const [];
+
+    final selected = limit != null ? picked.take(limit).toList() : picked;
+    final out = <Uint8List>[];
+    for (final file in selected) {
+      final raw = await file.readAsBytes();
+      if (!context.mounted) break;
+      final cropped = await _cropBytes(
+        context,
+        raw,
+        cropPathFn: cropPathFn,
+        allowedAspectRatios: allowedAspectRatios,
+      );
+      if (cropped != null) out.add(cropped);
+    }
+    return out;
+  }
+
+  /// Shows the crop UI for [pickedBytes] and returns the result (or the
+  /// original resized bytes if the user dismisses the crop screen).
+  static Future<Uint8List?> _cropBytes(
+    BuildContext context,
+    Uint8List pickedBytes, {
+    CropShapeFn? cropPathFn,
+    List<CropAspectRatio?>? allowedAspectRatios,
+  }) async {
     // If exactly one aspect ratio is specified, build initialData with the
     // crop rect pre-set to that ratio so the crop is locked from the start.
     CroppableImageData? initialData;

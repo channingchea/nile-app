@@ -14,7 +14,8 @@ class Post {
   final String authorUsername;
   final String? authorAvatarUrl;
   final String? content; // maps to posts.content (the caption/body)
-  final String? imageUrl;
+  final String? imageUrl; // first image — mirror of imageUrls[0], legacy compat
+  final List<String> imageUrls; // up to 5; image_url remains the first
   final int likeCount;
   final int commentCount;
   final int repostCount;
@@ -37,6 +38,7 @@ class Post {
     this.authorAvatarUrl,
     this.content,
     this.imageUrl,
+    this.imageUrls = const [],
     this.likeCount = 0,
     this.commentCount = 0,
     this.repostCount = 0,
@@ -51,7 +53,13 @@ class Post {
   /// Convenience getter — caller-friendly alias for `content`.
   String? get caption => content;
 
-  bool get hasImage => imageUrl != null && imageUrl!.isNotEmpty;
+  /// All images for this post, newest schema first. Falls back to the legacy
+  /// single [imageUrl] when [imageUrls] is empty.
+  List<String> get images => imageUrls.isNotEmpty
+      ? imageUrls
+      : (imageUrl != null && imageUrl!.isNotEmpty ? [imageUrl!] : const []);
+
+  bool get hasImage => images.isNotEmpty;
   bool get hasCaption => content != null && content!.trim().isNotEmpty;
 
   Post copyWith({
@@ -69,6 +77,7 @@ class Post {
       authorAvatarUrl: authorAvatarUrl,
       content: content,
       imageUrl: imageUrl,
+      imageUrls: imageUrls,
       likeCount: likeCount ?? this.likeCount,
       commentCount: commentCount ?? this.commentCount,
       repostCount: repostCount ?? this.repostCount,
@@ -93,6 +102,9 @@ class Post {
       authorAvatarUrl: profile['avatar_url'] as String?,
       content: json['content'] as String?,
       imageUrl: json['image_url'] as String?,
+      imageUrls:
+          (json['image_urls'] as List?)?.map((e) => e as String).toList() ??
+          const [],
       likeCount: (json['like_count'] as num?)?.toInt() ?? 0,
       commentCount: (json['comment_count'] as num?)?.toInt() ?? 0,
       repostCount: (json['repost_count'] as num?)?.toInt() ?? 0,
@@ -202,10 +214,14 @@ class PostService {
     );
   }
 
-  /// Insert a new post and return the hydrated row.
+  /// Max images allowed on a single post.
+  static const int maxImages = 5;
+
+  /// Insert a new post and return the hydrated row. [imageUrls] holds up to
+  /// [maxImages] URLs; image_url mirrors the first for legacy compatibility.
   static Future<Post> create({
     String? content,
-    String? imageUrl,
+    List<String> imageUrls = const [],
     String? eventId,
   }) async {
     final uid = supabase.auth.currentUser?.id;
@@ -213,8 +229,8 @@ class PostService {
 
     final body = content?.trim();
     final hasBody = body != null && body.isNotEmpty;
-    final hasImage = imageUrl != null && imageUrl.isNotEmpty;
-    if (!hasBody && !hasImage) {
+    final images = imageUrls.take(maxImages).toList();
+    if (!hasBody && images.isEmpty) {
       throw ArgumentError('Post must have content or an image.');
     }
 
@@ -223,7 +239,8 @@ class PostService {
         .insert({
           'user_id': uid,
           'content': body ?? '',
-          if (hasImage) 'image_url': imageUrl,
+          if (images.isNotEmpty) 'image_url': images.first,
+          if (images.isNotEmpty) 'image_urls': images,
           'event_id': ?eventId,
         })
         .select(_postSelect)
@@ -233,17 +250,23 @@ class PostService {
   }
 
   /// Update mutable fields on a post. Only the current user's posts (RLS).
+  /// Pass [imageUrls] to replace the full image set (capped at [maxImages]);
+  /// [clearImage] wipes all images.
   static Future<Post> update({
     required String postId,
     String? content,
-    String? imageUrl,
+    List<String>? imageUrls,
     bool clearImage = false,
   }) async {
-    final updates = <String, dynamic>{
-      'content': ?content,
-      'image_url': ?imageUrl,
-      if (clearImage) 'image_url': null,
-    };
+    final updates = <String, dynamic>{'content': ?content};
+    if (clearImage) {
+      updates['image_url'] = null;
+      updates['image_urls'] = null;
+    } else if (imageUrls != null) {
+      final images = imageUrls.take(maxImages).toList();
+      updates['image_url'] = images.isEmpty ? null : images.first;
+      updates['image_urls'] = images.isEmpty ? null : images;
+    }
     final row = await supabase
         .from('posts')
         .update(updates)
@@ -314,5 +337,14 @@ class PostService {
           ),
         );
     return supabase.storage.from('posts').getPublicUrl(path);
+  }
+
+  /// Upload several images sequentially, returning their public URLs in order.
+  static Future<List<String>> uploadImagesBytes(List<Uint8List> images) async {
+    final urls = <String>[];
+    for (final bytes in images) {
+      urls.add(await uploadImageBytes(bytes));
+    }
+    return urls;
   }
 }

@@ -7,7 +7,7 @@ import '../theme.dart';
 /// the feed card and post detail.
 class PostImageCarousel extends StatefulWidget {
   final List<String> imageUrls;
-  final int decodeWidth;
+  final double decodeWidth;
 
   const PostImageCarousel({
     super.key,
