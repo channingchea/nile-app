@@ -85,6 +85,42 @@ class LivekitService {
   static Future<void> startShow({required String eventId}) =>
       _invoke<Map>({'action': 'start-show', 'eventId': eventId});
 
+  /// Host: stop the replay egress so the recording finalizes. Call when ending
+  /// the show. Best-effort — the live show already ended via EventService.end,
+  /// and the server-side auto-end + stuck-row sweep cover any missed call.
+  static Future<void> stopEgress({required String eventId}) =>
+      _invoke<Map>({'action': 'stop-egress', 'eventId': eventId});
+
+  /// Viewer: whether a ready replay exists that this user may watch, plus whether
+  /// the caller is authorized at all (so a paid event with no ticket can still
+  /// surface a "buy to watch the replay" CTA). Returns a falsey default on error.
+  static Future<ReplayAvailability> replayExists({required String eventId}) async {
+    try {
+      final d = await _invoke<Map>({'action': 'replay-exists', 'eventId': eventId});
+      return ReplayAvailability(
+        available: d['available'] as bool? ?? false,
+        authorized: d['authorized'] as bool? ?? false,
+        hasReplay: d['hasReplay'] as bool? ?? false,
+      );
+    } catch (_) {
+      return const ReplayAvailability(available: false, authorized: false, hasReplay: false);
+    }
+  }
+
+  /// Viewer: signed playback URL for a ready replay (ticket-gated). Returns null
+  /// if no replay is available or the user isn't authorized.
+  static Future<ReplayPlayback?> replayUrl({required String eventId}) async {
+    try {
+      final d = await _invoke<Map>({'action': 'replay-url', 'eventId': eventId});
+      final url = d['url'] as String?;
+      if (url == null) return null;
+      return ReplayPlayback(url: url, durationMs: (d['durationMs'] as num?)?.toInt());
+    } catch (_) {
+      // 403/404 → no replay for this user; treat as "not available".
+      return null;
+    }
+  }
+
   /// Viewer: ticket-gated connection descriptor. Identity comes from the JWT.
   /// Today `mode` is always "webrtc"; the seam allows "hls" at much higher scale.
   static Future<ViewerConnection> viewerToken({required String eventId}) async {
@@ -119,5 +155,29 @@ class ViewerConnection {
     required this.mode,
     required this.token,
     required this.wsUrl,
+  });
+}
+
+class ReplayPlayback {
+  final String url; // short-lived signed URL to the composited replay MP4
+  final int? durationMs;
+  const ReplayPlayback({required this.url, this.durationMs});
+}
+
+class ReplayAvailability {
+  /// A ready replay exists AND the caller may watch it now → show "Watch Replay".
+  final bool available;
+
+  /// The caller passes the paid-ticket gate (host/operator/ticket or free event).
+  final bool authorized;
+
+  /// A ready replay exists for the event, regardless of this caller's access.
+  /// `available && !authorized` is exactly the "buy a ticket to watch" case.
+  final bool hasReplay;
+
+  const ReplayAvailability({
+    required this.available,
+    required this.authorized,
+    required this.hasReplay,
   });
 }

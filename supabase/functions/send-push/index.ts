@@ -54,6 +54,8 @@ function buildMessage(p: Payload): { title: string; body: string } {
       return { title: who, body: "Sent you a message" };
     case "message_reaction":
       return { title: who, body: "Reacted to your message" };
+    case "replay_ready":
+      return { title: "Replay ready", body: `${who}'s replay is ready to watch` };
     default:
       return { title: "Nile", body: "You have a new notification" };
   }

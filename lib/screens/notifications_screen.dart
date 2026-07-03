@@ -118,6 +118,7 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
       case NotificationType.eventLive:
       case NotificationType.eventEnded:
       case NotificationType.operatorAssigned:
+      case NotificationType.replayReady:
         if (n.entityId == null) return;
         final event = await EventService.fetchById(n.entityId!);
         if (!mounted || event == null) return;
@@ -235,13 +236,15 @@ class _NotificationTile extends StatelessWidget {
       '@${notification.actorUsername}’s event starts in 15 minutes',
     NotificationType.eventLive => '@${notification.actorUsername} is live now',
     NotificationType.eventEnded =>
-      '@${notification.actorUsername}’s event ended — replay is ready',
+      '@${notification.actorUsername}’s event ended',
     NotificationType.operatorAssigned =>
       '@${notification.actorUsername} added you as a camera operator',
     NotificationType.newMessage =>
       '@${notification.actorUsername} sent you a message',
     NotificationType.messageReaction =>
       '@${notification.actorUsername} reacted to your message',
+    NotificationType.replayReady =>
+      '@${notification.actorUsername}’s replay is ready to watch',
   };
 
   IconData _icon() => switch (notification.type) {
@@ -254,6 +257,7 @@ class _NotificationTile extends StatelessWidget {
     NotificationType.operatorAssigned => Icons.videocam,
     NotificationType.newMessage => Icons.send_rounded,
     NotificationType.messageReaction => Icons.favorite,
+    NotificationType.replayReady => Icons.play_circle_fill,
   };
 
   Color _iconColor() => switch (notification.type) {
@@ -266,6 +270,7 @@ class _NotificationTile extends StatelessWidget {
     NotificationType.operatorAssigned => NileColors.azure,
     NotificationType.newMessage => NileColors.volt,
     NotificationType.messageReaction => NileColors.coral,
+    NotificationType.replayReady => NileColors.volt,
   };
 
   String _timeAgo(DateTime dt) {

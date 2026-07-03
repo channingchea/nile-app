@@ -13,6 +13,7 @@ enum NotificationType {
   operatorAssigned,
   newMessage,
   messageReaction,
+  replayReady,
 }
 
 class AppNotification {
@@ -67,6 +68,7 @@ class AppNotification {
     'operator_assigned' => NotificationType.operatorAssigned,
     'new_message' => NotificationType.newMessage,
     'message_reaction' => NotificationType.messageReaction,
+    'replay_ready' => NotificationType.replayReady,
     _ => NotificationType.follow,
   };
 }
