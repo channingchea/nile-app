@@ -80,6 +80,8 @@ class _ViewerPreviewOverlayState extends State<ViewerPreviewOverlay> {
       listener
         ..on<TrackSubscribedEvent>((_) => _resync())
         ..on<TrackUnsubscribedEvent>((_) => _resync())
+        ..on<TrackMutedEvent>((_) => _resync())
+        ..on<TrackUnmutedEvent>((_) => _resync())
         ..on<ParticipantConnectedEvent>((_) => _resync())
         ..on<ParticipantDisconnectedEvent>((_) => _resync())
         ..on<ParticipantMetadataUpdatedEvent>((_) => _resync());
@@ -88,7 +90,8 @@ class _ViewerPreviewOverlayState extends State<ViewerPreviewOverlay> {
           .connect(conn.wsUrl, conn.token)
           .timeout(
             const Duration(seconds: 15),
-            onTimeout: () => throw Exception('Connection timed out. Try again.'),
+            onTimeout: () =>
+                throw Exception('Connection timed out. Try again.'),
           );
 
       // Subscribe to every remote audio/video track regardless of event status
@@ -175,7 +178,9 @@ class _ViewerPreviewOverlayState extends State<ViewerPreviewOverlay> {
   VideoTrack? _firstVideo(RemoteParticipant? p) {
     if (p == null) return null;
     for (final pub in p.videoTrackPublications) {
-      if (pub.subscribed && pub.track is VideoTrack) {
+      // A muted publication is still "subscribed" but delivers black frames —
+      // skip it so _resync falls through to a camera that's actually sending.
+      if (pub.subscribed && !pub.muted && pub.track is VideoTrack) {
         return pub.track as VideoTrack;
       }
     }
@@ -226,7 +231,9 @@ class _ViewerPreviewOverlayState extends State<ViewerPreviewOverlay> {
         const SizedBox(height: NileSpacing.s8),
         Text(
           _errorMessage ?? 'Unknown error.',
-          style: NileTextStyles.bodySm().copyWith(color: NileColors.txtSecondary),
+          style: NileTextStyles.bodySm().copyWith(
+            color: NileColors.txtSecondary,
+          ),
           textAlign: TextAlign.center,
         ),
         const SizedBox(height: NileSpacing.s24),
@@ -269,56 +276,63 @@ class _ViewerPreviewOverlayState extends State<ViewerPreviewOverlay> {
         const SizedBox(height: NileSpacing.s4),
         Text(
           'Your mic is muted while you monitor. Use headphones to avoid feedback.',
-          style: NileTextStyles.bodySm().copyWith(color: NileColors.txtSecondary),
+          style: NileTextStyles.bodySm().copyWith(
+            color: NileColors.txtSecondary,
+          ),
         ),
         const SizedBox(height: NileSpacing.s24),
         // ── Audio-forward: the meter is the hero element ─────────────────
+        // FittedBox scales the fixed-height meter down instead of overflowing
+        // when the window is short (macOS resize / small screens).
         Expanded(
           child: Center(
-            child: hasAudio
-                ? Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      AudioMeter(
-                        participant: _audioParticipant!,
-                        height: 220,
-                        active: true,
-                      ),
-                      const SizedBox(height: NileSpacing.s12),
-                      Text(
-                        'STREAM AUDIO',
-                        style: NileTextStyles.labelSm().copyWith(
-                          color: NileColors.volt,
-                          letterSpacing: 1.2,
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
+              child: hasAudio
+                  ? Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        AudioMeter(
+                          participant: _audioParticipant!,
+                          height: 220,
+                          active: true,
                         ),
-                      ),
-                    ],
-                  )
-                : Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Icon(
-                        Icons.graphic_eq,
-                        size: 48,
-                        color: NileColors.txtTertiary,
-                      ),
-                      const SizedBox(height: NileSpacing.s12),
-                      Text(
-                        'No stream audio yet',
-                        style: NileTextStyles.bodyMd().copyWith(
-                          color: NileColors.txtSecondary,
+                        const SizedBox(height: NileSpacing.s12),
+                        Text(
+                          'STREAM AUDIO',
+                          style: NileTextStyles.labelSm().copyWith(
+                            color: NileColors.volt,
+                            letterSpacing: 1.2,
+                          ),
                         ),
-                      ),
-                      const SizedBox(height: NileSpacing.s4),
-                      Text(
-                        'Waiting for the Stream Audio operator to start.',
-                        style: NileTextStyles.bodySm().copyWith(
+                      ],
+                    )
+                  : Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(
+                          Icons.graphic_eq,
+                          size: 48,
                           color: NileColors.txtTertiary,
                         ),
-                        textAlign: TextAlign.center,
-                      ),
-                    ],
-                  ),
+                        const SizedBox(height: NileSpacing.s12),
+                        Text(
+                          'No stream audio yet',
+                          style: NileTextStyles.bodyMd().copyWith(
+                            color: NileColors.txtSecondary,
+                          ),
+                        ),
+                        const SizedBox(height: NileSpacing.s4),
+                        Text(
+                          'Waiting for the Stream Audio operator to start.',
+                          style: NileTextStyles.bodySm().copyWith(
+                            color: NileColors.txtTertiary,
+                          ),
+                          textAlign: TextAlign.center,
+                        ),
+                      ],
+                    ),
+            ),
           ),
         ),
         // ── Secondary video preview ──────────────────────────────────────
@@ -328,7 +342,13 @@ class _ViewerPreviewOverlayState extends State<ViewerPreviewOverlay> {
             borderRadius: BorderRadius.circular(NileRadius.md),
             child: AspectRatio(
               aspectRatio: 16 / 9,
-              child: VideoTrackRenderer(_videoTrack!),
+              // Keyed by track sid so Flutter tears down and re-attaches the
+              // platform view when the track changes (a reused renderer can
+              // keep painting black after a swap).
+              child: VideoTrackRenderer(
+                key: ValueKey(_videoTrack!.sid),
+                _videoTrack!,
+              ),
             ),
           ),
         ],
