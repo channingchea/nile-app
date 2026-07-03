@@ -1,22 +1,32 @@
 // Supabase Edge Function: create-ad-payment
 //
-// Phase A-2 — host boosts. Creates a Stripe Checkout Session (hosted web page)
-// that charges a host to boost their own event. Unlike create-payment-intent
-// (ticket sales, which split to the host via Connect), this is PLATFORM-WARD:
-// the host pays the platform, so there is NO Connect destination / application
-// fee. All checkout happens on the web ad portal — never in-app — so no iOS IAP.
+// Handles TWO checkout paths, both platform-ward (advertiser pays the platform;
+// no Connect destination / application fee) and both on the web ad portal — never
+// in-app — so no iOS IAP:
+//
+//   1) HOST BOOST (A-2).  { event_id, budget_cents, duration_days }
+//      Host boosts their own event. Campaign → active on payment (webhook).
+//
+//   2) STANDALONE CREATIVE AD (A-4 Part 2).
+//      { advertiser_account_id, headline, body, click_url, image_url,
+//        topic_ids?, budget_cents, duration_days }
+//      External brand runs a creative ad targeting neither event nor post.
+//      This fn creates the campaign (pending_payment, advertiser_account_id set,
+//      advertiser_id null) + ad_creatives + ad_targeting rows server-side, then a
+//      Checkout Session with capture_method: manual — checkout only AUTHORIZES
+//      the card (2026-07-01). The webhook flips it to pending_review (NOT
+//      active); admin approval (review-ad-campaign fn) captures the
+//      PaymentIntent, and rejection cancels the authorization so no money ever
+//      moves. Stripe auth holds last ~7 days — that window is the review SLA.
 //
 // Setup:
 //   supabase secrets set STRIPE_SECRET_KEY=sk_test_...
 //   supabase secrets set AD_SUCCESS_URL=https://links.joinnile.com/boost-success
 //   supabase secrets set AD_CANCEL_URL=https://links.joinnile.com/boost
+//   supabase secrets set AD_PORTAL_URL=https://ads.joinnile.com   (standalone redirects; optional, this is the default)
 //   supabase functions deploy create-ad-payment        (KEEP JWT on — reads the user session)
 //
-// Request (POST, Bearer = user JWT):
-//   { "event_id": "uuid", "budget_cents": 2500, "duration_days": 7 }
-//
-// Response:
-//   { "checkout_url": "https://checkout.stripe.com/..." }  or  { "error": "..." }
+// Response: { "checkout_url": "https://checkout.stripe.com/..." }  or  { "error": "..." }
 
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
@@ -32,9 +42,19 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
-// Allowed boost budgets (cents) — mirrors the portal's $10 / $25 / $50 presets.
+// Allowed budgets/durations — same presets for host boosts and standalone ads.
 const ALLOWED_BUDGETS = new Set([1000, 2500, 5000]);
 const ALLOWED_DURATIONS = new Set([3, 7, 14]);
+
+const HEADLINE_MAX = 60;
+const BODY_MAX = 150;
+
+// Base URL of the advertiser web portal, for standalone success/cancel redirects.
+// The portal is a single Vue island at /advertise/portal on the ads subdomain.
+function portalUrl() {
+  const base = (Deno.env.get("AD_PORTAL_URL") ?? "https://ads.joinnile.com").replace(/\/$/, "");
+  return `${base}/advertise/portal`;
+}
 
 serve(async (req) => {
   if (req.method === "OPTIONS") {
@@ -54,84 +74,211 @@ serve(async (req) => {
     const { data: { user }, error: authError } = await supabase.auth.getUser();
     if (authError || !user) return json({ error: "Unauthorized" }, 401);
 
-    const { event_id, budget_cents, duration_days } = await req.json();
-    if (!event_id || !ALLOWED_BUDGETS.has(budget_cents) || !ALLOWED_DURATIONS.has(duration_days)) {
-      return json({ error: "Invalid request body" }, 400);
+    const body = await req.json();
+    const { budget_cents, duration_days } = body;
+    if (!ALLOWED_BUDGETS.has(budget_cents) || !ALLOWED_DURATIONS.has(duration_days)) {
+      return json({ error: "Invalid budget or duration" }, 400);
     }
 
-    const adminClient = createClient(
+    const admin = createClient(
       Deno.env.get("SUPABASE_URL")!,
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
     );
 
-    // A host may only boost their OWN event. Verify ownership server-side.
-    const { data: ev } = await adminClient
-      .from("events")
-      .select("id, host_id, title, status")
-      .eq("id", event_id)
-      .maybeSingle();
-    if (!ev) return json({ error: "Event not found" }, 404);
-    if (ev.host_id !== user.id) return json({ error: "Not your event" }, 403);
-    if (ev.status === "ended") return json({ error: "Event has ended" }, 409);
-
     const now = new Date();
     const endsAt = new Date(now.getTime() + duration_days * 86_400_000);
 
-    // Pre-create the campaign as pending_payment. The webhook flips it to active
-    // and stores the real PaymentIntent id once Stripe confirms the charge.
-    const { data: campaign, error: campErr } = await adminClient
-      .from("ad_campaigns")
-      .insert({
-        advertiser_id: ev.host_id,
-        name: `Boost: ${ev.title}`,
-        event_id,
-        pricing_model: "flat",
-        budget_cents,
-        starts_at: now.toISOString(),
-        ends_at: endsAt.toISOString(),
-        status: "pending_payment",
-      })
-      .select("id")
-      .single();
-    if (campErr || !campaign) return json({ error: "Could not create campaign" }, 500);
-
-    const session = await stripe.checkout.sessions.create({
-      payment_method_types: ["card"],
-      line_items: [
-        {
-          price_data: {
-            currency: "usd",
-            unit_amount: budget_cents,
-            product_data: { name: `Boost “${ev.title}” (${duration_days} days)` },
-          },
-          quantity: 1,
-        },
-      ],
-      mode: "payment",
-      success_url: `${Deno.env.get("AD_SUCCESS_URL")}?campaign_id=${campaign.id}&session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${Deno.env.get("AD_CANCEL_URL")}?event=${event_id}`,
-      // type lets the shared stripe-webhook branch to the ad path; campaign_id
-      // is matched on checkout.session.completed to flip status → active.
-      metadata: {
-        type: "ad_campaign",
-        campaign_id: campaign.id,
-        advertiser_id: ev.host_id,
-      },
-    });
-
-    // Store session.id so the webhook can match (PaymentIntent is null here,
-    // same pattern as create-payment-intent / stripe-webhook for tickets).
-    await adminClient
-      .from("ad_campaigns")
-      .update({ stripe_payment_intent_id: session.id })
-      .eq("id", campaign.id);
-
-    return json({ checkout_url: session.url });
+    // Branch: standalone creative ad vs. host boost. advertiser_account_id present
+    // ⇒ standalone; otherwise fall through to the legacy event-boost path.
+    if (body.advertiser_account_id) {
+      return await createStandaloneAd(admin, user.id, body, now, endsAt);
+    }
+    return await createHostBoost(admin, user.id, body, now, endsAt);
   } catch (err) {
     console.error(err);
     return json({ error: String(err) }, 500);
   }
 });
+
+// ── Host boost (A-2) — unchanged behavior ────────────────────────────────────
+async function createHostBoost(
+  admin: ReturnType<typeof createClient>,
+  userId: string,
+  body: any,
+  now: Date,
+  endsAt: Date,
+) {
+  const { event_id, budget_cents, duration_days } = body;
+  if (!event_id) return json({ error: "Missing event_id" }, 400);
+
+  const { data: ev } = await admin
+    .from("events")
+    .select("id, host_id, title, status")
+    .eq("id", event_id)
+    .maybeSingle();
+  if (!ev) return json({ error: "Event not found" }, 404);
+  if (ev.host_id !== userId) return json({ error: "Not your event" }, 403);
+  if (ev.status === "ended") return json({ error: "Event has ended" }, 409);
+
+  const { data: campaign, error: campErr } = await admin
+    .from("ad_campaigns")
+    .insert({
+      advertiser_id: ev.host_id,
+      name: `Boost: ${ev.title}`,
+      event_id,
+      pricing_model: "flat",
+      budget_cents,
+      starts_at: now.toISOString(),
+      ends_at: endsAt.toISOString(),
+      status: "pending_payment",
+    })
+    .select("id")
+    .single();
+  if (campErr || !campaign) return json({ error: "Could not create campaign" }, 500);
+
+  const session = await stripe.checkout.sessions.create({
+    payment_method_types: ["card"],
+    line_items: [{
+      price_data: {
+        currency: "usd",
+        unit_amount: budget_cents,
+        product_data: { name: `Boost “${ev.title}” (${duration_days} days)` },
+      },
+      quantity: 1,
+    }],
+    mode: "payment",
+    success_url: `${Deno.env.get("AD_SUCCESS_URL")}?campaign_id=${campaign.id}&session_id={CHECKOUT_SESSION_ID}`,
+    cancel_url: `${Deno.env.get("AD_CANCEL_URL")}?event=${event_id}`,
+    // standalone:"0" ⇒ webhook activates immediately.
+    metadata: { type: "ad_campaign", standalone: "0", campaign_id: campaign.id },
+  });
+
+  await admin.from("ad_campaigns")
+    .update({ stripe_payment_intent_id: session.id })
+    .eq("id", campaign.id);
+
+  return json({ checkout_url: session.url });
+}
+
+// ── Standalone creative ad (A-4 Part 2) ──────────────────────────────────────
+async function createStandaloneAd(
+  admin: ReturnType<typeof createClient>,
+  userId: string,
+  body: any,
+  now: Date,
+  endsAt: Date,
+) {
+  const {
+    advertiser_account_id, headline, body: adBody, click_url, image_url,
+    topic_ids, budget_cents, duration_days,
+  } = body;
+
+  // Validate creative fields.
+  const hl = (headline ?? "").trim();
+  const bd = (adBody ?? "").trim();
+  if (!hl || hl.length > HEADLINE_MAX) return json({ error: "Invalid headline" }, 400);
+  if (!bd || bd.length > BODY_MAX) return json({ error: "Invalid body" }, 400);
+  if (!image_url) return json({ error: "Missing creative image" }, 400);
+  let url: URL;
+  try { url = new URL(click_url); } catch { return json({ error: "Invalid click URL" }, 400); }
+  if (url.protocol !== "https:") return json({ error: "Click URL must be https" }, 400);
+  const topics: string[] = Array.isArray(topic_ids) ? topic_ids.filter(Boolean) : [];
+
+  // Verify the caller owns this advertiser account.
+  const { data: account } = await admin
+    .from("advertiser_accounts")
+    .select("id, name, auth_user_id")
+    .eq("id", advertiser_account_id)
+    .maybeSingle();
+  if (!account) return json({ error: "Advertiser account not found" }, 404);
+  if (account.auth_user_id !== userId) return json({ error: "Not your account" }, 403);
+
+  // Review finding #4: image_url must point at OUR ad-creatives bucket, inside
+  // THIS account's folder (the portal uploads to {account_id}/{uuid}.{ext} —
+  // the same convention the bucket's insert RLS enforces). Rejects arbitrary
+  // external URLs and other accounts' creatives; manual review stays the
+  // content backstop, this closes the abuse hole cheaply.
+  const supaBase = Deno.env.get("SUPABASE_URL")!.replace(/\/$/, "");
+  const creativePrefix =
+    `${supaBase}/storage/v1/object/public/ad-creatives/${advertiser_account_id}/`;
+  if (typeof image_url !== "string" || !image_url.startsWith(creativePrefix)) {
+    return json({ error: "Creative image must be uploaded through the portal" }, 400);
+  }
+
+  // Create campaign (advertiser_id null; owned via advertiser_account_id).
+  const { data: campaign, error: campErr } = await admin
+    .from("ad_campaigns")
+    .insert({
+      advertiser_account_id,
+      name: hl,
+      pricing_model: "flat",
+      budget_cents,
+      starts_at: now.toISOString(),
+      ends_at: endsAt.toISOString(),
+      status: "pending_payment",
+    })
+    .select("id")
+    .single();
+  if (campErr || !campaign) {
+    console.error(campErr);
+    return json({ error: "Could not create campaign" }, 500);
+  }
+
+  // Creative + targeting. On failure, roll back the campaign so no orphan sits in
+  // pending_payment forever (get_feed_ads already guards creative-less rows, but
+  // cleanliness matters for the review queue).
+  const { error: crErr } = await admin.from("ad_creatives").insert({
+    campaign_id: campaign.id,
+    image_url,
+    headline: hl,
+    body: bd,
+    click_url,
+  });
+  if (crErr) {
+    await admin.from("ad_campaigns").delete().eq("id", campaign.id);
+    console.error(crErr);
+    return json({ error: "Could not save creative" }, 500);
+  }
+
+  const { error: tgErr } = await admin.from("ad_targeting").insert({
+    campaign_id: campaign.id,
+    topic_ids: topics, // empty ⇒ broad targeting (intended fallback)
+  });
+  if (tgErr) {
+    await admin.from("ad_creatives").delete().eq("campaign_id", campaign.id);
+    await admin.from("ad_campaigns").delete().eq("id", campaign.id);
+    console.error(tgErr);
+    return json({ error: "Could not save targeting" }, 500);
+  }
+
+  const session = await stripe.checkout.sessions.create({
+    payment_method_types: ["card"],
+    line_items: [{
+      price_data: {
+        currency: "usd",
+        unit_amount: budget_cents,
+        product_data: { name: `Nile ad: “${hl}” (${duration_days} days)` },
+      },
+      quantity: 1,
+    }],
+    mode: "payment",
+    // Authorize only — the review-ad-campaign fn captures on approve or cancels
+    // on reject. Host boosts (no review step) keep automatic capture.
+    payment_intent_data: { capture_method: "manual" },
+    // Standalone checkout returns into the advertiser portal (not the host-boost
+    // page). AD_PORTAL_URL defaults to https://ads.joinnile.com.
+    success_url: `${portalUrl()}?campaign_id=${campaign.id}&session_id={CHECKOUT_SESSION_ID}`,
+    cancel_url: portalUrl(),
+    // standalone:"1" ⇒ webhook flips to pending_review (human approval), not active.
+    metadata: { type: "ad_campaign", standalone: "1", campaign_id: campaign.id },
+  });
+
+  await admin.from("ad_campaigns")
+    .update({ stripe_payment_intent_id: session.id })
+    .eq("id", campaign.id);
+
+  return json({ checkout_url: session.url });
+}
 
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {

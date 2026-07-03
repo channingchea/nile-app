@@ -162,6 +162,7 @@ class _ReportSheetState extends State<_ReportSheet> {
     ReportTargetType.post => 'post',
     ReportTargetType.event => 'event',
     ReportTargetType.comment => 'comment',
+    ReportTargetType.ad => 'ad',
   };
 
   Future<void> _submit() async {

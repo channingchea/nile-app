@@ -47,6 +47,10 @@ class SearchService {
     final offset = int.tryParse(cursor ?? '') ?? 0;
 
     var b = filter(supabase.from('profiles').select());
+    // Hide profiles that never finished onboarding (e.g. web advertiser
+    // signups, which get a `profiles` row via handle_new_user but never set
+    // onboarded_at). Direct profile views are intentionally unaffected.
+    b = b.not('onboarded_at', 'is', null);
     if (myId != null) b = b.neq('id', myId);
     final blocked = _notInList(await BlockService.blockedIds());
     if (blocked != null) b = b.not('id', 'in', blocked);

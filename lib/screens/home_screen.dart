@@ -1,5 +1,8 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:visibility_detector/visibility_detector.dart';
 import '../services/ad_service.dart';
 import '../services/event_repost_service.dart';
@@ -10,6 +13,7 @@ import '../services/like_service.dart';
 import '../services/notification_service.dart';
 import '../services/pagination.dart' show Paged;
 import '../services/post_service.dart';
+import '../services/report_service.dart';
 import '../services/repost_service.dart';
 import '../services/search_service.dart';
 import '../theme.dart';
@@ -19,6 +23,7 @@ import '../widgets/like_button.dart';
 import '../widgets/nile_glass_app_bar.dart';
 import '../widgets/nile_glass_nav_bar.dart';
 import '../widgets/nile_skeleton.dart';
+import '../widgets/post_image_carousel.dart';
 import '../widgets/pressable.dart';
 import '../widgets/share_to_sheet.dart';
 import '../widgets/empty_state.dart';
@@ -35,6 +40,7 @@ import 'post_detail_screen.dart';
 import 'profile_screen.dart';
 import 'viewer_screen.dart';
 import 'widgets/load_more_footer.dart';
+import 'widgets/moderation_menu.dart';
 
 // ── Shell ─────────────────────────────────────────────────────────────────────
 
@@ -306,6 +312,20 @@ class _PostFeedItem extends _FeedItem {
   DateTime get sortKey => sortOverride ?? post.createdAt;
 }
 
+/// A standalone advertiser creative (Phase A-4): an external ad that is neither
+/// an event nor a post, so it carries no like/comment/repost mutation paths.
+/// Always sponsored. Injected like other ads; never authored by a Nile user.
+class _AdFeedItem extends _FeedItem {
+  final AdCreative creative;
+  @override
+  final String adCampaignId;
+  _AdFeedItem(this.creative, {required this.adCampaignId});
+  @override
+  bool get fromNetwork => false;
+  @override
+  DateTime get sortKey => DateTime.now();
+}
+
 class _FeedTabState extends State<_FeedTab> {
   List<_FeedItem>? _items;
   bool _noFollows = false;
@@ -326,6 +346,9 @@ class _FeedTabState extends State<_FeedTab> {
   // added when a card logs an impression and removed when it scrolls fully out
   // of view, so each distinct viewing counts once.
   final Set<String> _loggedImpressions = {};
+  // Dwell timers: an impression only counts after the card has stayed ≥50%
+  // visible for 1s, so fast scroll-pasts don't log (honest CPM).
+  final Map<String, Timer> _impressionTimers = {};
 
   // Pagination — independent cursors per source, merged into [_items].
   final _scroll = ScrollController();
@@ -384,6 +407,13 @@ class _FeedTabState extends State<_FeedTab> {
 
   void _removeEvent(String eventId) =>
       _remove((it) => it is _EventFeedItem && it.event.id == eventId);
+
+  /// Hides a dismissed sponsored ad (after "Not interested" or a report). Also
+  /// drops it from [_ads] so a feed re-interleave can't re-inject it this session.
+  void _removeAd(String campaignId) {
+    _ads = _ads.where((it) => it.adCampaignId != campaignId).toList();
+    _remove((it) => it is _AdFeedItem && it.adCampaignId == campaignId);
+  }
 
   Future<void> _togglePostLike(Post post) async {
     final wasLiked = post.likedByMe;
@@ -497,6 +527,10 @@ class _FeedTabState extends State<_FeedTab> {
 
   @override
   void dispose() {
+    for (final t in _impressionTimers.values) {
+      t.cancel();
+    }
+    _impressionTimers.clear();
     _scroll.dispose();
     super.dispose();
   }
@@ -512,6 +546,7 @@ class _FeedTabState extends State<_FeedTab> {
   String _idOf(_FeedItem it) => switch (it) {
     _EventFeedItem(:final event) => 'e:${event.id}',
     _PostFeedItem(:final post) => 'p:${post.id}',
+    _AdFeedItem(:final adCampaignId) => 'ad:$adCampaignId',
   };
 
   /// Interleaves [_recs] into the sorted [followed] feed: one rec after every
@@ -697,7 +732,9 @@ class _FeedTabState extends State<_FeedTab> {
             if (ad.event != null)
               _EventFeedItem(ad.event!, adCampaignId: ad.campaignId)
             else if (ad.post != null)
-              _PostFeedItem(ad.post!, adCampaignId: ad.campaignId),
+              _PostFeedItem(ad.post!, adCampaignId: ad.campaignId)
+            else if (ad.creative != null)
+              _AdFeedItem(ad.creative!, adCampaignId: ad.campaignId),
         ];
       } catch (_) {}
       setState(() {
@@ -819,10 +856,18 @@ class _FeedTabState extends State<_FeedTab> {
                             onRepostToggle: () => _togglePostRepost(post),
                             onUpdated: (updated) => _replacePost(updated),
                           ),
+                          _AdFeedItem(:final creative) => _AdCreativeCard(
+                            creative: creative,
+                            campaignId: campaignId!,
+                            onTap: () => AdService.logClick(campaignId),
+                            onDismiss: () => _removeAd(campaignId),
+                          ),
                         };
                         // Count an honest CPM impression: log once each time the
-                        // card scrolls ≥50% into view, re-arming when it leaves so
-                        // repeat views (and post-refresh re-renders) each count.
+                        // card stays ≥50% visible for ≥1s, re-arming when it
+                        // leaves so repeat views (and post-refresh re-renders)
+                        // each count. The 1s dwell keeps fast scroll-pasts from
+                        // logging (review finding #7).
                         if (campaignId != null) {
                           final impressionKey = 'ad-$campaignId-${_idOf(it)}';
                           card = VisibilityDetector(
@@ -833,9 +878,26 @@ class _FeedTabState extends State<_FeedTab> {
                               // the card is often recycled before reporting 0.0.
                               if (info.visibleFraction < 0.25) {
                                 _loggedImpressions.remove(impressionKey);
+                                _impressionTimers.remove(impressionKey)?.cancel();
                               } else if (info.visibleFraction >= 0.5 &&
-                                  _loggedImpressions.add(impressionKey)) {
-                                AdService.logImpression(campaignId);
+                                  !_loggedImpressions.contains(impressionKey) &&
+                                  !_impressionTimers.containsKey(impressionKey)) {
+                                _impressionTimers[impressionKey] = Timer(
+                                  const Duration(seconds: 1),
+                                  () {
+                                    // Still armed after 1s of dwell (a drop below
+                                    // 50% before now would have cancelled us).
+                                    _impressionTimers.remove(impressionKey);
+                                    if (_loggedImpressions.add(impressionKey)) {
+                                      AdService.logImpression(campaignId);
+                                    }
+                                  },
+                                );
+                              } else if (info.visibleFraction < 0.5) {
+                                // Dropped below the threshold mid-dwell: cancel.
+                                _impressionTimers
+                                    .remove(impressionKey)
+                                    ?.cancel();
                               }
                             },
                             child: card,
@@ -1103,6 +1165,162 @@ class _SponsoredTag extends StatelessWidget {
   }
 }
 
+// ── Standalone advertiser creative card (Phase A-4) ────────────────────────────
+
+/// Renders an external advertiser's standalone ad: 4:3 image, headline, body,
+/// advertiser name, and a "Sponsored" disclosure. Tapping logs a click and
+/// opens the external [AdCreative.clickUrl] in the system browser — never an
+/// in-app webview (preserves the no-IAP posture). No like/comment/repost.
+class _AdCreativeCard extends StatelessWidget {
+  final AdCreative creative;
+  final String campaignId;
+  final VoidCallback onTap;
+
+  /// Removes this card from the feed (after "Not interested" or a submitted
+  /// report), so the viewer doesn't keep seeing an ad they dismissed.
+  final VoidCallback onDismiss;
+  const _AdCreativeCard({
+    required this.creative,
+    required this.campaignId,
+    required this.onTap,
+    required this.onDismiss,
+  });
+
+  Future<void> _open(BuildContext context) async {
+    onTap();
+    final uri = Uri.tryParse(creative.clickUrl);
+    if (uri == null) return;
+    if (!await launchUrl(uri, mode: LaunchMode.externalApplication) &&
+        context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Could not open link')),
+      );
+    }
+  }
+
+  void _notInterested(BuildContext context) {
+    AdService.logNotInterested(campaignId);
+    onDismiss();
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text("Thanks — you'll see fewer ads like this.")),
+    );
+  }
+
+  Future<void> _report(BuildContext context) async {
+    final submitted = await Moderation.showReportSheet(
+      context,
+      targetType: ReportTargetType.ad,
+      targetId: campaignId,
+    );
+    if (submitted) onDismiss();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return NilePressable(
+      child: Material(
+        color: NileColors.bgSurface,
+        borderRadius: BorderRadius.circular(NileRadius.lg),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: () => _open(context),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              AspectRatio(
+                aspectRatio: 4 / 3,
+                child: Image.network(
+                  creative.imageUrl,
+                  fit: BoxFit.cover,
+                  cacheWidth: nileDecodeWidth(600),
+                  errorBuilder: (_, _, _) =>
+                      Container(color: NileColors.bgRaised),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(
+                  NileSpacing.s12, NileSpacing.s8, NileSpacing.s4, NileSpacing.s12,
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Expanded(child: _SponsoredTag()),
+                        SizedBox(
+                          height: 28,
+                          width: 28,
+                          child: PopupMenuButton<String>(
+                            padding: EdgeInsets.zero,
+                            iconSize: 18,
+                            tooltip: 'Ad options',
+                            icon: const Icon(
+                              Icons.more_horiz,
+                              color: NileColors.txtTertiary,
+                            ),
+                            color: NileColors.bgSurface,
+                            onSelected: (v) {
+                              if (v == 'not_interested') {
+                                _notInterested(context);
+                              } else if (v == 'report') {
+                                _report(context);
+                              }
+                            },
+                            itemBuilder: (_) => [
+                              PopupMenuItem(
+                                value: 'not_interested',
+                                child: Text(
+                                  'Not interested',
+                                  style: NileTextStyles.bodyMd(),
+                                ),
+                              ),
+                              PopupMenuItem(
+                                value: 'report',
+                                child: Text(
+                                  'Report ad',
+                                  style: NileTextStyles.bodyMd()
+                                      .copyWith(color: NileColors.error),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.only(right: NileSpacing.s8),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(creative.headline,
+                              style: NileTextStyles.headingSm()),
+                          const SizedBox(height: 4),
+                          Text(
+                            creative.body,
+                            style: NileTextStyles.bodyMd()
+                                .copyWith(color: NileColors.txtSecondary),
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            creative.advertiserName,
+                            style: NileTextStyles.labelSm()
+                                .copyWith(color: NileColors.txtTertiary),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 // ── Post card ─────────────────────────────────────────────────────────────────
 
 class _PostCard extends StatelessWidget {
@@ -1248,26 +1466,7 @@ class _PostCard extends StatelessWidget {
                 ],
                 if (post.hasImage) ...[
                   const SizedBox(height: 10),
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(NileRadius.sm),
-                    child: AspectRatio(
-                      aspectRatio: 4 / 3,
-                      child: Image.network(
-                        post.imageUrl!,
-                        cacheWidth: nileDecodeWidth(600),
-                        fit: BoxFit.cover,
-                        errorBuilder: (_, _, _) => Container(
-                          color: NileColors.bgRaised,
-                          child: const Center(
-                            child: Icon(
-                              Icons.broken_image,
-                              color: NileColors.border,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
+                  PostImageCarousel(imageUrls: post.images),
                 ],
                 if (post.eventId != null) ...[
                   const SizedBox(height: 10),

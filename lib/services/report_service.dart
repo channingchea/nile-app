@@ -1,6 +1,6 @@
 import 'supabase_client.dart';
 
-enum ReportTargetType { user, post, event, comment }
+enum ReportTargetType { user, post, event, comment, ad }
 
 enum ReportReason {
   spam,

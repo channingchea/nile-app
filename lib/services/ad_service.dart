@@ -2,14 +2,32 @@ import 'event_service.dart';
 import 'post_service.dart';
 import 'supabase_client.dart';
 
-/// A sponsored feed item: the promoted [Event] or [Post] plus the
-/// [campaignId] used for impression/click logging. Exactly one of
-/// [event]/[post] is non-null.
+/// A standalone advertiser creative (Phase A-4): a self-uploaded image +
+/// headline + body that opens an external [clickUrl], referencing no event/post.
+class AdCreative {
+  final String imageUrl;
+  final String headline;
+  final String body;
+  final String clickUrl;
+  final String advertiserName;
+  const AdCreative({
+    required this.imageUrl,
+    required this.headline,
+    required this.body,
+    required this.clickUrl,
+    required this.advertiserName,
+  });
+}
+
+/// A sponsored feed item: the promoted [Event] or [Post] (host boost), or a
+/// standalone [creative] (external advertiser), plus the [campaignId] used for
+/// impression/click logging. Exactly one of [event]/[post]/[creative] is set.
 class FeedAd {
   final String campaignId;
   final Event? event;
   final Post? post;
-  const FeedAd({required this.campaignId, this.event, this.post});
+  final AdCreative? creative;
+  const FeedAd({required this.campaignId, this.event, this.post, this.creative});
 }
 
 /// One campaign's lifetime performance (Phase A-3), as returned by the
@@ -86,12 +104,24 @@ class AdService {
       // Preserve the RPC's serving order.
       final ads = <FeedAd>[];
       for (final r in list) {
+        final campaign = r['campaign_id'] as String;
         if (r['event_id'] != null) {
           final e = byEvent[r['event_id'] as String];
-          if (e != null) ads.add(FeedAd(campaignId: r['campaign_id'] as String, event: e));
+          if (e != null) ads.add(FeedAd(campaignId: campaign, event: e));
         } else if (r['post_id'] != null) {
           final p = byPost[r['post_id'] as String];
-          if (p != null) ads.add(FeedAd(campaignId: r['campaign_id'] as String, post: p));
+          if (p != null) ads.add(FeedAd(campaignId: campaign, post: p));
+        } else if (r['image_url'] != null) {
+          ads.add(FeedAd(
+            campaignId: campaign,
+            creative: AdCreative(
+              imageUrl: r['image_url'] as String,
+              headline: r['headline'] as String,
+              body: r['body'] as String,
+              clickUrl: r['click_url'] as String,
+              advertiserName: (r['advertiser_name'] as String?) ?? 'Sponsored',
+            ),
+          ));
         }
       }
       return ads;
@@ -138,6 +168,12 @@ class AdService {
 
   static Future<void> logImpression(String campaignId) => _log(campaignId, 'impression');
   static Future<void> logClick(String campaignId) => _log(campaignId, 'click');
+
+  /// A soft "not interested" signal for a sponsored card. Logged like any other
+  /// ad event (insert-only); never bills or affects spend (tally_ad_spend counts
+  /// only impressions/clicks). Best-effort.
+  static Future<void> logNotInterested(String campaignId) =>
+      _log(campaignId, 'not_interested');
 
   /// The calling host's boost campaigns with lifetime performance (Phase A-3),
   /// newest first. Scoped server-side to auth.uid()'s own campaigns.

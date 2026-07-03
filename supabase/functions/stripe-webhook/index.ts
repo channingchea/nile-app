@@ -45,16 +45,26 @@ serve(async (req) => {
     const session = event.data.object as Stripe.Checkout.Session;
     const piId = (session.payment_intent as string) ?? session.id;
 
-    // Ad-platform boost (A-2): the host paid to boost an event. Activate the
-    // campaign and record the real PI id. Branched by create-ad-payment's
+    // Ad-platform campaign: advertiser paid. Branched by create-ad-payment's
     // metadata.type so it never collides with ticket sales.
+    //   standalone:"1" (A-4 external creative ad) → pending_review: checkout only
+    //     AUTHORIZED the card (manual capture); admin approval (review-ad-campaign
+    //     fn) captures the PaymentIntent and does the final → active, rejection
+    //     cancels the authorization.
+    //   otherwise (A-2 host boost) → active immediately (automatic capture).
+    // Status guard: only transition rows still in pending_payment, so a replayed
+    // or late Stripe event can never flip an already-reviewed (rejected/active/
+    // paused) campaign back.
     if (session.metadata?.type === "ad_campaign") {
       const campaignId = session.metadata.campaign_id;
       if (campaignId) {
+        const nextStatus =
+          session.metadata.standalone === "1" ? "pending_review" : "active";
         await adminClient
           .from("ad_campaigns")
-          .update({ status: "active", stripe_payment_intent_id: piId })
-          .eq("id", campaignId);
+          .update({ status: nextStatus, stripe_payment_intent_id: piId })
+          .eq("id", campaignId)
+          .eq("status", "pending_payment");
       }
     } else {
       // Ticket sale (default). The pending row was stored under session.id
@@ -72,10 +82,25 @@ serve(async (req) => {
     const charge = event.data.object as Stripe.Charge;
     const paymentIntentId = charge.payment_intent as string;
     if (paymentIntentId) {
+      // Ticket sale refund (original path).
       await adminClient.rpc("confirm_ticket", {
         p_payment_intent_id: paymentIntentId,
         p_status: "refunded",
       });
+
+      // Ad campaign refund (review finding #5): a refund issued from the Stripe
+      // dashboard must also pull the campaign. Only FULL refunds (charge.refunded
+      // = true) and only campaigns in a pullable state — pending_payment rows have
+      // no captured charge, and rejected/completed are already terminal. The
+      // normal reject path (cancel the manual-capture hold) emits no
+      // charge.refunded, so this only catches out-of-band dashboard refunds.
+      if (charge.refunded) {
+        await adminClient
+          .from("ad_campaigns")
+          .update({ status: "rejected" })
+          .eq("stripe_payment_intent_id", paymentIntentId)
+          .in("status", ["pending_review", "active", "paused"]);
+      }
     }
   }
 
