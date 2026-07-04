@@ -289,7 +289,7 @@ class _ImageStrip extends StatelessWidget {
       borderRadius: BorderRadius.circular(NileRadius.sm),
       child: Stack(
         children: [
-          Image.memory(bytes, width: 96, height: 96, fit: BoxFit.cover),
+          Image.memory(bytes, width: 96, height: 96, fit: BoxFit.cover, cacheWidth: nileDecodeWidth(96)),
           Positioned(
             top: 2,
             right: 2,

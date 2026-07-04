@@ -56,6 +56,11 @@ class _HomeScreenState extends State<HomeScreen> {
   int _feedKey = 0;
   int _profileKey = 0;
 
+  // Tabs are built on first visit, not eagerly. An unvisited tab renders as an
+  // empty placeholder in the IndexedStack; once shown it stays built (state
+  // preserved) so re-selecting it never re-fetches. Feed (0) is visited at start.
+  final Set<int> _visited = {0};
+
   List<Widget> get _pages => [
     _FeedTab(key: ValueKey(_feedKey), onContentChanged: _onContentChanged),
     const DiscoverScreen(),
@@ -111,7 +116,10 @@ class _HomeScreenState extends State<HomeScreen> {
             index: _selectedIndex,
             children: [
               for (final (i, page) in _pages.indexed)
-                HeroMode(enabled: i == _selectedIndex, child: page),
+                if (_visited.contains(i))
+                  HeroMode(enabled: i == _selectedIndex, child: page)
+                else
+                  const SizedBox.shrink(),
             ],
           ),
         ),
@@ -121,7 +129,10 @@ class _HomeScreenState extends State<HomeScreen> {
         // padding from the tab scroll views.
         bottomNavigationBar: NileGlassNavBar(
           selectedIndex: _selectedIndex,
-          onDestinationSelected: (i) => setState(() => _selectedIndex = i),
+          onDestinationSelected: (i) => setState(() {
+            _selectedIndex = i;
+            _visited.add(i);
+          }),
           // Create "+" sits on the same row as the nav pill, on every tab.
           trailing: _CreateButton(onTap: _showActionSheet),
           destinations: const [

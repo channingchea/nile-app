@@ -777,7 +777,12 @@ class _ProfileScreenState extends State<ProfileScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(p.displayName, style: NileTextStyles.displayMd()),
+                Text(
+                  p.displayName,
+                  style: NileTextStyles.displayMd(),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
                 const SizedBox(height: 2),
                 Text(
                   '@${p.username}',

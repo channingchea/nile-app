@@ -291,7 +291,7 @@ class _ImageStrip extends StatelessWidget {
       child: Stack(
         children: [
           if (slot.bytes != null)
-            Image.memory(slot.bytes!, width: 96, height: 96, fit: BoxFit.cover)
+            Image.memory(slot.bytes!, width: 96, height: 96, fit: BoxFit.cover, cacheWidth: nileDecodeWidth(96))
           else
             Image.network(
               slot.url!,
