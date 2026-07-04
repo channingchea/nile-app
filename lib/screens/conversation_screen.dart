@@ -4,11 +4,14 @@ import 'dart:ui' show ImageFilter;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import '../services/app_lifecycle.dart';
 import '../services/event_service.dart';
 import '../services/message_service.dart';
 import '../services/post_service.dart';
 import '../services/profile_service.dart';
+import '../services/realtime.dart';
 import '../theme.dart';
+import '../widgets/offline_banner.dart';
 import 'event_detail_screen.dart';
 import 'messages_screen.dart' show NileAvatar;
 import 'post_detail_screen.dart';
@@ -36,7 +39,8 @@ class _ConversationScreenState extends State<ConversationScreen> {
   bool _sending = false;
   bool _hasMore = false;
   String? _cursor;
-  RealtimeChannel? _channel;
+  ResilientChannel? _conn;
+  RealtimeConnState _connState = RealtimeConnState.connecting;
   RealtimeChannel? _reactionChannel;
 
   // Typing indicator state.
@@ -64,22 +68,32 @@ class _ConversationScreenState extends State<ConversationScreen> {
     _subscribeReactions();
     _subscribeTyping();
     _input.addListener(_onInputChanged);
+    AppLifecycle.instance.state.addListener(_onLifecycle);
     MessageService.markRead(_conv.id);
   }
 
   @override
   void dispose() {
+    AppLifecycle.instance.state.removeListener(_onLifecycle);
     _typingStopTimer?.cancel();
     _otherTypingTimeout?.cancel();
     _stopTyping();
     _typingChannel?.unsubscribe();
     _reactionChannel?.unsubscribe();
-    _channel?.unsubscribe();
+    _conn?.dispose();
     _input.removeListener(_onInputChanged);
     _input.dispose();
     _scroll.dispose();
     _focusNode.dispose();
     super.dispose();
+  }
+
+  // On resume from background, backfill any messages missed while suspended.
+  void _onLifecycle() {
+    if (AppLifecycle.instance.state.value == AppLifecycleState.resumed &&
+        mounted) {
+      _resyncMessages();
+    }
   }
 
   void _subscribeTyping() {
@@ -160,38 +174,76 @@ class _ConversationScreenState extends State<ConversationScreen> {
   }
 
   void _subscribeRealtime() {
-    _channel = MessageService.subscribeToMessages(
-      _conv.id,
-      (msg) {
-        if (!mounted) return;
-        // Avoid duplicates from optimistic insert.
-        if (_messages.any((m) => m.id == msg.id)) return;
-        setState(() => _messages.add(msg));
-        // Mark read if the message is from the other person.
-        if (msg.senderId != _myId) {
-          MessageService.markRead(_conv.id);
+    _conn = ResilientChannel(
+      onResync: _resyncMessages,
+      onState: (s) {
+        if (mounted) setState(() => _connState = s);
+      },
+      build: (onStatus) => MessageService.subscribeToMessages(
+        _conv.id,
+        (msg) {
+          if (!mounted) return;
+          // Avoid duplicates from optimistic insert.
+          if (_messages.any((m) => m.id == msg.id)) return;
+          setState(() => _messages.add(msg));
+          // Mark read if the message is from the other person.
+          if (msg.senderId != _myId) {
+            MessageService.markRead(_conv.id);
+          }
+          WidgetsBinding.instance.addPostFrameCallback(
+            (_) => _scrollToBottom(animate: true),
+          );
+        },
+        // Patch read receipts in place (preserves hydrated shared post/event).
+        onUpdate: (updated) {
+          if (!mounted) return;
+          final i = _messages.indexWhere((m) => m.id == updated.id);
+          if (i < 0 || _messages[i].readAt == updated.readAt) return;
+          setState(
+            () => _messages[i] = _messages[i].copyWith(readAt: updated.readAt),
+          );
+        },
+        // Remove deleted messages (fires for either participant).
+        onDelete: (id) {
+          if (!mounted) return;
+          final i = _messages.indexWhere((m) => m.id == id);
+          if (i < 0) return;
+          setState(() => _messages.removeAt(i));
+        },
+        onStatus: onStatus,
+      ),
+    );
+  }
+
+  /// Reconciles the thread after a dropped connection (channel rejoin or app
+  /// resume): pulls the newest page, appends any messages we missed, patches
+  /// read receipts, and re-marks the thread read. Cheap and best-effort.
+  Future<void> _resyncMessages() async {
+    try {
+      final page = await MessageService.getMessages(_conv.id);
+      if (!mounted) return;
+      final known = {for (final m in _messages) m.id};
+      var changed = false;
+      for (final m in page.items) {
+        final i = _messages.indexWhere((x) => x.id == m.id);
+        if (i < 0) {
+          _messages.add(m);
+          changed = true;
+        } else if (_messages[i].readAt != m.readAt) {
+          _messages[i] = _messages[i].copyWith(readAt: m.readAt);
+          changed = true;
         }
+      }
+      if (changed) {
+        // Merge may have appended out of order — restore chronological order.
+        _messages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+        setState(() {});
         WidgetsBinding.instance.addPostFrameCallback(
           (_) => _scrollToBottom(animate: true),
         );
-      },
-      // Patch read receipts in place (preserves hydrated shared post/event).
-      onUpdate: (updated) {
-        if (!mounted) return;
-        final i = _messages.indexWhere((m) => m.id == updated.id);
-        if (i < 0 || _messages[i].readAt == updated.readAt) return;
-        setState(
-          () => _messages[i] = _messages[i].copyWith(readAt: updated.readAt),
-        );
-      },
-      // Remove deleted messages (fires for either participant).
-      onDelete: (id) {
-        if (!mounted) return;
-        final i = _messages.indexWhere((m) => m.id == id);
-        if (i < 0) return;
-        setState(() => _messages.removeAt(i));
-      },
-    );
+      }
+      if (known.length != _messages.length) MessageService.markRead(_conv.id);
+    } catch (_) {}
   }
 
   void _subscribeReactions() {
@@ -413,7 +465,7 @@ class _ConversationScreenState extends State<ConversationScreen> {
           mainAxisSize: MainAxisSize.min,
           children: [
             ListTile(
-              leading: const Icon(Icons.image_outlined,
+              leading: Icon(Icons.image_outlined,
                   color: NileColors.txtPrimary),
               title: Text('Photo', style: NileTextStyles.bodyMd()),
               onTap: () {
@@ -422,7 +474,7 @@ class _ConversationScreenState extends State<ConversationScreen> {
               },
             ),
             ListTile(
-              leading: const Icon(Icons.article_outlined,
+              leading: Icon(Icons.article_outlined,
                   color: NileColors.txtPrimary),
               title: Text('Share a post', style: NileTextStyles.bodyMd()),
               onTap: () {
@@ -431,7 +483,7 @@ class _ConversationScreenState extends State<ConversationScreen> {
               },
             ),
             ListTile(
-              leading: const Icon(Icons.live_tv_outlined,
+              leading: Icon(Icons.live_tv_outlined,
                   color: NileColors.txtPrimary),
               title: Text('Share an event', style: NileTextStyles.bodyMd()),
               onTap: () {
@@ -531,9 +583,12 @@ class _ConversationScreenState extends State<ConversationScreen> {
           child: Column(
             children: [
               _AppBar(conv: _conv),
+              const OfflineBanner(),
+              if (_connState == RealtimeConnState.reconnecting)
+                const ReconnectingPill(),
               Expanded(
                 child: _loadingHistory
-                    ? const Center(
+                    ? Center(
                         child: CircularProgressIndicator(
                           color: NileColors.volt,
                         ),
@@ -555,7 +610,7 @@ class _ConversationScreenState extends State<ConversationScreen> {
                           itemCount: _messages.length + (_hasMore ? 1 : 0),
                           itemBuilder: (_, i) {
                             if (i == 0 && _hasMore) {
-                              return const Padding(
+                              return Padding(
                                 padding: EdgeInsets.only(bottom: NileSpacing.s8),
                                 child: Center(
                                   child: SizedBox(
@@ -674,7 +729,7 @@ class _AppBar extends StatelessWidget {
       child: Row(
         children: [
           IconButton(
-            icon: const Icon(
+            icon: Icon(
               Icons.arrow_back_ios_new,
               size: 18,
               color: NileColors.txtPrimary,
@@ -844,7 +899,7 @@ class _MessageBubble extends StatelessWidget {
                           message.content,
                           style: NileTextStyles.bodyMd().copyWith(
                             color: isMe
-                                ? NileColors.bgPage
+                                ? NileColors.onVolt
                                 : NileColors.txtPrimary,
                           ),
                         ),
@@ -1043,7 +1098,7 @@ class _MessageBubbleVisual extends StatelessWidget {
       child: Text(
         message.content,
         style: NileTextStyles.bodyMd().copyWith(
-          color: isMe ? NileColors.bgPage : NileColors.txtPrimary,
+          color: isMe ? NileColors.onVolt : NileColors.txtPrimary,
         ),
       ),
     );
@@ -1229,7 +1284,7 @@ class _ReactionPill extends StatelessWidget {
             _PillButton(
               highlighted: false,
               onTap: onMore,
-              child: const Icon(
+              child: Icon(
                 Icons.add_rounded,
                 color: NileColors.txtSecondary,
                 size: 22,
@@ -1300,7 +1355,7 @@ class _ReactionActionsCard extends StatelessWidget {
               onTap: onCopy,
             ),
           if (canCopy && isMine)
-            const Divider(height: 1, color: NileColors.border),
+            Divider(height: 1, color: NileColors.border),
           if (isMine)
             _ActionRow(
               icon: Icons.delete_outline_rounded,
@@ -1380,7 +1435,7 @@ class _TypingBubbleState extends State<_TypingBubble>
         horizontal: NileSpacing.s12,
         vertical: NileSpacing.s8 + 2,
       ),
-      decoration: const BoxDecoration(
+      decoration: BoxDecoration(
         color: NileColors.bgSurface,
         borderRadius: BorderRadius.only(
           topLeft: Radius.circular(NileRadius.lg),
@@ -1449,7 +1504,7 @@ class _ImageBubble extends StatelessWidget {
                     width: maxW,
                     height: 180,
                     color: NileColors.bgSurface,
-                    child: const Center(
+                    child: Center(
                       child: SizedBox(
                         width: 20,
                         height: 20,
@@ -1635,7 +1690,7 @@ class _SharedEventBubble extends StatelessWidget {
                 children: [
                   Row(
                     children: [
-                      const Icon(
+                      Icon(
                         Icons.live_tv,
                         size: 13,
                         color: NileColors.volt,
@@ -1698,7 +1753,7 @@ class _InputBar extends StatelessWidget {
       child: Row(
         children: [
           IconButton(
-            icon: const Icon(Icons.add_circle_outline_rounded,
+            icon: Icon(Icons.add_circle_outline_rounded,
                 color: NileColors.txtSecondary),
             onPressed: sending ? null : onAttach,
           ),
@@ -1767,7 +1822,7 @@ class _SendButtonState extends State<_SendButton> {
           shape: BoxShape.circle,
         ),
         child: widget.sending
-            ? const Center(
+            ? Center(
                 child: SizedBox(
                   width: 18,
                   height: 18,
@@ -1777,10 +1832,10 @@ class _SendButtonState extends State<_SendButton> {
                   ),
                 ),
               )
-            : const Icon(
+            : Icon(
                 Icons.send_rounded,
                 size: 18,
-                color: NileColors.bgPage,
+                color: NileColors.onVolt,
               ),
       ),
     );
@@ -1850,7 +1905,7 @@ class _MyContentPickerState extends State<_MyContentPicker> {
             ),
           ),
           if (!loaded)
-            const Padding(
+            Padding(
               padding: EdgeInsets.all(NileSpacing.s24),
               child: Center(
                 child: CircularProgressIndicator(color: NileColors.volt),

@@ -80,7 +80,7 @@ class _BlockedAccountsScreenState extends State<BlockedAccountsScreen> {
     }
     final accounts = _accounts;
     if (accounts == null) {
-      return const Center(
+      return Center(
         child: CircularProgressIndicator(color: NileColors.volt),
       );
     }
@@ -89,7 +89,7 @@ class _BlockedAccountsScreenState extends State<BlockedAccountsScreen> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(Icons.block, size: 48, color: NileColors.border),
+            Icon(Icons.block, size: 48, color: NileColors.border),
             const SizedBox(height: 12),
             Text('No blocked accounts', style: NileTextStyles.headingSm()),
             const SizedBox(height: 4),
@@ -179,7 +179,7 @@ class _BlockedTile extends StatelessWidget {
           OutlinedButton(
             onPressed: busy ? null : onUnblock,
             child: busy
-                ? const SizedBox(
+                ? SizedBox(
                     width: 14,
                     height: 14,
                     child: CircularProgressIndicator(

@@ -7,6 +7,7 @@ import '../services/chat_service.dart';
 import '../services/event_service.dart';
 import '../services/livekit_service.dart';
 import '../services/profile_service.dart';
+import '../services/realtime.dart';
 import '../theme.dart';
 import '../widgets/rolling_number.dart';
 
@@ -63,7 +64,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
   int _reconnectAttempt = 0;
   // Event status drives the Lobby: 'soundcheck' → Lobby, 'live' → stream.
   String? _eventStatus;
-  RealtimeChannel? _realtimeChannel;
+  ResilientChannel? _eventConn;
   bool _hasIncrementedViewerCount = false;
 
   // Live chat (ephemeral broadcast). Capped in-memory buffer so a session feels
@@ -103,10 +104,20 @@ class _ViewerScreenState extends State<ViewerScreen> {
       EventService.decrementViewerCount(_streamEventId!).catchError((_) {});
       _hasIncrementedViewerCount = false;
     }
-    _realtimeChannel?.unsubscribe();
-    _realtimeChannel = null;
+    _eventConn?.dispose();
+    _eventConn = null;
     _chatChannel?.unsubscribe();
     _chatChannel = null;
+  }
+
+  /// Re-pull authoritative event state after a realtime drop/rejoin, so a status
+  /// or viewer-count change missed while disconnected is applied on reconnect.
+  Future<void> _resyncEventState(String liveKitEventId) async {
+    try {
+      final state = await EventService.fetchEventState(liveKitEventId);
+      if (!mounted || state == null) return;
+      _onRealtimeUpdate(state);
+    } catch (_) {}
   }
 
   // ── Chat ──────────────────────────────────────────────────────────────────
@@ -258,9 +269,13 @@ class _ViewerScreenState extends State<ViewerScreen> {
       // Increment viewer count + subscribe to realtime
       EventService.incrementViewerCount(eventId).catchError((_) {});
 
-      final channel = EventService.subscribeToEvent(
-        liveKitEventId: eventId,
-        onUpdate: _onRealtimeUpdate,
+      final eventConn = ResilientChannel(
+        onResync: () => _resyncEventState(eventId),
+        build: (onStatus) => EventService.subscribeToEvent(
+          liveKitEventId: eventId,
+          onUpdate: _onRealtimeUpdate,
+          onStatus: onStatus,
+        ),
       );
 
       // Open the ephemeral chat channel and resolve our username once for
@@ -278,7 +293,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
         _viewerCount = eventState?['viewer_count'] as int? ?? 0;
         _eventStatus = eventState?['status'] as String?;
         _hasIncrementedViewerCount = true;
-        _realtimeChannel = channel;
+        _eventConn = eventConn;
         _chatChannel = chatChannel;
         _state = ViewerState.watching;
       });
@@ -734,7 +749,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
             label: const Text('Watch Now'),
             style: FilledButton.styleFrom(
               backgroundColor: NileColors.volt,
-              foregroundColor: NileColors.bgPage,
+              foregroundColor: NileColors.onVolt,
               padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
               textStyle: NileTextStyles.labelLg(),
               shape: const StadiumBorder(),
@@ -750,7 +765,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          const CircularProgressIndicator(color: NileColors.volt),
+          CircularProgressIndicator(color: NileColors.volt),
           const SizedBox(height: 16),
           Text('Joining stream...', style: NileTextStyles.bodyMd()),
         ],
@@ -771,7 +786,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  const Icon(Icons.tune, size: 56, color: NileColors.volt),
+                  Icon(Icons.tune, size: 56, color: NileColors.volt),
                   const SizedBox(height: 24),
                   Text(
                     'Your host is in Sound Check.',
@@ -787,7 +802,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
                     textAlign: TextAlign.center,
                   ),
                   const SizedBox(height: 28),
-                  const CircularProgressIndicator(color: NileColors.volt),
+                  CircularProgressIndicator(color: NileColors.volt),
                 ],
               ),
             ),
@@ -841,7 +856,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
                   child: Column(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      const CircularProgressIndicator(color: NileColors.volt),
+                      CircularProgressIndicator(color: NileColors.volt),
                       const SizedBox(height: 16),
                       Text(
                         'Waiting for cameras to connect...',
@@ -894,7 +909,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const CircularProgressIndicator(color: NileColors.volt),
+              CircularProgressIndicator(color: NileColors.volt),
               const SizedBox(height: 16),
               Text('Reconnecting…', style: NileTextStyles.headingMd()),
               const SizedBox(height: 8),
@@ -937,7 +952,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
                 child: Text(
                   inLobby ? 'SOUND CHECK' : 'LIVE',
                   style: NileTextStyles.caption().copyWith(
-                    color: inLobby ? NileColors.bgPage : Colors.white,
+                    color: inLobby ? NileColors.onVolt : Colors.white,
                     fontWeight: FontWeight.w700,
                     letterSpacing: 1.2,
                   ),
@@ -947,7 +962,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
           ),
           const SizedBox(width: 10),
           // Viewer count
-          const Icon(Icons.visibility, size: 14, color: NileColors.txtTertiary),
+          Icon(Icons.visibility, size: 14, color: NileColors.txtTertiary),
           const SizedBox(width: 4),
           NileRollingNumber(
             value: _viewerCount,
@@ -1192,7 +1207,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
             ? VideoTrackRenderer(focused.track!)
             : _buildCameraOffPlaceholder(large: true),
         if (focused.identity == _masterAudioIdentity)
-          const Positioned(
+          Positioned(
             top: 12,
             right: 12,
             child: Icon(Icons.album, color: NileColors.volt, size: 18),
@@ -1284,7 +1299,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
                   ? VideoTrackRenderer(camera.track!)
                   : _buildCameraOffPlaceholder(large: false),
               if (isMasterAudio)
-                const Positioned(
+                Positioned(
                   top: 4,
                   right: 4,
                   child: Icon(Icons.album, color: NileColors.volt, size: 14),
@@ -1318,7 +1333,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(
+            Icon(
               Icons.stop_circle_outlined,
               size: 72,
               color: NileColors.txtTertiary,
@@ -1337,7 +1352,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
               onPressed: _leave,
               style: FilledButton.styleFrom(
                 backgroundColor: NileColors.volt,
-                foregroundColor: NileColors.bgPage,
+                foregroundColor: NileColors.onVolt,
                 padding: const EdgeInsets.symmetric(
                   horizontal: NileSpacing.s40,
                   vertical: NileSpacing.s16,

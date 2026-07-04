@@ -88,7 +88,7 @@ class _ReplayScreenState extends State<ReplayScreen> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(Icons.error_outline, color: NileColors.txtSecondary, size: 40),
+            Icon(Icons.error_outline, color: NileColors.txtSecondary, size: 40),
             const SizedBox(height: NileSpacing.s12),
             Text(_error!, textAlign: TextAlign.center, style: NileTextStyles.bodyMd()),
           ],
@@ -97,7 +97,7 @@ class _ReplayScreenState extends State<ReplayScreen> {
     }
     final c = _controller;
     if (c == null) {
-      return const CircularProgressIndicator(color: NileColors.volt);
+      return CircularProgressIndicator(color: NileColors.volt);
     }
     return GestureDetector(
       onTap: () => setState(() => _controlsVisible = !_controlsVisible),
@@ -140,7 +140,7 @@ class _Controls extends StatelessWidget {
             controller,
             allowScrubbing: true,
             padding: const EdgeInsets.all(NileSpacing.s12),
-            colors: const VideoProgressColors(
+            colors: VideoProgressColors(
               playedColor: NileColors.volt,
               bufferedColor: Colors.white24,
               backgroundColor: Colors.white10,

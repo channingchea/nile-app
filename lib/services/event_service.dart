@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'event_repost_service.dart';
 import 'like_service.dart';
+import 'net.dart';
 import 'pagination.dart';
 import 'supabase_client.dart';
 import 'topic_service.dart';
@@ -166,7 +167,7 @@ class EventService {
   static Future<Paged<Event>> getFeed(
     List<String> followingIds, {
     String? cursor,
-  }) async {
+  }) => guard(() async {
     if (followingIds.isEmpty) return Paged.empty();
 
     var b = supabase
@@ -212,7 +213,7 @@ class EventService {
     });
 
     return Paged(items: events, hasMore: hasMore, nextCursor: nextCursor);
-  }
+  });
 
   /// All published events from a single host (newest first), excluding drafts.
   /// Used by public profile pages. Keyset-paged by created_at via [cursor].
@@ -500,6 +501,7 @@ class EventService {
   static RealtimeChannel subscribeToEventById({
     required String eventId,
     required void Function(Map<String, dynamic> record) onUpdate,
+    void Function(RealtimeSubscribeStatus status, Object? error)? onStatus,
   }) {
     return supabase
         .channel('event_detail:$eventId')
@@ -514,7 +516,7 @@ class EventService {
           ),
           callback: (payload) => onUpdate(payload.newRecord),
         )
-        .subscribe();
+        .subscribe(onStatus);
   }
 
   /// Transition an event to 'soundcheck' — host/operators are connected and
@@ -582,14 +584,14 @@ class EventService {
   /// liveKitEventId. scheduled_at gates how early a host may enter sound check.
   static Future<Map<String, dynamic>?> fetchEventState(
     String liveKitEventId,
-  ) async {
+  ) => guard(() async {
     final rows = await supabase
         .from('events')
         .select('viewer_count, status, scheduled_at')
         .eq('livekit_room', liveKitEventId)
         .limit(1);
     return rows.isNotEmpty ? rows.first : null;
-  }
+  });
 
   /// Subscribe to realtime updates on an event row.
   /// [onUpdate] receives the raw updated record (viewer_count, status, etc.).
@@ -597,6 +599,7 @@ class EventService {
   static RealtimeChannel subscribeToEvent({
     required String liveKitEventId,
     required void Function(Map<String, dynamic> record) onUpdate,
+    void Function(RealtimeSubscribeStatus status, Object? error)? onStatus,
   }) {
     return supabase
         .channel('event_updates:$liveKitEventId')
@@ -611,6 +614,6 @@ class EventService {
           ),
           callback: (payload) => onUpdate(payload.newRecord),
         )
-        .subscribe();
+        .subscribe(onStatus);
   }
 }

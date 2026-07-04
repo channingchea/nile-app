@@ -136,7 +136,7 @@ class _CrewSetupScreenState extends State<CrewSetupScreen> {
       ),
       body: NileMaxWidth(
         child: _loading
-            ? const Center(
+            ? Center(
                 child: CircularProgressIndicator(color: NileColors.volt),
               )
             : _buildBody(),
@@ -193,7 +193,7 @@ class _CrewSetupScreenState extends State<CrewSetupScreen> {
   Widget _buildFooter() {
     return Container(
       padding: const EdgeInsets.fromLTRB(NileSpacing.s24, NileSpacing.s12, NileSpacing.s24, NileSpacing.s24),
-      decoration: const BoxDecoration(
+      decoration: BoxDecoration(
         color: NileColors.bgPage,
         border: Border(top: BorderSide(color: NileColors.border)),
       ),
@@ -203,18 +203,18 @@ class _CrewSetupScreenState extends State<CrewSetupScreen> {
           onPressed: _saving ? null : _saveAndContinue,
           style: FilledButton.styleFrom(
             backgroundColor: NileColors.volt,
-            foregroundColor: NileColors.bgPage,
+            foregroundColor: NileColors.onVolt,
             padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
             textStyle: NileTextStyles.labelLg(),
             shape: const StadiumBorder(),
           ),
           child: _saving
-              ? const SizedBox(
+              ? SizedBox(
                   height: 20,
                   width: 20,
                   child: CircularProgressIndicator(
                     strokeWidth: 2,
-                    color: NileColors.bgPage,
+                    color: NileColors.onVolt,
                   ),
                 )
               : const Text('Continue to Sound Check'),
@@ -262,7 +262,7 @@ class _CrewAssignmentCard extends StatelessWidget {
                     ? nileAvatarImage(url, 18)
                     : null,
                 child: (url == null || url.isEmpty)
-                    ? const Icon(
+                    ? Icon(
                         Icons.person,
                         size: 18,
                         color: NileColors.txtTertiary,
@@ -328,7 +328,7 @@ class _SlotDropdown extends StatelessWidget {
           isExpanded: true,
           dropdownColor: NileColors.bgRaised,
           style: NileTextStyles.bodyMd().copyWith(color: NileColors.txtPrimary),
-          icon: const Icon(
+          icon: Icon(
             Icons.arrow_drop_down,
             color: NileColors.txtSecondary,
           ),
@@ -372,18 +372,18 @@ class _AudioToggle extends StatelessWidget {
             Icon(
               selected ? Icons.graphic_eq : Icons.graphic_eq_outlined,
               size: 18,
-              color: selected ? NileColors.bgPage : NileColors.txtSecondary,
+              color: selected ? NileColors.onVolt : NileColors.txtSecondary,
             ),
             const SizedBox(width: 8),
             Text(
               'Stream Audio device',
               style: NileTextStyles.labelMd().copyWith(
-                color: selected ? NileColors.bgPage : NileColors.txtSecondary,
+                color: selected ? NileColors.onVolt : NileColors.txtSecondary,
               ),
             ),
             const Spacer(),
             if (selected)
-              const Icon(Icons.check, size: 18, color: NileColors.bgPage),
+              Icon(Icons.check, size: 18, color: NileColors.onVolt),
           ],
         ),
       ),
@@ -405,7 +405,7 @@ class _EmptyCrew extends StatelessWidget {
       ),
       child: Column(
         children: [
-          const Icon(
+          Icon(
             Icons.group_outlined,
             size: 32,
             color: NileColors.txtTertiary,

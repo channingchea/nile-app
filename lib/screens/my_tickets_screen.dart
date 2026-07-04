@@ -119,7 +119,7 @@ class _MyTicketsScreenState extends State<MyTicketsScreen> {
       );
     }
     if (_tickets == null) {
-      return const Center(
+      return Center(
         child: CircularProgressIndicator(color: NileColors.volt),
       );
     }
@@ -175,7 +175,7 @@ class _TicketCard extends StatelessWidget {
                   ? Image.network(cover, fit: BoxFit.cover, cacheWidth: nileDecodeWidth(128))
                   : Container(
                       color: NileColors.bgRaised,
-                      child: const Icon(
+                      child: Icon(
                         Icons.event,
                         color: NileColors.txtTertiary,
                       ),
@@ -208,7 +208,7 @@ class _TicketCard extends StatelessWidget {
                         const Spacer(),
                         if (event != null && CalendarIcs.canAdd(event))
                           IconButton(
-                            icon: const Icon(
+                            icon: Icon(
                               Icons.calendar_today_outlined,
                               size: 18,
                               color: NileColors.txtSecondary,

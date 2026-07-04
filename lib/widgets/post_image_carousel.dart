@@ -73,7 +73,7 @@ class _PostImageCarouselState extends State<PostImageCarousel> {
     fit: BoxFit.cover,
     errorBuilder: (_, _, _) => Container(
       color: NileColors.bgRaised,
-      child: const Center(
+      child: Center(
         child: Icon(Icons.broken_image, color: NileColors.border),
       ),
     ),

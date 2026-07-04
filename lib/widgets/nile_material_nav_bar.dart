@@ -26,7 +26,7 @@ class NileMaterialNavBar extends StatelessWidget {
       selectedIndex: selectedIndex,
       onDestinationSelected: onDestinationSelected,
       labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
-      destinations: const [
+      destinations: [
         NavigationDestination(
           icon: Icon(Icons.home_outlined),
           selectedIcon: Icon(Icons.home, color: NileColors.volt),

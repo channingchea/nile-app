@@ -251,12 +251,7 @@ class _EditEventScreenState extends State<EditEventScreen> {
       lastDate: now.add(const Duration(days: 365 * 2)),
       builder: (ctx, child) => Theme(
         data: Theme.of(ctx).copyWith(
-          colorScheme: const ColorScheme.dark(
-            primary: NileColors.volt,
-            onPrimary: NileColors.bgPage,
-            surface: NileColors.bgSurface,
-            onSurface: NileColors.txtPrimary,
-          ),
+          colorScheme: Theme.of(ctx).colorScheme,
         ),
         child: child!,
       ),
@@ -267,12 +262,7 @@ class _EditEventScreenState extends State<EditEventScreen> {
       initialTime: TimeOfDay.fromDateTime(seed),
       builder: (ctx, child) => Theme(
         data: Theme.of(ctx).copyWith(
-          colorScheme: const ColorScheme.dark(
-            primary: NileColors.volt,
-            onPrimary: NileColors.bgPage,
-            surface: NileColors.bgSurface,
-            onSurface: NileColors.txtPrimary,
-          ),
+          colorScheme: Theme.of(ctx).colorScheme,
         ),
         child: child!,
       ),
@@ -556,12 +546,12 @@ class _EditEventScreenState extends State<EditEventScreen> {
                     ],
                   ),
                   const SizedBox(height: 24),
-                  const Divider(color: NileColors.border),
+                  Divider(color: NileColors.border),
                   const SizedBox(height: 16),
 
                   // Crew editor (cameras + operators) — same as the create flow.
                   if (_crewLoading)
-                    const Padding(
+                    Padding(
                       padding: EdgeInsets.symmetric(vertical: NileSpacing.s24),
                       child: Center(
                         child: CircularProgressIndicator(
@@ -605,12 +595,12 @@ class _EditEventScreenState extends State<EditEventScreen> {
                   FilledButton.icon(
                     onPressed: _saving ? null : _save,
                     icon: _saving
-                        ? const SizedBox(
+                        ? SizedBox(
                             width: 18,
                             height: 18,
                             child: CircularProgressIndicator(
                               strokeWidth: 2,
-                              color: NileColors.bgPage,
+                              color: NileColors.onVolt,
                             ),
                           )
                         : const Icon(Icons.check),
@@ -690,7 +680,7 @@ class _CoverEditor extends StatelessWidget {
               else
                 _empty(),
               if (busy)
-                const ColoredBox(
+                ColoredBox(
                   color: Colors.black54,
                   child: Center(
                     child: CircularProgressIndicator(color: NileColors.volt),
@@ -749,7 +739,7 @@ class _CoverEditor extends StatelessWidget {
     );
   }
 
-  Widget _empty() => const Center(
+  Widget _empty() => Center(
     child: Column(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -802,7 +792,7 @@ class _DateField extends StatelessWidget {
             ),
             child: Row(
               children: [
-                const Icon(
+                Icon(
                   Icons.calendar_today,
                   size: 16,
                   color: NileColors.txtSecondary,
@@ -820,7 +810,7 @@ class _DateField extends StatelessWidget {
                 ),
                 if (value != null)
                   IconButton(
-                    icon: const Icon(
+                    icon: Icon(
                       Icons.close,
                       size: 18,
                       color: NileColors.txtTertiary,

@@ -7,7 +7,7 @@ class LoadMoreFooter extends StatelessWidget {
   const LoadMoreFooter({super.key});
 
   @override
-  Widget build(BuildContext context) => const Padding(
+  Widget build(BuildContext context) => Padding(
     padding: EdgeInsets.symmetric(vertical: NileSpacing.s16),
     child: Center(
       child: SizedBox(

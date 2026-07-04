@@ -190,7 +190,7 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
           TextButton(
             onPressed: _saving ? null : _save,
             child: _saving
-                ? const SizedBox(
+                ? SizedBox(
                     width: 20,
                     height: 20,
                     child: CircularProgressIndicator(
@@ -231,7 +231,7 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
                       Positioned.fill(
                         child: Container(
                           color: NileColors.bgPage.withValues(alpha: 0.5),
-                          child: const Center(
+                          child: Center(
                             child: CircularProgressIndicator(
                               color: NileColors.volt,
                             ),
@@ -262,7 +262,7 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
                           children: [
                             Container(
                               padding: const EdgeInsets.all(NileSpacing.s2),
-                              decoration: const BoxDecoration(
+                              decoration: BoxDecoration(
                                 color: NileColors.bgPage,
                                 shape: BoxShape.circle,
                               ),
@@ -290,24 +290,24 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
                               bottom: 3,
                               right: 3,
                               child: Container(
-                                decoration: const BoxDecoration(
+                                decoration: BoxDecoration(
                                   color: NileColors.volt,
                                   shape: BoxShape.circle,
                                 ),
                                 padding: const EdgeInsets.all(NileSpacing.s6),
                                 child: _uploadingAvatar
-                                    ? const SizedBox(
+                                    ? SizedBox(
                                         width: 14,
                                         height: 14,
                                         child: CircularProgressIndicator(
                                           strokeWidth: 2,
-                                          color: NileColors.bgPage,
+                                          color: NileColors.onVolt,
                                         ),
                                       )
-                                    : const Icon(
+                                    : Icon(
                                         Icons.camera_alt,
                                         size: 14,
-                                        color: NileColors.bgPage,
+                                        color: NileColors.onVolt,
                                       ),
                               ),
                             ),

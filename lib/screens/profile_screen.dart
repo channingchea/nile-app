@@ -733,7 +733,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
               children: [
                 Container(
                   padding: const EdgeInsets.all(NileSpacing.s4),
-                  decoration: const BoxDecoration(
+                  decoration: BoxDecoration(
                     color: NileColors.bgPage,
                     shape: BoxShape.circle,
                   ),
@@ -815,7 +815,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
             ? OutlinedButton(
                 onPressed: _followLoading ? null : _toggleFollow,
                 child: _followLoading
-                    ? const SizedBox(
+                    ? SizedBox(
                         width: 14,
                         height: 14,
                         child: CircularProgressIndicator(
@@ -828,12 +828,12 @@ class _ProfileScreenState extends State<ProfileScreen> {
             : FilledButton(
                 onPressed: _followLoading ? null : _toggleFollow,
                 child: _followLoading
-                    ? const SizedBox(
+                    ? SizedBox(
                         width: 14,
                         height: 14,
                         child: CircularProgressIndicator(
                           strokeWidth: 2,
-                          color: NileColors.bgPage,
+                          color: NileColors.onVolt,
                         ),
                       )
                     : const Text('Follow'),
@@ -946,7 +946,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
     final draftCount = _drafts?.length;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s16),
-      decoration: const BoxDecoration(
+      decoration: BoxDecoration(
         border: Border(bottom: BorderSide(color: NileColors.border)),
       ),
       child: Row(
@@ -993,7 +993,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
     }
     final drafts = _drafts;
     if (drafts == null) {
-      return const SliverToBoxAdapter(
+      return SliverToBoxAdapter(
         child: Padding(
           padding: EdgeInsets.all(NileSpacing.s40),
           child: Center(
@@ -1009,7 +1009,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(
+              Icon(
                 Icons.drafts_outlined,
                 size: 48,
                 color: NileColors.border,
@@ -1066,7 +1066,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
     }
     final items = _profileItems;
     if (items == null) {
-      return const SliverToBoxAdapter(
+      return SliverToBoxAdapter(
         child: Padding(
           padding: EdgeInsets.all(NileSpacing.s40),
           child: Center(
@@ -1269,12 +1269,12 @@ Widget buildCameraChip(String label) {
     child: Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        const Icon(Icons.camera_alt, size: 14, color: Colors.white),
+        Icon(Icons.camera_alt, size: 14, color: NileColors.txtPrimary),
         const SizedBox(width: 4),
         Text(
           label,
           style: NileTextStyles.caption().copyWith(
-            color: Colors.white,
+            color: NileColors.txtPrimary,
             letterSpacing: 0,
           ),
         ),
@@ -1289,7 +1289,7 @@ class _CoverPlaceholder extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      decoration: const BoxDecoration(
+      decoration: BoxDecoration(
         gradient: LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
@@ -1489,7 +1489,7 @@ class _ProfilePostCard extends StatelessWidget {
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          const Icon(
+                          Icon(
                             Icons.mode_comment_outlined,
                             size: 18,
                             color: NileColors.txtSecondary,
@@ -1521,7 +1521,7 @@ class _ProfilePostCard extends StatelessWidget {
                       shareText: _shareText(),
                     ),
                     borderRadius: BorderRadius.circular(NileRadius.sm),
-                    child: const Padding(
+                    child: Padding(
                       padding: EdgeInsets.symmetric(horizontal: NileSpacing.s4, vertical: NileSpacing.s4),
                       child: Icon(
                         Icons.send_outlined,
@@ -1550,7 +1550,7 @@ class _ProfileRepostHeader extends StatelessWidget {
   Widget build(BuildContext context) {
     return Row(
       children: [
-        const Icon(Icons.repeat, size: 14, color: NileColors.txtTertiary),
+        Icon(Icons.repeat, size: 14, color: NileColors.txtTertiary),
         const SizedBox(width: 6),
         Flexible(
           child: Text(
@@ -1737,7 +1737,7 @@ class _ProfileContentMenu extends StatelessWidget {
   Widget build(BuildContext context) {
     return PopupMenuButton<String>(
       padding: EdgeInsets.zero,
-      icon: const Icon(
+      icon: Icon(
         Icons.more_horiz,
         size: 18,
         color: NileColors.txtTertiary,

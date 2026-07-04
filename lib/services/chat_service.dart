@@ -53,8 +53,9 @@ class ChatService {
   /// keeping a single render path for all messages.
   static RealtimeChannel subscribe(
     String eventId,
-    void Function(ChatMessage) onMessage,
-  ) {
+    void Function(ChatMessage) onMessage, {
+    void Function(RealtimeSubscribeStatus status, Object? error)? onStatus,
+  }) {
     final channel = supabase.channel(
       _channelName(eventId),
       opts: const RealtimeChannelConfig(self: true),
@@ -68,7 +69,7 @@ class ChatService {
             } catch (_) {}
           },
         )
-        .subscribe();
+        .subscribe(onStatus);
     return channel;
   }
 

@@ -86,7 +86,7 @@ class _SignupScreenState extends State<SignupScreen> {
         leading: _submitted
             ? null
             : IconButton(
-                icon: const Icon(
+                icon: Icon(
                   Icons.arrow_back,
                   color: NileColors.txtSecondary,
                 ),
@@ -134,7 +134,7 @@ class _SignupScreenState extends State<SignupScreen> {
             style: FilledButton.styleFrom(
               padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
               backgroundColor: NileColors.volt,
-              foregroundColor: NileColors.bgPage,
+              foregroundColor: NileColors.onVolt,
             ),
             child: const Text('Return to sign in'),
           ),
@@ -170,7 +170,7 @@ class _SignupScreenState extends State<SignupScreen> {
                 textInputAction: TextInputAction.next,
                 autocorrect: false,
                 style: NileTextStyles.bodyMd(),
-                decoration: const InputDecoration(
+                decoration: InputDecoration(
                   labelText: 'Username',
                   hintText: 'lowercase, no spaces',
                   prefixIcon: Icon(
@@ -196,7 +196,7 @@ class _SignupScreenState extends State<SignupScreen> {
                 controller: _nameCtrl,
                 textInputAction: TextInputAction.next,
                 style: NileTextStyles.bodyMd(),
-                decoration: const InputDecoration(
+                decoration: InputDecoration(
                   labelText: 'Display name',
                   hintText: 'How you appear to others',
                   prefixIcon: Icon(
@@ -220,7 +220,7 @@ class _SignupScreenState extends State<SignupScreen> {
                 textInputAction: TextInputAction.next,
                 autocorrect: false,
                 style: NileTextStyles.bodyMd(),
-                decoration: const InputDecoration(
+                decoration: InputDecoration(
                   labelText: 'Email',
                   prefixIcon: Icon(
                     Icons.mail_outline,
@@ -243,7 +243,7 @@ class _SignupScreenState extends State<SignupScreen> {
                 style: NileTextStyles.bodyMd(),
                 decoration: InputDecoration(
                   labelText: 'Password',
-                  prefixIcon: const Icon(
+                  prefixIcon: Icon(
                     Icons.lock_outline,
                     color: NileColors.txtTertiary,
                   ),
@@ -275,7 +275,7 @@ class _SignupScreenState extends State<SignupScreen> {
                 style: NileTextStyles.bodyMd(),
                 decoration: InputDecoration(
                   labelText: 'Confirm password',
-                  prefixIcon: const Icon(
+                  prefixIcon: Icon(
                     Icons.lock_outline,
                     color: NileColors.txtTertiary,
                   ),
@@ -306,16 +306,16 @@ class _SignupScreenState extends State<SignupScreen> {
                 style: FilledButton.styleFrom(
                   padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
                   backgroundColor: NileColors.volt,
-                  foregroundColor: NileColors.bgPage,
+                  foregroundColor: NileColors.onVolt,
                   disabledBackgroundColor: NileColors.bgRaised,
                 ),
                 child: _loading
-                    ? const SizedBox(
+                    ? SizedBox(
                         height: 20,
                         width: 20,
                         child: CircularProgressIndicator(
                           strokeWidth: 2,
-                          color: NileColors.bgPage,
+                          color: NileColors.onVolt,
                         ),
                       )
                     : const Text('Create Account'),

@@ -200,7 +200,7 @@ class _NotificationPreferencesScreenState
           onChanged: onChanged,
           thumbColor: WidgetStateProperty.resolveWith(
             (states) => states.contains(WidgetState.selected)
-                ? NileColors.bgPage
+                ? NileColors.onVolt
                 : NileColors.txtSecondary,
           ),
           trackColor: WidgetStateProperty.resolveWith(

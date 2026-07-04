@@ -38,17 +38,21 @@ dependencies:
   http: ^1.6.0
   permission_handler: ^12.0.1
   google_fonts: ^6.2.1
+  shared_preferences: ^2.3.0
   sentry_flutter: ^9.16.0
   supabase_flutter: ^2.5.0
   image_picker: ^1.1.2
   croppy: ^1.5.3
   share_plus: ^10.1.2
+  flutter_svg: ^2.0.10+1  # renders the TOTP enrollment QR (Supabase returns SVG)
   app_links: ^6.4.0
   url_launcher: ^6.3.0
   firebase_core: ^3.6.0
   firebase_messaging: ^15.1.3
   video_player: ^2.9.2
   visibility_detector: ^0.4.0+2
+  connectivity_plus: ^7.0.0
+  package_info_plus: ^8.1.0
 
 dependency_overrides:
   app_links: 6.4.0

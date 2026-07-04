@@ -252,7 +252,7 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
                         onLike: _toggleLike,
                         onComment: () => _commentFocus.requestFocus(),
                       ),
-                      const Divider(color: NileColors.border, height: 32),
+                      Divider(color: NileColors.border, height: 32),
                       Text('Comments', style: NileTextStyles.labelSm()),
                       const SizedBox(height: 8),
                       if (_commentsError != null)
@@ -266,7 +266,7 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
                           ),
                         )
                       else if (_comments == null)
-                        const Padding(
+                        Padding(
                           padding: EdgeInsets.all(NileSpacing.s24),
                           child: Center(
                             child: CircularProgressIndicator(
@@ -594,7 +594,7 @@ class _CommentMenu extends StatelessWidget {
   Widget build(BuildContext context) {
     return PopupMenuButton<String>(
       padding: EdgeInsets.zero,
-      icon: const Icon(
+      icon: Icon(
         Icons.more_horiz,
         size: 16,
         color: NileColors.txtTertiary,
@@ -640,7 +640,7 @@ class _CommentInput extends StatelessWidget {
       top: false,
       child: Container(
         padding: const EdgeInsets.fromLTRB(NileSpacing.s12, NileSpacing.s8, NileSpacing.s8, NileSpacing.s8),
-        decoration: const BoxDecoration(
+        decoration: BoxDecoration(
           color: NileColors.bgSurface,
           border: Border(top: BorderSide(color: NileColors.border)),
         ),
@@ -669,7 +669,7 @@ class _CommentInput extends StatelessWidget {
             IconButton(
               onPressed: submitting ? null : onSubmit,
               icon: submitting
-                  ? const SizedBox(
+                  ? SizedBox(
                       width: 18,
                       height: 18,
                       child: CircularProgressIndicator(
@@ -677,7 +677,7 @@ class _CommentInput extends StatelessWidget {
                         color: NileColors.volt,
                       ),
                     )
-                  : const Icon(Icons.send, color: NileColors.volt),
+                  : Icon(Icons.send, color: NileColors.volt),
               tooltip: 'Post comment',
             ),
           ],

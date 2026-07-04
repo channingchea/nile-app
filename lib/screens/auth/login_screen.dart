@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../services/supabase_client.dart';
 import '../../theme.dart';
+import 'forgot_password_screen.dart';
 import 'signup_screen.dart';
 
 class LoginScreen extends StatefulWidget {
@@ -94,7 +95,7 @@ class _LoginScreenState extends State<LoginScreen> {
                       textInputAction: TextInputAction.next,
                       autocorrect: false,
                       style: NileTextStyles.bodyMd(),
-                      decoration: const InputDecoration(
+                      decoration: InputDecoration(
                         labelText: 'Email',
                         prefixIcon: Icon(
                           Icons.mail_outline,
@@ -120,7 +121,7 @@ class _LoginScreenState extends State<LoginScreen> {
                       style: NileTextStyles.bodyMd(),
                       decoration: InputDecoration(
                         labelText: 'Password',
-                        prefixIcon: const Icon(
+                        prefixIcon: Icon(
                           Icons.lock_outline,
                           color: NileColors.txtTertiary,
                         ),
@@ -142,7 +143,32 @@ class _LoginScreenState extends State<LoginScreen> {
                         return null;
                       },
                     ),
-                    const SizedBox(height: 32),
+                    const SizedBox(height: 8),
+
+                    // ── Forgot password ──────────────────────────────────────
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: TextButton(
+                        onPressed: () => Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => ForgotPasswordScreen(
+                              initialEmail: _emailCtrl.text.trim().isEmpty
+                                  ? null
+                                  : _emailCtrl.text.trim(),
+                            ),
+                          ),
+                        ),
+                        child: Text(
+                          'Forgot password?',
+                          style: NileTextStyles.bodyMd().copyWith(
+                            color: NileColors.volt,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
 
                     // ── Sign in button ───────────────────────────────────────
                     FilledButton(
@@ -150,16 +176,16 @@ class _LoginScreenState extends State<LoginScreen> {
                       style: FilledButton.styleFrom(
                         padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
                         backgroundColor: NileColors.volt,
-                        foregroundColor: NileColors.bgPage,
+                        foregroundColor: NileColors.onVolt,
                         disabledBackgroundColor: NileColors.bgRaised,
                       ),
                       child: _loading
-                          ? const SizedBox(
+                          ? SizedBox(
                               height: 20,
                               width: 20,
                               child: CircularProgressIndicator(
                                 strokeWidth: 2,
-                                color: NileColors.bgPage,
+                                color: NileColors.onVolt,
                               ),
                             )
                           : const Text('Sign In'),

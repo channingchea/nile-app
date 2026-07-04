@@ -754,7 +754,7 @@ class _CameraScreenState extends State<CameraScreen> {
                     // Host-only, live-only; it's the sole path that ends a show.
                     if (widget.isHost && _state == CameraState.live) ...[
                       const SizedBox(height: 24),
-                      const Divider(color: NileColors.border, height: 1),
+                      Divider(color: NileColors.border, height: 1),
                       const SizedBox(height: 16),
                       SizedBox(
                         width: double.infinity,
@@ -881,7 +881,7 @@ class _CameraScreenState extends State<CameraScreen> {
         padding: const EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s8, NileSpacing.s8, NileSpacing.s8),
         child: Row(
           children: [
-            const Icon(Icons.mic_external_on, color: NileColors.volt, size: 20),
+            Icon(Icons.mic_external_on, color: NileColors.volt, size: 20),
             const SizedBox(width: 12),
             Expanded(
               child: Text(
@@ -901,7 +901,7 @@ class _CameraScreenState extends State<CameraScreen> {
               ),
             ),
             IconButton(
-              icon: const Icon(
+              icon: Icon(
                 Icons.close,
                 size: 18,
                 color: NileColors.txtSecondary,
@@ -980,7 +980,7 @@ class _CameraScreenState extends State<CameraScreen> {
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          const CircularProgressIndicator(color: NileColors.volt),
+          CircularProgressIndicator(color: NileColors.volt),
           const SizedBox(height: 16),
           Text('Connecting...', style: NileTextStyles.bodyMd()),
         ],
@@ -1098,7 +1098,7 @@ class _CameraScreenState extends State<CameraScreen> {
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  const Icon(
+                  Icon(
                     Icons.videocam_off,
                     size: 64,
                     color: NileColors.border,
@@ -1150,7 +1150,7 @@ class _CameraScreenState extends State<CameraScreen> {
                   size: 8,
                   color: _state == CameraState.live
                       ? Colors.white
-                      : NileColors.bgPage,
+                      : NileColors.onVolt,
                 ),
                 const SizedBox(width: 6),
                 Text(
@@ -1158,7 +1158,7 @@ class _CameraScreenState extends State<CameraScreen> {
                   style: NileTextStyles.labelSm().copyWith(
                     color: _state == CameraState.live
                         ? Colors.white
-                        : NileColors.bgPage,
+                        : NileColors.onVolt,
                     letterSpacing: 1.5,
                   ),
                 ),
@@ -1213,16 +1213,16 @@ class _CameraScreenState extends State<CameraScreen> {
                         child: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            const Icon(
+                            Icon(
                               Icons.album,
                               size: 14,
-                              color: NileColors.bgPage,
+                              color: NileColors.onVolt,
                             ),
                             const SizedBox(width: 6),
                             Text(
                               'MASTER AUDIO',
                               style: NileTextStyles.labelSm().copyWith(
-                                color: NileColors.bgPage,
+                                color: NileColors.onVolt,
                                 fontSize: 12,
                               ),
                             ),
@@ -1279,7 +1279,7 @@ class _CameraScreenState extends State<CameraScreen> {
                     label: const Text('View as Viewer'),
                     style: OutlinedButton.styleFrom(
                       foregroundColor: NileColors.volt,
-                      side: const BorderSide(color: NileColors.volt),
+                      side: BorderSide(color: NileColors.volt),
                       padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
                       textStyle: NileTextStyles.labelLg(),
                       shape: const StadiumBorder(),
@@ -1316,7 +1316,7 @@ class _CameraScreenState extends State<CameraScreen> {
                           label: const Text('Ready'),
                           style: FilledButton.styleFrom(
                             backgroundColor: NileColors.volt,
-                            foregroundColor: NileColors.bgPage,
+                            foregroundColor: NileColors.onVolt,
                             padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
                             textStyle: NileTextStyles.labelLg(),
                             shape: const StadiumBorder(),
@@ -1328,7 +1328,7 @@ class _CameraScreenState extends State<CameraScreen> {
                           label: const Text('Ready to Stream'),
                           style: OutlinedButton.styleFrom(
                             foregroundColor: NileColors.volt,
-                            side: const BorderSide(color: NileColors.volt),
+                            side: BorderSide(color: NileColors.volt),
                             padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
                             textStyle: NileTextStyles.labelLg(),
                             shape: const StadiumBorder(),
@@ -1365,7 +1365,7 @@ class _CameraScreenState extends State<CameraScreen> {
                         label: Text(_videoEnabled ? 'Video Off' : 'Video On'),
                         style: OutlinedButton.styleFrom(
                           foregroundColor: NileColors.txtPrimary,
-                          side: const BorderSide(
+                          side: BorderSide(
                             color: NileColors.borderStrong,
                           ),
                           padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
@@ -1385,7 +1385,7 @@ class _CameraScreenState extends State<CameraScreen> {
                       label: const Text('Leave'),
                       style: OutlinedButton.styleFrom(
                         foregroundColor: NileColors.txtPrimary,
-                        side: const BorderSide(color: NileColors.border),
+                        side: BorderSide(color: NileColors.border),
                         padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
                         textStyle: NileTextStyles.labelMd(),
                         shape: const StadiumBorder(),

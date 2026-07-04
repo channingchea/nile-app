@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
+import '../services/mfa_service.dart';
 import '../services/payout_service.dart';
 import '../theme.dart';
+import 'auth/mfa_connect_gate_screen.dart';
 
 /// Host Stripe Connect payouts hub: shows onboarding status and links out to
 /// the hosted onboarding flow / Stripe Express dashboard.
@@ -47,6 +49,16 @@ class _PayoutsScreenState extends State<PayoutsScreen> {
   }
 
   Future<void> _startOnboarding() async {
+    // 2FA is mandatory before a host can set up payouts. Gate here (the server
+    // enforces it too); if they aren't enrolled, route through setup first.
+    if (!await MfaService.hasVerifiedFactor()) {
+      if (!mounted) return;
+      final enrolled = await Navigator.push<bool>(
+        context,
+        MaterialPageRoute(builder: (_) => const MfaConnectGateScreen()),
+      );
+      if (enrolled != true) return;
+    }
     setState(() => _busy = true);
     try {
       final url = await PayoutService.startOnboarding();
@@ -91,7 +103,7 @@ class _PayoutsScreenState extends State<PayoutsScreen> {
       );
     }
     if (_status == null) {
-      return const Center(
+      return Center(
         child: CircularProgressIndicator(color: NileColors.volt),
       );
     }
@@ -223,12 +235,12 @@ class _ActionButton extends StatelessWidget {
       child: FilledButton.icon(
         onPressed: onPressed,
         icon: busy
-            ? const SizedBox(
+            ? SizedBox(
                 width: 18,
                 height: 18,
                 child: CircularProgressIndicator(
                   strokeWidth: 2,
-                  color: NileColors.bgPage,
+                  color: NileColors.onVolt,
                 ),
               )
             : Icon(icon, size: 18),

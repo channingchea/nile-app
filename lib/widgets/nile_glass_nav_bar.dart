@@ -145,7 +145,9 @@ class _GlassTab extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final color = selected ? NileColors.volt : NileColors.txtSecondary;
+    // Mirrors discover_screen's tab colors: dark/bold text on selection,
+    // volt reserved for the accent pill behind the tab — not the icon or label.
+    final color = selected ? NileColors.txtPrimary : NileColors.txtSecondary;
     return Semantics(
       button: true,
       selected: selected,

@@ -81,7 +81,7 @@ class NileGlassBar extends StatelessWidget {
             color: NileColors.bgSurface.withValues(alpha: _tintAlpha),
             // Specular rim along the bottom edge — the "lit glass" seam where
             // the bar meets the scrolling content.
-            border: const Border(
+            border: Border(
               bottom: BorderSide(color: NileColors.borderStrong, width: 0.5),
             ),
           ),

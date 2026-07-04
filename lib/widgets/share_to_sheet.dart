@@ -113,7 +113,7 @@ class _ShareToSheetState extends State<ShareToSheet> {
               child: Text('Share to', style: NileTextStyles.headingSm()),
             ),
             ListTile(
-              leading: const Icon(
+              leading: Icon(
                 Icons.ios_share,
                 color: NileColors.txtPrimary,
               ),
@@ -123,9 +123,9 @@ class _ShareToSheetState extends State<ShareToSheet> {
                 Share.share(widget.shareText);
               },
             ),
-            const Divider(height: 1, color: NileColors.bgRaised),
+            Divider(height: 1, color: NileColors.bgRaised),
             if (convs == null)
-              const Padding(
+              Padding(
                 padding: EdgeInsets.all(NileSpacing.s24),
                 child: Center(
                   child: CircularProgressIndicator(color: NileColors.volt),
@@ -157,7 +157,7 @@ class _ShareToSheetState extends State<ShareToSheet> {
                         style: NileTextStyles.bodyMd(),
                       ),
                       trailing: _sendingTo == c.id
-                          ? const SizedBox(
+                          ? SizedBox(
                               width: 18,
                               height: 18,
                               child: CircularProgressIndicator(

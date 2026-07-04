@@ -9,13 +9,20 @@ import 'package:sentry_flutter/sentry_flutter.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'config.dart';
 import 'screens/auth/login_screen.dart';
+import 'screens/auth/mfa_challenge_screen.dart';
 import 'screens/auth/onboarding_screen.dart';
+import 'screens/auth/reset_password_screen.dart';
 import 'screens/home_screen.dart';
 import 'screens/splash_screen.dart';
+import 'services/app_lifecycle.dart';
+import 'services/connectivity_service.dart';
 import 'services/deep_link_service.dart';
+import 'services/mfa_service.dart';
 import 'services/profile_service.dart';
 import 'services/push_service.dart';
+import 'services/theme_service.dart';
 import 'theme.dart';
+import 'widgets/force_update_gate.dart';
 
 /// True only on platforms where a Firebase app is configured: web, iOS, Android.
 /// macOS and other desktop targets have no registered Firebase app.
@@ -62,7 +69,13 @@ Future<void> _bootstrap() async {
     );
   }
 
+  // Load the saved theme mode before the first frame paints (no flash).
+  await ThemeService.instance.load();
+
   await Supabase.initialize(url: supabaseUrl, anonKey: supabaseAnonKey);
+
+  // Start watching network reachability so any screen can react to on/offline.
+  await ConnectivityService.instance.init();
 
   runApp(const NileApp());
 }
@@ -88,12 +101,15 @@ class NileApp extends StatefulWidget {
   State<NileApp> createState() => _NileAppState();
 }
 
-class _NileAppState extends State<NileApp> {
+class _NileAppState extends State<NileApp> with WidgetsBindingObserver {
   final _navigatorKey = GlobalKey<NavigatorState>();
 
   @override
   void initState() {
     super.initState();
+    // One app-level lifecycle observer feeds AppLifecycle; screens listen there
+    // to refresh/re-subscribe on resume rather than each registering their own.
+    WidgetsBinding.instance.addObserver(this);
     // Initialize FCM after first frame so the navigator is mounted for routing.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_firebaseSupported) PushService.init(_navigatorKey);
@@ -102,16 +118,41 @@ class _NileAppState extends State<NileApp> {
   }
 
   @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    AppLifecycle.instance.state.value = state;
+  }
+
+  @override
+  void didChangePlatformBrightness() {
+    // "System" mode tracks the OS light/dark setting live.
+    ThemeService.instance.onPlatformBrightnessChanged();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Nile',
-      debugShowCheckedModeBanner: false,
-      theme: nileTheme(),
-      // Allow mouse + trackpad drag to scroll (and so drive RefreshIndicator)
-      // on web/desktop, where only touch is enabled by default.
-      scrollBehavior: const _NileScrollBehavior(),
-      navigatorKey: _navigatorKey,
-      home: _AuthGate(navigatorKey: _navigatorKey),
+    return ValueListenableBuilder<ThemeMode>(
+      valueListenable: ThemeService.instance.mode,
+      builder: (_, themeMode, _) => MaterialApp(
+        title: 'Nile',
+        debugShowCheckedModeBanner: false,
+        theme: nileTheme(Brightness.light),
+        darkTheme: nileTheme(Brightness.dark),
+        themeMode: themeMode,
+        // Allow mouse + trackpad drag to scroll (and so drive RefreshIndicator)
+        // on web/desktop, where only touch is enabled by default.
+        scrollBehavior: const _NileScrollBehavior(),
+        navigatorKey: _navigatorKey,
+        // Startup version gate wraps the whole app (fails open on any error).
+        home: ForceUpdateGate(
+          child: _AuthGate(navigatorKey: _navigatorKey),
+        ),
+      ),
     );
   }
 }
@@ -166,7 +207,11 @@ class _AuthGateState extends State<_AuthGate> {
     // A synchronously-restored session won't necessarily re-emit on the auth
     // stream, so treat its presence as already-resolved.
     _initialized = _session != null;
-    if (_session != null) _resolveOnboarded();
+    if (_session != null) {
+      _resolveOnboarded();
+      // New device with empty local prefs: adopt profiles.theme_mode.
+      ThemeService.instance.onSignIn();
+    }
     // On web, skip the splash entirely — the session is restored asynchronously
     // via the auth stream (currentSession is always null at initState on web),
     // so the minimum-duration guard never fires correctly. Web has no native
@@ -179,17 +224,30 @@ class _AuthGateState extends State<_AuthGate> {
       });
     }
     _sub = Supabase.instance.client.auth.onAuthStateChange.listen((state) {
-      // Pop any routes pushed on top of the gate before swapping the root,
-      // otherwise a pushed screen (e.g. Settings) stays visible after sign-out.
-      widget.navigatorKey.currentState?.popUntil((r) => r.isFirst);
-      // Keep the device's push token bound to the right user.
+      final nav = widget.navigatorKey.currentState;
+      // Only the root-swap events clear the pushed stack. In particular, do NOT
+      // pop on tokenRefreshed / mfaChallengeVerified / userUpdated — those fire
+      // mid-flow during MFA enroll/verify/recovery, and popping would tear the
+      // user out of the enrollment or recovery screen they're standing on.
       switch (state.event) {
         case AuthChangeEvent.signedIn:
+          nav?.popUntil((r) => r.isFirst);
           PushService.onSignIn();
+          ThemeService.instance.onSignIn();
           _onboarded = null; // fresh signup/sign-in: re-check below
         case AuthChangeEvent.signedOut:
+          nav?.popUntil((r) => r.isFirst);
           PushService.onSignOut();
           _onboarded = null;
+        case AuthChangeEvent.passwordRecovery:
+          // Opened a recovery link: force the set-new-password screen on top of
+          // whatever the gate resolves to underneath.
+          nav?.popUntil((r) => r.isFirst);
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            widget.navigatorKey.currentState?.push(
+              MaterialPageRoute(builder: (_) => const ResetPasswordScreen()),
+            );
+          });
         default:
           break;
       }
@@ -218,6 +276,11 @@ class _AuthGateState extends State<_AuthGate> {
       return const SplashScreen();
     }
     if (_session == null) return const LoginScreen();
+    // Session present but at aal1 with a verified factor pending — challenge for
+    // the second step before anything else (also covers cold-start restore).
+    if (MfaService.needsChallenge()) {
+      return MfaChallengeScreen(onVerified: () => setState(() {}));
+    }
     // Session present but onboarding state still loading — hold the splash.
     if (_onboarded == null) return const SplashScreen();
     if (!_onboarded!) {

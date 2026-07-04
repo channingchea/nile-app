@@ -166,8 +166,8 @@ class _CreateButton extends StatelessWidget {
       clipBehavior: Clip.antiAlias,
       child: InkWell(
         onTap: onTap,
-        child: const Center(
-          child: Icon(Icons.add, color: NileColors.bgPage, size: 28),
+        child: Center(
+          child: Icon(Icons.add, color: NileColors.onVolt, size: 28),
         ),
       ),
     );
@@ -1015,7 +1015,7 @@ class _EventCard extends StatelessWidget {
                           ),
                         ),
                         if (event.isLive) ...[
-                          const Icon(
+                          Icon(
                             Icons.visibility,
                             size: 13,
                             color: NileColors.txtTertiary,
@@ -1076,7 +1076,7 @@ class _EventCard extends StatelessWidget {
                             shareText: _shareText(),
                           ),
                           borderRadius: BorderRadius.circular(NileRadius.sm),
-                          child: const Padding(
+                          child: Padding(
                             padding: EdgeInsets.symmetric(
                               horizontal: NileSpacing.s4,
                               vertical: NileSpacing.s4,
@@ -1115,7 +1115,7 @@ class _NetworkTag extends StatelessWidget {
     final row = Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        const Icon(Icons.bolt, size: 14, color: NileColors.volt),
+        Icon(Icons.bolt, size: 14, color: NileColors.volt),
         const SizedBox(width: 4),
         Text(
           'From your network',
@@ -1145,7 +1145,7 @@ class _SponsoredTag extends StatelessWidget {
     final row = Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        const Icon(
+        Icon(
           Icons.campaign_outlined,
           size: 14,
           color: NileColors.txtTertiary,
@@ -1255,7 +1255,7 @@ class _AdCreativeCard extends StatelessWidget {
                             padding: EdgeInsets.zero,
                             iconSize: 18,
                             tooltip: 'Ad options',
-                            icon: const Icon(
+                            icon: Icon(
                               Icons.more_horiz,
                               color: NileColors.txtTertiary,
                             ),
@@ -1493,7 +1493,7 @@ class _PostCard extends StatelessWidget {
                         child: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            const Icon(
+                            Icon(
                               Icons.mode_comment_outlined,
                               size: 18,
                               color: NileColors.txtSecondary,
@@ -1525,7 +1525,7 @@ class _PostCard extends StatelessWidget {
                         shareText: _shareText(),
                       ),
                       borderRadius: BorderRadius.circular(NileRadius.sm),
-                      child: const Padding(
+                      child: Padding(
                         padding: EdgeInsets.symmetric(
                           horizontal: NileSpacing.s4,
                           vertical: NileSpacing.s4,
@@ -1558,7 +1558,7 @@ class _RepostHeader extends StatelessWidget {
   Widget build(BuildContext context) {
     return Row(
       children: [
-        const Icon(Icons.repeat, size: 14, color: NileColors.txtTertiary),
+        Icon(Icons.repeat, size: 14, color: NileColors.txtTertiary),
         const SizedBox(width: 6),
         Flexible(
           child: Text(
@@ -1723,7 +1723,7 @@ class _ContentMenu extends StatelessWidget {
   Widget build(BuildContext context) {
     return PopupMenuButton<String>(
       padding: EdgeInsets.zero,
-      icon: const Icon(
+      icon: Icon(
         Icons.more_horiz,
         size: 18,
         color: NileColors.txtTertiary,

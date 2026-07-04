@@ -125,7 +125,7 @@ class _EventLinkCardState extends State<EventLinkCard> {
                 ),
               ),
             ),
-            const Padding(
+            Padding(
               padding: EdgeInsets.only(right: NileSpacing.s8),
               child: Icon(
                 Icons.chevron_right,
@@ -139,7 +139,7 @@ class _EventLinkCardState extends State<EventLinkCard> {
     );
   }
 
-  Widget _placeholder() => const DecoratedBox(
+  Widget _placeholder() => DecoratedBox(
     decoration: BoxDecoration(color: NileColors.bgSurface),
     child: Center(
       child: Icon(Icons.live_tv, size: 24, color: NileColors.border),

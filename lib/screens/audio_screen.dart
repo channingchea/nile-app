@@ -209,7 +209,7 @@ class _AudioScreenState extends State<AudioScreen> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         const SizedBox(height: 48),
-        const Icon(Icons.album, size: 64, color: NileColors.border),
+        Icon(Icons.album, size: 64, color: NileColors.border),
         const SizedBox(height: 24),
         Text(
           'Master Audio',
@@ -246,19 +246,19 @@ class _AudioScreenState extends State<AudioScreen> {
         FilledButton.icon(
           onPressed: isConnecting ? null : _enterSoundCheck,
           icon: isConnecting
-              ? const SizedBox(
+              ? SizedBox(
                   width: 18,
                   height: 18,
                   child: CircularProgressIndicator(
                     strokeWidth: 2,
-                    color: NileColors.bgPage,
+                    color: NileColors.onVolt,
                   ),
                 )
               : const Icon(Icons.tune),
           label: Text(isConnecting ? 'Connecting...' : 'Sound Check'),
           style: FilledButton.styleFrom(
             backgroundColor: NileColors.volt,
-            foregroundColor: NileColors.bgPage,
+            foregroundColor: NileColors.onVolt,
             padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
             textStyle: NileTextStyles.labelLg(),
             shape: const StadiumBorder(),
@@ -286,7 +286,7 @@ class _AudioScreenState extends State<AudioScreen> {
           ),
           const SizedBox(height: 32),
         ] else
-          const Icon(Icons.mic, size: 80, color: NileColors.volt),
+          Icon(Icons.mic, size: 80, color: NileColors.volt),
         const SizedBox(height: 24),
         Container(
           padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s16, vertical: NileSpacing.s12),
@@ -324,7 +324,7 @@ class _AudioScreenState extends State<AudioScreen> {
               label: const Text('Ready'),
               style: FilledButton.styleFrom(
                 backgroundColor: NileColors.volt,
-                foregroundColor: NileColors.bgPage,
+                foregroundColor: NileColors.onVolt,
                 padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
                 textStyle: NileTextStyles.labelLg(),
                 shape: const StadiumBorder(),
@@ -337,7 +337,7 @@ class _AudioScreenState extends State<AudioScreen> {
               label: const Text('Ready to Stream'),
               style: OutlinedButton.styleFrom(
                 foregroundColor: NileColors.volt,
-                side: const BorderSide(color: NileColors.volt),
+                side: BorderSide(color: NileColors.volt),
                 padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
                 textStyle: NileTextStyles.labelLg(),
                 shape: const StadiumBorder(),

@@ -42,7 +42,7 @@ class _TopicChipsState extends State<TopicChips> {
     }
     final topics = _topics;
     if (topics == null) {
-      return const Padding(
+      return Padding(
         padding: EdgeInsets.symmetric(vertical: NileSpacing.s12),
         child: Center(
           child: SizedBox(
@@ -75,7 +75,7 @@ class _TopicChipsState extends State<TopicChips> {
             showCheckmark: false,
             labelStyle: NileTextStyles.bodySm().copyWith(
               color: widget.selected.contains(t.id)
-                  ? NileColors.bgPage
+                  ? NileColors.onVolt
                   : NileColors.txtSecondary,
             ),
             backgroundColor: NileColors.bgSurface,

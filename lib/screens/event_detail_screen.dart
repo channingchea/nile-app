@@ -555,7 +555,7 @@ class _EventDetailScreenState extends State<EventDetailScreen>
     // the previous screen can run; follow/ticket state hydrates in place.
     if (_event == null) {
       if (_loading) {
-        return const Center(
+        return Center(
           child: CircularProgressIndicator(color: NileColors.volt),
         );
       }
@@ -571,7 +571,7 @@ class _EventDetailScreenState extends State<EventDetailScreen>
             if (_isOwnEvent) ...[
               IconButton(
                 tooltip: 'Attendees',
-                icon: const Icon(
+                icon: Icon(
                   Icons.people_outline,
                   color: NileColors.txtPrimary,
                 ),
@@ -579,7 +579,7 @@ class _EventDetailScreenState extends State<EventDetailScreen>
               ),
               IconButton(
                 tooltip: 'Edit',
-                icon: const Icon(
+                icon: Icon(
                   Icons.edit_outlined,
                   color: NileColors.txtPrimary,
                 ),
@@ -593,18 +593,18 @@ class _EventDetailScreenState extends State<EventDetailScreen>
             ],
             IconButton(
               tooltip: 'Share',
-              icon: const Icon(Icons.ios_share, color: NileColors.txtPrimary),
+              icon: Icon(Icons.ios_share, color: NileColors.txtPrimary),
               onPressed: _share,
             ),
             IconButton(
               tooltip: 'Copy ID',
-              icon: const Icon(Icons.link, color: NileColors.txtPrimary),
+              icon: Icon(Icons.link, color: NileColors.txtPrimary),
               onPressed: _copyId,
             ),
             if (!_isOwnEvent)
               IconButton(
                 tooltip: 'Report event',
-                icon: const Icon(
+                icon: Icon(
                   Icons.flag_outlined,
                   color: NileColors.txtPrimary,
                 ),
@@ -693,7 +693,7 @@ class _EventDetailScreenState extends State<EventDetailScreen>
                     label: const Text('Boost this event'),
                     style: OutlinedButton.styleFrom(
                       foregroundColor: NileColors.txtPrimary,
-                      side: const BorderSide(color: NileColors.border),
+                      side: BorderSide(color: NileColors.border),
                       padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
                       shape: const StadiumBorder(),
                     ),
@@ -724,7 +724,7 @@ class _CoverImage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final placeholder = const DecoratedBox(
+    final placeholder = DecoratedBox(
       decoration: BoxDecoration(
         gradient: LinearGradient(
           begin: Alignment.topLeft,
@@ -751,7 +751,7 @@ class _CoverImage extends StatelessWidget {
                 )
               : placeholder,
         ),
-        const DecoratedBox(
+        DecoratedBox(
           decoration: BoxDecoration(
             gradient: LinearGradient(
               begin: Alignment.topCenter,
@@ -930,7 +930,7 @@ class _CountdownBlock extends StatelessWidget {
         ),
         child: Row(
           children: [
-            const SizedBox(
+            SizedBox(
               width: 18,
               height: 18,
               child: CircularProgressIndicator(
@@ -968,7 +968,7 @@ class _CountdownBlock extends StatelessWidget {
         children: [
           Row(
             children: [
-              const Icon(
+              Icon(
                 Icons.calendar_today,
                 size: 14,
                 color: NileColors.txtSecondary,
@@ -1175,7 +1175,7 @@ class _PrimaryCta extends StatelessWidget {
             style: FilledButton.styleFrom(
               padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
               backgroundColor: NileColors.volt,
-              foregroundColor: NileColors.bgPage,
+              foregroundColor: NileColors.onVolt,
             ),
             icon: const Icon(Icons.meeting_room_outlined),
             label: const Text('Join Lobby'),
@@ -1224,7 +1224,7 @@ class _PrimaryCta extends StatelessWidget {
             style: FilledButton.styleFrom(
               padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
               backgroundColor: NileColors.volt,
-              foregroundColor: NileColors.bgPage,
+              foregroundColor: NileColors.onVolt,
             ),
             icon: const Icon(Icons.play_arrow),
             label: const Text('Watch Replay'),

@@ -62,14 +62,14 @@ class _BoostPerformanceScreenState extends State<BoostPerformanceScreen> {
       );
     }
     if (_stats == null) {
-      return const Center(child: CircularProgressIndicator(color: NileColors.volt));
+      return Center(child: CircularProgressIndicator(color: NileColors.volt));
     }
     if (_stats!.isEmpty) {
       return _Centered(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(Icons.campaign_outlined, color: NileColors.txtTertiary, size: 40),
+            Icon(Icons.campaign_outlined, color: NileColors.txtTertiary, size: 40),
             const SizedBox(height: 12),
             Text(
               'No boosts yet',

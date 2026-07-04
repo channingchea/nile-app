@@ -251,12 +251,12 @@ class _ReportSheetState extends State<_ReportSheet> {
             FilledButton(
               onPressed: _reason == null || _submitting ? null : _submit,
               child: _submitting
-                  ? const SizedBox(
+                  ? SizedBox(
                       width: 16,
                       height: 16,
                       child: CircularProgressIndicator(
                         strokeWidth: 2,
-                        color: NileColors.bgPage,
+                        color: NileColors.onVolt,
                       ),
                     )
                   : const Text('Submit report'),

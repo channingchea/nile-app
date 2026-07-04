@@ -38,14 +38,14 @@ class EventCoverPill extends StatelessWidget {
     late final String text;
     if (event.isScheduled && event.scheduledAt != null) {
       bg = NileColors.volt;
-      fg = NileColors.bgPage;
+      fg = NileColors.onVolt;
       text = _label(event.scheduledAt!.toLocal());
     } else if (event.isDraft) {
-      bg = NileColors.bgPage.withValues(alpha: 0.6);
-      fg = NileColors.txtSecondary;
+      bg = Colors.black.withValues(alpha: 0.6); // over image — fixed dark
+      fg = Colors.white70;
       text = 'DRAFT';
     } else if (event.isEnded) {
-      bg = NileColors.bgPage.withValues(alpha: 0.6);
+      bg = Colors.black.withValues(alpha: 0.6); // over image — fixed dark
       fg = Colors.white;
       text = 'ENDED';
     } else {

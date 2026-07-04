@@ -197,7 +197,7 @@ class _CrewEditorState extends State<CrewEditor> {
           onRemove: _removeCamera,
         ),
         const SizedBox(height: 16),
-        const Divider(color: NileColors.border),
+        Divider(color: NileColors.border),
         const SizedBox(height: 16),
         _StepHeader(
           number: 2,
@@ -235,7 +235,7 @@ class _CrewEditorState extends State<CrewEditor> {
               prefixIcon: const Icon(Icons.search, size: 20),
               hintText: 'Search people by name or @username',
               suffixIcon: _searching
-                  ? const Padding(
+                  ? Padding(
                       padding: EdgeInsets.all(NileSpacing.s12),
                       child: SizedBox(
                         width: 16,
@@ -287,14 +287,14 @@ class _StepHeader extends StatelessWidget {
           width: 26,
           height: 26,
           alignment: Alignment.center,
-          decoration: const BoxDecoration(
+          decoration: BoxDecoration(
             color: NileColors.volt,
             shape: BoxShape.circle,
           ),
           child: Text(
             '$number',
             style: NileTextStyles.labelMd().copyWith(
-              color: NileColors.bgPage,
+              color: NileColors.onVolt,
               fontWeight: FontWeight.w700,
             ),
           ),
@@ -399,7 +399,7 @@ class _OperatorResultTile extends StatelessWidget {
                   ? nileAvatarImage(url, 18)
                   : null,
               child: (url == null || url.isEmpty)
-                  ? const Icon(
+                  ? Icon(
                       Icons.person,
                       size: 18,
                       color: NileColors.txtTertiary,
@@ -474,7 +474,7 @@ class _AssignMyselfTile extends StatelessWidget {
                   ? nileAvatarImage(url, 16)
                   : null,
               child: (url == null || url.isEmpty)
-                  ? const Icon(
+                  ? Icon(
                       Icons.person,
                       size: 16,
                       color: NileColors.txtTertiary,
@@ -490,7 +490,7 @@ class _AssignMyselfTile extends StatelessWidget {
                 style: NileTextStyles.labelMd(),
               ),
             ),
-            const Icon(Icons.add_circle_outline, color: NileColors.volt),
+            Icon(Icons.add_circle_outline, color: NileColors.volt),
           ],
         ),
       ),
@@ -548,7 +548,7 @@ class _PickerTabs extends StatelessWidget {
         child: Text(
           label,
           style: NileTextStyles.labelMd().copyWith(
-            color: selected ? NileColors.bgPage : NileColors.txtSecondary,
+            color: selected ? NileColors.onVolt : NileColors.txtSecondary,
           ),
         ),
       ),

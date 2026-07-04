@@ -1,9 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import '../services/app_error.dart';
+import '../services/app_lifecycle.dart';
 import '../services/message_service.dart';
+import '../services/realtime.dart';
 import '../theme.dart';
 import '../widgets/empty_state.dart';
 import '../widgets/nile_glass_nav_bar.dart';
+import '../widgets/offline_banner.dart';
 import 'conversation_screen.dart';
 
 class MessagesScreen extends StatefulWidget {
@@ -16,8 +20,8 @@ class MessagesScreen extends StatefulWidget {
 class _MessagesScreenState extends State<MessagesScreen> {
   List<Conversation>? _convs;
   bool _loading = true;
-  String? _error;
-  RealtimeChannel? _channel;
+  Object? _error;
+  ResilientChannel? _conn;
   final _searchCtrl = TextEditingController();
   String _query = '';
 
@@ -26,13 +30,24 @@ class _MessagesScreenState extends State<MessagesScreen> {
     super.initState();
     _load();
     _subscribeRealtime();
+    AppLifecycle.instance.state.addListener(_onLifecycle);
   }
 
   @override
   void dispose() {
-    _channel?.unsubscribe();
+    AppLifecycle.instance.state.removeListener(_onLifecycle);
+    _conn?.dispose();
     _searchCtrl.dispose();
     super.dispose();
+  }
+
+  // Refresh the list when the app returns to the foreground — realtime may have
+  // missed changes while suspended.
+  void _onLifecycle() {
+    if (AppLifecycle.instance.state.value == AppLifecycleState.resumed &&
+        mounted) {
+      _load();
+    }
   }
 
   /// Conversations filtered by the current search query (by username).
@@ -48,34 +63,40 @@ class _MessagesScreenState extends State<MessagesScreen> {
   void _subscribeRealtime() {
     final myId = Supabase.instance.client.auth.currentUser?.id;
     if (myId == null) return;
-    _channel = Supabase.instance.client
-        .channel('conversations:$myId')
-        .onPostgresChanges(
-          event: PostgresChangeEvent.all,
-          schema: 'public',
-          table: 'conversations',
-          callback: (_) {
-            if (mounted) _load();
-          },
-        )
-        .onPostgresChanges(
-          event: PostgresChangeEvent.insert,
-          schema: 'public',
-          table: 'messages',
-          callback: (_) {
-            if (mounted) _load();
-          },
-        )
-        // Refresh live-presence dots when any event goes live/ends.
-        .onPostgresChanges(
-          event: PostgresChangeEvent.update,
-          schema: 'public',
-          table: 'events',
-          callback: (_) {
-            if (mounted) _load();
-          },
-        )
-        .subscribe();
+    _conn = ResilientChannel(
+      build: (onStatus) => Supabase.instance.client
+          .channel('conversations:$myId')
+          .onPostgresChanges(
+            event: PostgresChangeEvent.all,
+            schema: 'public',
+            table: 'conversations',
+            callback: (_) {
+              if (mounted) _load();
+            },
+          )
+          .onPostgresChanges(
+            event: PostgresChangeEvent.insert,
+            schema: 'public',
+            table: 'messages',
+            callback: (_) {
+              if (mounted) _load();
+            },
+          )
+          // Refresh live-presence dots when any event goes live/ends.
+          .onPostgresChanges(
+            event: PostgresChangeEvent.update,
+            schema: 'public',
+            table: 'events',
+            callback: (_) {
+              if (mounted) _load();
+            },
+          )
+          .subscribe(onStatus),
+      // Backfill anything missed while the channel was dropped.
+      onResync: () {
+        if (mounted) _load();
+      },
+    );
   }
 
   Future<void> _load() async {
@@ -87,7 +108,7 @@ class _MessagesScreenState extends State<MessagesScreen> {
       final convs = await MessageService.getConversations();
       if (mounted) setState(() => _convs = convs);
     } catch (e) {
-      if (mounted) setState(() => _error = e.toString());
+      if (mounted) setState(() => _error = e);
     } finally {
       if (mounted) setState(() => _loading = false);
     }
@@ -123,15 +144,16 @@ class _MessagesScreenState extends State<MessagesScreen> {
                         )
                       : null,
                 ),
+                const SliverToBoxAdapter(child: OfflineBanner()),
                 if (_loading)
-                  const SliverFillRemaining(
+                  SliverFillRemaining(
                     child: Center(
                       child: CircularProgressIndicator(color: NileColors.volt),
                     ),
                   )
                 else if (_error != null)
                   SliverFillRemaining(
-                    child: _ErrorView(message: _error!, onRetry: _load),
+                    child: NileErrorState(error: _error!, onRetry: _load),
                   )
                 else if (_convs == null || _convs!.isEmpty)
                   const SliverFillRemaining(child: _EmptyView())
@@ -147,7 +169,7 @@ class _MessagesScreenState extends State<MessagesScreen> {
                     ),
                     sliver: SliverList.separated(
                       itemCount: _filtered.length,
-                      separatorBuilder: (_, _) => const Divider(
+                      separatorBuilder: (_, _) => Divider(
                         height: 1,
                         indent: 72,
                         color: NileColors.border,
@@ -265,7 +287,7 @@ class _ConversationTile extends StatelessWidget {
                           child: Text(
                             conv.unreadCount > 9 ? '9+' : '${conv.unreadCount}',
                             style: NileTextStyles.caption().copyWith(
-                              color: NileColors.bgPage,
+                              color: NileColors.onVolt,
                               fontWeight: FontWeight.w700,
                             ),
                           ),
@@ -355,7 +377,7 @@ class _SearchField extends StatelessWidget {
         decoration: InputDecoration(
           isDense: true,
           hintText: 'Search messages',
-          prefixIcon: const Icon(
+          prefixIcon: Icon(
             Icons.search,
             size: 20,
             color: NileColors.txtTertiary,
@@ -363,7 +385,7 @@ class _SearchField extends StatelessWidget {
           suffixIcon: controller.text.isEmpty
               ? null
               : IconButton(
-                  icon: const Icon(
+                  icon: Icon(
                     Icons.close,
                     size: 18,
                     color: NileColors.txtTertiary,
@@ -419,39 +441,6 @@ class _EmptyView extends StatelessWidget {
     title: 'No messages yet',
     body: 'Send a message by visiting someone\'s profile.',
   );
-}
-
-class _ErrorView extends StatelessWidget {
-  final String message;
-  final VoidCallback onRetry;
-  const _ErrorView({required this.message, required this.onRetry});
-
-  @override
-  Widget build(BuildContext context) {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(NileSpacing.s40),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.error_outline, size: 56, color: NileColors.error),
-            const SizedBox(height: 16),
-            Text('Something went wrong', style: NileTextStyles.headingMd()),
-            const SizedBox(height: 8),
-            Text(
-              message,
-              textAlign: TextAlign.center,
-              style: NileTextStyles.bodyMd().copyWith(
-                color: NileColors.txtSecondary,
-              ),
-            ),
-            const SizedBox(height: 24),
-            FilledButton(onPressed: onRetry, child: const Text('Retry')),
-          ],
-        ),
-      ),
-    );
-  }
 }
 
 // ── Public avatar widget for ConversationScreen ───────────────────────────────

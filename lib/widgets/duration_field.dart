@@ -56,7 +56,7 @@ class DurationField extends StatelessWidget {
           const SizedBox(height: 8),
           Row(
             children: [
-              const Icon(
+              Icon(
                 Icons.schedule,
                 size: 14,
                 color: NileColors.txtTertiary,
@@ -112,7 +112,7 @@ class _UnitToggle extends StatelessWidget {
         child: Text(
           label,
           style: NileTextStyles.labelMd().copyWith(
-            color: selected ? NileColors.bgPage : NileColors.txtSecondary,
+            color: selected ? NileColors.onVolt : NileColors.txtSecondary,
           ),
         ),
       ),

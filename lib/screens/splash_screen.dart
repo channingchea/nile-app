@@ -63,7 +63,7 @@ class _SplashScreenState extends State<SplashScreen>
                         child: Container(
                           width: 10,
                           height: 10,
-                          decoration: const BoxDecoration(
+                          decoration: BoxDecoration(
                             color: NileColors.volt,
                             shape: BoxShape.circle,
                           ),

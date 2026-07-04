@@ -133,7 +133,7 @@ class _EditPostScreenState extends State<EditPostScreen> {
               onPressed: _canSave ? _save : null,
               style: FilledButton.styleFrom(
                 backgroundColor: NileColors.volt,
-                foregroundColor: NileColors.bgPage,
+                foregroundColor: NileColors.onVolt,
                 disabledBackgroundColor: NileColors.bgRaised,
                 disabledForegroundColor: NileColors.txtTertiary,
                 padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s16),
@@ -142,12 +142,12 @@ class _EditPostScreenState extends State<EditPostScreen> {
                 ),
               ),
               child: _saving
-                  ? const SizedBox(
+                  ? SizedBox(
                       width: 16,
                       height: 16,
                       child: CircularProgressIndicator(
                         strokeWidth: 2,
-                        color: NileColors.bgPage,
+                        color: NileColors.onVolt,
                       ),
                     )
                   : Text('Save', style: NileTextStyles.labelMd()),
@@ -191,7 +191,7 @@ class _EditPostScreenState extends State<EditPostScreen> {
                   OutlinedButton.icon(
                     onPressed: _pickingImage ? null : _pickImage,
                     icon: _pickingImage
-                        ? const SizedBox(
+                        ? SizedBox(
                             width: 16,
                             height: 16,
                             child: CircularProgressIndicator(
@@ -203,7 +203,7 @@ class _EditPostScreenState extends State<EditPostScreen> {
                     label: Text(_pickingImage ? 'Loading…' : 'Add photo'),
                     style: OutlinedButton.styleFrom(
                       padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
-                      side: const BorderSide(color: NileColors.border),
+                      side: BorderSide(color: NileColors.border),
                     ),
                   ),
                 if (_error != null) ...[
@@ -333,7 +333,7 @@ class _ImageStrip extends StatelessWidget {
         ),
         child: Center(
           child: busy
-              ? const SizedBox(
+              ? SizedBox(
                   width: 16,
                   height: 16,
                   child: CircularProgressIndicator(
@@ -341,7 +341,7 @@ class _ImageStrip extends StatelessWidget {
                     color: NileColors.volt,
                   ),
                 )
-              : const Icon(
+              : Icon(
                   Icons.add_photo_alternate_outlined,
                   color: NileColors.txtTertiary,
                 ),

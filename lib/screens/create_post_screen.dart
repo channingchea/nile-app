@@ -132,7 +132,7 @@ class _CreatePostScreenState extends State<CreatePostScreen> {
               onPressed: _canPost ? _submit : null,
               style: FilledButton.styleFrom(
                 backgroundColor: NileColors.volt,
-                foregroundColor: NileColors.bgPage,
+                foregroundColor: NileColors.onVolt,
                 disabledBackgroundColor: NileColors.bgRaised,
                 disabledForegroundColor: NileColors.txtTertiary,
                 padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s16),
@@ -141,12 +141,12 @@ class _CreatePostScreenState extends State<CreatePostScreen> {
                 ),
               ),
               child: _submitting
-                  ? const SizedBox(
+                  ? SizedBox(
                       width: 16,
                       height: 16,
                       child: CircularProgressIndicator(
                         strokeWidth: 2,
-                        color: NileColors.bgPage,
+                        color: NileColors.onVolt,
                       ),
                     )
                   : const Text('Post'),
@@ -190,7 +190,7 @@ class _CreatePostScreenState extends State<CreatePostScreen> {
                   OutlinedButton.icon(
                     onPressed: _pickingImage ? null : _pickImage,
                     icon: _pickingImage
-                        ? const SizedBox(
+                        ? SizedBox(
                             width: 16,
                             height: 16,
                             child: CircularProgressIndicator(
@@ -202,7 +202,7 @@ class _CreatePostScreenState extends State<CreatePostScreen> {
                     label: Text(_pickingImage ? 'Loading…' : 'Add photo'),
                     style: OutlinedButton.styleFrom(
                       padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
-                      side: const BorderSide(color: NileColors.border),
+                      side: BorderSide(color: NileColors.border),
                     ),
                   ),
                 if (_errorMessage != null) ...[
@@ -323,7 +323,7 @@ class _ImageStrip extends StatelessWidget {
         ),
         child: Center(
           child: busy
-              ? const SizedBox(
+              ? SizedBox(
                   width: 16,
                   height: 16,
                   child: CircularProgressIndicator(
@@ -331,7 +331,7 @@ class _ImageStrip extends StatelessWidget {
                     color: NileColors.volt,
                   ),
                 )
-              : const Icon(
+              : Icon(
                   Icons.add_photo_alternate_outlined,
                   color: NileColors.txtTertiary,
                 ),

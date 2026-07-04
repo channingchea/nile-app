@@ -579,7 +579,7 @@ class _DiscoverScreenState extends State<DiscoverScreen>
         itemCount: users.length + (_hasMore[_Tab.people]! ? 1 : 0),
         separatorBuilder: (_, i) => i >= users.length - 1
             ? const SizedBox.shrink()
-            : const Divider(height: 1, indent: 72, color: NileColors.border),
+            : Divider(height: 1, indent: 72, color: NileColors.border),
         itemBuilder: (_, i) {
           if (i >= users.length) return const LoadMoreFooter();
           return _UserTile(
@@ -746,18 +746,18 @@ class _FollowButton extends StatelessWidget {
         tapTargetSize: MaterialTapTargetSize.shrinkWrap,
       ),
       child: isLoading
-          ? const SizedBox(
+          ? SizedBox(
               width: 14,
               height: 14,
               child: CircularProgressIndicator(
                 strokeWidth: 2,
-                color: NileColors.bgPage,
+                color: NileColors.onVolt,
               ),
             )
           : Text(
               'Follow',
               style: NileTextStyles.labelSm().copyWith(
-                color: NileColors.bgPage,
+                color: NileColors.onVolt,
                 letterSpacing: 0,
               ),
             ),
@@ -846,7 +846,7 @@ class _DiscoverPostCard extends StatelessWidget {
                       onTap: onLikeToggle!,
                     ),
                     const SizedBox(width: 14),
-                    const Icon(
+                    Icon(
                       Icons.mode_comment_outlined,
                       size: 18,
                       color: NileColors.txtSecondary,
@@ -925,7 +925,7 @@ class _DiscoverEventCard extends StatelessWidget {
                           ),
                         ),
                         if (event.isLive) ...[
-                          const Icon(
+                          Icon(
                             Icons.visibility,
                             size: 13,
                             color: NileColors.txtTertiary,
@@ -1026,7 +1026,7 @@ class _NetworkRail extends StatelessWidget {
       children: [
         Row(
           children: [
-            const Icon(Icons.bolt, size: 16, color: NileColors.volt),
+            Icon(Icons.bolt, size: 16, color: NileColors.volt),
             const SizedBox(width: 6),
             Text('From your network', style: NileTextStyles.labelMd()),
           ],

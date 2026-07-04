@@ -1,5 +1,6 @@
 import 'package:flutter/cupertino.dart' show CupertinoPageTransitionsBuilder;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show SystemUiOverlayStyle;
 import 'package:google_fonts/google_fonts.dart';
 
 /// Constrains [child] to 600 px and centers it horizontally.
@@ -60,28 +61,99 @@ class NileSpacing {
 
 // ── Colors ────────────────────────────────────────────────────────────────────
 
+/// The theme-varying color tokens, one instance per theme. Values mirror
+/// Nile_Design_System/tokens/colors.css exactly. Registered as a
+/// [ThemeExtension] on both ThemeDatas, so `context.nile.<token>` resolves
+/// per active theme; [NileColors] getters delegate to the current instance.
+@immutable
+class NilePalette extends ThemeExtension<NilePalette> {
+  const NilePalette({
+    required this.bgPage,
+    required this.bgSurface,
+    required this.bgRaised,
+    required this.txtPrimary,
+    required this.txtSecondary,
+    required this.txtTertiary,
+    required this.border,
+    required this.borderStrong,
+    required this.volt,
+  });
+
+  final Color bgPage; // scaffold / page bg
+  final Color bgSurface; // cards, app bars
+  final Color bgRaised; // elevated, hover fills
+  final Color txtPrimary;
+  final Color txtSecondary;
+  final Color txtTertiary;
+  final Color border; // hairline "lit edge"
+  final Color borderStrong;
+  final Color volt; // primary CTA — volt-dark in light for legibility
+
+  static const NilePalette dark = NilePalette(
+    bgPage: Color(0xFF0A0A0A),
+    bgSurface: Color(0xFF18181B),
+    bgRaised: Color(0xFF27272A),
+    txtPrimary: Color(0xFFFAFAFA),
+    txtSecondary: Color(0xFFA1A1AA),
+    txtTertiary: Color(0xFF71717A),
+    border: Color(0x1AFFFFFF), // white 10%
+    borderStrong: Color(0x33FFFFFF), // white 20%
+    volt: Color(0xFFC8FF00),
+  );
+
+  static const NilePalette light = NilePalette(
+    bgPage: Color(0xFFF4F4F5),
+    bgSurface: Color(0xFFFFFFFF),
+    bgRaised: Color(0xFFFAFAFA),
+    txtPrimary: Color(0xFF0A0A0A),
+    txtSecondary: Color(0xFF52525B),
+    txtTertiary: Color(0xFFA1A1AA),
+    border: Color(0x140A0A0A), // black 8%
+    borderStrong: Color(0x290A0A0A), // black 16%
+    volt: Color(0xFFA0CC00), // volt-dark
+  );
+
+  static NilePalette of(Brightness b) =>
+      b == Brightness.dark ? dark : light;
+
+  @override
+  ThemeExtension<NilePalette> copyWith() => this;
+
+  @override
+  ThemeExtension<NilePalette> lerp(
+    covariant ThemeExtension<NilePalette>? other,
+    double t,
+  ) => t < 0.5 ? this : (other ?? this);
+}
+
+/// Preferred accessor for new code: `context.nile.bgSurface` — registers a
+/// Theme dependency so the widget rebuilds automatically on theme change.
+extension NileContext on BuildContext {
+  NilePalette get nile => Theme.of(this).extension<NilePalette>()!;
+}
+
 class NileColors {
   NileColors._();
 
-  // Surfaces (dark mode)
-  static const Color bgPage = Color(0xFF0A0A0A); // scaffold / page bg
-  static const Color bgSurface = Color(0xFF18181B); // cards, app bars
-  static const Color bgRaised = Color(0xFF27272A); // elevated, hover fills
+  /// Backing palette for the theme-varying tokens below. Set by ThemeService
+  /// whenever the effective brightness changes (it then rebuilds the tree,
+  /// so every build re-reads the new values). Do not set directly.
+  static NilePalette palette = NilePalette.dark;
 
-  // Text
-  static const Color txtPrimary = Color(0xFFFAFAFA);
-  static const Color txtSecondary = Color(0xFFA1A1AA);
-  static const Color txtTertiary = Color(0xFF71717A);
+  // Theme-varying — resolve from the active palette.
+  static Color get bgPage => palette.bgPage;
+  static Color get bgSurface => palette.bgSurface;
+  static Color get bgRaised => palette.bgRaised;
+  static Color get txtPrimary => palette.txtPrimary;
+  static Color get txtSecondary => palette.txtSecondary;
+  static Color get txtTertiary => palette.txtTertiary;
+  static Color get border => palette.border;
+  static Color get borderStrong => palette.borderStrong;
+  static Color get volt => palette.volt;
 
-  // Borders — translucent white reads as "lit edge" on dark surfaces and
-  // adapts to whatever sits beneath it (cards, raised fills, images).
-  static const Color border = Color(0x1AFFFFFF); // white 10%
-  static const Color borderStrong = Color(0x33FFFFFF); // white 20%
-
-  // Accent / vibrant
-  static const Color volt = Color(
-    0xFFC8FF00,
-  ); // primary CTA — text on volt = bgPage
+  // Fixed across themes (per design system).
+  /// Text/icon color on a volt background — black in BOTH themes.
+  static const Color onVolt = Color(0xFF0A0A0A);
   static const Color coral = Color(
     0xFFFF4D6D,
   ); // LIVE badge, Go Live, urgent/destructive
@@ -127,7 +199,8 @@ class NileEffects {
 
   /// Faint volt glow. Reserve for the single primary CTA on a screen.
   /// Wrap the button: DecoratedBox(decoration: NileEffects.voltGlow, child: …)
-  static final BoxDecoration voltGlow = BoxDecoration(
+  /// Getter (not final) so it re-resolves volt per active theme.
+  static BoxDecoration get voltGlow => BoxDecoration(
     borderRadius: BorderRadius.circular(NileRadius.pill),
     boxShadow: [
       BoxShadow(
@@ -156,80 +229,80 @@ class NileTextStyles {
   NileTextStyles._();
 
   // Display / Headings — Syne
-  static TextStyle displayLg() => GoogleFonts.syne(
+  static TextStyle displayLg([NilePalette? p]) => GoogleFonts.syne(
     fontSize: 48,
     fontWeight: FontWeight.w800,
-    color: NileColors.txtPrimary,
+    color: (p ?? NileColors.palette).txtPrimary,
     letterSpacing: -1,
   );
 
-  static TextStyle displayMd() => GoogleFonts.syne(
+  static TextStyle displayMd([NilePalette? p]) => GoogleFonts.syne(
     fontSize: 32,
     fontWeight: FontWeight.w700,
-    color: NileColors.txtPrimary,
+    color: (p ?? NileColors.palette).txtPrimary,
     letterSpacing: -0.5,
   );
 
-  static TextStyle headingLg() => GoogleFonts.syne(
+  static TextStyle headingLg([NilePalette? p]) => GoogleFonts.syne(
     fontSize: 24,
     fontWeight: FontWeight.w700,
-    color: NileColors.txtPrimary,
+    color: (p ?? NileColors.palette).txtPrimary,
   );
 
-  static TextStyle headingMd() => GoogleFonts.syne(
+  static TextStyle headingMd([NilePalette? p]) => GoogleFonts.syne(
     fontSize: 20,
     fontWeight: FontWeight.w600,
-    color: NileColors.txtPrimary,
+    color: (p ?? NileColors.palette).txtPrimary,
   );
 
-  static TextStyle headingSm() => GoogleFonts.syne(
+  static TextStyle headingSm([NilePalette? p]) => GoogleFonts.syne(
     fontSize: 16,
     fontWeight: FontWeight.w600,
-    color: NileColors.txtPrimary,
+    color: (p ?? NileColors.palette).txtPrimary,
   );
 
   // Body / UI labels — Outfit
-  static TextStyle bodyLg() => GoogleFonts.outfit(
+  static TextStyle bodyLg([NilePalette? p]) => GoogleFonts.outfit(
     fontSize: 16,
     fontWeight: FontWeight.w400,
-    color: NileColors.txtPrimary,
+    color: (p ?? NileColors.palette).txtPrimary,
   );
 
-  static TextStyle bodyMd() => GoogleFonts.outfit(
+  static TextStyle bodyMd([NilePalette? p]) => GoogleFonts.outfit(
     fontSize: 14,
     fontWeight: FontWeight.w400,
-    color: NileColors.txtPrimary,
+    color: (p ?? NileColors.palette).txtPrimary,
   );
 
-  static TextStyle bodySm() => GoogleFonts.outfit(
+  static TextStyle bodySm([NilePalette? p]) => GoogleFonts.outfit(
     fontSize: 13,
     fontWeight: FontWeight.w400,
-    color: NileColors.txtSecondary,
+    color: (p ?? NileColors.palette).txtSecondary,
   );
 
-  static TextStyle labelLg() => GoogleFonts.outfit(
+  static TextStyle labelLg([NilePalette? p]) => GoogleFonts.outfit(
     fontSize: 18,
     fontWeight: FontWeight.w500,
-    color: NileColors.txtPrimary,
+    color: (p ?? NileColors.palette).txtPrimary,
   );
 
-  static TextStyle labelMd() => GoogleFonts.outfit(
+  static TextStyle labelMd([NilePalette? p]) => GoogleFonts.outfit(
     fontSize: 16,
     fontWeight: FontWeight.w500,
-    color: NileColors.txtPrimary,
+    color: (p ?? NileColors.palette).txtPrimary,
   );
 
-  static TextStyle labelSm() => GoogleFonts.outfit(
+  static TextStyle labelSm([NilePalette? p]) => GoogleFonts.outfit(
     fontSize: 13,
     fontWeight: FontWeight.w500,
-    color: NileColors.txtSecondary,
+    color: (p ?? NileColors.palette).txtSecondary,
     letterSpacing: 1.2,
   );
 
-  static TextStyle caption() => GoogleFonts.outfit(
+  static TextStyle caption([NilePalette? p]) => GoogleFonts.outfit(
     fontSize: 11,
     fontWeight: FontWeight.w400,
-    color: NileColors.txtTertiary,
+    color: (p ?? NileColors.palette).txtTertiary,
     letterSpacing: 0.5,
   );
 }
@@ -243,26 +316,28 @@ extension NileNumericText on TextStyle {
 
 // ── ThemeData ─────────────────────────────────────────────────────────────────
 
-ThemeData nileTheme() {
-  const colorScheme = ColorScheme(
-    brightness: Brightness.dark,
-    primary: NileColors.volt,
-    onPrimary: NileColors.bgPage, // black text on volt bg
+ThemeData nileTheme(Brightness brightness) {
+  final p = NilePalette.of(brightness);
+  final colorScheme = ColorScheme(
+    brightness: brightness,
+    primary: p.volt,
+    onPrimary: NileColors.onVolt, // black text on volt bg (both themes)
     secondary: NileColors.coral,
     onSecondary: Colors.white,
     error: NileColors.error,
     onError: Colors.white,
-    surface: NileColors.bgSurface,
-    onSurface: NileColors.txtPrimary,
-    surfaceContainerHighest: NileColors.bgRaised,
-    outline: NileColors.border,
-    outlineVariant: NileColors.borderStrong,
+    surface: p.bgSurface,
+    onSurface: p.txtPrimary,
+    surfaceContainerHighest: p.bgRaised,
+    outline: p.border,
+    outlineVariant: p.borderStrong,
   );
 
   return ThemeData(
     useMaterial3: true,
     colorScheme: colorScheme,
-    scaffoldBackgroundColor: NileColors.bgPage,
+    scaffoldBackgroundColor: p.bgPage,
+    extensions: [p], // enables context.nile.<token>
 
     // Fade-through page transitions (calmer than the default slide)
     pageTransitionsTheme: const PageTransitionsTheme(
@@ -277,26 +352,30 @@ ThemeData nileTheme() {
 
     // App bar
     appBarTheme: AppBarTheme(
-      backgroundColor: NileColors.bgPage,
-      foregroundColor: NileColors.txtPrimary,
+      backgroundColor: p.bgPage,
+      foregroundColor: p.txtPrimary,
       elevation: 0,
       centerTitle: false,
-      titleTextStyle: NileTextStyles.headingMd(),
+      titleTextStyle: NileTextStyles.headingMd(p),
+      // Status/nav bar icons flip with the theme.
+      systemOverlayStyle: brightness == Brightness.dark
+          ? SystemUiOverlayStyle.light
+          : SystemUiOverlayStyle.dark,
     ),
 
     // Text
     textTheme: TextTheme(
-      displayLarge: NileTextStyles.displayLg(),
-      displayMedium: NileTextStyles.displayMd(),
-      headlineLarge: NileTextStyles.headingLg(),
-      headlineMedium: NileTextStyles.headingMd(),
-      headlineSmall: NileTextStyles.headingSm(),
-      bodyLarge: NileTextStyles.bodyLg(),
-      bodyMedium: NileTextStyles.bodyMd(),
-      bodySmall: NileTextStyles.bodySm(),
-      labelLarge: NileTextStyles.labelLg(),
-      labelMedium: NileTextStyles.labelMd(),
-      labelSmall: NileTextStyles.labelSm(),
+      displayLarge: NileTextStyles.displayLg(p),
+      displayMedium: NileTextStyles.displayMd(p),
+      headlineLarge: NileTextStyles.headingLg(p),
+      headlineMedium: NileTextStyles.headingMd(p),
+      headlineSmall: NileTextStyles.headingSm(p),
+      bodyLarge: NileTextStyles.bodyLg(p),
+      bodyMedium: NileTextStyles.bodyMd(p),
+      bodySmall: NileTextStyles.bodySm(p),
+      labelLarge: NileTextStyles.labelLg(p),
+      labelMedium: NileTextStyles.labelMd(p),
+      labelSmall: NileTextStyles.labelSm(p),
     ),
 
     // Filled button — volt bg, dark text
@@ -304,9 +383,9 @@ ThemeData nileTheme() {
     // Any explicit color in textStyle would override foregroundColor.
     filledButtonTheme: FilledButtonThemeData(
       style: FilledButton.styleFrom(
-        backgroundColor: NileColors.volt,
-        foregroundColor: NileColors.bgPage,
-        textStyle: NileTextStyles.labelLg().copyWith(color: null),
+        backgroundColor: p.volt,
+        foregroundColor: NileColors.onVolt,
+        textStyle: NileTextStyles.labelLg(p).copyWith(color: null),
         shape: const StadiumBorder(),
       ),
     ),
@@ -314,9 +393,9 @@ ThemeData nileTheme() {
     // Outlined button
     outlinedButtonTheme: OutlinedButtonThemeData(
       style: OutlinedButton.styleFrom(
-        foregroundColor: NileColors.txtPrimary,
-        side: const BorderSide(color: NileColors.borderStrong),
-        textStyle: NileTextStyles.labelLg(),
+        foregroundColor: p.txtPrimary,
+        side: BorderSide(color: p.borderStrong),
+        textStyle: NileTextStyles.labelLg(p),
         shape: const StadiumBorder(),
       ),
     ),
@@ -324,54 +403,54 @@ ThemeData nileTheme() {
     // Elevated button
     elevatedButtonTheme: ElevatedButtonThemeData(
       style: ElevatedButton.styleFrom(
-        backgroundColor: NileColors.bgRaised,
-        foregroundColor: NileColors.txtPrimary,
-        textStyle: NileTextStyles.labelMd(),
+        backgroundColor: p.bgRaised,
+        foregroundColor: p.txtPrimary,
+        textStyle: NileTextStyles.labelMd(p),
         shape: const StadiumBorder(),
       ),
     ),
 
     // Cards — lg radius, hairline border, no shadow (depth via border + surface)
     cardTheme: CardThemeData(
-      color: NileColors.bgSurface,
+      color: p.bgSurface,
       elevation: 0,
       margin: EdgeInsets.zero,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(NileRadius.lg),
-        side: const BorderSide(color: NileColors.border),
+        side: BorderSide(color: p.border),
       ),
     ),
 
     // Text button
     textButtonTheme: TextButtonThemeData(
       style: TextButton.styleFrom(
-        foregroundColor: NileColors.txtSecondary,
-        textStyle: NileTextStyles.bodyMd(),
+        foregroundColor: p.txtSecondary,
+        textStyle: NileTextStyles.bodyMd(p),
       ),
     ),
 
     // Text fields
     inputDecorationTheme: InputDecorationTheme(
       filled: true,
-      fillColor: NileColors.bgSurface,
+      fillColor: p.bgSurface,
       labelStyle: GoogleFonts.outfit(
-        color: NileColors.txtSecondary,
+        color: p.txtSecondary,
         fontSize: 14,
       ),
       hintStyle: GoogleFonts.outfit(
-        color: NileColors.txtTertiary,
+        color: p.txtTertiary,
         fontSize: 14,
       ),
       border: OutlineInputBorder(
-        borderSide: const BorderSide(color: NileColors.border),
+        borderSide: BorderSide(color: p.border),
         borderRadius: BorderRadius.circular(NileRadius.sm),
       ),
       enabledBorder: OutlineInputBorder(
-        borderSide: const BorderSide(color: NileColors.border),
+        borderSide: BorderSide(color: p.border),
         borderRadius: BorderRadius.circular(NileRadius.sm),
       ),
       focusedBorder: OutlineInputBorder(
-        borderSide: const BorderSide(color: NileColors.volt, width: 1.5),
+        borderSide: BorderSide(color: p.volt, width: 1.5),
         borderRadius: BorderRadius.circular(NileRadius.sm),
       ),
       errorBorder: OutlineInputBorder(
@@ -381,15 +460,15 @@ ThemeData nileTheme() {
     ),
 
     // Dividers
-    dividerTheme: const DividerThemeData(
-      color: NileColors.border,
+    dividerTheme: DividerThemeData(
+      color: p.border,
       thickness: 1,
     ),
 
     // Snack bar
     snackBarTheme: SnackBarThemeData(
-      backgroundColor: NileColors.bgRaised,
-      contentTextStyle: NileTextStyles.bodyMd(),
+      backgroundColor: p.bgRaised,
+      contentTextStyle: NileTextStyles.bodyMd(p),
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(NileRadius.sm),
       ),
@@ -397,21 +476,21 @@ ThemeData nileTheme() {
     ),
 
     // Icon
-    iconTheme: const IconThemeData(color: NileColors.txtSecondary),
+    iconTheme: IconThemeData(color: p.txtSecondary),
 
     // Time picker
     timePickerTheme: TimePickerThemeData(
-      backgroundColor: NileColors.bgSurface,
+      backgroundColor: p.bgSurface,
       // Hour/minute input boxes
       hourMinuteColor: WidgetStateColor.resolveWith(
         (states) => states.contains(WidgetState.selected)
-            ? NileColors.volt
-            : NileColors.bgRaised,
+            ? p.volt
+            : p.bgRaised,
       ),
       hourMinuteTextColor: WidgetStateColor.resolveWith(
         (states) => states.contains(WidgetState.selected)
-            ? NileColors.bgPage
-            : NileColors.txtPrimary,
+            ? NileColors.onVolt
+            : p.txtPrimary,
       ),
       hourMinuteTextStyle: GoogleFonts.outfit(
         fontSize: 48,
@@ -424,40 +503,40 @@ ThemeData nileTheme() {
       // AM / PM toggle
       dayPeriodColor: WidgetStateColor.resolveWith(
         (states) => states.contains(WidgetState.selected)
-            ? NileColors.volt.withValues(alpha: 0.15)
+            ? p.volt.withValues(alpha: 0.15)
             : Colors.transparent,
       ),
       dayPeriodTextColor: WidgetStateColor.resolveWith(
         (states) => states.contains(WidgetState.selected)
-            ? NileColors.volt
-            : NileColors.txtSecondary,
+            ? p.volt
+            : p.txtSecondary,
       ),
       dayPeriodTextStyle: GoogleFonts.outfit(
         fontSize: 14,
         fontWeight: FontWeight.w600,
       ),
       dayPeriodShape: RoundedRectangleBorder(
-        side: const BorderSide(color: NileColors.border),
+        side: BorderSide(color: p.border),
         borderRadius: BorderRadius.circular(NileRadius.sm),
       ),
       // Dial
-      dialBackgroundColor: NileColors.bgRaised,
-      dialHandColor: NileColors.volt,
+      dialBackgroundColor: p.bgRaised,
+      dialHandColor: p.volt,
       dialTextColor: WidgetStateColor.resolveWith(
         (states) => states.contains(WidgetState.selected)
-            ? NileColors.bgPage
-            : NileColors.txtPrimary,
+            ? NileColors.onVolt
+            : p.txtPrimary,
       ),
       dialTextStyle: GoogleFonts.outfit(
         fontSize: 13,
         fontWeight: FontWeight.w500,
       ),
       // Misc
-      entryModeIconColor: NileColors.txtSecondary,
+      entryModeIconColor: p.txtSecondary,
       helpTextStyle: GoogleFonts.outfit(
         fontSize: 12,
         fontWeight: FontWeight.w600,
-        color: NileColors.txtSecondary,
+        color: p.txtSecondary,
         letterSpacing: 0.8,
       ),
       shape: RoundedRectangleBorder(

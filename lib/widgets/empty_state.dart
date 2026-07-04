@@ -7,7 +7,7 @@ import '../theme.dart';
 /// consistent.
 class NileEmptyState extends StatelessWidget {
   final IconData icon;
-  final Color iconColor;
+  final Color? iconColor; // defaults to NileColors.border (theme-varying)
   final String title;
   final String body;
   final String? actionLabel;
@@ -16,7 +16,7 @@ class NileEmptyState extends StatelessWidget {
   const NileEmptyState({
     super.key,
     required this.icon,
-    this.iconColor = NileColors.border,
+    this.iconColor,
     required this.title,
     required this.body,
     this.actionLabel,
@@ -31,7 +31,7 @@ class NileEmptyState extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(icon, size: 56, color: iconColor),
+            Icon(icon, size: 56, color: iconColor ?? NileColors.border),
             const SizedBox(height: NileSpacing.s16),
             Text(title, style: NileTextStyles.headingMd()),
             const SizedBox(height: NileSpacing.s8),

@@ -111,7 +111,7 @@ class _AttendeeListScreenState extends State<AttendeeListScreen> {
           mainAxisSize: MainAxisSize.min,
           children: [
             ListTile(
-              leading: const Icon(
+              leading: Icon(
                 Icons.person_outline,
                 color: NileColors.txtSecondary,
               ),
@@ -240,7 +240,7 @@ class _AttendeeListScreenState extends State<AttendeeListScreen> {
       );
     }
     if (_attendees == null) {
-      return const Center(
+      return Center(
         child: CircularProgressIndicator(color: NileColors.volt),
       );
     }
@@ -249,7 +249,7 @@ class _AttendeeListScreenState extends State<AttendeeListScreen> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(
+            Icon(
               Icons.confirmation_number_outlined,
               color: NileColors.txtTertiary,
               size: 40,
@@ -365,7 +365,7 @@ class _AttendeeTile extends StatelessWidget {
                   ? nileAvatarImage(url, 22)
                   : null,
               child: (url == null || url.isEmpty)
-                  ? const Icon(
+                  ? Icon(
                       Icons.person,
                       color: NileColors.txtTertiary,
                       size: 22,

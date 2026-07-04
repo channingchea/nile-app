@@ -269,12 +269,7 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
       lastDate: now.add(const Duration(days: 365 * 2)),
       builder: (ctx, child) => Theme(
         data: Theme.of(ctx).copyWith(
-          colorScheme: const ColorScheme.dark(
-            primary: NileColors.volt,
-            onPrimary: NileColors.bgPage,
-            surface: NileColors.bgSurface,
-            onSurface: NileColors.txtPrimary,
-          ),
+          colorScheme: Theme.of(ctx).colorScheme,
         ),
         child: child!,
       ),
@@ -287,12 +282,7 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
       ),
       builder: (ctx, child) => Theme(
         data: Theme.of(ctx).copyWith(
-          colorScheme: const ColorScheme.dark(
-            primary: NileColors.volt,
-            onPrimary: NileColors.bgPage,
-            surface: NileColors.bgSurface,
-            onSurface: NileColors.txtPrimary,
-          ),
+          colorScheme: Theme.of(ctx).colorScheme,
         ),
         child: child!,
       ),
@@ -564,12 +554,12 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
                   FilledButton.icon(
                     onPressed: _submitting ? null : _next,
                     icon: _submitting
-                        ? const SizedBox(
+                        ? SizedBox(
                             width: 18,
                             height: 18,
                             child: CircularProgressIndicator(
                               strokeWidth: 2,
-                              color: NileColors.bgPage,
+                              color: NileColors.onVolt,
                             ),
                           )
                         : const Icon(Icons.arrow_forward),
@@ -731,12 +721,12 @@ class _ChooseCrewPageState extends State<ChooseCrewPage> {
                     textStyle: NileTextStyles.labelLg().copyWith(color: null),
                   ),
                   child: _committing
-                      ? const SizedBox(
+                      ? SizedBox(
                           width: 18,
                           height: 18,
                           child: CircularProgressIndicator(
                             strokeWidth: 2,
-                            color: NileColors.bgPage,
+                            color: NileColors.onVolt,
                           ),
                         )
                       : Text(
@@ -831,7 +821,7 @@ class EventCreatedPage extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               const SizedBox(height: 16),
-              const Icon(Icons.check_circle, size: 56, color: NileColors.volt),
+              Icon(Icons.check_circle, size: 56, color: NileColors.volt),
               const SizedBox(height: 12),
               Text(
                 'You\'re all set',
@@ -916,7 +906,7 @@ class EventCreatedPage extends StatelessWidget {
                   ),
                   child: Row(
                     children: [
-                      const Icon(
+                      Icon(
                         Icons.open_in_new,
                         size: 18,
                         color: NileColors.txtSecondary,
@@ -928,7 +918,7 @@ class EventCreatedPage extends StatelessWidget {
                           style: NileTextStyles.bodyMd(),
                         ),
                       ),
-                      const Icon(
+                      Icon(
                         Icons.chevron_right,
                         size: 20,
                         color: NileColors.txtTertiary,
@@ -1050,7 +1040,7 @@ class _CoverPicker extends StatelessWidget {
               else
                 _emptyState(),
               if (busy)
-                const ColoredBox(
+                ColoredBox(
                   color: Colors.black54,
                   child: Center(
                     child: CircularProgressIndicator(color: NileColors.volt),
@@ -1081,7 +1071,7 @@ class _CoverPicker extends StatelessWidget {
     );
   }
 
-  Widget _emptyState() => const Center(
+  Widget _emptyState() => Center(
     child: Column(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -1134,7 +1124,7 @@ class _DateField extends StatelessWidget {
             ),
             child: Row(
               children: [
-                const Icon(
+                Icon(
                   Icons.calendar_today,
                   size: 16,
                   color: NileColors.txtSecondary,
@@ -1152,7 +1142,7 @@ class _DateField extends StatelessWidget {
                 ),
                 if (value != null)
                   IconButton(
-                    icon: const Icon(
+                    icon: Icon(
                       Icons.close,
                       size: 18,
                       color: NileColors.txtTertiary,

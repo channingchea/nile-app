@@ -10,9 +10,10 @@ import '../../services/push_service.dart';
 import '../../services/search_service.dart';
 import '../../services/supabase_client.dart';
 import '../../theme.dart';
+import '../../widgets/theme_mode_picker.dart';
 import 'interest_picker_screen.dart';
 
-/// Post-signup onboarding: avatar → bio → interests → follows → push.
+/// Post-signup onboarding: avatar → bio → interests → follows → theme → push.
 /// Every step is skippable; each persists on advance so a force-quit loses
 /// nothing. The final action stamps `profiles.onboarded_at`, after which
 /// [onDone] tells _AuthGate to swap to HomeScreen.
@@ -24,7 +25,7 @@ class OnboardingScreen extends StatefulWidget {
   State<OnboardingScreen> createState() => _OnboardingScreenState();
 }
 
-enum _Step { avatar, bio, interests, follows, push }
+enum _Step { avatar, bio, interests, follows, theme, push }
 
 class _OnboardingScreenState extends State<OnboardingScreen> {
   // Push permission prompts only exist on iOS/Android.
@@ -38,6 +39,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
     _Step.bio,
     _Step.interests,
     _Step.follows,
+    _Step.theme,
     if (_pushSupported) _Step.push,
   ];
 
@@ -177,6 +179,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
     _Step.bio: 'Tell people about you',
     _Step.interests: 'Pick your interests',
     _Step.follows: 'Find your people',
+    _Step.theme: 'Pick your look',
     _Step.push: 'Don\'t miss a show',
   };
 
@@ -218,6 +221,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                       _Step.bio => _bioStep(),
                       _Step.interests => const InterestPicker(),
                       _Step.follows => _followsStep(),
+                      _Step.theme => _themeStep(),
                       _Step.push => _pushStep(),
                     },
                 ],
@@ -234,12 +238,12 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                     textStyle: NileTextStyles.labelLg().copyWith(color: null),
                   ),
                   child: _busy
-                      ? const SizedBox(
+                      ? SizedBox(
                           width: 18,
                           height: 18,
                           child: CircularProgressIndicator(
                             strokeWidth: 2,
-                            color: NileColors.bgPage,
+                            color: NileColors.onVolt,
                           ),
                         )
                       : Text(_isLast ? 'Done' : 'Next'),
@@ -292,7 +296,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                     ? MemoryImage(_avatarBytes!)
                     : null,
                 child: _avatarBytes == null
-                    ? const Icon(
+                    ? Icon(
                         Icons.person_outline,
                         size: 56,
                         color: NileColors.txtTertiary,
@@ -301,14 +305,14 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
               ),
               Container(
                 padding: const EdgeInsets.all(NileSpacing.s8),
-                decoration: const BoxDecoration(
+                decoration: BoxDecoration(
                   shape: BoxShape.circle,
                   color: NileColors.volt,
                 ),
-                child: const Icon(
+                child: Icon(
                   Icons.camera_alt,
                   size: 20,
-                  color: NileColors.bgPage,
+                  color: NileColors.onVolt,
                 ),
               ),
             ],
@@ -343,7 +347,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
     }
     final users = _suggested;
     if (users == null) {
-      return const Center(
+      return Center(
         child: CircularProgressIndicator(color: NileColors.volt),
       );
     }
@@ -372,7 +376,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                     ? nileAvatarImage(u.avatarUrl!, 22)
                     : null,
                 child: u.avatarUrl == null
-                    ? const Icon(
+                    ? Icon(
                         Icons.person_outline,
                         size: 22,
                         color: NileColors.txtTertiary,
@@ -411,6 +415,18 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
     );
   }
 
+  /// Selecting applies instantly (the rest of onboarding renders in the
+  /// chosen theme) and persists local + profile via ThemeService — like
+  /// avatar/interests/follows, it's saved on interaction, so advancing is
+  /// pure navigation. Skipping keeps the default (Dark).
+  Widget _themeStep() {
+    return const _StepBody(
+      caption: 'Light, dark, or follow your device. '
+          'You can change this anytime in Settings.',
+      child: ThemeModePicker(),
+    );
+  }
+
   Widget _pushStep() {
     return _StepBody(
       caption:
@@ -418,7 +434,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
           'have tickets to is starting.',
       child: Column(
         children: [
-          const Icon(
+          Icon(
             Icons.notifications_active_outlined,
             size: 64,
             color: NileColors.volt,

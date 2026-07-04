@@ -86,7 +86,7 @@ serve(async (req) => {
 
     const { data: c } = await admin
       .from("ad_campaigns")
-      .select("id, status, starts_at, ends_at, stripe_payment_intent_id")
+      .select("id, status, starts_at, ends_at, stripe_payment_intent_id, advertiser_accounts(name, contact_email), ad_creatives(headline)")
       .eq("id", campaign_id)
       .maybeSingle();
     if (!c) return json({ error: "Campaign not found" }, 404);
@@ -143,12 +143,77 @@ serve(async (req) => {
       .single();
     if (updErr || !updated) return json({ error: "Update failed (status changed concurrently?)" }, 409);
 
+    // Advertiser notification (approve/reject only; host boosts have no account).
+    // Fire-and-forget: a send failure must never fail the review action.
+    if (action === "approve" || action === "reject") {
+      const acct = (c as any).advertiser_accounts;
+      const to = acct?.contact_email as string | undefined;
+      if (to) {
+        await notifyAdvertiser(
+          action, to, acct?.name ?? "there",
+          (c as any).ad_creatives?.[0]?.headline ?? "your ad",
+          campaign_id, update.review_note,
+        );
+      }
+    }
+
     return json({ campaign: updated });
   } catch (err) {
     console.error(err);
     return json({ error: String(err) }, 500);
   }
 });
+
+// Advertiser notification on approve/reject via a Klaviyo server-side event.
+// Env-gated on KLAVIYO_API_KEY (private pk_ key): no-ops cleanly when unset.
+// Fires the metric "Nile Ad Approved" / "Nile Ad Rejected" against the
+// advertiser's email profile; two Klaviyo flows (one per metric) own the
+// actual email + template. Never throws — all failures are logged only.
+async function notifyAdvertiser(
+  action: "approve" | "reject",
+  to: string,
+  brand: string,
+  headline: string,
+  campaignId: string,
+  note?: string,
+) {
+  const key = Deno.env.get("KLAVIYO_API_KEY");
+  if (!key) return;
+  const metric = action === "approve" ? "Nile Ad Approved" : "Nile Ad Rejected";
+  const payload = {
+    data: {
+      type: "event",
+      attributes: {
+        // Stable id so a retried review action can't double-fire the flow.
+        unique_id: `${campaignId}:${action}`,
+        properties: {
+          brand,
+          headline,
+          campaign_id: campaignId,
+          ...(action === "reject" ? { reason: note ?? "" } : {}),
+          dashboard_url: "https://ads.joinnile.com/advertise/portal",
+        },
+        metric: { data: { type: "metric", attributes: { name: metric } } },
+        profile: { data: { type: "profile", attributes: { email: to } } },
+      },
+    },
+  };
+  try {
+    const res = await fetch("https://a.klaviyo.com/api/events/", {
+      method: "POST",
+      headers: {
+        Authorization: `Klaviyo-API-Key ${key}`,
+        revision: "2024-10-15",
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) console.error("advertiser event failed:", res.status, await res.text());
+  } catch (err) {
+    console.error("advertiser event error:", err);
+  }
+}
 
 // Release an authorization: cancel if still a hold, refund if a legacy
 // pre-manual-capture payment already moved money.

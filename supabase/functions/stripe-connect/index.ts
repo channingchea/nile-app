@@ -64,6 +64,21 @@ serve(async (req) => {
     let accountId = profile?.stripe_account_id as string | null;
 
     if (action === "onboard") {
+      // Defense in depth: paid hosts must have 2FA enabled. The client gates
+      // this too, but never let onboarding start without a verified factor.
+      const { data: mfa } = await adminClient.auth.admin.mfa.listFactors({
+        userId: user.id,
+      });
+      const hasVerified = (mfa?.factors ?? []).some(
+        (f) => f.status === "verified",
+      );
+      if (!hasVerified) {
+        return json(
+          { error: "two_factor_required", message: "Enable two-factor authentication before setting up payouts." },
+          403,
+        );
+      }
+
       if (!accountId) {
         const account = await stripe.accounts.create({
           type: "express",

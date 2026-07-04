@@ -179,7 +179,7 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
     }
     if (_items == null) {
       return [
-        const SliverFillRemaining(
+        SliverFillRemaining(
           child: Center(
             child: CircularProgressIndicator(color: NileColors.volt),
           ),
@@ -204,7 +204,7 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
           itemCount: _items!.length + (_hasMore ? 1 : 0),
           separatorBuilder: (_, i) => i >= _items!.length - 1
               ? const SizedBox.shrink()
-              : const Divider(height: 1, color: NileColors.border, indent: 56),
+              : Divider(height: 1, color: NileColors.border, indent: 56),
           itemBuilder: (_, i) {
             if (i >= _items!.length) return const LoadMoreFooter();
             return _NotificationTile(
@@ -366,7 +366,7 @@ class _NotificationTile extends StatelessWidget {
             ),
             if (unread) ...[
               const SizedBox(width: 8),
-              const CircleAvatar(radius: 4, backgroundColor: NileColors.volt),
+              CircleAvatar(radius: 4, backgroundColor: NileColors.volt),
             ],
           ],
         ),
@@ -379,12 +379,12 @@ class _NotificationTile extends StatelessWidget {
 
 class _CenterMessage extends StatelessWidget {
   final IconData icon;
-  final Color iconColor;
+  final Color? iconColor;
   final String title;
   final String body;
   const _CenterMessage({
     required this.icon,
-    this.iconColor = NileColors.border,
+    this.iconColor,
     required this.title,
     required this.body,
   });

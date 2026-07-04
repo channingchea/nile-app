@@ -2,6 +2,7 @@ import 'dart:typed_data';
 
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'event_service.dart';
+import 'net.dart';
 import 'pagination.dart';
 import 'post_service.dart';
 import 'supabase_client.dart';
@@ -213,13 +214,13 @@ class MessageService {
   /// message. Each row already carries the counterpart profile, unread count,
   /// last-message preview, and live-presence flag — assembled server-side by
   /// the `get_conversations_for_user` RPC in one round trip.
-  static Future<List<Conversation>> getConversations() async {
+  static Future<List<Conversation>> getConversations() => guard(() async {
     _requireUid();
     final rows = await supabase.rpc('get_conversations_for_user');
     return (rows as List)
         .map((r) => _conversationFromRpc(r as Map<String, dynamic>))
         .toList();
-  }
+  });
 
   static Conversation _conversationFromRpc(Map<String, dynamic> r) {
     final last = r['last_message_at'];
@@ -269,7 +270,7 @@ class MessageService {
   static Future<Paged<Message>> getMessages(
     String conversationId, {
     String? cursor,
-  }) async {
+  }) => guard(() async {
     var q = supabase
         .from('messages')
         .select(_msgSelect)
@@ -285,7 +286,7 @@ class MessageService {
       hasMore: hasMore,
       nextCursor: hasMore ? items.last.createdAt.toIso8601String() : null,
     );
-  }
+  });
 
   /// Sends a message in [conversationId].
   static Future<Message> sendMessage(
@@ -517,6 +518,7 @@ class MessageService {
     void Function(Message) onMessage, {
     void Function(Message)? onUpdate,
     void Function(String id)? onDelete,
+    void Function(RealtimeSubscribeStatus status, Object? error)? onStatus,
   }) {
     final filter = PostgresChangeFilter(
       type: PostgresChangeFilterType.eq,
@@ -572,7 +574,7 @@ class MessageService {
             } catch (_) {}
           },
         )
-        .subscribe();
+        .subscribe(onStatus);
   }
 
   /// Ephemeral typing channel for [conversationId] using Supabase broadcast

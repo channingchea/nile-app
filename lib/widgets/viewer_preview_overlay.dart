@@ -210,7 +210,7 @@ class _ViewerPreviewOverlayState extends State<ViewerPreviewOverlay> {
     return Column(
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
-        const CircularProgressIndicator(color: NileColors.volt),
+        CircularProgressIndicator(color: NileColors.volt),
         const SizedBox(height: NileSpacing.s16),
         Text('Connecting as viewer…', style: NileTextStyles.bodyMd()),
       ],
@@ -261,7 +261,7 @@ class _ViewerPreviewOverlayState extends State<ViewerPreviewOverlay> {
               child: Text(
                 'VIEWER PREVIEW',
                 style: NileTextStyles.labelSm().copyWith(
-                  color: NileColors.bgPage,
+                  color: NileColors.onVolt,
                   letterSpacing: 1.5,
                 ),
               ),
@@ -310,7 +310,7 @@ class _ViewerPreviewOverlayState extends State<ViewerPreviewOverlay> {
                   : Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        const Icon(
+                        Icon(
                           Icons.graphic_eq,
                           size: 48,
                           color: NileColors.txtTertiary,
@@ -367,7 +367,7 @@ class _ViewerPreviewOverlayState extends State<ViewerPreviewOverlay> {
         label: const Text('Back to Host View'),
         style: FilledButton.styleFrom(
           backgroundColor: NileColors.volt,
-          foregroundColor: NileColors.bgPage,
+          foregroundColor: NileColors.onVolt,
           padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
           textStyle: NileTextStyles.labelLg(),
           shape: const StadiumBorder(),

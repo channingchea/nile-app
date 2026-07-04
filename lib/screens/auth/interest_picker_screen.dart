@@ -72,7 +72,7 @@ class _InterestPickerState extends State<InterestPicker> {
 
   Color _textColor(int w) => switch (w) {
     1 => NileColors.volt,
-    2 || 3 => NileColors.bgPage,
+    2 || 3 => NileColors.onVolt,
     _ => NileColors.txtSecondary,
   };
 
@@ -88,7 +88,7 @@ class _InterestPickerState extends State<InterestPicker> {
     }
     final topics = _topics;
     if (topics == null) {
-      return const Center(
+      return Center(
         child: CircularProgressIndicator(color: NileColors.volt),
       );
     }

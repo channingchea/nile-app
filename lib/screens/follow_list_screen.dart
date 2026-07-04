@@ -183,7 +183,7 @@ class _FollowListScreenState extends State<FollowListScreen> {
     }
 
     if (_users == null) {
-      return const Center(
+      return Center(
         child: CircularProgressIndicator(color: NileColors.volt),
       );
     }
@@ -222,7 +222,7 @@ class _FollowListScreenState extends State<FollowListScreen> {
         itemCount: _users!.length + (_hasMore ? 1 : 0),
         separatorBuilder: (_, i) => i >= _users!.length - 1
             ? const SizedBox.shrink()
-            : const Divider(height: 1, indent: 72, color: NileColors.border),
+            : Divider(height: 1, indent: 72, color: NileColors.border),
         itemBuilder: (_, i) {
           if (i >= _users!.length) return const LoadMoreFooter();
           final user = _users![i];
@@ -396,18 +396,18 @@ class _FollowButton extends StatelessWidget {
         tapTargetSize: MaterialTapTargetSize.shrinkWrap,
       ),
       child: isLoading
-          ? const SizedBox(
+          ? SizedBox(
               width: 14,
               height: 14,
               child: CircularProgressIndicator(
                 strokeWidth: 2,
-                color: NileColors.bgPage,
+                color: NileColors.onVolt,
               ),
             )
           : Text(
               'Follow',
               style: NileTextStyles.labelSm().copyWith(
-                color: NileColors.bgPage,
+                color: NileColors.onVolt,
                 letterSpacing: 0,
               ),
             ),
