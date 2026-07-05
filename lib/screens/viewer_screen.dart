@@ -1,13 +1,18 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:livekit_client/livekit_client.dart' hide ChatMessage;
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../services/chat_service.dart';
 import '../services/event_service.dart';
 import '../services/livekit_service.dart';
 import '../services/profile_service.dart';
 import '../services/realtime.dart';
+import '../services/supabase_client.dart';
+import '../services/tip_service.dart';
 import '../theme.dart';
 import '../widgets/rolling_number.dart';
 
@@ -30,7 +35,8 @@ class CameraFeed {
   CameraFeed({required this.identity, required this.cameraName, this.track});
 }
 
-class _ViewerScreenState extends State<ViewerScreen> {
+class _ViewerScreenState extends State<ViewerScreen>
+    with WidgetsBindingObserver {
   final _eventIdController = TextEditingController();
 
   ViewerState _state = ViewerState.idle;
@@ -57,6 +63,12 @@ class _ViewerScreenState extends State<ViewerScreen> {
   int _viewerCount = 0;
   String? _streamEventId; // liveKitEventId for cleanup
   bool _streamEnded = false;
+
+  // Tipping. Resolved from the event row on connect. _tipPending guards the
+  // post-checkout confirm-and-announce on app resume.
+  String? _eventDbId;
+  String? _hostId;
+  bool _tipPending = false;
   // True while the room dropped (e.g. all cameras left) but the show is still
   // live in the DB — we hold a "reconnecting" overlay and retry rather than
   // ending. Only an `ended` DB status actually ends the show.
@@ -67,6 +79,11 @@ class _ViewerScreenState extends State<ViewerScreen> {
   ResilientChannel? _eventConn;
   bool _hasIncrementedViewerCount = false;
 
+  // Periodic server-authoritative viewer-count reconcile. Any watching client
+  // re-derives the true count from LiveKit participants, so the number self-heals
+  // from killed-app drift instead of relying on matched increment/decrement.
+  Timer? _viewerReconcileTimer;
+
   // Live chat (ephemeral broadcast). Capped in-memory buffer so a session feels
   // populated without persisting anything server-side.
   static const int _maxChatMessages = 200;
@@ -75,12 +92,26 @@ class _ViewerScreenState extends State<ViewerScreen> {
   final _chatController = TextEditingController();
   final _chatScrollController = ScrollController();
   String? _myUsername;
+  String? _myAvatarUrl;
   bool _chatOpen = false;
   bool _hasUnreadChat = false;
+  // Pin-to-bottom: while the user has scrolled up, don't yank them down on a new
+  // message — count them and surface a "new messages" pill instead.
+  bool _chatAtBottom = true;
+  int _pendingChatCount = 0;
+
+  // Tap-to-react emoji bursts. Floating overlay particles + a send throttle so
+  // rapid taps can't flood the broadcast channel.
+  final List<_FloatingReaction> _reactions = [];
+  int _reactionSeq = 0;
+  DateTime? _lastReactionSentAt;
+  static const List<String> _reactionEmojis = ['❤️', '🔥', '👏', '😂', '🎉'];
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _chatScrollController.addListener(_onChatScroll);
     if (widget.initialEventId != null) {
       _eventIdController.text = widget.initialEventId!;
       // Auto-join when launched from the feed
@@ -89,7 +120,18 @@ class _ViewerScreenState extends State<ViewerScreen> {
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Returning from the external tip checkout: confirm the tip landed, then
+    // announce it in chat. _tipPending prevents any other resume from firing it.
+    if (state == AppLifecycleState.resumed && _tipPending) {
+      _tipPending = false;
+      _confirmAndAnnounceTip();
+    }
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _decrementAndCleanup();
     _eventIdController.dispose();
     _chatController.dispose();
@@ -100,8 +142,15 @@ class _ViewerScreenState extends State<ViewerScreen> {
   }
 
   void _decrementAndCleanup() {
+    _viewerReconcileTimer?.cancel();
+    _viewerReconcileTimer = null;
     if (_hasIncrementedViewerCount && _streamEventId != null) {
-      EventService.decrementViewerCount(_streamEventId!).catchError((_) {});
+      // Reconcile excluding ourselves so the count drops even before LiveKit
+      // registers our disconnect (covers the last-viewer-leaves case).
+      LivekitService.reconcileViewers(
+        eventId: _streamEventId!,
+        excludeSelf: true,
+      ).catchError((_) {});
       _hasIncrementedViewerCount = false;
     }
     _eventConn?.dispose();
@@ -124,14 +173,32 @@ class _ViewerScreenState extends State<ViewerScreen> {
 
   void _onChatMessage(ChatMessage msg) {
     if (!mounted) return;
+    // Auto-follow only when the user is already pinned to the bottom (or it's
+    // their own message). Otherwise keep their scroll position and count the
+    // new message for the "new messages" pill.
+    final follow = _chatAtBottom || msg.isMine;
     setState(() {
       _chatMessages.add(msg);
       if (_chatMessages.length > _maxChatMessages) {
         _chatMessages.removeRange(0, _chatMessages.length - _maxChatMessages);
       }
       if (!_chatOpen && !msg.isMine) _hasUnreadChat = true;
+      if (_chatOpen && !follow && !msg.isSystem) _pendingChatCount++;
     });
-    if (_chatOpen) _scrollChatToBottom();
+    if (_chatOpen && follow) _scrollChatToBottom();
+  }
+
+  void _onChatScroll() {
+    if (!_chatScrollController.hasClients) return;
+    final pos = _chatScrollController.position;
+    // Within 40px of the end counts as "at bottom".
+    final atBottom = pos.pixels >= pos.maxScrollExtent - 40;
+    if (atBottom != _chatAtBottom) {
+      setState(() {
+        _chatAtBottom = atBottom;
+        if (atBottom) _pendingChatCount = 0;
+      });
+    }
   }
 
   void _scrollChatToBottom() {
@@ -142,6 +209,14 @@ class _ViewerScreenState extends State<ViewerScreen> {
         );
       }
     });
+  }
+
+  void _jumpChatToBottom() {
+    setState(() {
+      _chatAtBottom = true;
+      _pendingChatCount = 0;
+    });
+    _scrollChatToBottom();
   }
 
   void _toggleChat() {
@@ -160,8 +235,125 @@ class _ViewerScreenState extends State<ViewerScreen> {
     await ChatService.send(
       _chatChannel!,
       username: _myUsername ?? 'viewer',
+      avatarUrl: _myAvatarUrl,
       content: text,
     );
+  }
+
+  // ── Reactions ─────────────────────────────────────────────────────────────
+
+  /// Incoming (and self-echoed) emoji burst → spawn a floating particle that
+  /// rises and fades, then removes itself.
+  void _onReaction(LiveReaction r) {
+    if (!mounted) return;
+    final id = _reactionSeq++;
+    setState(() {
+      _reactions.add(_FloatingReaction(id: id, emoji: r.emoji));
+      // Cap concurrent particles so a flood can't grow the list unbounded.
+      if (_reactions.length > 40) _reactions.removeAt(0);
+    });
+  }
+
+  void _removeReaction(int id) {
+    if (!mounted) return;
+    setState(() => _reactions.removeWhere((f) => f.id == id));
+  }
+
+  /// Send a reaction, throttled to ~5/sec so rapid taps don't flood the channel.
+  Future<void> _sendReaction(String emoji) async {
+    final channel = _chatChannel;
+    if (channel == null) return;
+    final now = DateTime.now();
+    if (_lastReactionSentAt != null &&
+        now.difference(_lastReactionSentAt!) < const Duration(milliseconds: 200)) {
+      return;
+    }
+    _lastReactionSentAt = now;
+    await ChatService.sendReaction(channel, emoji: emoji);
+  }
+
+  // ── Tipping ─────────────────────────────────────────────────────────────────
+
+  /// True when the current user can tip: a live show they don't host.
+  bool get _canTip =>
+      _eventStatus == 'live' &&
+      !_streamEnded &&
+      _eventDbId != null &&
+      _hostId != null &&
+      _hostId != supabase.auth.currentUser?.id;
+
+  /// Reactions are available to everyone on a live show (host included).
+  bool get _canReact => _eventStatus == 'live' && !_streamEnded;
+
+  void _openTipSheet() {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: NileColors.bgSurface,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(NileRadius.lg)),
+      ),
+      builder: (_) => _TipSheet(onPick: _startTip),
+    );
+  }
+
+  /// Kicks off checkout for [amountCents] and opens the hosted page externally.
+  Future<void> _startTip(int amountCents) async {
+    final eventId = _eventDbId;
+    if (eventId == null) return;
+    try {
+      final url = await TipService.createCheckoutUrl(
+        eventId: eventId,
+        amountCents: amountCents,
+      );
+      _tipPending = true; // confirmed + announced on resume
+      final ok = await launchUrl(
+        Uri.parse(url),
+        mode: LaunchMode.externalApplication,
+      );
+      if (!ok) {
+        _tipPending = false;
+        _showSnack("Couldn't open checkout");
+      }
+    } catch (e) {
+      _tipPending = false;
+      final msg = e.toString().contains('host_not_payable')
+          ? "This host isn't set up to receive tips yet."
+          : "Couldn't start the tip";
+      _showSnack(msg);
+    }
+  }
+
+  /// After returning from checkout, confirm the tip actually paid (webhook may
+  /// lag a beat, so retry once) and broadcast an ephemeral announcement.
+  Future<void> _confirmAndAnnounceTip() async {
+    final eventId = _eventDbId;
+    final channel = _chatChannel;
+    if (eventId == null || channel == null) return;
+    for (var attempt = 0; attempt < 2; attempt++) {
+      final cents = await TipService.latestPaidTipCents(eventId);
+      if (cents != null) {
+        final name = _myUsername ?? 'Someone';
+        await ChatService.sendSystem(
+          channel,
+          content: '$name tipped ${_formatCents(cents)} 🎉',
+        );
+        return;
+      }
+      if (attempt == 0) await Future<void>.delayed(const Duration(seconds: 3));
+    }
+  }
+
+  String _formatCents(int cents) {
+    final dollars = cents / 100;
+    return dollars == dollars.roundToDouble()
+        ? '\$${dollars.toStringAsFixed(0)}'
+        : '\$${dollars.toStringAsFixed(2)}';
+  }
+
+  void _showSnack(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
 
   // ── Realtime callback ─────────────────────────────────────────────────────
@@ -266,8 +458,14 @@ class _ViewerScreenState extends State<ViewerScreen> {
         }
       }
 
-      // Increment viewer count + subscribe to realtime
-      EventService.incrementViewerCount(eventId).catchError((_) {});
+      // Reconcile the viewer count from LiveKit now, then on a light interval —
+      // authoritative and self-healing (replaces the drift-prone increment).
+      LivekitService.reconcileViewers(eventId: eventId).catchError((_) {});
+      _viewerReconcileTimer?.cancel();
+      _viewerReconcileTimer = Timer.periodic(
+        const Duration(seconds: 30),
+        (_) => LivekitService.reconcileViewers(eventId: eventId).catchError((_) {}),
+      );
 
       final eventConn = ResilientChannel(
         onResync: () => _resyncEventState(eventId),
@@ -280,10 +478,15 @@ class _ViewerScreenState extends State<ViewerScreen> {
 
       // Open the ephemeral chat channel and resolve our username once for
       // outgoing messages (broadcast carries no profile join).
-      final chatChannel = ChatService.subscribe(eventId, _onChatMessage);
-      ProfileService.fetchCurrentProfile()
-          .then((p) => _myUsername = p?.username)
-          .catchError((_) => null);
+      final chatChannel = ChatService.subscribe(
+        eventId,
+        _onChatMessage,
+        onReaction: _onReaction,
+      );
+      ProfileService.fetchCurrentProfile().then((p) {
+        _myUsername = p?.username;
+        _myAvatarUrl = p?.avatarUrl;
+      }).catchError((_) => null);
 
       setState(() {
         _room = room;
@@ -292,6 +495,8 @@ class _ViewerScreenState extends State<ViewerScreen> {
         _streamEventId = eventId;
         _viewerCount = eventState?['viewer_count'] as int? ?? 0;
         _eventStatus = eventState?['status'] as String?;
+        _eventDbId = eventState?['id'] as String?;
+        _hostId = eventState?['host_id'] as String?;
         _hasIncrementedViewerCount = true;
         _eventConn = eventConn;
         _chatChannel = chatChannel;
@@ -690,10 +895,16 @@ class _ViewerScreenState extends State<ViewerScreen> {
       _streamEventId = null;
       _streamEnded = false;
       _eventStatus = null;
+      _eventDbId = null;
+      _hostId = null;
+      _tipPending = false;
       _chatMessages.clear();
       _chatController.clear();
       _chatOpen = false;
       _hasUnreadChat = false;
+      _chatAtBottom = true;
+      _pendingChatCount = 0;
+      _reactions.clear();
       _myUsername = null;
       _state = ViewerState.idle;
     });
@@ -732,7 +943,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
             style: NileTextStyles.bodyLg(),
             decoration: const InputDecoration(
               labelText: 'Event ID',
-              hintText: 'e.g. show-2024-01',
+              hintText: 'e.g. my-live-show',
             ),
           ),
           if (_errorMessage != null) ...[
@@ -889,6 +1100,12 @@ class _ViewerScreenState extends State<ViewerScreen> {
           ],
         ),
 
+        // Floating emoji reactions — non-interactive layer over the video.
+        if (!_streamEnded) _buildReactionOverlay(),
+
+        // Tap-to-react rail (live only, hidden while the chat panel is open).
+        if (_canReact && !_chatOpen) _buildReactionRail(),
+
         // Collapsible live chat — sits above the video, slides off when closed
         if (!_streamEnded) _buildChatOverlay(),
 
@@ -971,6 +1188,15 @@ class _ViewerScreenState extends State<ViewerScreen> {
             ),
           ),
           const Spacer(),
+          // Tip button — live shows only, never for the host's own show.
+          if (_canTip)
+            IconButton(
+              icon: const Icon(Icons.volunteer_activism),
+              color: NileColors.volt,
+              iconSize: 20,
+              tooltip: 'Send a tip',
+              onPressed: _openTipSheet,
+            ),
           // Chat toggle (hidden in the Lobby — no live chat before the show)
           if (_eventStatus != 'soundcheck' && !_streamEnded)
             Stack(
@@ -1003,6 +1229,54 @@ class _ViewerScreenState extends State<ViewerScreen> {
               style: NileTextStyles.bodyMd().copyWith(color: NileColors.error),
             ),
           ),
+        ],
+      ),
+    );
+  }
+
+  // ── Reactions ─────────────────────────────────────────────────────────────
+
+  Widget _buildReactionOverlay() {
+    // Particles rise from the lower-right and fade; the layer never blocks taps.
+    return Positioned.fill(
+      child: IgnorePointer(
+        child: Stack(
+          children: [
+            for (final r in _reactions)
+              _FloatingReactionWidget(
+                key: ValueKey(r.id),
+                emoji: r.emoji,
+                onDone: () => _removeReaction(r.id),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildReactionRail() {
+    return Positioned(
+      right: NileSpacing.s8,
+      bottom: 96,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          for (final emoji in _reactionEmojis)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: NileSpacing.s4),
+              child: Material(
+                color: NileColors.bgPage.withValues(alpha: 0.55),
+                shape: const CircleBorder(),
+                child: InkWell(
+                  customBorder: const CircleBorder(),
+                  onTap: () => _sendReaction(emoji),
+                  child: Padding(
+                    padding: const EdgeInsets.all(NileSpacing.s8),
+                    child: Text(emoji, style: const TextStyle(fontSize: 22)),
+                  ),
+                ),
+              ),
+            ),
         ],
       ),
     );
@@ -1041,9 +1315,52 @@ class _ViewerScreenState extends State<ViewerScreen> {
         ),
         child: Column(
           children: [
-            Expanded(child: _buildChatList()),
+            Expanded(
+              child: Stack(
+                children: [
+                  _buildChatList(),
+                  if (_pendingChatCount > 0)
+                    Positioned(
+                      bottom: NileSpacing.s8,
+                      left: 0,
+                      right: 0,
+                      child: Center(child: _buildNewMessagesPill()),
+                    ),
+                ],
+              ),
+            ),
             _buildChatInput(media.padding.bottom),
           ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildNewMessagesPill() {
+    return Material(
+      color: NileColors.volt,
+      shape: const StadiumBorder(),
+      child: InkWell(
+        customBorder: const StadiumBorder(),
+        onTap: _jumpChatToBottom,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s12, vertical: NileSpacing.s6),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.arrow_downward, size: 14, color: NileColors.onVolt),
+              const SizedBox(width: 4),
+              Text(
+                _pendingChatCount == 1
+                    ? 'New message'
+                    : '$_pendingChatCount new messages',
+                style: NileTextStyles.bodySm().copyWith(
+                  color: NileColors.onVolt,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -1066,24 +1383,130 @@ class _ViewerScreenState extends State<ViewerScreen> {
       itemCount: _chatMessages.length,
       itemBuilder: (context, i) {
         final m = _chatMessages[i];
-        return Padding(
-          padding: const EdgeInsets.symmetric(vertical: NileSpacing.s2),
-          child: RichText(
-            text: TextSpan(
-              children: [
-                TextSpan(
-                  text: '${m.username}  ',
-                  style: NileTextStyles.bodySm().copyWith(
-                    color: m.isMine ? NileColors.volt : NileColors.azure,
-                    fontWeight: FontWeight.w600,
-                  ),
+        final row = _buildChatRow(m);
+        // Gentle entry animation for the newest message only.
+        if (i == _chatMessages.length - 1) {
+          return TweenAnimationBuilder<double>(
+            key: ValueKey('anim_${m.senderId}_${m.sentAt.microsecondsSinceEpoch}'),
+            tween: Tween(begin: 0, end: 1),
+            duration: const Duration(milliseconds: 220),
+            curve: Curves.easeOut,
+            builder: (context, t, child) => Opacity(
+              opacity: t,
+              child: Transform.translate(offset: Offset(0, (1 - t) * 8), child: child),
+            ),
+            child: row,
+          );
+        }
+        return row;
+      },
+    );
+  }
+
+  Widget _buildChatRow(ChatMessage m) {
+    if (m.isSystem) {
+      // Tip / announcement: author-less, volt-accented pill.
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: NileSpacing.s4),
+        child: Row(
+          children: [
+            Icon(Icons.volunteer_activism, size: 14, color: NileColors.volt),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                m.content,
+                style: NileTextStyles.bodyMd().copyWith(
+                  color: NileColors.volt,
+                  fontWeight: FontWeight.w600,
                 ),
-                TextSpan(text: m.content, style: NileTextStyles.bodyMd()),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    final isHost = _hostId != null && m.senderId == _hostId;
+    final nameColor = isHost
+        ? NileColors.coral
+        : (m.isMine ? NileColors.volt : NileColors.azure);
+
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: NileSpacing.s2),
+      padding: isHost
+          ? const EdgeInsets.symmetric(horizontal: NileSpacing.s8, vertical: NileSpacing.s6)
+          : EdgeInsets.zero,
+      decoration: isHost
+          ? BoxDecoration(
+              color: NileColors.coral.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(NileRadius.sm),
+            )
+          : null,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _chatAvatar(m),
+          const SizedBox(width: NileSpacing.s8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Flexible(
+                      child: Text(
+                        m.username,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: NileTextStyles.bodySm().copyWith(
+                          color: nameColor,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                    if (isHost) ...[
+                      const SizedBox(width: 6),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s4, vertical: 1),
+                        decoration: BoxDecoration(
+                          color: NileColors.coral,
+                          borderRadius: BorderRadius.circular(NileRadius.xs),
+                        ),
+                        child: Text(
+                          'HOST',
+                          style: NileTextStyles.caption().copyWith(
+                            color: Colors.white,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: 0.5,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+                Text(m.content, style: NileTextStyles.bodyMd()),
               ],
             ),
           ),
-        );
-      },
+        ],
+      ),
+    );
+  }
+
+  Widget _chatAvatar(ChatMessage m) {
+    const r = 12.0;
+    final url = m.avatarUrl;
+    if (url != null && url.isNotEmpty) {
+      return CircleAvatar(radius: r, backgroundImage: nileAvatarImage(url, r));
+    }
+    final initial = m.username.isNotEmpty ? m.username[0].toUpperCase() : '?';
+    return CircleAvatar(
+      radius: r,
+      backgroundColor: NileColors.bgRaised,
+      child: Text(
+        initial,
+        style: NileTextStyles.caption().copyWith(color: NileColors.txtSecondary),
+      ),
     );
   }
 
@@ -1365,6 +1788,199 @@ class _ViewerScreenState extends State<ViewerScreen> {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// Tip amount picker: preset chips + a custom amount, dollars.
+class _TipSheet extends StatefulWidget {
+  final void Function(int amountCents) onPick;
+  const _TipSheet({required this.onPick});
+
+  @override
+  State<_TipSheet> createState() => _TipSheetState();
+}
+
+class _TipSheetState extends State<_TipSheet> {
+  final _customController = TextEditingController();
+  int? _selected; // selected preset (cents); null when using custom
+
+  @override
+  void dispose() {
+    _customController.dispose();
+    super.dispose();
+  }
+
+  void _confirm() {
+    int? cents = _selected;
+    if (cents == null) {
+      final dollars = double.tryParse(_customController.text.trim());
+      if (dollars != null) cents = (dollars * 100).round();
+    }
+    if (cents == null ||
+        cents < TipService.minCents ||
+        cents > TipService.maxCents) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Enter an amount between \$1 and \$500')),
+      );
+      return;
+    }
+    Navigator.pop(context);
+    widget.onPick(cents);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final bottom = MediaQuery.of(context).viewInsets.bottom;
+    return Padding(
+      padding: EdgeInsets.fromLTRB(20, 20, 20, 20 + bottom),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('Send a tip', style: NileTextStyles.headingSm()),
+          const SizedBox(height: NileSpacing.s4),
+          Text(
+            'Support the host. Goes straight to them, minus a small platform fee.',
+            style: NileTextStyles.bodySm().copyWith(color: NileColors.txtSecondary),
+          ),
+          const SizedBox(height: NileSpacing.s16),
+          Wrap(
+            spacing: NileSpacing.s8,
+            runSpacing: NileSpacing.s8,
+            children: [
+              for (final cents in TipService.presetsCents)
+                ChoiceChip(
+                  label: Text('\$${cents ~/ 100}'),
+                  selected: _selected == cents,
+                  onSelected: (_) => setState(() {
+                    _selected = cents;
+                    _customController.clear();
+                  }),
+                  selectedColor: NileColors.volt,
+                  labelStyle: NileTextStyles.labelLg().copyWith(
+                    color: _selected == cents
+                        ? NileColors.onVolt
+                        : NileColors.txtPrimary,
+                  ),
+                  backgroundColor: NileColors.bgRaised,
+                ),
+            ],
+          ),
+          const SizedBox(height: NileSpacing.s16),
+          TextField(
+            controller: _customController,
+            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+            style: NileTextStyles.bodyMd(),
+            onChanged: (v) {
+              if (v.isNotEmpty && _selected != null) {
+                setState(() => _selected = null);
+              }
+            },
+            decoration: InputDecoration(
+              prefixText: '\$ ',
+              hintText: 'Custom amount',
+              fillColor: NileColors.bgRaised,
+              filled: true,
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(NileRadius.sm),
+                borderSide: BorderSide.none,
+              ),
+            ),
+          ),
+          const SizedBox(height: 20),
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton(
+              onPressed: _confirm,
+              style: FilledButton.styleFrom(
+                backgroundColor: NileColors.volt,
+                foregroundColor: NileColors.onVolt,
+                padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
+                textStyle: NileTextStyles.labelLg(),
+                shape: const StadiumBorder(),
+              ),
+              child: const Text('Continue to checkout'),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// A live emoji reaction in flight — one floating particle.
+class _FloatingReaction {
+  final int id;
+  final String emoji;
+  const _FloatingReaction({required this.id, required this.emoji});
+}
+
+/// Renders one reaction rising from the lower-right, drifting and fading, then
+/// calls [onDone] so the parent can drop it from its list.
+class _FloatingReactionWidget extends StatefulWidget {
+  final String emoji;
+  final VoidCallback onDone;
+  const _FloatingReactionWidget({
+    super.key,
+    required this.emoji,
+    required this.onDone,
+  });
+
+  @override
+  State<_FloatingReactionWidget> createState() =>
+      _FloatingReactionWidgetState();
+}
+
+class _FloatingReactionWidgetState extends State<_FloatingReactionWidget>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _c;
+  late final double _drift; // horizontal wander
+  late final double _startRight;
+
+  @override
+  void initState() {
+    super.initState();
+    final rnd = Random();
+    _drift = (rnd.nextDouble() - 0.5) * 70;
+    _startRight = 16 + rnd.nextDouble() * 44;
+    _c = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 2200),
+    )
+      ..addStatusListener((s) {
+        if (s == AnimationStatus.completed) widget.onDone();
+      })
+      ..forward();
+  }
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _c,
+      builder: (context, _) {
+        final t = _c.value;
+        // Fade in quickly, then out over the rest of the rise.
+        final opacity = (t < 0.15 ? t / 0.15 : 1 - (t - 0.15) / 0.85)
+            .clamp(0.0, 1.0);
+        return Positioned(
+          right: _startRight + _drift * t,
+          bottom: 110 + 230 * t,
+          child: Opacity(
+            opacity: opacity,
+            child: Transform.scale(
+              scale: 0.8 + 0.4 * t,
+              child: Text(widget.emoji, style: const TextStyle(fontSize: 28)),
+            ),
+          ),
+        );
+      },
     );
   }
 }

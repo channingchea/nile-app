@@ -91,6 +91,18 @@ class LivekitService {
   static Future<void> stopEgress({required String eventId}) =>
       _invoke<Map>({'action': 'stop-egress', 'eventId': eventId});
 
+  /// Write the true live viewer count (from LiveKit participants) into the event.
+  /// Server-authoritative and self-healing — replaces the drift-prone
+  /// increment/decrement pair. Call on join and on a light interval while viewing.
+  static Future<void> reconcileViewers({
+    required String eventId,
+    bool excludeSelf = false,
+  }) => _invoke<Map>({
+    'action': 'reconcile-viewers',
+    'eventId': eventId,
+    'excludeSelf': excludeSelf,
+  });
+
   /// Viewer: whether a ready replay exists that this user may watch, plus whether
   /// the caller is authorized at all (so a paid event with no ticket can still
   /// surface a "buy to watch the replay" CTA). Returns a falsey default on error.
@@ -101,9 +113,16 @@ class LivekitService {
         available: d['available'] as bool? ?? false,
         authorized: d['authorized'] as bool? ?? false,
         hasReplay: d['hasReplay'] as bool? ?? false,
+        published: d['published'] as bool? ?? false,
+        replayPrice: (d['replayPrice'] as num?)?.toInt(),
       );
     } catch (_) {
-      return const ReplayAvailability(available: false, authorized: false, hasReplay: false);
+      return const ReplayAvailability(
+        available: false,
+        authorized: false,
+        hasReplay: false,
+        published: false,
+      );
     }
   }
 
@@ -172,12 +191,21 @@ class ReplayAvailability {
   final bool authorized;
 
   /// A ready replay exists for the event, regardless of this caller's access.
-  /// `available && !authorized` is exactly the "buy a ticket to watch" case.
   final bool hasReplay;
+
+  /// The host has published the replay (or the 48h cron did). Fans only see a
+  /// purchase CTA once this is true; before that only crew can watch.
+  final bool published;
+
+  /// Cents. 0 = free, null = not yet priced. `hasReplay && published &&
+  /// !authorized` is exactly the "Get Replay — $X" case.
+  final int? replayPrice;
 
   const ReplayAvailability({
     required this.available,
     required this.authorized,
     required this.hasReplay,
+    required this.published,
+    this.replayPrice,
   });
 }

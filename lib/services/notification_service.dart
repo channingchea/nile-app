@@ -14,6 +14,8 @@ enum NotificationType {
   newMessage,
   messageReaction,
   replayReady,
+  soundcheckOpen,
+  replayPricePrompt,
 }
 
 class AppNotification {
@@ -69,6 +71,8 @@ class AppNotification {
     'new_message' => NotificationType.newMessage,
     'message_reaction' => NotificationType.messageReaction,
     'replay_ready' => NotificationType.replayReady,
+    'soundcheck_open' => NotificationType.soundcheckOpen,
+    'replay_price_prompt' => NotificationType.replayPricePrompt,
     _ => NotificationType.follow,
   };
 }

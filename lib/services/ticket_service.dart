@@ -72,19 +72,16 @@ class TicketService {
   }
 
   /// Calls the Edge Function to create a Stripe Checkout Session.
-  /// Returns the hosted checkout URL to open in a browser.
+  /// Returns the hosted checkout URL to open in a browser. Price and title are
+  /// read server-side from the event — the client can't set them.
+  /// [kind] is 'live' (default) or 'replay' (Phase 2 VOD purchase).
   static Future<String> createCheckoutUrl({
     required String eventId,
-    required String eventTitle,
-    required int amountCents,
+    String kind = 'live',
   }) async {
     final response = await supabase.functions.invoke(
       'create-payment-intent',
-      body: {
-        'event_id': eventId,
-        'event_title': eventTitle,
-        'amount_cents': amountCents,
-      },
+      body: {'event_id': eventId, 'kind': kind},
     );
 
     if (response.status != 200) {

@@ -205,6 +205,8 @@ async function handle(req: Request, ctx: ReqCtx): Promise<Response> {
       return await replayUrl(body, user.id, admin);
     case "viewer-token":
       return await viewerToken(body, user.id, admin);
+    case "reconcile-viewers":
+      return await reconcileViewers(body, user.id, admin);
     default:
       return json({ error: `Unknown action: ${action}` }, 400);
   }
@@ -458,6 +460,17 @@ async function startShow(body: any, userId: string, admin: any): Promise<Respons
     // Room metadata unreadable — fall back to a bare anchor.
   }
 
+  // Idempotent: if the show already has an anchor (host rejoining after a drop,
+  // or a duplicate call), keep the original showStartedAt so the camera-sync
+  // timeline never shifts for viewers, and skip a second egress.
+  const existingAnchor = typeof meta.showStartedAt === "number"
+    ? (meta.showStartedAt as number)
+    : null;
+  if (existingAnchor !== null) {
+    log("info", { action: "start-show", note: "already started; no-op", eventId });
+    return json({ success: true, alreadyStarted: true });
+  }
+
   const startedAt = Date.now();
   await roomService.updateRoomMetadata(
     roomName,
@@ -465,10 +478,19 @@ async function startShow(body: any, userId: string, admin: any): Promise<Respons
   );
 
   // Kick off the composited replay recording. Non-fatal: a failed egress must
-  // never block the live show, so we log and continue.
-  await startReplayEgress(gate.event.id, roomName, startedAt, admin).catch((err) =>
-    log("error", { reqId: "-", action: "start-egress", error: String(err) }),
-  );
+  // never block the live show, so we log and continue. Guarded against a
+  // duplicate row in case an anchor write was lost but a recording exists.
+  const { data: existingReplay } = await admin
+    .from("replays")
+    .select("id")
+    .eq("event_id", gate.event.id)
+    .eq("status", "recording")
+    .maybeSingle();
+  if (!existingReplay) {
+    await startReplayEgress(gate.event.id, roomName, startedAt, admin).catch((err) =>
+      log("error", { reqId: "-", action: "start-egress", error: String(err) }),
+    );
+  }
 
   return json({ success: true });
 }
@@ -549,9 +571,53 @@ async function stopEgress(body: any, userId: string, admin: any): Promise<Respon
   return json({ success: true });
 }
 
-// Resolve the event by LiveKit slug and apply the SAME paid-ticket gate as
-// viewer-token. Returns the event row, or a Response (404 not found / 403 no
-// ticket). Shared by replay-exists and replay-url so both gate identically.
+// reconcile-viewers — write the TRUE live viewer count from LiveKit into
+// events.viewer_count, replacing the increment/decrement pair that drifted
+// whenever a viewer's app was killed before its decrement fired. Any viewer
+// calls this (on join + on a light interval); the value is derived solely from
+// the room's actual participants, so it can't be gamed and self-heals. Cameras/
+// audio operators (role != 'viewer') are excluded; identity is unique per user
+// (`viewer-<userId>`) so multiple tabs count once.
+async function reconcileViewers(body: any, userId: string, admin: any): Promise<Response> {
+  const { eventId, excludeSelf } = body;
+  if (!eventId) return json({ error: "eventId is required" }, 400);
+
+  const { data: event } = await admin
+    .from("events")
+    .select("id")
+    .eq("livekit_room", eventId)
+    .maybeSingle();
+  if (!event) return json({ error: "Event not found" }, 404);
+
+  // A leaving viewer passes excludeSelf so they aren't counted even if LiveKit
+  // hasn't yet processed their disconnect — makes the last-viewer-leaves case
+  // settle to the right number instead of sticking at 1.
+  const selfIdentity = `viewer-${userId}`;
+  let count = 0;
+  try {
+    const participants = await roomService.listParticipants(roomNameFor(eventId));
+    const viewers = new Set<string>();
+    for (const p of participants) {
+      if (parseMeta(p.metadata).role !== "viewer") continue;
+      if (excludeSelf === true && p.identity === selfIdentity) continue;
+      viewers.add(p.identity);
+    }
+    count = viewers.size;
+  } catch {
+    // Room gone/unreadable (show ended) → 0 viewers.
+    count = 0;
+  }
+
+  await admin.from("events").update({ viewer_count: count }).eq("id", event.id);
+  return json({ success: true, viewer_count: count });
+}
+
+// Resolve the event by LiveKit slug and apply the replay access gate (Phase 2
+// VOD pricing). Crew (host/operator) always pass — they can preview before
+// publish. Everyone else needs the replay PUBLISHED (replay_published_at set),
+// and then: free replay (replay_price 0) → open; priced replay → any paid
+// ticket row (kind 'live' or 'replay' — live holders always rewatch free).
+// Shared by replay-exists and replay-url so both gate identically.
 async function gateReplayAccess(
   eventId: string,
   userId: string,
@@ -561,28 +627,31 @@ async function gateReplayAccess(
 
   const { data: event, error } = await admin
     .from("events")
-    .select("id, host_id, price")
+    .select("id, host_id, replay_price, replay_published_at")
     .eq("livekit_room", eventId)
     .maybeSingle();
   if (error || !event) return json({ error: "Event not found" }, 404);
 
-  // Paid-event gate (host/operator/paid-ticket), identical to viewer-token.
-  if (event.price && event.price > 0) {
-    const isCrew = await isAuthorizedOperator(
-      { id: event.id, host_id: event.host_id },
-      userId,
-      admin,
-    );
-    if (!isCrew) {
-      const { data: ticket } = await admin
-        .from("tickets")
-        .select("status")
-        .eq("event_id", event.id)
-        .eq("buyer_id", userId)
-        .maybeSingle();
-      if (!ticket || ticket.status !== "paid") {
-        return json({ error: "A valid ticket is required to watch this replay" }, 403);
-      }
+  const isCrew = await isAuthorizedOperator(
+    { id: event.id, host_id: event.host_id },
+    userId,
+    admin,
+  );
+  if (isCrew) return { id: event.id };
+
+  if (!event.replay_published_at) {
+    return json({ error: "Replay not published yet" }, 403);
+  }
+
+  if (event.replay_price && event.replay_price > 0) {
+    const { data: ticket } = await admin
+      .from("tickets")
+      .select("status")
+      .eq("event_id", event.id)
+      .eq("buyer_id", userId)
+      .maybeSingle();
+    if (!ticket || ticket.status !== "paid") {
+      return json({ error: "Purchase the replay to watch it" }, 403);
     }
   }
 
@@ -601,7 +670,7 @@ async function replayExists(body: any, userId: string, admin: any): Promise<Resp
   // Does any ready replay exist at all (independent of this user's access)?
   const { data: event } = await admin
     .from("events")
-    .select("id")
+    .select("id, replay_published_at, replay_price")
     .eq("livekit_room", eventId)
     .maybeSingle();
   if (!event) return json({ available: false, authorized: false });
@@ -614,13 +683,22 @@ async function replayExists(body: any, userId: string, admin: any): Promise<Resp
     .limit(1)
     .maybeSingle();
   const hasReplay = !!replay;
+  const published = !!event.replay_published_at;
 
-  // Is the caller authorized (host/operator/paid-ticket or free event)?
+  // Is the caller authorized (crew, or published + free/ticketed)?
   const gate = await gateReplayAccess(eventId, userId, admin);
   const authorized = !(gate instanceof Response);
 
   // available = there's a ready replay AND the caller may watch it now.
-  return json({ available: hasReplay && authorized, authorized, hasReplay });
+  // published + replayPrice drive the client CTA: unpublished → host sees
+  // "Set replay price"; published+unauthorized → "Get Replay — $X".
+  return json({
+    available: hasReplay && authorized,
+    authorized,
+    hasReplay,
+    published,
+    replayPrice: event.replay_price ?? null,
+  });
 }
 
 // replay-url — mint a short-lived signed playback URL for a ready replay, after

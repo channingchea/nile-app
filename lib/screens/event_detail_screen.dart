@@ -26,6 +26,7 @@ import 'crew_setup_screen.dart';
 import 'widgets/moderation_menu.dart';
 import 'edit_event_screen.dart';
 import 'profile_screen.dart';
+import 'replay_pricing_screen.dart';
 import 'replay_screen.dart';
 import 'viewer_screen.dart';
 
@@ -82,6 +83,9 @@ class _EventDetailScreenState extends State<EventDetailScreen>
   // lacks a ticket on a paid event (→ "buy a ticket to watch the replay").
   bool _replayWatchable = false;
   bool _replayLockedByTicket = false;
+  bool _replayHasReplay = false;
+  bool _replayPublished = false;
+  int? _replayPrice; // cents, from replay-exists (server-authoritative)
 
   // Countdown
   Timer? _ticker;
@@ -246,7 +250,24 @@ class _EventDetailScreenState extends State<EventDetailScreen>
     setState(() {
       _replayWatchable = r.available;
       _replayLockedByTicket = r.hasReplay && !r.authorized;
+      _replayHasReplay = r.hasReplay;
+      _replayPublished = r.published;
+      _replayPrice = r.replayPrice;
     });
+  }
+
+  /// Host: open the pricing screen; refresh the replay probe on return so the
+  /// CTA flips from "Set replay price" once published.
+  Future<void> _priceReplay() async {
+    final event = _event;
+    if (event == null) return;
+    final published = await Navigator.push<bool>(
+      context,
+      MaterialPageRoute(builder: (_) => ReplayPricingScreen(event: event)),
+    );
+    if (published == true && mounted) {
+      await _load();
+    }
   }
 
   void _watchReplay() {
@@ -334,14 +355,15 @@ class _EventDetailScreenState extends State<EventDetailScreen>
     ).showSnackBar(const SnackBar(content: Text('Event ID copied')));
   }
 
-  Future<void> _buyTicket() async {
-    if (_event == null || _event!.price == null) return;
+  /// [kind] 'live' buys a ticket to the show; 'replay' buys the published VOD.
+  /// Price is read server-side from the event either way.
+  Future<void> _buyTicket({String kind = 'live'}) async {
+    if (_event == null) return;
     setState(() => _ticketBusy = true);
     try {
       final url = await TicketService.createCheckoutUrl(
         eventId: _event!.id,
-        eventTitle: _event!.title,
-        amountCents: _event!.price!,
+        kind: kind,
       );
       final uri = Uri.parse(url);
       if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
@@ -676,10 +698,15 @@ class _EventDetailScreenState extends State<EventDetailScreen>
                 ticketsRemaining: _ticketsRemaining,
                 replayWatchable: _replayWatchable,
                 replayLockedByTicket: _replayLockedByTicket,
+                replayExistsForEvent: _replayHasReplay,
+                replayPublished: _replayPublished,
+                replayPriceCents: _replayPrice,
                 onWatch: _watch,
                 onBuyTicket: _buyTicket,
+                onBuyReplay: () => _buyTicket(kind: 'replay'),
                 onEnterAsCamera: _enterAsCamera,
                 onWatchReplay: _watchReplay,
+                onPriceReplay: _priceReplay,
               ),
               // Host-only: promote this event via the web ad portal. Opens in
               // the external browser — a link out, not an in-app purchase.
@@ -1085,10 +1112,15 @@ class _PrimaryCta extends StatelessWidget {
   final int? ticketsRemaining;
   final bool replayWatchable;
   final bool replayLockedByTicket;
+  final bool replayExistsForEvent;
+  final bool replayPublished;
+  final int? replayPriceCents;
   final VoidCallback onWatch;
   final VoidCallback onBuyTicket;
+  final VoidCallback onBuyReplay;
   final VoidCallback onEnterAsCamera;
   final VoidCallback onWatchReplay;
+  final VoidCallback onPriceReplay;
 
   const _PrimaryCta({
     required this.event,
@@ -1101,10 +1133,15 @@ class _PrimaryCta extends StatelessWidget {
     required this.ticketsRemaining,
     required this.replayWatchable,
     required this.replayLockedByTicket,
+    required this.replayExistsForEvent,
+    required this.replayPublished,
+    required this.replayPriceCents,
     required this.onWatch,
     required this.onBuyTicket,
+    required this.onBuyReplay,
     required this.onEnterAsCamera,
     required this.onWatchReplay,
+    required this.onPriceReplay,
   });
 
   bool get _isPaid => event.price != null && event.price! > 0;
@@ -1215,31 +1252,79 @@ class _PrimaryCta extends StatelessWidget {
     }
 
     if (event.isEnded) {
+      final children = <Widget>[];
+
       // A ready replay this user may watch → primary "Watch Replay" CTA.
+      // (Crew always pass the gate, so the host/operators can preview before
+      // publishing.)
       if (replayWatchable) {
-        return SizedBox(
-          width: double.infinity,
-          child: FilledButton.icon(
-            onPressed: onWatchReplay,
-            style: FilledButton.styleFrom(
-              padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
-              backgroundColor: NileColors.volt,
-              foregroundColor: NileColors.onVolt,
+        children.add(
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton.icon(
+              onPressed: onWatchReplay,
+              style: FilledButton.styleFrom(
+                padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
+                backgroundColor: NileColors.volt,
+                foregroundColor: NileColors.onVolt,
+              ),
+              icon: const Icon(Icons.play_arrow),
+              label: const Text('Watch Replay'),
             ),
-            icon: const Icon(Icons.play_arrow),
-            label: const Text('Watch Replay'),
           ),
         );
       }
-      // A replay exists but this user lacks a ticket on a paid event → let them
-      // buy in to unlock it. (fix 1: this is keyed off replayLockedByTicket, not
-      // off replay-url succeeding — which it never would for an unticketed user.)
-      if (replayLockedByTicket) {
+
+      // Host with an unpublished replay → set a price to publish it (Phase 2).
+      // The 48h cron publishes at the live price if they never do.
+      if (isOwn && replayExistsForEvent && !replayPublished) {
+        children.add(
+          Padding(
+            padding: EdgeInsets.only(top: children.isEmpty ? 0 : 10),
+            child: SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                onPressed: onPriceReplay,
+                icon: const Icon(Icons.sell_outlined),
+                label: const Text('Set replay price'),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: NileColors.txtPrimary,
+                  side: BorderSide(color: NileColors.border),
+                  padding: const EdgeInsets.symmetric(
+                    vertical: NileSpacing.s16,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      }
+
+      if (children.isNotEmpty) return Column(children: children);
+
+      // A published, priced replay this user hasn't bought → buy the VOD.
+      // Live-ticket holders never land here (their ticket authorizes them).
+      if (replayLockedByTicket && replayPublished) {
         return _GetTicketButton(
-          priceCents: event.price!,
-          soldOut: _soldOut,
+          priceCents: replayPriceCents ?? event.price ?? 0,
+          soldOut: false,
           busy: ticketBusy,
-          onBuy: onBuyTicket,
+          onBuy: onBuyReplay,
+          labelPrefix: 'Get Replay',
+        );
+      }
+      // A replay exists but the host hasn't published it yet.
+      if (replayLockedByTicket && !replayPublished) {
+        return SizedBox(
+          width: double.infinity,
+          child: OutlinedButton.icon(
+            onPressed: null,
+            icon: const Icon(Icons.hourglass_top),
+            label: const Text('Replay coming soon'),
+            style: OutlinedButton.styleFrom(
+              padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
+            ),
+          ),
         );
       }
       // No replay (or none yet) → inert ended state.
@@ -1285,12 +1370,14 @@ class _GetTicketButton extends StatelessWidget {
   final bool soldOut;
   final bool busy;
   final VoidCallback onBuy;
+  final String labelPrefix; // 'Get Ticket' (live) or 'Get Replay' (VOD)
 
   const _GetTicketButton({
     required this.priceCents,
     required this.soldOut,
     required this.busy,
     required this.onBuy,
+    this.labelPrefix = 'Get Ticket',
   });
 
   @override
@@ -1318,7 +1405,7 @@ class _GetTicketButton extends StatelessWidget {
                 ),
               )
             : const Icon(Icons.confirmation_number_outlined),
-        label: Text(soldOut ? 'Sold Out' : 'Get Ticket — $priceLabel'),
+        label: Text(soldOut ? 'Sold Out' : '$labelPrefix — $priceLabel'),
       ),
     );
     // Faint volt glow on the screen's single primary CTA.

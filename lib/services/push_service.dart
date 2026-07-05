@@ -6,6 +6,7 @@ import '../screens/conversation_screen.dart';
 import '../screens/event_detail_screen.dart';
 import '../screens/post_detail_screen.dart';
 import '../screens/profile_screen.dart';
+import '../screens/replay_pricing_screen.dart';
 import '../screens/viewer_screen.dart';
 import 'device_token_service.dart';
 import 'event_service.dart';
@@ -142,6 +143,7 @@ class PushService {
       case 'event_ended':
       case 'operator_assigned':
       case 'replay_ready':
+      case 'soundcheck_open':
         if (entityId == null) return;
         final event = await EventService.fetchById(entityId);
         if (event == null) return;
@@ -151,6 +153,14 @@ class PushService {
                 ? ViewerScreen(initialEventId: event.liveKitEventId)
                 : EventDetailScreen(event: event),
           ),
+        );
+      case 'replay_price_prompt':
+        // Host tap → straight to the pricing screen for this event.
+        if (entityId == null) return;
+        final ev = await EventService.fetchById(entityId);
+        if (ev == null) return;
+        pushFresh(
+          MaterialPageRoute(builder: (_) => ReplayPricingScreen(event: ev)),
         );
       case 'new_message':
       case 'message_reaction':

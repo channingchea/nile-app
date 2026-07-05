@@ -56,6 +56,12 @@ function buildMessage(p: Payload): { title: string; body: string } {
       return { title: who, body: "Reacted to your message" };
     case "replay_ready":
       return { title: "Replay ready", body: `${who}'s replay is ready to watch` };
+    case "soundcheck_open":
+      return { title: "Sound check open", body: `${who} opened sound check — join to get ready` };
+    case "tip_received":
+      return { title: "New tip", body: `${who} sent you a tip` };
+    case "replay_price_prompt":
+      return { title: "Price your replay", body: "Your replay is ready — set a price to publish it" };
     default:
       return { title: "Nile", body: "You have a new notification" };
   }

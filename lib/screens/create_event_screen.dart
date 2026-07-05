@@ -265,7 +265,7 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
               textCapitalization: TextCapitalization.words,
               maxLength: 80,
               decoration: const InputDecoration(
-                hintText: 'e.g. Spring Concert 2025',
+                hintText: 'e.g. Friday Night Live',
               ),
               validator: (v) =>
                   (v == null || v.trim().isEmpty) ? 'Required' : null,

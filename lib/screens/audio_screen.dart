@@ -231,7 +231,7 @@ class _AudioScreenState extends State<AudioScreen> {
           style: NileTextStyles.bodyLg(),
           decoration: const InputDecoration(
             labelText: 'Event ID',
-            hintText: 'e.g. show-2024-01',
+            hintText: 'e.g. my-live-show',
           ),
         ),
         if (_errorMessage != null) ...[

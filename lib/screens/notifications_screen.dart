@@ -9,6 +9,7 @@ import 'conversation_screen.dart';
 import 'event_detail_screen.dart';
 import 'post_detail_screen.dart';
 import 'profile_screen.dart';
+import 'replay_pricing_screen.dart';
 import 'viewer_screen.dart';
 import 'widgets/load_more_footer.dart';
 
@@ -119,6 +120,7 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
       case NotificationType.eventEnded:
       case NotificationType.operatorAssigned:
       case NotificationType.replayReady:
+      case NotificationType.soundcheckOpen:
         if (n.entityId == null) return;
         final event = await EventService.fetchById(n.entityId!);
         if (!mounted || event == null) return;
@@ -129,6 +131,14 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
                 ? ViewerScreen(initialEventId: event.liveKitEventId)
                 : EventDetailScreen(event: event),
           ),
+        );
+      case NotificationType.replayPricePrompt:
+        if (n.entityId == null) return;
+        final ev = await EventService.fetchById(n.entityId!);
+        if (!mounted || ev == null) return;
+        Navigator.push(
+          context,
+          MaterialPageRoute(builder: (_) => ReplayPricingScreen(event: ev)),
         );
     }
   }
@@ -245,6 +255,10 @@ class _NotificationTile extends StatelessWidget {
       '@${notification.actorUsername} reacted to your message',
     NotificationType.replayReady =>
       '@${notification.actorUsername}’s replay is ready to watch',
+    NotificationType.soundcheckOpen =>
+      '@${notification.actorUsername} opened sound check — join to get ready',
+    NotificationType.replayPricePrompt =>
+      'Your replay is ready — set a price to publish it',
   };
 
   IconData _icon() => switch (notification.type) {
@@ -258,6 +272,8 @@ class _NotificationTile extends StatelessWidget {
     NotificationType.newMessage => Icons.send_rounded,
     NotificationType.messageReaction => Icons.favorite,
     NotificationType.replayReady => Icons.play_circle_fill,
+    NotificationType.soundcheckOpen => Icons.tune,
+    NotificationType.replayPricePrompt => Icons.sell,
   };
 
   Color _iconColor() => switch (notification.type) {
@@ -271,6 +287,8 @@ class _NotificationTile extends StatelessWidget {
     NotificationType.newMessage => NileColors.volt,
     NotificationType.messageReaction => NileColors.coral,
     NotificationType.replayReady => NileColors.volt,
+    NotificationType.soundcheckOpen => NileColors.azure,
+    NotificationType.replayPricePrompt => NileColors.volt,
   };
 
   String _timeAgo(DateTime dt) {

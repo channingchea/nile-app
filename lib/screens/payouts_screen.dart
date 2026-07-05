@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../services/mfa_service.dart';
 import '../services/payout_service.dart';
+import '../services/tip_service.dart';
 import '../theme.dart';
 import 'auth/mfa_connect_gate_screen.dart';
 
@@ -16,6 +17,7 @@ class PayoutsScreen extends StatefulWidget {
 
 class _PayoutsScreenState extends State<PayoutsScreen> {
   PayoutStatus? _status;
+  TipEarnings? _tips;
   String? _error;
   bool _busy = false;
 
@@ -32,7 +34,10 @@ class _PayoutsScreenState extends State<PayoutsScreen> {
     });
     try {
       final s = await PayoutService.status();
-      if (mounted) setState(() => _status = s);
+      final tips = await TipService.hostEarnings().catchError(
+        (_) => const TipEarnings(grossCents: 0, feeCents: 0, count: 0),
+      );
+      if (mounted) setState(() { _status = s; _tips = tips; });
     } catch (e) {
       if (mounted) setState(() => _error = e.toString());
     }
@@ -113,6 +118,10 @@ class _PayoutsScreenState extends State<PayoutsScreen> {
       padding: const EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s16, NileSpacing.s16, NileSpacing.s32),
       children: [
         _StatusCard(status: s),
+        if (_tips?.hasTips ?? false) ...[
+          const SizedBox(height: 12),
+          _TipsCard(tips: _tips!),
+        ],
         const SizedBox(height: 20),
         if (s.isActive) ...[
           if (s.dashboardUrl != null)
@@ -130,7 +139,7 @@ class _PayoutsScreenState extends State<PayoutsScreen> {
           ),
         const SizedBox(height: 16),
         Text(
-          'Nile uses Stripe to pay out ticket revenue. Setup opens in your '
+          'Nile uses Stripe to pay out ticket and tip revenue. Setup opens in your '
           'browser; pull down to refresh once you\'re done.',
           style: NileTextStyles.caption().copyWith(
             color: NileColors.txtTertiary,
@@ -209,6 +218,55 @@ class _StatusCard extends StatelessWidget {
                 ),
               ],
             ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _TipsCard extends StatelessWidget {
+  final TipEarnings tips;
+  const _TipsCard({required this.tips});
+
+  String _money(int cents) {
+    final d = cents / 100;
+    return d == d.roundToDouble()
+        ? '\$${d.toStringAsFixed(0)}'
+        : '\$${d.toStringAsFixed(2)}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(NileSpacing.s16),
+      decoration: BoxDecoration(
+        color: NileColors.bgSurface,
+        borderRadius: BorderRadius.circular(NileRadius.lg),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.volunteer_activism, color: NileColors.volt, size: 20),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Tips earned', style: NileTextStyles.headingSm()),
+                const SizedBox(height: 4),
+                Text(
+                  '${tips.count} ${tips.count == 1 ? 'tip' : 'tips'} · '
+                  '${_money(tips.feeCents)} platform fee',
+                  style: NileTextStyles.bodySm().copyWith(
+                    color: NileColors.txtSecondary,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Text(
+            _money(tips.netCents),
+            style: NileTextStyles.headingSm().copyWith(color: NileColors.volt),
           ),
         ],
       ),

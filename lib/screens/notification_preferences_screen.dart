@@ -141,6 +141,18 @@ class _NotificationPreferencesScreenState
           p.operatorAssigned,
           (v) => _set(p.copyWith(operatorAssigned: v), p),
         ),
+        _toggle(
+          'Sound check open',
+          'When a host you’re crewing for opens sound check',
+          p.soundcheckOpen,
+          (v) => _set(p.copyWith(soundcheckOpen: v), p),
+        ),
+        _toggle(
+          'Price your replay',
+          'When your show’s replay is ready to be priced and published',
+          p.replayPricePrompt,
+          (v) => _set(p.copyWith(replayPricePrompt: v), p),
+        ),
         _section('Messages'),
         _toggle(
           'Direct messages',

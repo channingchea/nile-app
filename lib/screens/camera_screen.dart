@@ -54,6 +54,15 @@ class _CameraScreenState extends State<CameraScreen> {
     _deviceChangeSub = Hardware.instance.onDeviceChange.stream.listen(
       (_) => _refreshMicDetection(),
     );
+    // Launched from an event with a known camera slot: skip the manual Event
+    // ID / Camera Name form and connect straight into sound check. The form
+    // stays as a fallback only if a field is missing or the connect fails.
+    if ((widget.initialEventId?.isNotEmpty ?? false) &&
+        (widget.initialCameraName?.isNotEmpty ?? false)) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _state == CameraState.idle) _enterSoundCheck();
+      });
+    }
   }
 
   /// Inspect audio inputs; flag when a non-builtin mic is present so we can
@@ -268,7 +277,7 @@ class _CameraScreenState extends State<CameraScreen> {
       return;
     }
 
-    // Sound check opens 5 minutes before the scheduled start. Only gate an
+    // Sound check opens 15 minutes before the scheduled start. Only gate an
     // event that hasn't begun (still 'scheduled'); a host re-entering one that's
     // already soundcheck/live isn't blocked. Unknown scheduled_at → allow.
     try {
@@ -277,12 +286,12 @@ class _CameraScreenState extends State<CameraScreen> {
       if (state?['status'] == 'scheduled' && schedRaw != null) {
         final opensAt = DateTime.parse(
           schedRaw,
-        ).subtract(const Duration(minutes: 5));
+        ).subtract(const Duration(minutes: 15));
         if (DateTime.now().isBefore(opensAt)) {
           final mins = opensAt.difference(DateTime.now()).inMinutes + 1;
           setState(
             () => _errorMessage =
-                'Sound check opens 5 minutes before showtime. Try again in '
+                'Sound check opens 15 minutes before showtime. Try again in '
                 '$mins min.',
           );
           return;
@@ -437,6 +446,35 @@ class _CameraScreenState extends State<CameraScreen> {
               }
             })
             .catchError((_) {});
+        // Host rejoin after a drop: if the show is already live, land straight
+        // in LIVE — never show Start Show, which would re-stamp the sync anchor
+        // and kick off a duplicate replay egress. Also follow the DB status so
+        // an end elsewhere tears this screen down. When the show ISN'T already
+        // live, ping assigned crew that sound check is open (server dedupes).
+        EventService.fetchEventState(eventId)
+            .then((state) {
+              if (!mounted) return;
+              final status = state?['status'];
+              if (status == 'live' && _state == CameraState.soundCheck) {
+                setState(() => _state = CameraState.live);
+              } else if (status != 'live' && status != 'ended') {
+                EventService.notifySoundcheckOpen(eventId).catchError((_) {});
+              }
+            })
+            .catchError((_) {});
+        _statusChannel?.unsubscribe();
+        _statusChannel = EventService.subscribeToEvent(
+          liveKitEventId: eventId,
+          onUpdate: (record) {
+            if (!mounted) return;
+            if (record['status'] == 'live' &&
+                _state == CameraState.soundCheck) {
+              setState(() => _state = CameraState.live);
+            } else if (record['status'] == 'ended') {
+              _teardownRoom();
+            }
+          },
+        );
       } else {
         // If the show is already live (operator rejoining after a drop),
         // suppress the auto-flip: they re-enter the show via "Ready to
@@ -749,37 +787,6 @@ class _CameraScreenState extends State<CameraScreen> {
                         ),
                       ),
                     ],
-                    // End Stream lives here, at the bottom of Settings — clearly
-                    // labelled but out of the way so it can't be hit by accident.
-                    // Host-only, live-only; it's the sole path that ends a show.
-                    if (widget.isHost && _state == CameraState.live) ...[
-                      const SizedBox(height: 24),
-                      Divider(color: NileColors.border, height: 1),
-                      const SizedBox(height: 16),
-                      SizedBox(
-                        width: double.infinity,
-                        child: OutlinedButton.icon(
-                          onPressed: () => _confirmEndStream(sheetCtx),
-                          icon: const Icon(Icons.stop_circle_outlined),
-                          label: const Text('End Stream'),
-                          style: OutlinedButton.styleFrom(
-                            foregroundColor: NileColors.error,
-                            side: const BorderSide(color: NileColors.error),
-                            padding: const EdgeInsets.symmetric(vertical: NileSpacing.s12),
-                            textStyle: NileTextStyles.labelMd(),
-                            shape: const StadiumBorder(),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      Text(
-                        'Ends the show for everyone. Viewers see the stream as '
-                        'ended. This can\'t be undone.',
-                        style: NileTextStyles.bodySm().copyWith(
-                          color: NileColors.txtSecondary,
-                        ),
-                      ),
-                    ],
                   ],
                 ),
               ),
@@ -790,9 +797,9 @@ class _CameraScreenState extends State<CameraScreen> {
     );
   }
 
-  /// Confirm before ending. Closes the settings sheet, asks once, then ends.
-  Future<void> _confirmEndStream(BuildContext sheetCtx) async {
-    Navigator.of(sheetCtx).pop(); // close the settings sheet first
+  /// Confirm before ending, then end. Reached from the visible End Stream
+  /// button on the host's live layout.
+  Future<void> _confirmEndStream() async {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -937,7 +944,7 @@ class _CameraScreenState extends State<CameraScreen> {
             style: NileTextStyles.bodyLg(),
             decoration: const InputDecoration(
               labelText: 'Event ID',
-              hintText: 'e.g. show-2024-01',
+              hintText: 'e.g. my-live-show',
             ),
           ),
           const SizedBox(height: 16),
@@ -1334,6 +1341,26 @@ class _CameraScreenState extends State<CameraScreen> {
                             shape: const StadiumBorder(),
                           ),
                         ),
+                ),
+                const SizedBox(height: 12),
+              ],
+              // Live, host: visible End Stream — destructive, confirm-gated. The
+              // sole path that ends a show. Operators never see it (host-only).
+              if (_state == CameraState.live && widget.isHost) ...[
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: _confirmEndStream,
+                    icon: const Icon(Icons.stop_circle_outlined),
+                    label: const Text('End Stream'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: NileColors.error,
+                      side: const BorderSide(color: NileColors.error),
+                      padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
+                      textStyle: NileTextStyles.labelLg(),
+                      shape: const StadiumBorder(),
+                    ),
+                  ),
                 ),
                 const SizedBox(height: 12),
               ],

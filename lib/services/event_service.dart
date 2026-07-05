@@ -38,6 +38,8 @@ class Event {
   final int likeCount;
   final int repostCount;
   final int? price; // cents
+  final int? replayPrice; // cents; null = host hasn't priced the replay yet
+  final DateTime? replayPublishedAt; // null = replay not published to fans
   final int? ticketLimit;
   final int cameraCount;
   final DateTime createdAt;
@@ -66,6 +68,8 @@ class Event {
     this.likeCount = 0,
     this.repostCount = 0,
     this.price,
+    this.replayPrice,
+    this.replayPublishedAt,
     this.ticketLimit,
     this.cameraCount = 1,
     required this.createdAt,
@@ -98,6 +102,8 @@ class Event {
       likeCount: likeCount ?? this.likeCount,
       repostCount: repostCount ?? this.repostCount,
       price: price,
+      replayPrice: replayPrice,
+      replayPublishedAt: replayPublishedAt,
       ticketLimit: ticketLimit,
       cameraCount: cameraCount,
       createdAt: createdAt,
@@ -140,6 +146,10 @@ class Event {
       repostCount: (json['repost_count'] as num?)?.toInt() ?? 0,
       repostedByUsername: repostedByUsername,
       price: (json['price'] as num?)?.toInt(),
+      replayPrice: (json['replay_price'] as num?)?.toInt(),
+      replayPublishedAt: json['replay_published_at'] != null
+          ? DateTime.parse(json['replay_published_at'] as String)
+          : null,
       ticketLimit: (json['ticket_limit'] as num?)?.toInt(),
       cameraCount: (json['camera_count'] as num?)?.toInt() ?? 1,
       createdAt: DateTime.parse(json['created_at'] as String),
@@ -531,6 +541,15 @@ class EventService {
         .neq('status', 'ended');
   }
 
+  /// Ping assigned crew that sound check is open. Server verifies the caller is
+  /// the host and dedupes per event, so it's safe to call on every host entry.
+  static Future<void> notifySoundcheckOpen(String liveKitEventId) async {
+    await supabase.rpc(
+      'notify_soundcheck_open',
+      params: {'p_livekit_room': liveKitEventId},
+    );
+  }
+
   /// Revert a never-started event from 'soundcheck' back to 'scheduled' (host
   /// left during setup without pressing Start Show). Guarded so a live or ended
   /// event is never dragged backwards.
@@ -564,6 +583,16 @@ class EventService {
         .eq('livekit_room', liveKitEventId);
   }
 
+  /// Host: publish the replay at [priceCents] (0 = free). Server-side RPC
+  /// (migration 0049) verifies the caller is the host, locks the price, stamps
+  /// replay_published_at, and fans out replay_ready to fans. Idempotent.
+  static Future<void> publishReplay(String eventId, int priceCents) => guard(
+    () => supabase.rpc(
+      'publish_replay',
+      params: {'p_event_id': eventId, 'p_price_cents': priceCents},
+    ),
+  );
+
   /// Atomically increment viewer_count (requires the SQL function above).
   static Future<void> incrementViewerCount(String liveKitEventId) async {
     await supabase.rpc(
@@ -587,7 +616,7 @@ class EventService {
   ) => guard(() async {
     final rows = await supabase
         .from('events')
-        .select('viewer_count, status, scheduled_at')
+        .select('id, host_id, title, viewer_count, status, scheduled_at')
         .eq('livekit_room', liveKitEventId)
         .limit(1);
     return rows.isNotEmpty ? rows.first : null;

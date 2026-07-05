@@ -66,6 +66,35 @@ serve(async (req) => {
           .eq("id", campaignId)
           .eq("status", "pending_payment");
       }
+    } else if (session.metadata?.type === "tip") {
+      // Tip completed (atomic Connect split already settled by Stripe). Flip the
+      // pending ledger row to paid; the status guard makes replays idempotent.
+      // The pending row was keyed on session.id (PI was null at create time).
+      const { data: tip } = await adminClient
+        .from("tips")
+        .update({ status: "paid", stripe_payment_intent_id: piId })
+        .eq("stripe_payment_intent_id", session.id)
+        .eq("status", "pending")
+        .select("host_id, tipper_id, event_id")
+        .maybeSingle();
+
+      // Notify the host (only on a real transition, so replays don't re-notify).
+      // Gated by the host's tip_received preference (fail-open); push delivery is
+      // free via the phase-20 AFTER INSERT trigger on notifications.
+      if (tip) {
+        const { data: enabled } = await adminClient.rpc("notif_enabled", {
+          p_uid: tip.host_id,
+          p_type: "tip_received",
+        });
+        if (enabled !== false) {
+          await adminClient.from("notifications").insert({
+            recipient_id: tip.host_id,
+            actor_id: tip.tipper_id,
+            type: "tip_received",
+            entity_id: tip.event_id,
+          });
+        }
+      }
     } else {
       // Ticket sale (default). The pending row was stored under session.id
       // (PaymentIntent is null at session creation). Mark paid by session.id and
@@ -87,6 +116,17 @@ serve(async (req) => {
         p_payment_intent_id: paymentIntentId,
         p_status: "refunded",
       });
+
+      // Tip refund (out-of-band dashboard refund). A destination-charge refund
+      // also reverses the transfer, so keep host earnings honest by marking the
+      // ledger row. Only full refunds; only a currently-paid tip.
+      if (charge.refunded) {
+        await adminClient
+          .from("tips")
+          .update({ status: "refunded" })
+          .eq("stripe_payment_intent_id", paymentIntentId)
+          .eq("status", "paid");
+      }
 
       // Ad campaign refund (review finding #5): a refund issued from the Stripe
       // dashboard must also pull the campaign. Only FULL refunds (charge.refunded

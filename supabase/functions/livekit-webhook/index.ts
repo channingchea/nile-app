@@ -20,9 +20,20 @@
 
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { WebhookReceiver } from "https://esm.sh/livekit-server-sdk@2.9.7?target=deno";
+import { WebhookReceiver, EgressClient } from "https://esm.sh/livekit-server-sdk@2.9.7?target=deno";
 
 const receiver = new WebhookReceiver(
+  Deno.env.get("LIVEKIT_API_KEY")!,
+  Deno.env.get("LIVEKIT_API_SECRET")!,
+);
+
+// Same LIVEKIT_URL → https conversion the `livekit` fn uses, so we can stop
+// egress when a room finishes without the room emptying out its full timeout.
+const LIVEKIT_HTTP_URL = Deno.env.get("LIVEKIT_URL")!
+  .replace(/^wss:/, "https:")
+  .replace(/^ws:/, "http:");
+const egressClient = new EgressClient(
+  LIVEKIT_HTTP_URL,
   Deno.env.get("LIVEKIT_API_KEY")!,
   Deno.env.get("LIVEKIT_API_SECRET")!,
 );
@@ -47,6 +58,39 @@ serve(async (req) => {
   } catch (err) {
     log("warn", { error: "signature verification failed", detail: String(err) });
     return new Response("invalid signature", { status: 401 });
+  }
+
+  // A room finishing (auto-end cron, or the last publisher leaving after the
+  // emptyTimeout) is our cue to stop any replay egress still recording — without
+  // this, egress runs on until the empty timeout and appends dead air. Stopping
+  // it here triggers egress_ended, which finalizes the file below. Idempotent:
+  // stopping an already-stopped egress is a harmless no-op.
+  if (event.event === "room_finished" && event.room) {
+    const roomName = event.room.name ?? "";
+    const slug = roomName.replace(/^nile-event-/, "");
+    const { data: ev } = await admin
+      .from("events")
+      .select("id")
+      .eq("livekit_room", slug)
+      .maybeSingle();
+
+    if (ev?.id) {
+      const { data: recording } = await admin
+        .from("replays")
+        .select("egress_id")
+        .eq("event_id", ev.id)
+        .eq("status", "recording")
+        .order("created_at", { ascending: false })
+        .maybeSingle();
+
+      if (recording?.egress_id) {
+        await egressClient.stopEgress(recording.egress_id).catch((err) =>
+          log("warn", { event: "room_finished", roomName, stop_error: String(err) }),
+        );
+        log("info", { event: "room_finished", roomName, action: "stopped-egress" });
+      }
+    }
+    return new Response("ok", { status: 200 });
   }
 
   if (event.event === "egress_ended" && event.egressInfo) {
