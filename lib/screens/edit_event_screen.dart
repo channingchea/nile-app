@@ -9,6 +9,7 @@ import '../services/topic_service.dart';
 import '../theme.dart';
 import '../widgets/crew_editor.dart';
 import '../widgets/duration_field.dart';
+import '../widgets/payout_gate.dart';
 import '../widgets/topic_chips.dart';
 
 /// Edit an event the signed-in user hosts. Mirrors the create flow's fields
@@ -324,6 +325,18 @@ class _EditEventScreenState extends State<EditEventScreen> {
       final endChanged = newEndAt != widget.event.endAt;
       final priceChanged = priceCents != widget.event.price;
       final limitChanged = ticketLimit != widget.event.ticketLimit;
+
+      // Publishing a paid draft or flipping a free event to paid requires an
+      // active payout account. Gate before writing so we never leave an event
+      // paid-and-public without payouts (the server trigger backs this up).
+      if ((priceCents ?? 0) > 0 &&
+          (widget.event.isDraft || (widget.event.price ?? 0) == 0)) {
+        if (!mounted) return;
+        if (!await ensurePaidPublishAllowed(context)) {
+          setState(() => _saving = false);
+          return;
+        }
+      }
 
       final updated = await EventService.update(
         eventId: widget.event.id,

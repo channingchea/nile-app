@@ -32,10 +32,9 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
-// Platform fee in basis points. No ticket-fee constant exists to inherit
-// (tickets currently take 0% at checkout); 10% is the Phase 6 default — change
-// this one line to adjust.
-const TIP_FEE_BPS = 1000;
+// Platform tip fee is config-driven (app_config.tip_fee_share), defaulting to
+// 10% if the row/column is missing. Read per-request below.
+const DEFAULT_TIP_FEE_SHARE = 0.10;
 
 // Preset amounts (cents). Custom amounts are allowed within [MIN, MAX].
 const PRESETS = new Set([200, 500, 1000, 2000]);
@@ -97,7 +96,13 @@ serve(async (req) => {
     const account = await stripe.accounts.retrieve(hostAccountId);
     if (!account.charges_enabled) return json({ error: "host_not_payable" }, 409);
 
-    const fee = Math.round((amt * TIP_FEE_BPS) / 10000);
+    const { data: cfg } = await admin
+      .from("app_config")
+      .select("tip_fee_share")
+      .eq("id", 1)
+      .maybeSingle();
+    const feeShare = Number(cfg?.tip_fee_share ?? DEFAULT_TIP_FEE_SHARE);
+    const fee = Math.round(amt * feeShare);
 
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ["card"],

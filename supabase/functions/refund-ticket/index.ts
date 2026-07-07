@@ -59,7 +59,7 @@ serve(async (req) => {
     // Fetch the ticket + its event's host in one query.
     const { data: ticket } = await adminClient
       .from("tickets")
-      .select("id, status, stripe_payment_intent_id, events!tickets_event_id_fkey(host_id)")
+      .select("id, status, stripe_payment_intent_id, split_status, events!tickets_event_id_fkey(host_id)")
       .eq("id", ticket_id)
       .maybeSingle();
 
@@ -78,7 +78,15 @@ serve(async (req) => {
       return json({ error: "Ticket has no settled payment to refund" }, 409);
     }
 
-    const refund = await stripe.refunds.create({ payment_intent: pi });
+    // Split tickets sent the creator's share to their Connect account at sale,
+    // so the refund must also pull that transfer back and return the platform
+    // fee. Fallback tickets were a plain platform charge → plain refund.
+    const isSplit = ticket.split_status === "split";
+    const refund = await stripe.refunds.create(
+      isSplit
+        ? { payment_intent: pi, reverse_transfer: true, refund_application_fee: true }
+        : { payment_intent: pi },
+    );
 
     // Optimistic update; webhook will confirm.
     await adminClient

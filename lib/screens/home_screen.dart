@@ -21,6 +21,7 @@ import '../widgets/event_cover_pill.dart';
 import '../widgets/event_link_card.dart';
 import '../widgets/like_button.dart';
 import '../widgets/nile_glass_app_bar.dart';
+import '../widgets/nile_logo.dart';
 import '../widgets/nile_glass_nav_bar.dart';
 import '../widgets/nile_skeleton.dart';
 import '../widgets/post_image_carousel.dart';
@@ -776,13 +777,7 @@ class _FeedTabState extends State<_FeedTab> {
           physics: const AlwaysScrollableScrollPhysics(),
           slivers: [
             NileGlassBar.sliverAppBar(
-              title: Text(
-                'Nile',
-                style: NileTextStyles.displayLg().copyWith(
-                  fontSize: 32,
-                  color: NileColors.volt,
-                ),
-              ),
+              title: const NileLogo(size: 'small', height: 28),
               actions: [
                 IconButton(
                   onPressed: _load,

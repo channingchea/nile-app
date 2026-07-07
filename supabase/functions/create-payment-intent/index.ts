@@ -70,7 +70,7 @@ serve(async (req) => {
     // null/0) aren't sold through Stripe.
     const { data: event } = await adminClient
       .from("events")
-      .select("price, title, status, replay_price, replay_published_at")
+      .select("host_id, price, title, status, replay_price, replay_published_at")
       .eq("id", event_id)
       .maybeSingle();
 
@@ -138,6 +138,41 @@ serve(async (req) => {
       return json({ error: "Already purchased" }, 409);
     }
 
+    // Revenue split: the creator's share is deposited to their Connect account
+    // at checkout via a destination charge; the platform keeps the remainder as
+    // an application fee. Share is config-driven (fail closed to 50%). Each
+    // ticket freezes its own fee so earnings stay accurate if the share changes.
+    const { data: cfg } = await adminClient
+      .from("app_config")
+      .select("creator_revenue_share")
+      .eq("id", 1)
+      .maybeSingle();
+    const share = Number(cfg?.creator_revenue_share ?? 0.5);
+    const creatorCents = Math.floor(amount_cents * share);
+    const feeCents = amount_cents - creatorCents; // platform's cut, always < amount
+
+    // Host must have a payable Connect account for the split; if not (or Stripe
+    // is unreachable), fall back to a plain platform charge so the sale still
+    // completes — flagged for a later manual transfer.
+    let destination: string | null = null;
+    const { data: hostProfile } = await adminClient
+      .from("profiles")
+      .select("stripe_account_id")
+      .eq("id", event.host_id)
+      .maybeSingle();
+    const hostAccountId = hostProfile?.stripe_account_id as string | null;
+    if (hostAccountId) {
+      try {
+        const acct = await stripe.accounts.retrieve(hostAccountId);
+        if (acct.charges_enabled) destination = hostAccountId;
+      } catch (_) {/* Stripe unreachable → fallback, don't fail the sale */}
+    }
+    if (!destination) {
+      console.warn(
+        `payout_fallback: event=${event_id} host=${event.host_id} — no payable Connect account, charging platform (manual transfer owed)`,
+      );
+    }
+
     // Create Stripe Checkout Session (hosted page — no native SDK needed)
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ["card"],
@@ -152,6 +187,15 @@ serve(async (req) => {
         },
       ],
       mode: "payment",
+      // Atomic split when the host is payable; plain charge otherwise.
+      ...(destination
+        ? {
+            payment_intent_data: {
+              application_fee_amount: feeCents,
+              transfer_data: { destination },
+            },
+          }
+        : {}),
       success_url: `${Deno.env.get("STRIPE_SUCCESS_URL")}?event_id=${event_id}&session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${Deno.env.get("STRIPE_CANCEL_URL")}?event_id=${event_id}`,
       metadata: {
@@ -170,6 +214,8 @@ serve(async (req) => {
         amount_cents,
         status: "pending",
         kind,
+        split_status: destination ? "split" : "platform_fallback",
+        application_fee_cents: destination ? feeCents : null,
       },
       { onConflict: "event_id,buyer_id", ignoreDuplicates: false }
     );

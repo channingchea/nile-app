@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../theme.dart';
+import '../widgets/nile_logo.dart';
 
 /// Branded launch screen shown while the app boots and auth resolves.
 ///
@@ -55,21 +56,7 @@ class _SplashScreenState extends State<SplashScreen>
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
-                    Text('Nile', style: NileTextStyles.displayLg()),
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: NileSpacing.s8, left: NileSpacing.s4),
-                      child: FadeTransition(
-                        opacity: _pulse,
-                        child: Container(
-                          width: 10,
-                          height: 10,
-                          decoration: BoxDecoration(
-                            color: NileColors.volt,
-                            shape: BoxShape.circle,
-                          ),
-                        ),
-                      ),
-                    ),
+                    NileLogo(size: 'large', height: 80),
                   ],
                 ),
               ),

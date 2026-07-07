@@ -18,6 +18,7 @@ class PayoutsScreen extends StatefulWidget {
 class _PayoutsScreenState extends State<PayoutsScreen> {
   PayoutStatus? _status;
   TipEarnings? _tips;
+  TicketEarnings? _tickets;
   String? _error;
   bool _busy = false;
 
@@ -37,7 +38,11 @@ class _PayoutsScreenState extends State<PayoutsScreen> {
       final tips = await TipService.hostEarnings().catchError(
         (_) => const TipEarnings(grossCents: 0, feeCents: 0, count: 0),
       );
-      if (mounted) setState(() { _status = s; _tips = tips; });
+      final tickets = await PayoutService.ticketEarnings()
+          .catchError((_) => TicketEarnings.empty);
+      if (mounted) {
+        setState(() { _status = s; _tips = tips; _tickets = tickets; });
+      }
     } catch (e) {
       if (mounted) setState(() => _error = e.toString());
     }
@@ -118,6 +123,10 @@ class _PayoutsScreenState extends State<PayoutsScreen> {
       padding: const EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s16, NileSpacing.s16, NileSpacing.s32),
       children: [
         _StatusCard(status: s),
+        if (_tickets?.hasSales ?? false) ...[
+          const SizedBox(height: 12),
+          _TicketsCard(tickets: _tickets!),
+        ],
         if (_tips?.hasTips ?? false) ...[
           const SizedBox(height: 12),
           _TipsCard(tips: _tips!),
@@ -225,16 +234,59 @@ class _StatusCard extends StatelessWidget {
   }
 }
 
+String _money(int cents) {
+  final d = cents / 100;
+  return d == d.roundToDouble()
+      ? '\$${d.toStringAsFixed(0)}'
+      : '\$${d.toStringAsFixed(2)}';
+}
+
+class _TicketsCard extends StatelessWidget {
+  final TicketEarnings tickets;
+  const _TicketsCard({required this.tickets});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(NileSpacing.s16),
+      decoration: BoxDecoration(
+        color: NileColors.bgSurface,
+        borderRadius: BorderRadius.circular(NileRadius.lg),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.confirmation_number_outlined,
+              color: NileColors.volt, size: 20),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Tickets earned', style: NileTextStyles.headingSm()),
+                const SizedBox(height: 4),
+                Text(
+                  '${tickets.count} ${tickets.count == 1 ? 'sale' : 'sales'} · '
+                  '${_money(tickets.monthNetCents)} this month',
+                  style: NileTextStyles.bodySm().copyWith(
+                    color: NileColors.txtSecondary,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Text(
+            _money(tickets.lifetimeNetCents),
+            style: NileTextStyles.headingSm().copyWith(color: NileColors.volt),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _TipsCard extends StatelessWidget {
   final TipEarnings tips;
   const _TipsCard({required this.tips});
-
-  String _money(int cents) {
-    final d = cents / 100;
-    return d == d.roundToDouble()
-        ? '\$${d.toStringAsFixed(0)}'
-        : '\$${d.toStringAsFixed(2)}';
-  }
 
   @override
   Widget build(BuildContext context) {

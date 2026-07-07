@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../services/supabase_client.dart';
 import '../../theme.dart';
+import '../../widgets/nile_logo.dart';
 import 'forgot_password_screen.dart';
 import 'signup_screen.dart';
 
@@ -71,13 +72,7 @@ class _LoginScreenState extends State<LoginScreen> {
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     // ── Logo / wordmark ──────────────────────────────────────
-                    Text(
-                      'Nile',
-                      textAlign: TextAlign.center,
-                      style: NileTextStyles.displayLg().copyWith(
-                        color: NileColors.volt,
-                      ),
-                    ),
+                    NileLogo(size: 'medium', height: 48),
                     const SizedBox(height: 8),
                     Text(
                       'Sign in to continue',

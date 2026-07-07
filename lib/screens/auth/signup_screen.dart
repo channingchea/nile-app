@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../services/supabase_client.dart';
 import '../../theme.dart';
+import '../../widgets/nile_logo.dart';
 
 class SignupScreen extends StatefulWidget {
   const SignupScreen({super.key});
@@ -154,6 +155,8 @@ class _SignupScreenState extends State<SignupScreen> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               // ── Header ───────────────────────────────────────────────
+              Center(child: NileLogo(size: 'medium', height: 48)),
+              const SizedBox(height: 24),
               Text('Create account', style: NileTextStyles.displayMd()),
               const SizedBox(height: 8),
               Text(

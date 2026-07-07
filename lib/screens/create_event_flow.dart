@@ -11,6 +11,7 @@ import '../services/profile_service.dart';
 import '../theme.dart';
 import '../widgets/crew_editor.dart';
 import '../widgets/duration_field.dart';
+import '../widgets/payout_gate.dart';
 import '../widgets/topic_chips.dart';
 import 'create_post_screen.dart';
 import 'event_detail_screen.dart';
@@ -640,6 +641,15 @@ class _ChooseCrewPageState extends State<ChooseCrewPage> {
         if (!mounted) return;
         widget.onCancel();
         return;
+      }
+
+      // Paid events require an active payout account before going public.
+      if ((_draft.priceCents ?? 0) > 0) {
+        if (!mounted) return;
+        if (!await ensurePaidPublishAllowed(context)) {
+          if (mounted) setState(() => _committing = false);
+          return;
+        }
       }
 
       // Publish: flip the draft to a scheduled (live-eligible) event.

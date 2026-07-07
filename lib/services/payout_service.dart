@@ -58,4 +58,50 @@ class PayoutService {
     if (url == null) throw Exception('No onboarding URL returned');
     return url;
   }
+
+  /// Ticket + replay earnings (net of the platform share) for the signed-in
+  /// host, via the `host_ticket_earnings()` RPC.
+  static Future<TicketEarnings> ticketEarnings() async {
+    final rows = await supabase.rpc('host_ticket_earnings');
+    final list = rows as List;
+    if (list.isEmpty) return TicketEarnings.empty;
+    return TicketEarnings.fromRow(list.first as Map<String, dynamic>);
+  }
+}
+
+/// Host ticket/replay earnings. Net = gross minus the platform application fee
+/// frozen per split ticket; fallback (un-onboarded) sales count toward gross
+/// but net 0 until manually transferred.
+class TicketEarnings {
+  final int lifetimeNetCents;
+  final int monthNetCents;
+  final int lifetimeGrossCents;
+  final int monthGrossCents;
+  final int count;
+
+  const TicketEarnings({
+    required this.lifetimeNetCents,
+    required this.monthNetCents,
+    required this.lifetimeGrossCents,
+    required this.monthGrossCents,
+    required this.count,
+  });
+
+  static const empty = TicketEarnings(
+    lifetimeNetCents: 0,
+    monthNetCents: 0,
+    lifetimeGrossCents: 0,
+    monthGrossCents: 0,
+    count: 0,
+  );
+
+  bool get hasSales => count > 0;
+
+  factory TicketEarnings.fromRow(Map<String, dynamic> r) => TicketEarnings(
+    lifetimeNetCents: (r['lifetime_net_cents'] as num?)?.toInt() ?? 0,
+    monthNetCents: (r['month_net_cents'] as num?)?.toInt() ?? 0,
+    lifetimeGrossCents: (r['lifetime_gross_cents'] as num?)?.toInt() ?? 0,
+    monthGrossCents: (r['month_gross_cents'] as num?)?.toInt() ?? 0,
+    count: (r['ticket_count'] as num?)?.toInt() ?? 0,
+  );
 }

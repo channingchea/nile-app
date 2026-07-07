@@ -119,6 +119,20 @@ serve(async (req) => {
 
     const account = await stripe.accounts.retrieve(accountId);
 
+    // Put newly-payable accounts on a monthly payout schedule (end of month).
+    // Idempotent — skip if already monthly. Done here (polled on the Payouts
+    // screen after onboarding) so we don't need a Connect webhook.
+    if (account.payouts_enabled &&
+        account.settings?.payouts?.schedule?.interval !== "monthly") {
+      try {
+        await stripe.accounts.update(accountId, {
+          settings: { payouts: { schedule: { interval: "monthly", monthly_anchor: 31 } } },
+        });
+      } catch (e) {
+        console.warn("payout schedule update failed", e);
+      }
+    }
+
     // Express dashboard login link — only valid once details are submitted.
     let dashboardUrl: string | null = null;
     if (account.details_submitted) {
