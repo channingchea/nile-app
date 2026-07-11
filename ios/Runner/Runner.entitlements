@@ -10,5 +10,11 @@
 		<string>applinks:links.nile.app</string>
 	</array>
 	-->
+	<!-- Shared container between the app and the Broadcast Upload Extension —
+	     the screen-share frames travel over a socket in this group. -->
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.com.nilestreaming.app</string>
+	</array>
 </dict>
 </plist>

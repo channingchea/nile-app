@@ -2,6 +2,7 @@
 //
 // Setup:
 //   supabase secrets set STRIPE_WEBHOOK_SECRET=whsec_...
+//   supabase secrets set ADMIN_ALERT_EMAIL=you@joinnile.com   (Part 2: review-needed alert; also read by tally-ad-spend)
 //   supabase functions deploy stripe-webhook --no-verify-jwt
 //
 // IMPORTANT: deploy with --no-verify-jwt. Stripe signs with the webhook
@@ -60,11 +61,25 @@ serve(async (req) => {
       if (campaignId) {
         const nextStatus =
           session.metadata.standalone === "1" ? "pending_review" : "active";
-        await adminClient
+        const { data: updatedCampaign } = await adminClient
           .from("ad_campaigns")
           .update({ status: nextStatus, stripe_payment_intent_id: piId })
           .eq("id", campaignId)
-          .eq("status", "pending_payment");
+          .eq("status", "pending_payment")
+          .select("advertiser_accounts(name), ad_creatives(headline)")
+          .maybeSingle();
+
+        // New-submission admin alert (Part 2 of the hardening plan). Only
+        // fires on a real pending_payment→pending_review transition — the
+        // status guard above returns no row on a replay, so this can't
+        // double-fire; the Klaviyo unique_id below is a second backstop.
+        if (updatedCampaign && nextStatus === "pending_review") {
+          await notifyAdminNeedsReview(
+            campaignId,
+            (updatedCampaign as any).advertiser_accounts?.name ?? "Unknown",
+            (updatedCampaign as any).ad_creatives?.[0]?.headline ?? "Untitled ad",
+          );
+        }
       }
     } else if (session.metadata?.type === "tip") {
       // Tip completed (atomic Connect split already settled by Stripe). Flip the
@@ -148,3 +163,47 @@ serve(async (req) => {
     headers: { "Content-Type": "application/json" },
   });
 });
+
+// Admin alert: a paid standalone ad just entered pending_review (Part 2 of
+// the hardening plan — the Stripe auth window is only ~7 days, so a silent
+// submission is a real risk). Env-gated on KLAVIYO_API_KEY + ADMIN_ALERT_EMAIL:
+// no-ops cleanly when either is unset, same posture as notifyAdvertiser in
+// review-ad-campaign. Fires "Nile Ad Needs Review"; a Klaviyo flow owns the
+// actual email. unique_id keys on campaign_id so this can never double-send.
+// Never throws.
+async function notifyAdminNeedsReview(campaignId: string, brand: string, headline: string) {
+  const key = Deno.env.get("KLAVIYO_API_KEY");
+  const adminEmail = Deno.env.get("ADMIN_ALERT_EMAIL");
+  if (!key || !adminEmail) return;
+  const payload = {
+    data: {
+      type: "event",
+      attributes: {
+        unique_id: `${campaignId}:needs_review`,
+        properties: {
+          brand,
+          headline,
+          campaign_id: campaignId,
+          portal_url: "https://ads.joinnile.com/advertise/portal?view=review",
+        },
+        metric: { data: { type: "metric", attributes: { name: "Nile Ad Needs Review" } } },
+        profile: { data: { type: "profile", attributes: { email: adminEmail } } },
+      },
+    },
+  };
+  try {
+    const res = await fetch("https://a.klaviyo.com/api/events/", {
+      method: "POST",
+      headers: {
+        Authorization: `Klaviyo-API-Key ${key}`,
+        revision: "2024-10-15",
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) console.error("admin needs-review event failed:", res.status, await res.text());
+  } catch (err) {
+    console.error("admin needs-review event error:", err);
+  }
+}

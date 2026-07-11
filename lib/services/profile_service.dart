@@ -193,7 +193,7 @@ class ProfileService {
     if (uid == null) return;
     await supabase
         .from('profiles')
-        .update({'onboarded_at': DateTime.now().toIso8601String()})
+        .update({'onboarded_at': DateTime.now().toUtc().toIso8601String()})
         .eq('id', uid);
   }
 

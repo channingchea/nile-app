@@ -1,7 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart'
+    show kIsWeb, defaultTargetPlatform, TargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:livekit_client/livekit_client.dart' hide ChatMessage;
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -11,10 +12,12 @@ import '../services/event_service.dart';
 import '../services/livekit_service.dart';
 import '../services/profile_service.dart';
 import '../services/realtime.dart';
+import '../services/share_urls.dart';
 import '../services/supabase_client.dart';
 import '../services/tip_service.dart';
 import '../theme.dart';
 import '../widgets/rolling_number.dart';
+import '../widgets/share_to_sheet.dart';
 
 class ViewerScreen extends StatefulWidget {
   final String? initialEventId;
@@ -32,7 +35,20 @@ class CameraFeed {
   final String cameraName;
   final VideoTrack? track;
 
-  CameraFeed({required this.identity, required this.cameraName, this.track});
+  /// True when this tile is a participant's screen share rather than their
+  /// camera. One participant can own two tiles (camera + screen), so feeds
+  /// are always matched on identity AND kind — never identity alone.
+  final bool isScreenShare;
+
+  CameraFeed({
+    required this.identity,
+    required this.cameraName,
+    this.track,
+    this.isScreenShare = false,
+  });
+
+  String get displayName =>
+      isScreenShare ? '$cameraName — Screen' : cameraName;
 }
 
 class _ViewerScreenState extends State<ViewerScreen>
@@ -67,6 +83,7 @@ class _ViewerScreenState extends State<ViewerScreen>
   // Tipping. Resolved from the event row on connect. _tipPending guards the
   // post-checkout confirm-and-announce on app resume.
   String? _eventDbId;
+  String? _eventTitle;
   String? _hostId;
   bool _tipPending = false;
   // True while the room dropped (e.g. all cameras left) but the show is still
@@ -225,6 +242,21 @@ class _ViewerScreenState extends State<ViewerScreen>
       if (_chatOpen) _hasUnreadChat = false;
     });
     if (_chatOpen) _scrollChatToBottom();
+  }
+
+  /// Share the stream: DM picker + OS share sheet with the canonical event
+  /// link, same flow as sharing from the event page.
+  Future<void> _shareStream() async {
+    final id = _eventDbId;
+    if (id == null) return;
+    await ShareToSheet.showEvent(
+      context,
+      eventId: id,
+      shareText: ShareUrls.eventCaption(
+        id: id,
+        title: _eventTitle ?? 'Live on Nile',
+      ),
+    );
   }
 
   Future<void> _sendChat() async {
@@ -442,7 +474,11 @@ class _ViewerScreenState extends State<ViewerScreen>
           // Don't gate on TrackSource — it can still be `unknown` at this point.
           // _addCamera authoritatively checks the participant's role == 'camera'.
           if (publication.subscribed && publication.track != null) {
-            _addCamera(participant, publication.track as VideoTrack);
+            _addCamera(
+              participant,
+              publication.track as VideoTrack,
+              isScreenShare: _isScreenSharePub(participant, publication),
+            );
           } else {
             // Hold the video back until it aligns with the audio timeline; the
             // track arrives via TrackSubscribedEvent. Covers autoSubscribe off.
@@ -496,6 +532,7 @@ class _ViewerScreenState extends State<ViewerScreen>
         _viewerCount = eventState?['viewer_count'] as int? ?? 0;
         _eventStatus = eventState?['status'] as String?;
         _eventDbId = eventState?['id'] as String?;
+        _eventTitle = eventState?['title'] as String?;
         _hostId = eventState?['host_id'] as String?;
         _hasIncrementedViewerCount = true;
         _eventConn = eventConn;
@@ -520,8 +557,11 @@ class _ViewerScreenState extends State<ViewerScreen>
     // Don't gate on TrackSource (can be `unknown` at subscribe time) — _addCamera
     // checks the participant's role == 'camera' authoritatively.
     if (event.track is VideoTrack) {
+      final isScreen = _isScreenSharePub(event.participant, event.publication);
       final idx = _cameras.indexWhere(
-        (c) => c.identity == event.participant.identity,
+        (c) =>
+            c.identity == event.participant.identity &&
+            c.isScreenShare == isScreen,
       );
       if (idx != -1) {
         setState(() {
@@ -529,10 +569,15 @@ class _ViewerScreenState extends State<ViewerScreen>
             identity: _cameras[idx].identity,
             cameraName: _cameras[idx].cameraName,
             track: event.track as VideoTrack,
+            isScreenShare: isScreen,
           );
         });
       } else {
-        _addCamera(event.participant, event.track as VideoTrack);
+        _addCamera(
+          event.participant,
+          event.track as VideoTrack,
+          isScreenShare: isScreen,
+        );
       }
     } else if (event.track is AudioTrack) {
       _storeAudioPublication(event.participant, event.publication);
@@ -541,16 +586,29 @@ class _ViewerScreenState extends State<ViewerScreen>
 
   void _onTrackUnsubscribed(TrackUnsubscribedEvent event) {
     if (event.track is VideoTrack) {
+      final isScreen = _isScreenSharePub(event.participant, event.publication);
       final idx = _cameras.indexWhere(
-        (c) => c.identity == event.participant.identity,
+        (c) =>
+            c.identity == event.participant.identity &&
+            c.isScreenShare == isScreen,
       );
       if (idx != -1) {
         setState(() {
-          _cameras[idx] = CameraFeed(
-            identity: _cameras[idx].identity,
-            cameraName: _cameras[idx].cameraName,
-            track: null,
-          );
+          if (isScreen) {
+            // A stopped share is gone for good — drop the tile entirely
+            // instead of leaving a dead placeholder.
+            _cameras.removeAt(idx);
+            if (_focusedIndex >= _cameras.length && _cameras.isNotEmpty) {
+              _focusedIndex = _cameras.length - 1;
+            }
+          } else {
+            // A camera can come back (video toggle) — keep the placeholder.
+            _cameras[idx] = CameraFeed(
+              identity: _cameras[idx].identity,
+              cameraName: _cameras[idx].cameraName,
+              track: null,
+            );
+          }
         });
       }
       _updateAudioRouting();
@@ -637,6 +695,11 @@ class _ViewerScreenState extends State<ViewerScreen>
     RemoteParticipant participant,
     RemoteTrackPublication publication,
   ) {
+    // Screen shares aren't part of the audio-sync dance — show immediately.
+    if (publication.source == TrackSource.screenShareVideo) {
+      publication.subscribe();
+      return;
+    }
     final cameraJoinedAt =
         (_parseMeta(participant.metadata)['joinedAt'] as num?)?.toInt();
     int delayMs = 0;
@@ -755,7 +818,11 @@ class _ViewerScreenState extends State<ViewerScreen>
     for (final participant in room.remoteParticipants.values) {
       for (final publication in participant.videoTrackPublications) {
         if (publication.subscribed && publication.track != null) {
-          _addCamera(participant, publication.track as VideoTrack);
+          _addCamera(
+            participant,
+            publication.track as VideoTrack,
+            isScreenShare: _isScreenSharePub(participant, publication),
+          );
         } else {
           _delayedSubscribeVideo(participant, publication);
         }
@@ -851,7 +918,29 @@ class _ViewerScreenState extends State<ViewerScreen>
 
   // ── Camera helpers ────────────────────────────────────────────────────────
 
-  void _addCamera(RemoteParticipant participant, VideoTrack track) {
+  /// Whether a video publication is a screen share. Source is stamped at
+  /// publish time; the fallback covers the brief `unknown` window by checking
+  /// if this participant's camera tile is already occupied by another track.
+  bool _isScreenSharePub(
+    RemoteParticipant participant,
+    RemoteTrackPublication publication,
+  ) {
+    if (publication.source == TrackSource.screenShareVideo) return true;
+    if (publication.source != TrackSource.unknown) return false;
+    return _cameras.any(
+      (c) =>
+          c.identity == participant.identity &&
+          !c.isScreenShare &&
+          c.track != null &&
+          c.track!.sid != publication.sid,
+    );
+  }
+
+  void _addCamera(
+    RemoteParticipant participant,
+    VideoTrack track, {
+    bool isScreenShare = false,
+  }) {
     Map<String, dynamic> meta;
     try {
       meta = jsonDecode(participant.metadata ?? '{}') as Map<String, dynamic>;
@@ -859,7 +948,13 @@ class _ViewerScreenState extends State<ViewerScreen>
       return;
     }
     if (meta['role'] != 'camera') return;
-    if (_cameras.any((c) => c.identity == participant.identity)) return;
+    if (_cameras.any(
+      (c) =>
+          c.identity == participant.identity &&
+          c.isScreenShare == isScreenShare,
+    )) {
+      return;
+    }
 
     final cameraName =
         (meta['cameraName'] as String?) ??
@@ -871,6 +966,7 @@ class _ViewerScreenState extends State<ViewerScreen>
           identity: participant.identity,
           cameraName: cameraName,
           track: track,
+          isScreenShare: isScreenShare,
         ),
       );
     });
@@ -1196,6 +1292,15 @@ class _ViewerScreenState extends State<ViewerScreen>
               iconSize: 20,
               tooltip: 'Send a tip',
               onPressed: _openTipSheet,
+            ),
+          // Share — canonical event link, available any time while watching.
+          if (_eventDbId != null)
+            IconButton(
+              icon: const Icon(Icons.ios_share),
+              color: NileColors.txtSecondary,
+              iconSize: 20,
+              tooltip: 'Share',
+              onPressed: _shareStream,
             ),
           // Chat toggle (hidden in the Lobby — no live chat before the show)
           if (_eventStatus != 'soundcheck' && !_streamEnded)
@@ -1603,10 +1708,62 @@ class _ViewerScreenState extends State<ViewerScreen>
 
   // ── Layouts ───────────────────────────────────────────────────────────────
 
+  /// Desktop gets bigger angle previews by default, plus a drag handle
+  /// between the main feed and the rail so the user can resize them.
+  static bool get _isDesktop =>
+      !kIsWeb &&
+      (defaultTargetPlatform == TargetPlatform.macOS ||
+          defaultTargetPlatform == TargetPlatform.windows ||
+          defaultTargetPlatform == TargetPlatform.linux);
+
+  double _thumbScale = _isDesktop ? 1.6 : 1.0;
+
+  void _resizeThumbnails(double deltaPx, double basePx) {
+    setState(() {
+      _thumbScale = (_thumbScale + deltaPx / basePx).clamp(1.0, 3.0);
+    });
+  }
+
+  /// Thin grab bar for resizing the thumbnail rail (desktop only).
+  Widget _buildThumbResizeHandle({required bool horizontal}) {
+    return MouseRegion(
+      cursor: horizontal
+          ? SystemMouseCursors.resizeRow
+          : SystemMouseCursors.resizeColumn,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        // Rail sits below/right of the main feed, so dragging toward the
+        // feed (negative delta) grows it.
+        onVerticalDragUpdate: horizontal
+            ? (d) => _resizeThumbnails(-d.delta.dy, 100)
+            : null,
+        onHorizontalDragUpdate: horizontal
+            ? null
+            : (d) => _resizeThumbnails(-d.delta.dx, 110),
+        child: Container(
+          height: horizontal ? 8 : null,
+          width: horizontal ? null : 8,
+          color: NileColors.bgPage,
+          alignment: Alignment.center,
+          child: Container(
+            height: horizontal ? 3 : 28,
+            width: horizontal ? 28 : 3,
+            decoration: BoxDecoration(
+              color: NileColors.txtTertiary,
+              borderRadius: BorderRadius.circular(NileRadius.pill),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _buildPortraitLayout() {
     return Column(
       children: [
         Expanded(child: _buildMainCamera()),
+        if (_cameras.length > 1 && _isDesktop)
+          _buildThumbResizeHandle(horizontal: true),
         if (_cameras.length > 1) _buildHorizontalThumbnails(),
       ],
     );
@@ -1616,6 +1773,8 @@ class _ViewerScreenState extends State<ViewerScreen>
     return Row(
       children: [
         Expanded(child: _buildMainCamera()),
+        if (_cameras.length > 1 && _isDesktop)
+          _buildThumbResizeHandle(horizontal: false),
         if (_cameras.length > 1) _buildVerticalThumbnails(),
       ],
     );
@@ -1644,7 +1803,7 @@ class _ViewerScreenState extends State<ViewerScreen>
               color: NileColors.bgPage.withValues(alpha: 0.7),
               borderRadius: BorderRadius.circular(NileRadius.sm),
             ),
-            child: Text(focused.cameraName, style: NileTextStyles.bodyMd()),
+            child: Text(focused.displayName, style: NileTextStyles.bodyMd()),
           ),
         ),
       ],
@@ -1653,7 +1812,7 @@ class _ViewerScreenState extends State<ViewerScreen>
 
   Widget _buildHorizontalThumbnails() {
     return Container(
-      height: 100,
+      height: 100 * _thumbScale,
       color: NileColors.bgPage,
       child: ListView.builder(
         scrollDirection: Axis.horizontal,
@@ -1661,7 +1820,7 @@ class _ViewerScreenState extends State<ViewerScreen>
         itemCount: _cameras.length,
         itemBuilder: (context, index) => _buildThumbnailItem(
           index: index,
-          width: 140,
+          width: 140 * _thumbScale,
           height: double.infinity,
           margin: const EdgeInsets.only(right: NileSpacing.s8),
         ),
@@ -1671,7 +1830,7 @@ class _ViewerScreenState extends State<ViewerScreen>
 
   Widget _buildVerticalThumbnails() {
     return Container(
-      width: 110,
+      width: 110 * _thumbScale,
       color: NileColors.bgPage,
       child: ListView.builder(
         scrollDirection: Axis.vertical,
@@ -1680,7 +1839,7 @@ class _ViewerScreenState extends State<ViewerScreen>
         itemBuilder: (context, index) => _buildThumbnailItem(
           index: index,
           width: double.infinity,
-          height: 80,
+          height: 80 * _thumbScale,
           margin: const EdgeInsets.only(bottom: NileSpacing.s8),
         ),
       ),
@@ -1732,7 +1891,7 @@ class _ViewerScreenState extends State<ViewerScreen>
                 left: 4,
                 right: 4,
                 child: Text(
-                  camera.cameraName,
+                  camera.displayName,
                   style: NileTextStyles.caption().copyWith(
                     color: NileColors.txtPrimary,
                     shadows: const [Shadow(blurRadius: 4)],

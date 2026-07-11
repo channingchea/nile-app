@@ -73,7 +73,7 @@ class TopicService {
       'topic_id': topicId,
       'weight': weight,
       'source': 'explicit',
-      'updated_at': DateTime.now().toIso8601String(),
+      'updated_at': DateTime.now().toUtc().toIso8601String(),
     }, onConflict: 'user_id,topic_id');
   }
 

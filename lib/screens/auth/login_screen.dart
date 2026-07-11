@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../services/supabase_client.dart';
 import '../../theme.dart';
@@ -72,7 +73,23 @@ class _LoginScreenState extends State<LoginScreen> {
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     // ── Logo / wordmark ──────────────────────────────────────
-                    NileLogo(size: 'medium', height: 48),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      crossAxisAlignment: CrossAxisAlignment.center,
+                      children: [
+                        NileLogo(size: 'medium', height: 48),
+                        const SizedBox(width: 10),
+                        Text(
+                          'Nile',
+                          style: GoogleFonts.syne(
+                            fontSize: 34,
+                            fontWeight: FontWeight.w800,
+                            color: NileColors.volt,
+                            letterSpacing: -0.5,
+                          ),
+                        ),
+                      ],
+                    ),
                     const SizedBox(height: 8),
                     Text(
                       'Sign in to continue',

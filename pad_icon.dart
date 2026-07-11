@@ -1,17 +1,21 @@
+// One-off dev script: pads the logo into app-icon PNGs. Run manually with
+// `dart pad_icon.dart`; never shipped. `image` is already available as a
+// transitive dependency, so we don't declare one for a throwaway script.
+// ignore_for_file: depend_on_referenced_packages
 import 'dart:io';
 import 'package:image/image.dart' as img;
 
 void main() {
   final file = File('assets/images/logo_large_dark.png');
   if (!file.existsSync()) {
-    print('Error: assets/images/logo_large.png not found');
+    stderr.writeln('Error: assets/images/logo_large_dark.png not found');
     exit(1);
   }
 
   final bytes = file.readAsBytesSync();
   final image = img.decodeImage(bytes);
   if (image == null) {
-    print('Error: could not decode image');
+    stderr.writeln('Error: could not decode image');
     exit(1);
   }
   
@@ -37,5 +41,5 @@ void main() {
   img.compositeImage(fg, image, dstX: dstX, dstY: dstY);
   File('assets/images/logo_icon_foreground.png').writeAsBytesSync(img.encodePng(fg));
   
-  print('Successfully created padded icons!');
+  stdout.writeln('Successfully created padded icons!');
 }

@@ -180,7 +180,12 @@ class _ViewerPreviewOverlayState extends State<ViewerPreviewOverlay> {
     for (final pub in p.videoTrackPublications) {
       // A muted publication is still "subscribed" but delivers black frames —
       // skip it so _resync falls through to a camera that's actually sending.
-      if (pub.subscribed && !pub.muted && pub.track is VideoTrack) {
+      // Also skip screen shares: this preview shows "the camera", and a
+      // participant may be publishing both.
+      if (pub.subscribed &&
+          !pub.muted &&
+          pub.source != TrackSource.screenShareVideo &&
+          pub.track is VideoTrack) {
         return pub.track as VideoTrack;
       }
     }

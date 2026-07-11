@@ -86,7 +86,7 @@ serve(async (req) => {
 
     const { data: c } = await admin
       .from("ad_campaigns")
-      .select("id, status, starts_at, ends_at, stripe_payment_intent_id, advertiser_accounts(name, contact_email), ad_creatives(headline)")
+      .select("id, name, status, starts_at, ends_at, stripe_payment_intent_id, advertiser_accounts(name, contact_email), ad_creatives(headline)")
       .eq("id", campaign_id)
       .maybeSingle();
     if (!c) return json({ error: "Campaign not found" }, 404);
@@ -142,6 +142,15 @@ serve(async (req) => {
       .select("id, status, starts_at, ends_at")
       .single();
     if (updErr || !updated) return json({ error: "Update failed (status changed concurrently?)" }, 409);
+
+    // Permanent audit trail (fire-and-forget; never fails the action).
+    await logAudit(admin, {
+      campaign_id,
+      campaign_name: (c as any).name ?? null,
+      actor: user.id,
+      action,
+      note: update.review_note ?? null,
+    });
 
     // Advertiser notification (approve/reject only; host boosts have no account).
     // Fire-and-forget: a send failure must never fail the review action.
@@ -215,6 +224,25 @@ async function notifyAdvertiser(
   }
 }
 
+// Permanent record of a review action. Written with the service role (RLS on
+// ad_admin_audit only grants reads). Fire-and-forget: an insert failure is
+// logged but never fails the action — same posture as the Klaviyo notify.
+// deno-lint-ignore no-explicit-any
+async function logAudit(admin: any, row: {
+  campaign_id: string;
+  campaign_name: string | null;
+  actor: string;
+  action: string;
+  note: string | null;
+}) {
+  try {
+    const { error } = await admin.from("ad_admin_audit").insert(row);
+    if (error) console.error("audit insert failed:", error);
+  } catch (err) {
+    console.error("audit insert error:", err);
+  }
+}
+
 // Release an authorization: cancel if still a hold, refund if a legacy
 // pre-manual-capture payment already moved money.
 async function releaseHold(piId: string) {
@@ -233,7 +261,7 @@ async function withdraw(admin: any, userId: string, campaignId: string) {
 
   const { data: c } = await admin
     .from("ad_campaigns")
-    .select("id, status, stripe_payment_intent_id, advertiser_account_id, ad_creatives(image_url)")
+    .select("id, name, status, stripe_payment_intent_id, advertiser_account_id, ad_creatives(image_url)")
     .eq("id", campaignId)
     .maybeSingle();
   if (!c) return json({ error: "Campaign not found" }, 404);
@@ -269,6 +297,16 @@ async function withdraw(admin: any, userId: string, campaignId: string) {
   if (delErr || !deleted?.length) {
     return json({ error: "Delete failed (status changed concurrently?)" }, 409);
   }
+
+  // Audit: actor is the owner (withdraw is owner-gated). Name snapshotted since
+  // the campaign row is now gone.
+  await logAudit(admin, {
+    campaign_id: campaignId,
+    campaign_name: c.name ?? null,
+    actor: userId,
+    action: "withdraw",
+    note: null,
+  });
 
   // 3) Best-effort creative image cleanup — an orphaned object is cosmetic.
   const path = imageUrl?.split("/ad-creatives/")[1];

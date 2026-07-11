@@ -1,6 +1,9 @@
 import 'package:firebase_messaging/firebase_messaging.dart';
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart'
+    show kIsWeb, defaultTargetPlatform, TargetPlatform;
 import 'package:flutter/material.dart';
+
+import 'app_lifecycle.dart';
 
 import '../screens/conversation_screen.dart';
 import '../screens/event_detail_screen.dart';
@@ -64,8 +67,44 @@ class PushService {
     // Keep the stored token current.
     messaging.onTokenRefresh.listen(_saveToken);
 
-    final token = await messaging.getToken();
-    if (token != null) await _saveToken(token);
+    await _tryRegisterToken();
+    // If registration failed (iOS commonly hasn't received its APNs token yet
+    // at cold start), retry whenever the app returns to the foreground so the
+    // device eventually lands in device_tokens without needing a fresh launch.
+    AppLifecycle.instance.state.addListener(_retryOnResume);
+  }
+
+  /// Fetch + store the FCM token, tolerating the platform quirks that used to
+  /// silently skip registration (and with it, ALL push delivery):
+  /// iOS throws `apns-token-not-set` when getToken() runs before APNs hands
+  /// over its token, so wait for it briefly instead of failing once and never
+  /// retrying.
+  static Future<void> _tryRegisterToken() async {
+    try {
+      final messaging = FirebaseMessaging.instance;
+      if (!kIsWeb && defaultTargetPlatform == TargetPlatform.iOS) {
+        String? apns = await messaging.getAPNSToken();
+        for (var i = 0; apns == null && i < 10; i++) {
+          await Future.delayed(const Duration(seconds: 1));
+          apns = await messaging.getAPNSToken();
+        }
+        // Still no APNs token (permission denied, or push entitlement/APNs key
+        // not configured) — bail; the resume listener retries later.
+        if (apns == null) return;
+      }
+      final token = await messaging.getToken();
+      if (token != null) await _saveToken(token);
+    } catch (_) {
+      // Swallowed on purpose — retried on resume / sign-in.
+    }
+  }
+
+  static void _retryOnResume() {
+    if (_token == null &&
+        AppLifecycle.instance.state.value == AppLifecycleState.resumed &&
+        supabase.auth.currentUser != null) {
+      _tryRegisterToken();
+    }
   }
 
   /// Fire the OS notification-permission prompt and register the token on
@@ -77,18 +116,18 @@ class PushService {
     final granted =
         settings.authorizationStatus == AuthorizationStatus.authorized ||
         settings.authorizationStatus == AuthorizationStatus.provisional;
-    if (granted) {
-      final token = await messaging.getToken();
-      if (token != null) await _saveToken(token);
-    }
+    if (granted) await _tryRegisterToken();
     return granted;
   }
 
   /// Register the current token for the signed-in user. Call on sign-in.
   static Future<void> onSignIn() async {
     if (kIsWeb) return;
-    final token = _token ?? await FirebaseMessaging.instance.getToken();
-    if (token != null) await _saveToken(token);
+    if (_token != null) {
+      await _saveToken(_token!);
+    } else {
+      await _tryRegisterToken();
+    }
   }
 
   /// Drop this device's token on sign-out.

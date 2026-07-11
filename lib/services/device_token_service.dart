@@ -15,7 +15,7 @@ class DeviceTokenService {
       'user_id': uid,
       'token': token,
       'platform': Platform.isIOS ? 'ios' : 'android',
-      'last_seen_at': DateTime.now().toIso8601String(),
+      'last_seen_at': DateTime.now().toUtc().toIso8601String(),
     }, onConflict: 'token');
   }
 

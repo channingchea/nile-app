@@ -35,6 +35,9 @@ dependencies:
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
   livekit_client: ^2.7.0
+  # Direct dep for desktop screen-share source picking (desktopCapturer);
+  # already pulled in transitively by livekit_client.
+  flutter_webrtc: ^1.4.0
   http: ^1.6.0
   permission_handler: ^12.0.1
   google_fonts: ^6.2.1

@@ -118,7 +118,7 @@ class NotificationService {
   static Future<void> markRead(String notificationId) async {
     await supabase
         .from('notifications')
-        .update({'read_at': DateTime.now().toIso8601String()})
+        .update({'read_at': DateTime.now().toUtc().toIso8601String()})
         .eq('id', notificationId);
   }
 
@@ -127,7 +127,7 @@ class NotificationService {
     final uid = _requireUid();
     await supabase
         .from('notifications')
-        .update({'read_at': DateTime.now().toIso8601String()})
+        .update({'read_at': DateTime.now().toUtc().toIso8601String()})
         .eq('recipient_id', uid)
         .isFilter('read_at', null);
   }

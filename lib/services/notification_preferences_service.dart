@@ -110,7 +110,7 @@ class NotificationPreferencesService {
     await supabase.from('notification_preferences').upsert({
       'user_id': uid,
       ...prefs.toColumns(),
-      'updated_at': DateTime.now().toIso8601String(),
+      'updated_at': DateTime.now().toUtc().toIso8601String(),
     });
   }
 

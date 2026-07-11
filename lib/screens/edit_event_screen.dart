@@ -67,7 +67,9 @@ class _EditEventScreenState extends State<EditEventScreen> {
       text: e.ticketLimit?.toString() ?? '',
     );
     _existingCoverUrl = e.coverImageUrl;
-    _scheduledAt = e.scheduledAt;
+    // toLocal(): the server returns UTC; the picker and previews are all
+    // wall-clock local. Save converts back with toUtc().
+    _scheduledAt = e.scheduledAt?.toLocal();
 
     // Seed duration from the saved end_at − scheduled_at (default 60 min).
     final mins = _initialDurationMinutes();

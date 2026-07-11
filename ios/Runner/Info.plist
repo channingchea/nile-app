@@ -4,10 +4,17 @@
 <dict>
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
+	<!-- Screen share (iPad): flutter_webrtc reads these to find the Broadcast
+	     Upload Extension and the shared App Group socket. Must match the
+	     extension target's bundle ID and both targets' App Group. -->
+	<key>RTCScreenSharingExtension</key>
+	<string>com.nilestreaming.app.BroadcastExtension</string>
+	<key>RTCAppGroupIdentifier</key>
+	<string>group.com.nilestreaming.app</string>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>Nile App</string>
+	<string>Nile</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -15,7 +22,7 @@
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>nile_app</string>
+	<string>Nile</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>

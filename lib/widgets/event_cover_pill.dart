@@ -34,9 +34,19 @@ class EventCoverPill extends StatelessWidget {
   Widget build(BuildContext context) {
     if (event.isLive) return const LiveBadge();
 
+    // The scheduled end has passed — show ENDED even if the show never
+    // actually started (host no-show) or the status hasn't flipped yet.
+    final endAt = event.endAt;
+    final endedByTime =
+        !event.isDraft && endAt != null && DateTime.now().isAfter(endAt);
+
     late final Color bg, fg;
     late final String text;
-    if (event.isScheduled && event.scheduledAt != null) {
+    if (event.isEnded || endedByTime) {
+      bg = Colors.black.withValues(alpha: 0.6); // over image — fixed dark
+      fg = Colors.white;
+      text = 'ENDED';
+    } else if (event.isScheduled && event.scheduledAt != null) {
       bg = NileColors.volt;
       fg = NileColors.onVolt;
       text = _label(event.scheduledAt!.toLocal());
@@ -44,10 +54,6 @@ class EventCoverPill extends StatelessWidget {
       bg = Colors.black.withValues(alpha: 0.6); // over image — fixed dark
       fg = Colors.white70;
       text = 'DRAFT';
-    } else if (event.isEnded) {
-      bg = Colors.black.withValues(alpha: 0.6); // over image — fixed dark
-      fg = Colors.white;
-      text = 'ENDED';
     } else {
       return const SizedBox.shrink();
     }

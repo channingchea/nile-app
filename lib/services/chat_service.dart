@@ -33,7 +33,7 @@ class ChatMessage {
     'username': username,
     if (avatarUrl != null) 'avatar_url': avatarUrl,
     'content': content,
-    'sent_at': sentAt.toIso8601String(),
+    'sent_at': sentAt.toUtc().toIso8601String(),
     'kind': kind,
   };
 

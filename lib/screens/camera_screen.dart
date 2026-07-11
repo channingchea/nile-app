@@ -1,14 +1,16 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:livekit_client/livekit_client.dart';
+import 'package:livekit_client/livekit_client.dart' hide ChatMessage;
 import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart' show RealtimeChannel;
 import '../services/supabase_client.dart';
+import '../services/chat_service.dart';
 import '../services/crew_service.dart';
 import '../services/event_service.dart';
 import '../services/livekit_service.dart';
 import '../widgets/audio_meter.dart';
+import '../widgets/screen_share_picker.dart';
 import '../widgets/viewer_preview_overlay.dart';
 import '../theme.dart';
 
@@ -51,9 +53,11 @@ class _CameraScreenState extends State<CameraScreen> {
       _cameraNameController.text = widget.initialCameraName!;
     }
     _refreshMicDetection();
-    _deviceChangeSub = Hardware.instance.onDeviceChange.stream.listen(
-      (_) => _refreshMicDetection(),
-    );
+    _refreshVideoInputs();
+    _deviceChangeSub = Hardware.instance.onDeviceChange.stream.listen((_) {
+      _refreshMicDetection();
+      _refreshVideoInputs();
+    });
     // Launched from an event with a known camera slot: skip the manual Event
     // ID / Camera Name form and connect straight into sound check. The form
     // stays as a fallback only if a field is missing or the connect fails.
@@ -97,6 +101,175 @@ class _CameraScreenState extends State<CameraScreen> {
     } catch (_) {
       // Enumeration unsupported/empty on this platform — silently skip.
     }
+  }
+
+  /// Refresh the list of attachable cameras (webcams, USB cams, capture
+  /// cards). If the currently selected device was unplugged mid-session,
+  /// fall back to the default camera so the feed doesn't freeze.
+  Future<void> _refreshVideoInputs() async {
+    try {
+      final devices = await Hardware.instance.enumerateDevices(
+        type: 'videoinput',
+      );
+      if (!mounted) return;
+      setState(() => _videoInputs = devices);
+      if (_selectedCameraId != null &&
+          !devices.any((d) => d.deviceId == _selectedCameraId)) {
+        final lost = _selectedCameraId;
+        _selectedCameraId = null;
+        // Only republish if we're actively capturing.
+        if (_room != null && _videoEnabled) {
+          await _republishCamera();
+          if (mounted && lost != null) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text(
+                  'External camera disconnected — switched to the default camera.',
+                ),
+              ),
+            );
+          }
+        }
+      }
+    } catch (_) {
+      // Enumeration unsupported on this platform — silently skip.
+    }
+  }
+
+  /// The capture options every (re)publish path uses: an explicitly picked
+  /// device wins; otherwise fall back to front/back position (mobile).
+  CameraCaptureOptions get _cameraCaptureOptions => _selectedCameraId != null
+      ? CameraCaptureOptions(deviceId: _selectedCameraId)
+      : CameraCaptureOptions(
+          cameraPosition: _isFrontCamera
+              ? CameraPosition.front
+              : CameraPosition.back,
+        );
+
+  /// The local CAMERA publication specifically — never the screen share,
+  /// which also lives in videoTrackPublications once sharing starts.
+  LocalTrackPublication? _cameraPub(LocalParticipant? p) => p
+      ?.videoTrackPublications
+      .where((pub) => pub.source == TrackSource.camera)
+      .firstOrNull;
+
+  /// Restart the local camera with the current [_cameraCaptureOptions] and
+  /// refresh the preview track reference.
+  Future<void> _republishCamera() async {
+    final participant = _room?.localParticipant;
+    if (participant == null) return;
+    await participant.setCameraEnabled(false);
+    await participant.setCameraEnabled(
+      true,
+      cameraCaptureOptions: _cameraCaptureOptions,
+    );
+    if (!mounted) return;
+    final publication = _cameraPub(participant);
+    setState(() {
+      if (publication?.track != null) {
+        _localVideoTrack = publication!.track as VideoTrack;
+      }
+    });
+  }
+
+  /// User picked a camera from the device menu. Null re-selects the default.
+  Future<void> _selectCamera(String? deviceId) async {
+    if (deviceId == _selectedCameraId) return;
+    setState(() => _selectedCameraId = deviceId);
+    if (_room != null && _videoEnabled) {
+      try {
+        await _republishCamera();
+      } catch (_) {
+        // Device refused to open (in use / permission) — revert to default.
+        if (mounted) {
+          setState(() => _selectedCameraId = null);
+          await _republishCamera();
+        }
+      }
+    }
+  }
+
+  bool get _isSharingScreen => _screenShareTrack != null;
+
+  /// Start/stop sharing this device's screen as an additional video track.
+  /// The camera keeps publishing — viewers get both tiles.
+  /// macOS: source-picker dialog, then a plain screen-share track (first
+  /// share triggers the system Screen Recording prompt).
+  /// iPad: hands off to the Broadcast Upload Extension via the system
+  /// broadcast picker (whole-device capture).
+  Future<void> _toggleScreenShare() async {
+    final participant = _room?.localParticipant;
+    if (participant == null || _togglingShare) return;
+    setState(() => _togglingShare = true);
+    try {
+      if (_isSharingScreen) {
+        await _stopScreenShare(participant);
+      } else if (defaultTargetPlatform == TargetPlatform.iOS) {
+        final pub = await participant.setScreenShareEnabled(
+          true,
+          screenShareCaptureOptions: const ScreenShareCaptureOptions(
+            useiOSBroadcastExtension: true,
+            maxFrameRate: 15.0,
+          ),
+        );
+        if (mounted) {
+          setState(
+            () => _screenShareTrack = pub?.track as LocalVideoTrack?,
+          );
+        }
+      } else {
+        final source = await ScreenSharePicker.show(context);
+        if (source == null) return; // cancelled
+        final track = await LocalVideoTrack.createScreenShareTrack(
+          ScreenShareCaptureOptions(sourceId: source.id, maxFrameRate: 15.0),
+        );
+        await participant.publishVideoTrack(track);
+        if (mounted) setState(() => _screenShareTrack = track);
+      }
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              defaultTargetPlatform == TargetPlatform.iOS
+                  ? 'Could not start the screen broadcast. Try again from '
+                        'the broadcast picker.'
+                  : 'Could not share the screen. Check Screen Recording '
+                        'permission in System Settings → Privacy & Security, '
+                        'then relaunch.',
+            ),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _togglingShare = false);
+    }
+  }
+
+  Future<void> _stopScreenShare(LocalParticipant participant) async {
+    if (defaultTargetPlatform == TargetPlatform.iOS) {
+      await participant.setScreenShareEnabled(false);
+    } else {
+      final track = _screenShareTrack;
+      if (track != null) {
+        final pub = participant.videoTrackPublications
+            .where((p) => p.track == track)
+            .firstOrNull;
+        if (pub != null) await participant.removePublishedTrack(pub.sid);
+        await track.stop();
+      }
+    }
+    if (mounted) setState(() => _screenShareTrack = null);
+  }
+
+  /// The device picker only appears where external cameras are a real thing:
+  /// macOS, or iOS on a tablet-sized screen (iPad — iPadOS 17+ supports USB
+  /// cameras). Phones keep the compact front/back flip button.
+  bool _showCameraPicker(BuildContext context) {
+    if (kIsWeb) return false;
+    if (defaultTargetPlatform == TargetPlatform.macOS) return true;
+    return defaultTargetPlatform == TargetPlatform.iOS &&
+        MediaQuery.sizeOf(context).shortestSide >= 600;
   }
 
   /// This camera is the broadcast audio source only when it holds the
@@ -211,6 +384,16 @@ class _CameraScreenState extends State<CameraScreen> {
   // Camera position (mobile only)
   bool _isFrontCamera = false;
 
+  // External camera selection (iPad/macOS). Null = system default camera,
+  // driven by _isFrontCamera. Non-null = an explicitly picked device.
+  List<MediaDevice> _videoInputs = const [];
+  String? _selectedCameraId;
+
+  // Screen share (macOS for now; iPad in Phase 3). Published as a second
+  // video track alongside the camera — viewers see it as its own tile.
+  LocalVideoTrack? _screenShareTrack;
+  bool _togglingShare = false;
+
   // Disable WebRTC AGC/denoise/echo-cancel for this camera's mic. Default off —
   // matches prior behavior. Turning it on lets a third-party mic's own
   // processing pass through untouched (see settings modal).
@@ -247,6 +430,23 @@ class _CameraScreenState extends State<CameraScreen> {
   // mic is force-muted for its lifetime (feedback guard) and restored on close.
   bool _viewerPreviewOpen = false;
 
+  // Live chat (read-only overlay). Same ephemeral broadcast channel the
+  // viewers use; capped buffer, newest first (list renders reversed).
+  static const int _maxChatMessages = 200;
+  RealtimeChannel? _chatChannel;
+  final List<ChatMessage> _chatMessages = [];
+  bool _chatVisible = true;
+
+  void _onChatMessage(ChatMessage m) {
+    if (!mounted) return;
+    setState(() {
+      _chatMessages.insert(0, m);
+      if (_chatMessages.length > _maxChatMessages) {
+        _chatMessages.removeLast();
+      }
+    });
+  }
+
   @override
   void dispose() {
     // A drop or back-swipe never ends a live show anymore — the show stays
@@ -258,6 +458,7 @@ class _CameraScreenState extends State<CameraScreen> {
       EventService.revertToScheduled(_eventId!).catchError((_) {});
     }
     _statusChannel?.unsubscribe();
+    _chatChannel?.unsubscribe();
     _deviceChangeSub?.cancel();
     _eventIdController.dispose();
     _cameraNameController.dispose();
@@ -352,6 +553,15 @@ class _CameraScreenState extends State<CameraScreen> {
         } catch (_) {}
       });
 
+      // The screen share can end outside our button — iPad's system broadcast
+      // stop, or the shared window closing on macOS. Keep the UI honest.
+      listener.on<LocalTrackUnpublishedEvent>((event) {
+        if (event.publication.source == TrackSource.screenShareVideo &&
+            mounted) {
+          setState(() => _screenShareTrack = null);
+        }
+      });
+
       listener.on<ParticipantDisconnectedEvent>((event) {
         try {
           final meta = jsonDecode(event.participant.metadata ?? '{}');
@@ -377,14 +587,7 @@ class _CameraScreenState extends State<CameraScreen> {
                 throw Exception('Connection timed out. Try again.'),
           );
       await room.localParticipant
-          ?.setCameraEnabled(
-            true,
-            cameraCaptureOptions: CameraCaptureOptions(
-              cameraPosition: _isFrontCamera
-                  ? CameraPosition.front
-                  : CameraPosition.back,
-            ),
-          )
+          ?.setCameraEnabled(true, cameraCaptureOptions: _cameraCaptureOptions)
           .timeout(
             const Duration(seconds: 15),
             onTimeout: () =>
@@ -392,8 +595,7 @@ class _CameraScreenState extends State<CameraScreen> {
           );
       await _applyMicProcessing(room.localParticipant);
 
-      final publication =
-          room.localParticipant?.videoTrackPublications.firstOrNull;
+      final publication = _cameraPub(room.localParticipant);
       final track = publication?.track;
 
       var streamAudioActive = false;
@@ -426,6 +628,9 @@ class _CameraScreenState extends State<CameraScreen> {
       // Enter Sound Check in Supabase — best-effort, no-op if not in DB.
       // The show only goes live when Start Show is pressed (_startShow).
       EventService.enterSoundCheck(eventId).catchError((_) {});
+
+      // Join the live-chat broadcast so the host/operator can watch the room.
+      _chatChannel = ChatService.subscribe(eventId, _onChatMessage);
 
       // Host: load the assigned-crew roster for the readiness panel.
       // Non-host: follow the DB status so the UI flips to LIVE when the host
@@ -614,19 +819,12 @@ class _CameraScreenState extends State<CameraScreen> {
     final newEnabled = !_videoEnabled;
     await _room?.localParticipant?.setCameraEnabled(
       newEnabled,
-      cameraCaptureOptions: newEnabled
-          ? CameraCaptureOptions(
-              cameraPosition: _isFrontCamera
-                  ? CameraPosition.front
-                  : CameraPosition.back,
-            )
-          : null,
+      cameraCaptureOptions: newEnabled ? _cameraCaptureOptions : null,
     );
 
     VideoTrack? newTrack;
     if (newEnabled) {
-      final publication =
-          _room?.localParticipant?.videoTrackPublications.firstOrNull;
+      final publication = _cameraPub(_room?.localParticipant);
       newTrack = publication?.track as VideoTrack?;
     }
 
@@ -640,21 +838,29 @@ class _CameraScreenState extends State<CameraScreen> {
     if (_room == null) return;
     final newFront = !_isFrontCamera;
     try {
-      await _room!.localParticipant?.setCameraEnabled(false);
-      await _room!.localParticipant?.setCameraEnabled(
-        true,
-        cameraCaptureOptions: CameraCaptureOptions(
-          cameraPosition: newFront ? CameraPosition.front : CameraPosition.back,
-        ),
-      );
-      final publication =
-          _room!.localParticipant?.videoTrackPublications.firstOrNull;
-      setState(() {
-        _isFrontCamera = newFront;
-        if (publication?.track != null) {
-          _localVideoTrack = publication!.track as VideoTrack;
-        }
-      });
+      final track = _cameraPub(_room?.localParticipant)?.track;
+      if (track is LocalVideoTrack) {
+        // Restart the existing track on the other position. The
+        // unpublish/republish path ignores cameraPosition on Android (the
+        // capturer reopens the same device), so only the preview mirror
+        // flipped — this actually switches the camera.
+        await track.setCameraPosition(
+          newFront ? CameraPosition.front : CameraPosition.back,
+        );
+        if (!mounted) return;
+        setState(() {
+          _isFrontCamera = newFront;
+          _selectedCameraId = null; // flipping means the built-in cameras
+          _localVideoTrack = track;
+        });
+      } else {
+        // No live track yet (video off) — fall back to a full republish.
+        setState(() {
+          _isFrontCamera = newFront;
+          _selectedCameraId = null;
+        });
+        await _republishCamera();
+      }
     } catch (_) {}
   }
 
@@ -686,6 +892,15 @@ class _CameraScreenState extends State<CameraScreen> {
   Future<void> _teardownRoom() async {
     _statusChannel?.unsubscribe();
     _statusChannel = null;
+    _chatChannel?.unsubscribe();
+    _chatChannel = null;
+    _chatMessages.clear();
+    // Stop screen capture explicitly — disconnect unpublishes the track but
+    // doesn't always halt the native capturer promptly.
+    try {
+      await _screenShareTrack?.stop();
+    } catch (_) {}
+    _screenShareTrack = null;
     await _listener?.dispose();
     await _room?.disconnect();
     if (!mounted) return;
@@ -1087,6 +1302,107 @@ class _CameraScreenState extends State<CameraScreen> {
     );
   }
 
+  /// Device menu for iPad/macOS: lists every attached camera plus a "Default"
+  /// entry. The active source carries a check mark.
+  Widget _buildCameraPickerButton() {
+    return PopupMenuButton<String>(
+      tooltip: 'Choose camera',
+      // PopupMenuButton swallows null selections, so '' stands in for default.
+      onSelected: (id) => _selectCamera(id.isEmpty ? null : id),
+      color: NileColors.bgSurface,
+      itemBuilder: (context) => [
+        CheckedPopupMenuItem<String>(
+          value: '',
+          checked: _selectedCameraId == null,
+          child: Text('Default camera', style: NileTextStyles.bodyMd()),
+        ),
+        for (final d in _videoInputs)
+          CheckedPopupMenuItem<String>(
+            value: d.deviceId,
+            checked: _selectedCameraId == d.deviceId,
+            child: Text(
+              d.label.isNotEmpty ? d.label : 'Camera',
+              style: NileTextStyles.bodyMd(),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+      ],
+      icon: const Icon(Icons.cameraswitch_outlined),
+      iconColor: NileColors.txtPrimary,
+      style: IconButton.styleFrom(
+        backgroundColor: NileColors.bgSurface.withValues(alpha: 0.8),
+        padding: const EdgeInsets.all(NileSpacing.s12),
+      ),
+    );
+  }
+
+  /// Read-only chat overlay — top-left under the status badge, newest at the
+  /// bottom. Toggled by the chat button in the bottom controls.
+  Widget _buildChatOverlay() {
+    final size = MediaQuery.of(context).size;
+    return Positioned(
+      top: 56,
+      left: 16,
+      child: Container(
+        width: (size.width * 0.6).clamp(180.0, 300.0),
+        constraints: BoxConstraints(maxHeight: size.height * 0.35),
+        padding: const EdgeInsets.symmetric(
+          horizontal: NileSpacing.s8,
+          vertical: NileSpacing.s6,
+        ),
+        decoration: BoxDecoration(
+          color: Colors.black.withValues(alpha: 0.35),
+          borderRadius: BorderRadius.circular(NileRadius.sm),
+        ),
+        child: _chatMessages.isEmpty
+            ? Text(
+                'Chat is quiet — messages will appear here.',
+                style: NileTextStyles.bodySm().copyWith(color: Colors.white54),
+              )
+            : ListView.builder(
+                reverse: true,
+                shrinkWrap: true,
+                itemCount: _chatMessages.length,
+                itemBuilder: (context, i) {
+                  final m = _chatMessages[i];
+                  return Padding(
+                    padding: const EdgeInsets.symmetric(
+                      vertical: NileSpacing.s2,
+                    ),
+                    child: m.isSystem
+                        ? Text(
+                            m.content,
+                            style: NileTextStyles.bodySm().copyWith(
+                              color: NileColors.volt,
+                              fontStyle: FontStyle.italic,
+                            ),
+                          )
+                        : Text.rich(
+                            TextSpan(
+                              children: [
+                                TextSpan(
+                                  text: '@${m.username}  ',
+                                  style: NileTextStyles.bodySm().copyWith(
+                                    color: NileColors.volt,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                                TextSpan(
+                                  text: m.content,
+                                  style: NileTextStyles.bodySm().copyWith(
+                                    color: Colors.white,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                  );
+                },
+              ),
+      ),
+    );
+  }
+
   Widget _buildLive() {
     return Stack(
       children: [
@@ -1094,7 +1410,9 @@ class _CameraScreenState extends State<CameraScreen> {
         if (_videoEnabled && _localVideoTrack != null)
           VideoTrackRenderer(
             _localVideoTrack!,
-            mirrorMode: _isFrontCamera
+            // Mirror only the built-in selfie camera — an explicitly picked
+            // external device is never mirrored.
+            mirrorMode: _selectedCameraId == null && _isFrontCamera
                 ? VideoViewMirrorMode.mirror
                 : VideoViewMirrorMode.off,
           )
@@ -1259,6 +1577,9 @@ class _CameraScreenState extends State<CameraScreen> {
                 ),
         ),
 
+        // ── Live chat overlay — toggleable, read-only ──────────────────
+        if (_chatVisible) _buildChatOverlay(),
+
         // ── Bottom controls ────────────────────────────────────────────
         Positioned(
           bottom: 32,
@@ -1366,16 +1687,66 @@ class _CameraScreenState extends State<CameraScreen> {
               ],
               Row(
                 children: [
-                  // Flip camera — mobile only, video must be on
+                  // Chat visibility toggle.
+                  IconButton(
+                    onPressed: () =>
+                        setState(() => _chatVisible = !_chatVisible),
+                    tooltip: _chatVisible ? 'Hide chat' : 'Show chat',
+                    icon: Icon(
+                      _chatVisible
+                          ? Icons.chat_bubble
+                          : Icons.chat_bubble_outline,
+                    ),
+                    color: _chatVisible
+                        ? NileColors.volt
+                        : NileColors.txtPrimary,
+                    style: IconButton.styleFrom(
+                      backgroundColor: NileColors.bgSurface.withValues(
+                        alpha: 0.8,
+                      ),
+                      padding: const EdgeInsets.all(NileSpacing.s12),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  // Camera source — iPad/macOS get a device picker (external
+                  // cameras); phones keep the front/back flip button.
                   if (!kIsWeb && _videoEnabled) ...[
-                    IconButton(
-                      onPressed: _switchCamera,
-                      icon: const Icon(Icons.flip_camera_ios),
-                      color: NileColors.txtPrimary,
-                      style: IconButton.styleFrom(
-                        backgroundColor: NileColors.bgSurface.withValues(
-                          alpha: 0.8,
+                    if (_showCameraPicker(context))
+                      _buildCameraPickerButton()
+                    else
+                      IconButton(
+                        onPressed: _switchCamera,
+                        icon: const Icon(Icons.flip_camera_ios),
+                        color: NileColors.txtPrimary,
+                        style: IconButton.styleFrom(
+                          backgroundColor: NileColors.bgSurface.withValues(
+                            alpha: 0.8,
+                          ),
+                          padding: const EdgeInsets.all(NileSpacing.s12),
                         ),
+                      ),
+                    const SizedBox(width: 12),
+                  ],
+                  // Screen share — macOS + iPad (same gate as the camera
+                  // picker: platforms where sharing is supported).
+                  if (_showCameraPicker(context)) ...[
+                    IconButton(
+                      onPressed: _togglingShare ? null : _toggleScreenShare,
+                      tooltip: _isSharingScreen
+                          ? 'Stop sharing screen'
+                          : 'Share screen',
+                      icon: Icon(
+                        _isSharingScreen
+                            ? Icons.stop_screen_share
+                            : Icons.screen_share,
+                      ),
+                      color: _isSharingScreen
+                          ? Colors.white
+                          : NileColors.txtPrimary,
+                      style: IconButton.styleFrom(
+                        backgroundColor: _isSharingScreen
+                            ? NileColors.coral
+                            : NileColors.bgSurface.withValues(alpha: 0.8),
                         padding: const EdgeInsets.all(NileSpacing.s12),
                       ),
                     ),

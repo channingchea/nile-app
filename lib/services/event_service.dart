@@ -321,9 +321,11 @@ class EventService {
           if (description != null && description.isNotEmpty)
             'description': description,
           'cover_image_url': ?coverImageUrl,
+          // toUtc() so the ISO string carries the offset — otherwise Postgres
+          // reads a local wall-clock time as UTC and every display is skewed.
           if (scheduledAt != null)
-            'scheduled_at': scheduledAt.toIso8601String(),
-          if (endAt != null) 'end_at': endAt.toIso8601String(),
+            'scheduled_at': scheduledAt.toUtc().toIso8601String(),
+          if (endAt != null) 'end_at': endAt.toUtc().toIso8601String(),
           'price': ?price,
           'ticket_limit': ?ticketLimit,
           'camera_count': ?cameraCount,
@@ -365,9 +367,10 @@ class EventService {
       'description': ?description,
       'cover_image_url': ?coverImageUrl,
       if (clearCoverImageUrl) 'cover_image_url': null,
-      if (scheduledAt != null) 'scheduled_at': scheduledAt.toIso8601String(),
+      if (scheduledAt != null)
+        'scheduled_at': scheduledAt.toUtc().toIso8601String(),
       if (clearScheduledAt) 'scheduled_at': null,
-      if (endAt != null) 'end_at': endAt.toIso8601String(),
+      if (endAt != null) 'end_at': endAt.toUtc().toIso8601String(),
       if (clearEndAt) 'end_at': null,
       'price': ?price,
       if (clearPrice) 'price': null,
@@ -567,7 +570,7 @@ class EventService {
         .from('events')
         .update({
           'status': 'live',
-          'started_at': DateTime.now().toIso8601String(),
+          'started_at': DateTime.now().toUtc().toIso8601String(),
         })
         .eq('livekit_room', liveKitEventId);
   }
@@ -578,7 +581,7 @@ class EventService {
         .from('events')
         .update({
           'status': 'ended',
-          'ended_at': DateTime.now().toIso8601String(),
+          'ended_at': DateTime.now().toUtc().toIso8601String(),
         })
         .eq('livekit_room', liveKitEventId);
   }

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
 import '../theme.dart';
 import '../widgets/nile_logo.dart';
 
@@ -54,9 +55,19 @@ class _SplashScreenState extends State<SplashScreen>
                 position: _rise,
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.end,
+                  crossAxisAlignment: CrossAxisAlignment.center,
                   children: [
                     NileLogo(size: 'large', height: 80),
+                    const SizedBox(width: 16),
+                    Text(
+                      'Nile',
+                      style: GoogleFonts.syne(
+                        fontSize: 56,
+                        fontWeight: FontWeight.w800,
+                        color: NileColors.volt,
+                        letterSpacing: -1,
+                      ),
+                    ),
                   ],
                 ),
               ),

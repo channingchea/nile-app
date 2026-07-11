@@ -413,7 +413,7 @@ class MessageService {
     final myId = _requireUid();
     await supabase
         .from('messages')
-        .update({'read_at': DateTime.now().toIso8601String()})
+        .update({'read_at': DateTime.now().toUtc().toIso8601String()})
         .eq('conversation_id', conversationId)
         .neq('sender_id', myId)
         .isFilter('read_at', null);
