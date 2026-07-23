@@ -163,6 +163,8 @@ class _ReportSheetState extends State<_ReportSheet> {
     ReportTargetType.event => 'event',
     ReportTargetType.comment => 'comment',
     ReportTargetType.ad => 'ad',
+    ReportTargetType.rapid => 'Rapid',
+    ReportTargetType.rapidComment => 'comment',
   };
 
   Future<void> _submit() async {

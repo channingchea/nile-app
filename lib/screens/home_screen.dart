@@ -14,6 +14,7 @@ import '../services/like_service.dart';
 import '../services/notification_service.dart';
 import '../services/pagination.dart' show Paged;
 import '../services/post_service.dart';
+import '../services/rapid_service.dart';
 import '../services/report_service.dart';
 import '../services/repost_service.dart';
 import '../services/search_service.dart';
@@ -28,11 +29,13 @@ import '../widgets/nile_skeleton.dart';
 import '../widgets/official_badge.dart';
 import '../widgets/post_image_carousel.dart';
 import '../widgets/pressable.dart';
+import '../widgets/rapids_rail.dart';
 import '../widgets/share_to_sheet.dart';
 import '../widgets/empty_state.dart';
 import '../widgets/staggered_fade_in.dart';
 import 'create_event_flow.dart';
 import 'create_post_screen.dart';
+import 'create_rapid_screen.dart';
 import 'discover_screen.dart';
 import 'edit_event_screen.dart';
 import 'edit_post_screen.dart';
@@ -41,6 +44,7 @@ import 'messages_screen.dart';
 import 'notifications_screen.dart';
 import 'post_detail_screen.dart';
 import 'profile_screen.dart';
+import 'rapids_player_screen.dart';
 import 'viewer_screen.dart';
 import 'widgets/load_more_footer.dart';
 import 'widgets/moderation_menu.dart';
@@ -253,6 +257,18 @@ class _ActionSheet extends StatelessWidget {
                 Navigator.pop(context);
                 Navigator.push(
                   context,
+                  MaterialPageRoute(builder: (_) => const CreateRapidScreen()),
+                ).then((_) => onCreated());
+              },
+              icon: const Icon(Icons.bolt_outlined),
+              label: const Text('Create Rapid'),
+            ),
+            const SizedBox(height: 12),
+            OutlinedButton.icon(
+              onPressed: () {
+                Navigator.pop(context);
+                Navigator.push(
+                  context,
                   MaterialPageRoute(builder: (_) => const CreateEventFlow()),
                 ).then((_) => onCreated());
               },
@@ -369,6 +385,9 @@ class _FeedTabState extends State<_FeedTab> {
   // Platform-wide "Live now" rail, shown to every user above the feed (Phase 3).
   // Live events live here, not in the list below, so nothing shows twice.
   List<Event> _liveNow = [];
+  // Rapids rail — creators with live (≤24h) Rapids, followed-first. The rail
+  // widget itself always renders (its first slot is the create entry).
+  List<RapidRailEntry> _rapidsRail = [];
   // Cold-start fill for zero-follow and thin feeds (Phase 1). Rendered as a
   // separate section below the followed feed, in priority order (topic →
   // upcoming → newest; live shows in the rail above) — not time-sorted.
@@ -757,6 +776,9 @@ class _FeedTabState extends State<_FeedTab> {
       } catch (_) {}
       final liveIds = {for (final e in liveNow) e.id};
 
+      // Rapids rail — best-effort (rail() returns [] on failure internally).
+      final rapidsRail = await RapidService.rail();
+
       var items = <_FeedItem>[];
       var recs = <_FeedItem>[];
       var ads = <_FeedItem>[];
@@ -856,6 +878,7 @@ class _FeedTabState extends State<_FeedTab> {
       setState(() {
         _items = items;
         _liveNow = liveNow;
+        _rapidsRail = rapidsRail;
         _recs = recs;
         _ads = ads;
         _starterItems = starter;
@@ -974,6 +997,36 @@ class _FeedTabState extends State<_FeedTab> {
     };
   }
 
+  // ── Rapids rail actions ────────────────────────────────────────────────────
+
+  /// Opens the Rapid creation flow; refreshes the rail on return so the
+  /// creator sees their new Rapid land (without a full feed reload).
+  Future<void> _createRapid() async {
+    final created = await Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const CreateRapidScreen()),
+    );
+    if (created != null) _reloadRapidsRail();
+  }
+
+  /// Opens the vertical player at [e]'s first unwatched Rapid; refreshes the
+  /// rail on return so watched rings update.
+  Future<void> _openRapids(RapidRailEntry e) async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        fullscreenDialog: true,
+        builder: (_) => RapidsPlayerScreen(startUserId: e.userId),
+      ),
+    );
+    _reloadRapidsRail();
+  }
+
+  Future<void> _reloadRapidsRail() async {
+    final rail = await RapidService.rail();
+    if (mounted) setState(() => _rapidsRail = rail);
+  }
+
   /// Wraps a sponsored card in a [VisibilityDetector] that logs an honest CPM
   /// impression once per viewing (≥50% visible for ≥1s, re-arming on exit).
   /// Non-sponsored items pass through untouched.
@@ -1055,6 +1108,15 @@ class _FeedTabState extends State<_FeedTab> {
             else if (_items == null)
               const SliverToBoxAdapter(child: NileSkeletonList())
             else ...[
+              // Rapids rail — always first; its leading slot is the "Your
+              // Rapid" create entry, so it renders even with no content.
+              SliverToBoxAdapter(
+                child: RapidsRail(
+                  entries: _rapidsRail,
+                  onCreate: _createRapid,
+                  onTapCreator: _openRapids,
+                ),
+              ),
               // Platform-wide Live Now rail — pinned first for every user,
               // hidden entirely when nothing is live (no empty shell).
               if (_liveNow.isNotEmpty)

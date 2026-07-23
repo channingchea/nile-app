@@ -2,6 +2,29 @@ import 'event_service.dart';
 import 'post_service.dart';
 import 'supabase_client.dart';
 
+/// A Rapids video ad (docs/plans/rapids.md, Phase 4): a self-uploaded ≤60s
+/// video + headline + CTA served between Rapids in the vertical player.
+class RapidAd {
+  final String campaignId;
+  final String videoUrl;
+  final String? thumbUrl;
+  final String headline;
+  final String? body;
+  final String clickUrl;
+  final String advertiserName;
+  final int durationMs;
+  const RapidAd({
+    required this.campaignId,
+    required this.videoUrl,
+    this.thumbUrl,
+    required this.headline,
+    this.body,
+    required this.clickUrl,
+    required this.advertiserName,
+    required this.durationMs,
+  });
+}
+
 /// A standalone advertiser creative (Phase A-4): a self-uploaded image +
 /// headline + body that opens an external [clickUrl], referencing no event/post.
 class AdCreative {
@@ -174,6 +197,58 @@ class AdService {
   /// only impressions/clicks). Best-effort.
   static Future<void> logNotInterested(String campaignId) =>
       _log(campaignId, 'not_interested');
+
+  /// Active Rapids video-ad campaigns for this viewer, in serving order.
+  /// Mirrors [feedAds]: the get_rapids_ads RPC returns campaign + creative
+  /// columns; video/thumb paths live in the ad-videos bucket (0068).
+  /// Best-effort: [] on any failure so the player never breaks.
+  static Future<List<RapidAd>> rapidsAds({int limit = 5}) async {
+    try {
+      final rows =
+          await supabase.rpc('get_rapids_ads', params: {'page_limit': limit});
+      final ads = <RapidAd>[];
+      for (final r in (rows as List).cast<Map<String, dynamic>>()) {
+        final videoPath = r['video_path'] as String?;
+        if (videoPath == null) continue;
+        ads.add(RapidAd(
+          campaignId: r['campaign_id'] as String,
+          videoUrl:
+              supabase.storage.from('ad-videos').getPublicUrl(videoPath),
+          thumbUrl: r['thumb_path'] != null
+              ? supabase.storage
+                  .from('ad-videos')
+                  .getPublicUrl(r['thumb_path'] as String)
+              : null,
+          headline: r['headline'] as String? ?? '',
+          body: r['body'] as String?,
+          clickUrl: r['click_url'] as String? ?? '',
+          advertiserName: (r['advertiser_name'] as String?) ?? 'Sponsored',
+          durationMs: (r['duration_ms'] as num?)?.toInt() ?? 0,
+        ));
+      }
+      return ads;
+    } catch (_) {
+      return [];
+    }
+  }
+
+  /// Server-tunable ad cadence for the Rapids player: one ad slot after every
+  /// Nth Rapid. Falls back to 5 on any failure.
+  static Future<int> rapidsAdFrequency() async {
+    try {
+      final rows = await supabase
+          .from('app_config')
+          .select('rapids_ad_frequency')
+          .eq('id', 1)
+          .limit(1);
+      final v = (rows as List).isEmpty
+          ? null
+          : (rows.first['rapids_ad_frequency'] as num?)?.toInt();
+      return (v == null || v < 1) ? 5 : v;
+    } catch (_) {
+      return 5;
+    }
+  }
 
   /// The calling host's boost campaigns with lifetime performance (Phase A-3),
   /// newest first. Scoped server-side to auth.uid()'s own campaigns.

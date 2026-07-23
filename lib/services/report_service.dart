@@ -1,6 +1,14 @@
 import 'supabase_client.dart';
 
-enum ReportTargetType { user, post, event, comment, ad }
+enum ReportTargetType { user, post, event, comment, ad, rapid, rapidComment }
+
+extension ReportTargetTypeX on ReportTargetType {
+  /// Matches the report_target_type Postgres enum (0066 adds the rapid values).
+  String get dbValue => switch (this) {
+    ReportTargetType.rapidComment => 'rapid_comment',
+    _ => name,
+  };
+}
 
 enum ReportReason {
   spam,
@@ -47,7 +55,7 @@ class ReportService {
     if (myId == null) throw StateError('ReportService: no authenticated user');
     await supabase.from('reports').insert({
       'reporter_id': myId,
-      'target_type': targetType.name,
+      'target_type': targetType.dbValue,
       'target_id': targetId,
       'reason': reason.dbValue,
       if (note != null && note.trim().isNotEmpty) 'note': note.trim(),

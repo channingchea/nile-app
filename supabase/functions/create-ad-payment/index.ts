@@ -10,6 +10,9 @@
 //   2) STANDALONE CREATIVE AD (A-4 Part 2).
 //      { advertiser_account_id, headline, body, click_url, image_url,
 //        topic_ids?, budget_cents, duration_days }
+//      Rapids VIDEO variant (0068): pass creative_kind: "video" with
+//      { video_url, thumb_url?, duration_ms } instead of image_url; body is
+//      optional. Same checkout/review flow; serves in the Rapids player.
 //      External brand runs a creative ad targeting neither event nor post.
 //      This fn creates the campaign (pending_payment, advertiser_account_id set,
 //      advertiser_id null) + ad_creatives + ad_targeting rows server-side, then a
@@ -174,18 +177,32 @@ async function createStandaloneAd(
   const {
     advertiser_account_id, headline, body: adBody, click_url, image_url,
     topic_ids, budget_cents, duration_days,
+    creative_kind, video_url, thumb_url, duration_ms,
   } = body;
+  const isVideo = creative_kind === "video"; // Rapids video ad (0068)
 
-  // Validate creative fields.
+  // Validate creative fields. Body is required for image creatives, optional
+  // for video (the video carries the message).
   const hl = (headline ?? "").trim();
   const bd = (adBody ?? "").trim();
   if (!hl || hl.length > HEADLINE_MAX) return json({ error: "Invalid headline" }, 400);
-  if (!bd || bd.length > BODY_MAX) return json({ error: "Invalid body" }, 400);
-  if (!image_url) return json({ error: "Missing creative image" }, 400);
+  if (bd.length > BODY_MAX) return json({ error: "Invalid body" }, 400);
+  if (!isVideo && !bd) return json({ error: "Invalid body" }, 400);
+  if (!isVideo && !image_url) return json({ error: "Missing creative image" }, 400);
   let url: URL;
   try { url = new URL(click_url); } catch { return json({ error: "Invalid click URL" }, 400); }
   if (url.protocol !== "https:") return json({ error: "Click URL must be https" }, 400);
   const topics: string[] = Array.isArray(topic_ids) ? topic_ids.filter(Boolean) : [];
+
+  // Video-specific validation (mirrors the 0068 CHECKs so failures are 400s,
+  // not opaque insert errors).
+  const durMs = Number(duration_ms);
+  if (isVideo) {
+    if (!video_url) return json({ error: "Missing creative video" }, 400);
+    if (!Number.isFinite(durMs) || durMs <= 0 || durMs > 61000) {
+      return json({ error: "Video must be 60 seconds or shorter" }, 400);
+    }
+  }
 
   // Verify the caller owns this advertiser account.
   const { data: account } = await admin
@@ -196,15 +213,30 @@ async function createStandaloneAd(
   if (!account) return json({ error: "Advertiser account not found" }, 404);
   if (account.auth_user_id !== userId) return json({ error: "Not your account" }, 403);
 
-  // Review finding #4: image_url must point at OUR ad-creatives bucket, inside
-  // THIS account's folder (the portal uploads to {account_id}/{uuid}.{ext} —
-  // the same convention the bucket's insert RLS enforces). Rejects arbitrary
+  // Review finding #4: creative assets must point at OUR buckets, inside THIS
+  // account's folder (the portal uploads to {account_id}/{uuid}.{ext} — the
+  // same convention the buckets' insert RLS enforces). Rejects arbitrary
   // external URLs and other accounts' creatives; manual review stays the
   // content backstop, this closes the abuse hole cheaply.
   const supaBase = Deno.env.get("SUPABASE_URL")!.replace(/\/$/, "");
   const creativePrefix =
     `${supaBase}/storage/v1/object/public/ad-creatives/${advertiser_account_id}/`;
-  if (typeof image_url !== "string" || !image_url.startsWith(creativePrefix)) {
+  const videoPrefix =
+    `${supaBase}/storage/v1/object/public/ad-videos/${advertiser_account_id}/`;
+  let videoPath: string | null = null;
+  let thumbPath: string | null = null;
+  if (isVideo) {
+    if (typeof video_url !== "string" || !video_url.startsWith(videoPrefix)) {
+      return json({ error: "Creative video must be uploaded through the portal" }, 400);
+    }
+    // ad_creatives stores bucket-relative paths for video assets — i.e.
+    // "{account_id}/{uuid}.mp4", everything after "/ad-videos/" (the app
+    // rebuilds public URLs from the ad-videos bucket).
+    videoPath = decodeURIComponent(video_url.split("/ad-videos/")[1]);
+    if (typeof thumb_url === "string" && thumb_url.startsWith(videoPrefix)) {
+      thumbPath = decodeURIComponent(thumb_url.split("/ad-videos/")[1]);
+    }
+  } else if (typeof image_url !== "string" || !image_url.startsWith(creativePrefix)) {
     return json({ error: "Creative image must be uploaded through the portal" }, 400);
   }
 
@@ -230,13 +262,26 @@ async function createStandaloneAd(
   // Creative + targeting. On failure, roll back the campaign so no orphan sits in
   // pending_payment forever (get_feed_ads already guards creative-less rows, but
   // cleanliness matters for the review queue).
-  const { error: crErr } = await admin.from("ad_creatives").insert({
-    campaign_id: campaign.id,
-    image_url,
-    headline: hl,
-    body: bd,
-    click_url,
-  });
+  const { error: crErr } = await admin.from("ad_creatives").insert(
+    isVideo
+      ? {
+          campaign_id: campaign.id,
+          kind: "video",
+          video_path: videoPath,
+          thumb_path: thumbPath,
+          duration_ms: Math.round(durMs),
+          headline: hl,
+          body: bd || null,
+          click_url,
+        }
+      : {
+          campaign_id: campaign.id,
+          image_url,
+          headline: hl,
+          body: bd,
+          click_url,
+        },
+  );
   if (crErr) {
     await admin.from("ad_campaigns").delete().eq("id", campaign.id);
     console.error(crErr);

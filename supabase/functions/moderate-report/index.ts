@@ -6,7 +6,8 @@
 // against races (return 409 if the target already moved) and every action
 // leaves a row in `moderation_audit` (fire-and-forget; never fails the call).
 //
-//   { target_type: "user" | "post" | "event" | "comment" | "ad",
+//   { target_type: "user" | "post" | "event" | "comment" | "ad"
+//                | "rapid" | "rapid_comment",
 //     target_id: uuid,
 //     action: "resolve" | "dismiss" | "remove_content" | "restore_content"
 //           | "suspend_user" | "unsuspend_user",
@@ -17,16 +18,16 @@
 //                          Valid for every target_type, including "ad" (the
 //                          portal calls review-ad-campaign separately for
 //                          the actual pause/reject of an ad campaign).
-//   remove_content       — post/comment/event only. Sets removed_at/
-//                          removed_by (0053's RLS then hides it app-wide) and
-//                          resolves the target's open/reviewing reports.
-//                          Decrements the parent post's comment_count for a
-//                          comment (soft-remove doesn't fire the delete
-//                          trigger from phase10).
-//   restore_content      — post/comment/event only. Clears removed_at/
-//                          removed_by. Reports are left resolved — restoring
-//                          doesn't reopen them. Re-increments comment_count
-//                          for a comment.
+//   remove_content       — post/comment/event/rapid/rapid_comment. Sets
+//                          removed_at/removed_by (0053/0065 RLS then hides it
+//                          app-wide) and resolves the target's open/reviewing
+//                          reports. Decrements the parent's comment_count for
+//                          comment-shaped targets (soft-remove doesn't fire
+//                          the delete trigger).
+//   restore_content      — post/comment/event/rapid/rapid_comment. Clears
+//                          removed_at/removed_by. Reports are left resolved —
+//                          restoring doesn't reopen them. Re-increments the
+//                          parent's comment_count for comment-shaped targets.
 //   suspend_user         — user only. Bans the auth user (indefinite) via
 //                          auth.admin.updateUserById + sets
 //                          profiles.suspended_at, and resolves that user's
@@ -45,9 +46,20 @@ const CONTENT_TABLES: Record<string, string> = {
   post: "posts",
   comment: "post_comments",
   event: "events",
+  rapid: "rapids",
+  rapid_comment: "rapid_comments",
 };
 
-const TARGET_TYPES = new Set(["user", "post", "event", "comment", "ad"]);
+// Comment-shaped tables keep a denormalized count on their parent; soft
+// removal doesn't fire the count trigger, so it's adjusted by hand.
+const COMMENT_PARENTS: Record<string, { parentTable: string; parentCol: string }> = {
+  post_comments: { parentTable: "posts", parentCol: "post_id" },
+  rapid_comments: { parentTable: "rapids", parentCol: "rapid_id" },
+};
+
+const TARGET_TYPES = new Set([
+  "user", "post", "event", "comment", "ad", "rapid", "rapid_comment",
+]);
 const ACTIONS = new Set([
   "resolve", "dismiss", "remove_content", "restore_content",
   "suspend_user", "unsuspend_user",
@@ -148,9 +160,10 @@ async function removeContent(
   admin: any, actorId: string, targetType: string, targetId: string, note: string | null,
 ) {
   const table = CONTENT_TABLES[targetType];
-  if (!table) return json({ error: "remove_content is only valid for post/comment/event" }, 400);
+  if (!table) return json({ error: "remove_content is only valid for content targets" }, 400);
 
-  const cols = table === "post_comments" ? "id, post_id" : "id";
+  const parent = COMMENT_PARENTS[table];
+  const cols = parent ? `id, ${parent.parentCol}` : "id";
   const { data: updated, error } = await admin
     .from(table)
     .update({ removed_at: new Date().toISOString(), removed_by: actorId })
@@ -163,10 +176,10 @@ async function removeContent(
   }
 
   // Denormalized counter: a soft-removed comment doesn't fire the delete
-  // trigger from phase10, so decrement comment_count by hand.
-  if (table === "post_comments") {
-    const postId = (updated[0] as any).post_id;
-    if (postId) await bumpCommentCount(admin, postId, -1);
+  // trigger, so decrement the parent's comment_count by hand.
+  if (parent) {
+    const parentId = (updated[0] as any)[parent.parentCol];
+    if (parentId) await bumpCommentCount(admin, parent.parentTable, parentId, -1);
   }
 
   // Close out the reports that flagged this target.
@@ -192,9 +205,10 @@ async function restoreContent(
   admin: any, actorId: string, targetType: string, targetId: string, note: string | null,
 ) {
   const table = CONTENT_TABLES[targetType];
-  if (!table) return json({ error: "restore_content is only valid for post/comment/event" }, 400);
+  if (!table) return json({ error: "restore_content is only valid for content targets" }, 400);
 
-  const cols = table === "post_comments" ? "id, post_id" : "id";
+  const parent = COMMENT_PARENTS[table];
+  const cols = parent ? `id, ${parent.parentCol}` : "id";
   const { data: updated, error } = await admin
     .from(table)
     .update({ removed_at: null, removed_by: null })
@@ -206,9 +220,9 @@ async function restoreContent(
     return json({ error: "Not currently removed (or not found)" }, 409);
   }
 
-  if (table === "post_comments") {
-    const postId = (updated[0] as any).post_id;
-    if (postId) await bumpCommentCount(admin, postId, 1);
+  if (parent) {
+    const parentId = (updated[0] as any)[parent.parentCol];
+    if (parentId) await bumpCommentCount(admin, parent.parentTable, parentId, 1);
   }
 
   // Reports intentionally stay resolved — restoring doesn't reopen them.
@@ -217,12 +231,12 @@ async function restoreContent(
 }
 
 // deno-lint-ignore no-explicit-any
-async function bumpCommentCount(admin: any, postId: string, delta: number) {
-  const { data: post, error } = await admin
-    .from("posts").select("comment_count").eq("id", postId).maybeSingle();
-  if (error || !post) { console.error("comment_count lookup failed:", error); return; }
-  const next = Math.max(0, post.comment_count + delta);
-  const { error: updErr } = await admin.from("posts").update({ comment_count: next }).eq("id", postId);
+async function bumpCommentCount(admin: any, parentTable: string, parentId: string, delta: number) {
+  const { data: row, error } = await admin
+    .from(parentTable).select("comment_count").eq("id", parentId).maybeSingle();
+  if (error || !row) { console.error("comment_count lookup failed:", error); return; }
+  const next = Math.max(0, row.comment_count + delta);
+  const { error: updErr } = await admin.from(parentTable).update({ comment_count: next }).eq("id", parentId);
   if (updErr) console.error("comment_count update failed:", updErr);
 }
 

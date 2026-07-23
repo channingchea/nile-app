@@ -264,7 +264,7 @@ async function withdraw(admin: any, userId: string, campaignId: string) {
 
   const { data: c } = await admin
     .from("ad_campaigns")
-    .select("id, name, status, stripe_payment_intent_id, advertiser_account_id, ad_creatives(image_url)")
+    .select("id, name, status, stripe_payment_intent_id, advertiser_account_id, ad_creatives(image_url, kind, video_path, thumb_path)")
     .eq("id", campaignId)
     .maybeSingle();
   if (!c) return json({ error: "Campaign not found" }, 404);
@@ -290,7 +290,10 @@ async function withdraw(admin: any, userId: string, campaignId: string) {
 
   // 2) Delete the campaign (creative/targeting/events cascade), guarded
   //    against a concurrent status change.
-  const imageUrl: string | undefined = c.ad_creatives?.[0]?.image_url;
+  const creative = c.ad_creatives?.[0];
+  const imageUrl: string | undefined = creative?.image_url;
+  const videoPaths: string[] = [creative?.video_path, creative?.thumb_path]
+    .filter((p: unknown): p is string => typeof p === "string" && p.length > 0);
   const { data: deleted, error: delErr } = await admin
     .from("ad_campaigns")
     .delete()
@@ -311,13 +314,20 @@ async function withdraw(admin: any, userId: string, campaignId: string) {
     note: null,
   });
 
-  // 3) Best-effort creative image cleanup — an orphaned object is cosmetic.
+  // 3) Best-effort creative asset cleanup — an orphaned object is cosmetic.
   const path = imageUrl?.split("/ad-creatives/")[1];
   if (path) {
     const { error: rmErr } = await admin.storage
       .from("ad-creatives")
       .remove([decodeURIComponent(path)]);
     if (rmErr) console.error("creative cleanup failed:", rmErr);
+  }
+  // Video creatives store bucket-relative paths in the ad-videos bucket (0068).
+  if (videoPaths.length) {
+    const { error: rmErr } = await admin.storage
+      .from("ad-videos")
+      .remove(videoPaths);
+    if (rmErr) console.error("video creative cleanup failed:", rmErr);
   }
 
   return json({ deleted: campaignId });
