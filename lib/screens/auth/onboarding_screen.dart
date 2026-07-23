@@ -4,7 +4,9 @@ import 'package:flutter/foundation.dart'
     show kIsWeb, defaultTargetPlatform, TargetPlatform;
 import 'package:flutter/material.dart';
 
+import '../../services/featured_service.dart';
 import '../../services/follow_service.dart';
+import '../../services/pagination.dart' show Paged;
 import '../../services/profile_service.dart';
 import '../../services/push_service.dart';
 import '../../services/search_service.dart';
@@ -78,8 +80,19 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
 
   Future<void> _loadSuggested() async {
     try {
-      final page = await SearchService.suggestedUsers();
-      if (mounted) setState(() => _suggested = page.items);
+      // Curated "Featured" creators lead the list, then follower-count order.
+      final results = await Future.wait([
+        FeaturedService.getFeatured(),
+        SearchService.suggestedUsers(),
+      ]);
+      final featured = (results[0] as Featured).creators;
+      final suggested = (results[1] as Paged<UserProfile>).items;
+      final seen = <String>{};
+      final merged = [
+        for (final u in [...featured, ...suggested])
+          if (seen.add(u.id)) u,
+      ];
+      if (mounted) setState(() => _suggested = merged);
     } catch (e) {
       if (mounted) setState(() => _followError = 'Couldn\'t load people: $e');
     }
@@ -352,10 +365,28 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
       );
     }
     if (users.isEmpty) {
-      return Center(
-        child: Text(
-          'No suggestions yet — you\'re early!',
-          style: NileTextStyles.bodySm(),
+      return Padding(
+        padding: const EdgeInsets.all(NileSpacing.s40),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              Icons.rocket_launch_outlined,
+              size: 56,
+              color: NileColors.volt,
+            ),
+            const SizedBox(height: NileSpacing.s16),
+            Text("You're early!", style: NileTextStyles.headingMd()),
+            const SizedBox(height: NileSpacing.s8),
+            Text(
+              'New creators join every week. Once you\'re in, check Discover '
+              'to see upcoming shows and who\'s going live.',
+              textAlign: TextAlign.center,
+              style: NileTextStyles.bodyMd().copyWith(
+                color: NileColors.txtSecondary,
+              ),
+            ),
+          ],
         ),
       );
     }

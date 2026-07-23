@@ -5,6 +5,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:visibility_detector/visibility_detector.dart';
 import '../services/ad_service.dart';
+import '../services/app_lifecycle.dart';
 import '../services/event_repost_service.dart';
 import '../services/share_urls.dart';
 import '../services/event_service.dart';
@@ -24,6 +25,7 @@ import '../widgets/nile_glass_app_bar.dart';
 import '../widgets/nile_logo.dart';
 import '../widgets/nile_glass_nav_bar.dart';
 import '../widgets/nile_skeleton.dart';
+import '../widgets/official_badge.dart';
 import '../widgets/post_image_carousel.dart';
 import '../widgets/pressable.dart';
 import '../widgets/share_to_sheet.dart';
@@ -43,6 +45,11 @@ import 'viewer_screen.dart';
 import 'widgets/load_more_footer.dart';
 import 'widgets/moderation_menu.dart';
 
+/// Below this many followed-feed items, blend in cold-start "starter" content
+/// (live now, topic recs, upcoming shows, newest posts) so a quiet feed still
+/// fills the screen. Just a threshold — tune freely.
+const int kThinFeedThreshold = 5;
+
 // ── Shell ─────────────────────────────────────────────────────────────────────
 
 class HomeScreen extends StatefulWidget {
@@ -56,6 +63,8 @@ class _HomeScreenState extends State<HomeScreen> {
   int _selectedIndex = 0;
   int _feedKey = 0;
   int _profileKey = 0;
+  int _discoverKey = 0;
+  int _discoverInitialTab = 0;
 
   // Tabs are built on first visit, not eagerly. An unvisited tab renders as an
   // empty placeholder in the IndexedStack; once shown it stays built (state
@@ -63,11 +72,24 @@ class _HomeScreenState extends State<HomeScreen> {
   final Set<int> _visited = {0};
 
   List<Widget> get _pages => [
-    _FeedTab(key: ValueKey(_feedKey), onContentChanged: _onContentChanged),
-    const DiscoverScreen(),
+    _FeedTab(
+      key: ValueKey(_feedKey),
+      onContentChanged: _onContentChanged,
+      onFindPeople: () => _goToDiscover(2),
+    ),
+    DiscoverScreen(key: ValueKey(_discoverKey), initialTab: _discoverInitialTab),
     const MessagesScreen(),
     ProfileScreen(key: ValueKey(_profileKey)),
   ];
+
+  // Jump to Discover, remounting it on [tab] (0 posts, 1 events, 2 people) so
+  // Home's empty-state CTAs land the user somewhere useful instead of a dead end.
+  void _goToDiscover(int tab) => setState(() {
+    _discoverInitialTab = tab;
+    _discoverKey++;
+    _selectedIndex = 1;
+    _visited.add(1);
+  });
 
   // A repost happened inside the feed. The feed already updated its own card
   // optimistically, so leave it (and its scroll position) untouched — only
@@ -262,11 +284,15 @@ class _ActionSheet extends StatelessWidget {
 // ── Feed tab ──────────────────────────────────────────────────────────────────
 
 class _FeedTab extends StatefulWidget {
-  const _FeedTab({super.key, this.onContentChanged});
+  const _FeedTab({super.key, this.onContentChanged, this.onFindPeople});
 
   /// Called after a repost/unrepost succeeds so the host can refresh the
   /// profile tab (where the reposted item appears).
   final VoidCallback? onContentChanged;
+
+  /// Sends the user to Discover → People. Powers the empty-state CTAs so a
+  /// follow-less or quiet feed offers a real next step.
+  final VoidCallback? onFindPeople;
 
   @override
   State<_FeedTab> createState() => _FeedTabState();
@@ -340,7 +366,15 @@ class _AdFeedItem extends _FeedItem {
 
 class _FeedTabState extends State<_FeedTab> {
   List<_FeedItem>? _items;
-  bool _noFollows = false;
+  // Platform-wide "Live now" rail, shown to every user above the feed (Phase 3).
+  // Live events live here, not in the list below, so nothing shows twice.
+  List<Event> _liveNow = [];
+  // Cold-start fill for zero-follow and thin feeds (Phase 1). Rendered as a
+  // separate section below the followed feed, in priority order (topic →
+  // upcoming → newest; live shows in the rail above) — not time-sorted.
+  List<_FeedItem> _starterItems = [];
+  bool _starterMode = false; // true when the user follows no one
+  bool _starterHeaderDismissed = false;
   String? _error;
   int _unreadCount = 0;
 
@@ -381,7 +415,7 @@ class _FeedTabState extends State<_FeedTab> {
     _FeedItem Function(_FeedItem) update,
   ) {
     setState(() {
-      for (final list in [_items, _recs]) {
+      for (final list in [_items, _recs, _starterItems]) {
         if (list == null) continue;
         final i = list.indexWhere(match);
         if (i >= 0) list[i] = update(list[i]);
@@ -393,6 +427,7 @@ class _FeedTabState extends State<_FeedTab> {
     setState(() {
       _items?.removeWhere(match);
       _recs.removeWhere(match);
+      _starterItems.removeWhere(match);
     });
   }
 
@@ -533,6 +568,7 @@ class _FeedTabState extends State<_FeedTab> {
   void initState() {
     super.initState();
     _scroll.addListener(_onScroll);
+    AppLifecycle.instance.state.addListener(_onLifecycleChanged);
     _load();
     _loadUnread();
   }
@@ -543,9 +579,40 @@ class _FeedTabState extends State<_FeedTab> {
       t.cancel();
     }
     _impressionTimers.clear();
+    AppLifecycle.instance.state.removeListener(_onLifecycleChanged);
     _scroll.dispose();
     super.dispose();
   }
+
+  // On return from background, refresh just the Live Now rail (lighter than a
+  // full reload) so streams that started or ended while away are current.
+  void _onLifecycleChanged() {
+    if (AppLifecycle.instance.state.value == AppLifecycleState.resumed) {
+      _refreshLiveNow();
+    }
+  }
+
+  Future<void> _refreshLiveNow() async {
+    try {
+      final live = await EventService.getLiveNow();
+      if (!mounted) return;
+      final liveIds = {for (final e in live) e.id};
+      setState(() {
+        _liveNow = live;
+        // Keep the list free of anything now surfaced in the rail.
+        _items?.removeWhere(
+          (it) => it is _EventFeedItem && liveIds.contains(it.event.id),
+        );
+      });
+    } catch (_) {}
+  }
+
+  void _openLive(Event event) => Navigator.push(
+    context,
+    MaterialPageRoute(
+      builder: (_) => ViewerScreen(initialEventId: event.liveKitEventId),
+    ),
+  );
 
   void _onScroll() {
     if (!_scroll.hasClients) return;
@@ -673,86 +740,126 @@ class _FeedTabState extends State<_FeedTab> {
   Future<void> _load() async {
     setState(() {
       _items = null;
-      _noFollows = false;
+      _starterItems = [];
+      _liveNow = [];
+      _starterMode = false;
       _error = null;
     });
     try {
       final ids = await FollowService.getFollowingIds();
       _followingIds = ids;
-      if (ids.isEmpty) {
-        setState(() => _noFollows = true);
-        return;
+
+      // Platform-wide Live Now rail — for every user, loaded once. Best-effort:
+      // a failure here just means no rail, never a broken feed.
+      var liveNow = <Event>[];
+      try {
+        liveNow = await EventService.getLiveNow();
+      } catch (_) {}
+      final liveIds = {for (final e in liveNow) e.id};
+
+      var items = <_FeedItem>[];
+      var recs = <_FeedItem>[];
+      var ads = <_FeedItem>[];
+      Paged<Event> eventPage = Paged.empty();
+      Paged<Post> postPage = Paged.empty();
+
+      // Followed feed — skipped entirely when the user follows no one.
+      if (ids.isNotEmpty) {
+        (eventPage, postPage) = await (
+          EventService.getFeed(ids),
+          PostService.getFeed(ids),
+        ).wait;
+        // Reposts by followed users + your own — best-effort, loaded once
+        // (not paged). Including self so you see your repost land in-feed.
+        final myId = Supabase.instance.client.auth.currentUser?.id;
+        final reposterIds = [...ids, ?myId];
+        List<({Post post, DateTime repostedAt})> repostRows = [];
+        List<({Event event, DateTime repostedAt})> eventRepostRows = [];
+        try {
+          (repostRows, eventRepostRows) = await (
+            PostService.getRepostsFeed(reposterIds),
+            EventService.getRepostsFeed(reposterIds),
+          ).wait;
+        } catch (_) {}
+        // Hydrate likedByMe + repostedByMe flags in parallel (non-fatal).
+        final (hEvents, lPosts, lReposts, lEventReposts) = await (
+          EventService.hydrateLikes(eventPage.items),
+          PostService.hydrateLikes(postPage.items),
+          PostService.hydrateLikes(repostRows.map((r) => r.post).toList()),
+          EventService.hydrateLikes(
+            eventRepostRows.map((r) => r.event).toList(),
+          ),
+        ).wait;
+        final (hPosts, hReposts, hEventReposts) = await (
+          PostService.hydrateReposts(lPosts),
+          PostService.hydrateReposts(lReposts),
+          EventService.hydrateReposts(lEventReposts),
+        ).wait;
+        // A repost is its own distinct feed entry (shown with a "reposted by"
+        // header), sorted by repost time — not deduped against the original.
+        final repostAt = {for (final r in repostRows) r.post.id: r.repostedAt};
+        final eventRepostAt = {
+          for (final r in eventRepostRows) r.event.id: r.repostedAt,
+        };
+        items = <_FeedItem>[
+          ...hEvents.map((e) => _EventFeedItem(e)),
+          ...hPosts.map((p) => _PostFeedItem(p)),
+          ...hReposts.map((p) => _PostFeedItem(p, sortOverride: repostAt[p.id])),
+          ...hEventReposts.map(
+            (e) => _EventFeedItem(e, sortOverride: eventRepostAt[e.id]),
+          ),
+        ];
+        _sortItems(items);
+        // Recs and ads are best-effort: a failure here must not break the feed.
+        try {
+          final (rEvents, rPosts, feedAds) = await (
+            SearchService.recommendedEvents(),
+            SearchService.recommendedPosts(),
+            AdService.feedAds(),
+          ).wait;
+          recs = [
+            ...rEvents.map((e) => _EventFeedItem(e, fromNetwork: true)),
+            ...rPosts.map((p) => _PostFeedItem(p, fromNetwork: true)),
+          ];
+          ads = [
+            for (final ad in feedAds)
+              if (ad.event != null)
+                _EventFeedItem(ad.event!, adCampaignId: ad.campaignId)
+              else if (ad.post != null)
+                _PostFeedItem(ad.post!, adCampaignId: ad.campaignId)
+              else if (ad.creative != null)
+                _AdFeedItem(ad.creative!, adCampaignId: ad.campaignId),
+          ];
+        } catch (_) {}
       }
-      final (eventPage, postPage) = await (
-        EventService.getFeed(ids),
-        PostService.getFeed(ids),
-      ).wait;
-      // Reposts by followed users + your own — best-effort, loaded once
-      // (not paged). Including self so you see your repost land in-feed.
-      final myId = Supabase.instance.client.auth.currentUser?.id;
-      final reposterIds = [...ids, ?myId];
-      List<({Post post, DateTime repostedAt})> repostRows = [];
-      List<({Event event, DateTime repostedAt})> eventRepostRows = [];
-      try {
-        (repostRows, eventRepostRows) = await (
-          PostService.getRepostsFeed(reposterIds),
-          EventService.getRepostsFeed(reposterIds),
-        ).wait;
-      } catch (_) {}
-      // Hydrate likedByMe + repostedByMe flags in parallel (non-fatal).
-      final (hEvents, lPosts, lReposts, lEventReposts) = await (
-        EventService.hydrateLikes(eventPage.items),
-        PostService.hydrateLikes(postPage.items),
-        PostService.hydrateLikes(repostRows.map((r) => r.post).toList()),
-        EventService.hydrateLikes(eventRepostRows.map((r) => r.event).toList()),
-      ).wait;
-      final (hPosts, hReposts, hEventReposts) = await (
-        PostService.hydrateReposts(lPosts),
-        PostService.hydrateReposts(lReposts),
-        EventService.hydrateReposts(lEventReposts),
-      ).wait;
-      // A repost is its own distinct feed entry (shown with a "reposted by"
-      // header), sorted by repost time — not deduped against the original.
-      final repostAt = {for (final r in repostRows) r.post.id: r.repostedAt};
-      final eventRepostAt = {
-        for (final r in eventRepostRows) r.event.id: r.repostedAt,
-      };
-      final items = <_FeedItem>[
-        ...hEvents.map((e) => _EventFeedItem(e)),
-        ...hPosts.map((p) => _PostFeedItem(p)),
-        ...hReposts.map((p) => _PostFeedItem(p, sortOverride: repostAt[p.id])),
-        ...hEventReposts.map(
-          (e) => _EventFeedItem(e, sortOverride: eventRepostAt[e.id]),
-        ),
-      ];
-      _sortItems(items);
-      // Recs and ads are best-effort: a failure here must not break the feed.
-      List<_FeedItem> recs = [];
-      List<_FeedItem> ads = [];
-      try {
-        final (rEvents, rPosts, feedAds) = await (
-          SearchService.recommendedEvents(),
-          SearchService.recommendedPosts(),
-          AdService.feedAds(),
-        ).wait;
-        recs = [
-          ...rEvents.map((e) => _EventFeedItem(e, fromNetwork: true)),
-          ...rPosts.map((p) => _PostFeedItem(p, fromNetwork: true)),
-        ];
-        ads = [
-          for (final ad in feedAds)
-            if (ad.event != null)
-              _EventFeedItem(ad.event!, adCampaignId: ad.campaignId)
-            else if (ad.post != null)
-              _PostFeedItem(ad.post!, adCampaignId: ad.campaignId)
-            else if (ad.creative != null)
-              _AdFeedItem(ad.creative!, adCampaignId: ad.campaignId),
-        ];
-      } catch (_) {}
+
+      // Live events belong to the rail, not the list — drop them so a followed
+      // host who's live doesn't appear twice.
+      items = items
+          .where(
+            (it) => !(it is _EventFeedItem && liveIds.contains(it.event.id)),
+          )
+          .toList();
+
+      // Cold-start fill: always for zero-follow, and to top up a thin feed.
+      var starter = <_FeedItem>[];
+      if (ids.isEmpty || items.length < kThinFeedThreshold) {
+        final exclude = {
+          ...items.map(_idOf),
+          ...recs.map(_idOf),
+          for (final e in liveNow) 'e:${e.id}',
+        };
+        starter = await _loadStarterItems(exclude);
+      }
+
+      if (!mounted) return;
       setState(() {
         _items = items;
+        _liveNow = liveNow;
         _recs = recs;
         _ads = ads;
+        _starterItems = starter;
+        _starterMode = ids.isEmpty;
         _eventCursor = eventPage.nextCursor;
         _postCursor = postPage.nextCursor;
         _eventsHasMore = eventPage.hasMore;
@@ -761,6 +868,150 @@ class _FeedTabState extends State<_FeedTab> {
     } catch (e) {
       setState(() => _error = e.toString());
     }
+  }
+
+  /// Builds the cold-start fill in priority order: topic recommendations →
+  /// upcoming shows → newest discover posts. (Live now is surfaced in the rail
+  /// above, so it isn't repeated here.) Deduped by id and against [exclude]
+  /// (ids already in the followed feed / recs / rail). Every fetch is
+  /// best-effort, so a single failure just yields a shorter list.
+  Future<List<_FeedItem>> _loadStarterItems(Set<String> exclude) async {
+    var topic = <Event>[];
+    var upcoming = <Event>[];
+    var posts = <Post>[];
+    try {
+      final r = await (
+        SearchService.recommendedEventsByTopic(),
+        EventService.getUpcoming(),
+        PostService.getDiscover(),
+      ).wait;
+      topic = r.$1;
+      upcoming = r.$2;
+      posts = r.$3.items;
+    } catch (_) {}
+
+    // Hydrate like/repost flags so the action buttons render correct state.
+    try {
+      final events = await EventService.hydrateReposts(
+        await EventService.hydrateLikes([...topic, ...upcoming]),
+      );
+      final byId = {for (final e in events) e.id: e};
+      Event pick(Event e) => byId[e.id] ?? e;
+      topic = topic.map(pick).toList();
+      upcoming = upcoming.map(pick).toList();
+    } catch (_) {}
+    try {
+      posts = await PostService.hydrateReposts(
+        await PostService.hydrateLikes(posts),
+      );
+    } catch (_) {}
+
+    final out = <_FeedItem>[];
+    final seen = {...exclude};
+    void add(_FeedItem it) {
+      if (seen.add(_idOf(it))) out.add(it);
+    }
+
+    for (final e in topic) {
+      add(_EventFeedItem(e));
+    }
+    for (final e in upcoming) {
+      add(_EventFeedItem(e));
+    }
+    for (final p in posts) {
+      add(_PostFeedItem(p));
+    }
+    return out;
+  }
+
+  /// Builds the card widget for a single feed item (event / post / ad),
+  /// wiring the owner and ad callbacks. Shared by the followed feed and the
+  /// starter section.
+  Widget _cardFor(_FeedItem it) {
+    final myId = Supabase.instance.client.auth.currentUser?.id;
+    final campaignId = it.adCampaignId;
+    // Sponsored cards suppress owner edit/delete affordances.
+    return switch (it) {
+      _EventFeedItem(:final event) => _EventCard(
+        event: event,
+        fromNetwork: it.fromNetwork,
+        isSponsored: it.isSponsored,
+        onTapAd: campaignId == null
+            ? null
+            : () => AdService.logClick(campaignId),
+        onEdited: myId == event.hostId && campaignId == null
+            ? (e) => _replaceEvent(e)
+            : null,
+        onDeleted: myId == event.hostId && campaignId == null
+            ? () => _removeEvent(event.id)
+            : null,
+        onLikeToggle: () => _toggleEventLike(event),
+        onRepostToggle: () => _toggleEventRepost(event),
+      ),
+      _PostFeedItem(:final post) => _PostCard(
+        post: post,
+        fromNetwork: it.fromNetwork,
+        isSponsored: it.isSponsored,
+        onTapAd: campaignId == null
+            ? null
+            : () => AdService.logClick(campaignId),
+        onEdited: myId == post.authorId && campaignId == null
+            ? (p) => _replacePost(p)
+            : null,
+        onDeleted: myId == post.authorId && campaignId == null
+            ? () => _removePost(post.id)
+            : null,
+        onLikeToggle: () => _togglePostLike(post),
+        onRepostToggle: () => _togglePostRepost(post),
+        onUpdated: (updated) => _replacePost(updated),
+      ),
+      _AdFeedItem(:final creative) => _AdCreativeCard(
+        creative: creative,
+        campaignId: campaignId!,
+        onTap: () => AdService.logClick(campaignId),
+        onDismiss: () => _removeAd(campaignId),
+      ),
+    };
+  }
+
+  /// Wraps a sponsored card in a [VisibilityDetector] that logs an honest CPM
+  /// impression once per viewing (≥50% visible for ≥1s, re-arming on exit).
+  /// Non-sponsored items pass through untouched.
+  Widget _wrapImpression(_FeedItem it) {
+    final campaignId = it.adCampaignId;
+    final card = _cardFor(it);
+    if (campaignId == null) return card;
+    final impressionKey = 'ad-$campaignId-${_idOf(it)}';
+    return VisibilityDetector(
+      key: ValueKey(impressionKey),
+      onVisibilityChanged: (info) {
+        // Re-arm as soon as the card drops below a quarter visible; waiting for
+        // an exact 0 is unreliable since the card is often recycled before
+        // reporting 0.0.
+        if (info.visibleFraction < 0.25) {
+          _loggedImpressions.remove(impressionKey);
+          _impressionTimers.remove(impressionKey)?.cancel();
+        } else if (info.visibleFraction >= 0.5 &&
+            !_loggedImpressions.contains(impressionKey) &&
+            !_impressionTimers.containsKey(impressionKey)) {
+          _impressionTimers[impressionKey] = Timer(
+            const Duration(seconds: 1),
+            () {
+              // Still armed after 1s of dwell (a drop below 50% before now
+              // would have cancelled us).
+              _impressionTimers.remove(impressionKey);
+              if (_loggedImpressions.add(impressionKey)) {
+                AdService.logImpression(campaignId);
+              }
+            },
+          );
+        } else if (info.visibleFraction < 0.5) {
+          // Dropped below the threshold mid-dwell: cancel.
+          _impressionTimers.remove(impressionKey)?.cancel();
+        }
+      },
+      child: card,
+    );
   }
 
   @override
@@ -801,120 +1052,87 @@ class _FeedTabState extends State<_FeedTab> {
               SliverFillRemaining(
                 child: _ErrorState(message: _error!, onRetry: _load),
               )
-            else if (_noFollows)
-              const SliverFillRemaining(child: _EmptyFollows())
             else if (_items == null)
               const SliverToBoxAdapter(child: NileSkeletonList())
-            else if (_items!.isEmpty)
-              const SliverFillRemaining(child: _EmptyFeed())
-            else
-              Builder(
-                builder: (_) {
-                  final display = _injectAds(_interleaveRecs(_items!));
-                  return SliverPadding(
-                    padding: EdgeInsets.fromLTRB(
-                      NileSpacing.s16,
-                      NileSpacing.s8,
-                      NileSpacing.s16,
-                      NileGlassNavBar.reservedHeight + NileSpacing.s16,
-                    ),
-                    sliver: SliverList.separated(
-                      itemCount: display.length + (_hasMore ? 1 : 0),
-                      separatorBuilder: (_, _) => const SizedBox(height: 12),
-                      itemBuilder: (_, i) {
-                        if (i >= display.length) return const LoadMoreFooter();
-                        final it = display[i];
-                        final myId =
-                            Supabase.instance.client.auth.currentUser?.id;
-                        final campaignId = it.adCampaignId;
-                        // Sponsored cards suppress owner edit/delete affordances.
-                        Widget card = switch (it) {
-                          _EventFeedItem(:final event) => _EventCard(
-                            event: event,
-                            fromNetwork: it.fromNetwork,
-                            isSponsored: it.isSponsored,
-                            onTapAd: campaignId == null
-                                ? null
-                                : () => AdService.logClick(campaignId),
-                            onEdited: myId == event.hostId && campaignId == null
-                                ? (e) => _replaceEvent(e)
-                                : null,
-                            onDeleted: myId == event.hostId && campaignId == null
-                                ? () => _removeEvent(event.id)
-                                : null,
-                            onLikeToggle: () => _toggleEventLike(event),
-                            onRepostToggle: () => _toggleEventRepost(event),
-                          ),
-                          _PostFeedItem(:final post) => _PostCard(
-                            post: post,
-                            fromNetwork: it.fromNetwork,
-                            isSponsored: it.isSponsored,
-                            onTapAd: campaignId == null
-                                ? null
-                                : () => AdService.logClick(campaignId),
-                            onEdited: myId == post.authorId && campaignId == null
-                                ? (p) => _replacePost(p)
-                                : null,
-                            onDeleted: myId == post.authorId && campaignId == null
-                                ? () => _removePost(post.id)
-                                : null,
-                            onLikeToggle: () => _togglePostLike(post),
-                            onRepostToggle: () => _togglePostRepost(post),
-                            onUpdated: (updated) => _replacePost(updated),
-                          ),
-                          _AdFeedItem(:final creative) => _AdCreativeCard(
-                            creative: creative,
-                            campaignId: campaignId!,
-                            onTap: () => AdService.logClick(campaignId),
-                            onDismiss: () => _removeAd(campaignId),
-                          ),
-                        };
-                        // Count an honest CPM impression: log once each time the
-                        // card stays ≥50% visible for ≥1s, re-arming when it
-                        // leaves so repeat views (and post-refresh re-renders)
-                        // each count. The 1s dwell keeps fast scroll-pasts from
-                        // logging (review finding #7).
-                        if (campaignId != null) {
-                          final impressionKey = 'ad-$campaignId-${_idOf(it)}';
-                          card = VisibilityDetector(
-                            key: ValueKey(impressionKey),
-                            onVisibilityChanged: (info) {
-                              // Re-arm as soon as the card drops below a quarter
-                              // visible; waiting for an exact 0 is unreliable since
-                              // the card is often recycled before reporting 0.0.
-                              if (info.visibleFraction < 0.25) {
-                                _loggedImpressions.remove(impressionKey);
-                                _impressionTimers.remove(impressionKey)?.cancel();
-                              } else if (info.visibleFraction >= 0.5 &&
-                                  !_loggedImpressions.contains(impressionKey) &&
-                                  !_impressionTimers.containsKey(impressionKey)) {
-                                _impressionTimers[impressionKey] = Timer(
-                                  const Duration(seconds: 1),
-                                  () {
-                                    // Still armed after 1s of dwell (a drop below
-                                    // 50% before now would have cancelled us).
-                                    _impressionTimers.remove(impressionKey);
-                                    if (_loggedImpressions.add(impressionKey)) {
-                                      AdService.logImpression(campaignId);
-                                    }
-                                  },
-                                );
-                              } else if (info.visibleFraction < 0.5) {
-                                // Dropped below the threshold mid-dwell: cancel.
-                                _impressionTimers
-                                    .remove(impressionKey)
-                                    ?.cancel();
-                              }
-                            },
-                            child: card,
+            else ...[
+              // Platform-wide Live Now rail — pinned first for every user,
+              // hidden entirely when nothing is live (no empty shell).
+              if (_liveNow.isNotEmpty)
+                SliverToBoxAdapter(
+                  child: _LiveNowRail(events: _liveNow, onTap: _openLive),
+                ),
+              // Followed feed (empty when the user follows no one). Reserves
+              // the nav-bar gap at its foot only when no starter section
+              // follows it.
+              if (_items!.isNotEmpty)
+                Builder(
+                  builder: (_) {
+                    final display = _injectAds(_interleaveRecs(_items!));
+                    final bottom = _starterItems.isEmpty
+                        ? NileGlassNavBar.reservedHeight + NileSpacing.s16
+                        : NileSpacing.s16;
+                    return SliverPadding(
+                      padding: EdgeInsets.fromLTRB(
+                        NileSpacing.s16,
+                        NileSpacing.s8,
+                        NileSpacing.s16,
+                        bottom,
+                      ),
+                      sliver: SliverList.separated(
+                        itemCount: display.length + (_hasMore ? 1 : 0),
+                        separatorBuilder: (_, _) => const SizedBox(height: 12),
+                        itemBuilder: (_, i) {
+                          if (i >= display.length) return const LoadMoreFooter();
+                          return NileStaggeredFadeIn(
+                            index: i,
+                            child: _wrapImpression(display[i]),
                           );
-                        }
-                        return NileStaggeredFadeIn(index: i, child: card);
-                      },
+                        },
+                      ),
+                    );
+                  },
+                ),
+              // Cold-start starter fill, in priority order (not time-sorted),
+              // under a header that explains why it's shown.
+              if (_starterItems.isNotEmpty) ...[
+                if (!(_starterMode && _starterHeaderDismissed))
+                  SliverToBoxAdapter(
+                    child: _StarterHeader(
+                      label: _starterMode
+                          ? 'Follow creators to shape this feed'
+                          : 'Suggested for you',
+                      onDismiss: _starterMode
+                          ? () =>
+                                setState(() => _starterHeaderDismissed = true)
+                          : null,
                     ),
-                  );
-                },
-              ),
+                  ),
+                SliverPadding(
+                  padding: EdgeInsets.fromLTRB(
+                    NileSpacing.s16,
+                    NileSpacing.s8,
+                    NileSpacing.s16,
+                    NileGlassNavBar.reservedHeight + NileSpacing.s16,
+                  ),
+                  sliver: SliverList.separated(
+                    itemCount: _starterItems.length,
+                    separatorBuilder: (_, _) => const SizedBox(height: 12),
+                    itemBuilder: (_, i) => NileStaggeredFadeIn(
+                      index: i,
+                      child: _cardFor(_starterItems[i]),
+                    ),
+                  ),
+                ),
+              ],
+              // Nothing to show at all: still offer a next step.
+              if (_items!.isEmpty && _starterItems.isEmpty)
+                SliverFillRemaining(
+                  hasScrollBody: false,
+                  child: _followingIds.isEmpty
+                      ? _EmptyFollows(onFindPeople: widget.onFindPeople)
+                      : _EmptyFeed(onFindPeople: widget.onFindPeople),
+                ),
+            ],
           ],
         ),
       ),
@@ -1014,10 +1232,20 @@ class _EventCard extends StatelessWidget {
                         ),
                         const SizedBox(width: 8),
                         Expanded(
-                          child: Text(
-                            '@${event.hostUsername}',
-                            style: NileTextStyles.bodySm(),
-                            overflow: TextOverflow.ellipsis,
+                          child: Row(
+                            children: [
+                              Flexible(
+                                child: Text(
+                                  '@${event.hostUsername}',
+                                  style: NileTextStyles.bodySm(),
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                              if (event.hostIsOfficial) ...[
+                                const SizedBox(width: 4),
+                                const OfficialBadge(size: 13),
+                              ],
+                            ],
                           ),
                         ),
                         if (event.isLive) ...[
@@ -1416,10 +1644,20 @@ class _PostCard extends StatelessWidget {
                     ),
                     const SizedBox(width: 8),
                     Expanded(
-                      child: Text(
-                        '@${post.authorUsername}',
-                        style: NileTextStyles.bodySm(),
-                        overflow: TextOverflow.ellipsis,
+                      child: Row(
+                        children: [
+                          Flexible(
+                            child: Text(
+                              '@${post.authorUsername}',
+                              style: NileTextStyles.bodySm(),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          if (post.authorIsOfficial) ...[
+                            const SizedBox(width: 4),
+                            const OfficialBadge(size: 13),
+                          ],
+                        ],
                       ),
                     ),
                     Text(
@@ -1650,43 +1888,255 @@ class _Thumbnail extends StatelessWidget {
   }
 }
 
-// ── Empty / error states ──────────────────────────────────────────────────────
+// ── Live Now rail ─────────────────────────────────────────────────────────────
 
-class _StateView extends StatelessWidget {
-  final IconData icon;
-  final String title;
-  final String body;
-  const _StateView({
-    required this.icon,
-    required this.title,
-    required this.body,
-  });
+/// Horizontal shelf of currently-live events, pinned at the top of Home for
+/// every user (Phase 3). Mirrors Discover's network-rail shelf. Fed by
+/// [EventService.getLiveNow]; the caller hides it entirely when empty.
+class _LiveNowRail extends StatelessWidget {
+  final List<Event> events;
+  final void Function(Event) onTap;
+  const _LiveNowRail({required this.events, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
-    return NileEmptyState(icon: icon, title: title, body: body);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(
+            NileSpacing.s16,
+            NileSpacing.s8,
+            NileSpacing.s16,
+            0,
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 8,
+                height: 8,
+                decoration: const BoxDecoration(
+                  color: NileColors.coral,
+                  shape: BoxShape.circle,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Text('Live now', style: NileTextStyles.labelMd()),
+            ],
+          ),
+        ),
+        const SizedBox(height: 12),
+        SizedBox(
+          height: 184,
+          child: ListView.separated(
+            scrollDirection: Axis.horizontal,
+            clipBehavior: Clip.none,
+            padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s16),
+            itemCount: events.length,
+            separatorBuilder: (_, _) => const SizedBox(width: 12),
+            itemBuilder: (_, i) => SizedBox(
+              width: 220,
+              child: _LiveNowCard(
+                event: events[i],
+                onTap: () => onTap(events[i]),
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(height: NileSpacing.s8),
+      ],
+    );
+  }
+}
+
+class _LiveNowCard extends StatelessWidget {
+  final Event event;
+  final VoidCallback onTap;
+  const _LiveNowCard({required this.event, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return NilePressable(
+      child: Material(
+        color: NileColors.bgSurface,
+        borderRadius: BorderRadius.circular(NileRadius.lg),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onTap,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Expanded(child: _LiveThumbnail(event: event)),
+              Padding(
+                padding: const EdgeInsets.all(NileSpacing.s12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Flexible(
+                          child: Text(
+                            '@${event.hostUsername}',
+                            style: NileTextStyles.bodySm(),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        if (event.hostIsOfficial) ...[
+                          const SizedBox(width: 4),
+                          const OfficialBadge(size: 13),
+                        ],
+                      ],
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      event.title,
+                      style: NileTextStyles.labelMd(),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Live event cover for a rail card: image (or gradient placeholder) under a
+/// scrim, LIVE badge top-left, viewer count top-right. No Hero — the rail and
+/// the viewer screen don't share a cover transition.
+class _LiveThumbnail extends StatelessWidget {
+  final Event event;
+  const _LiveThumbnail({required this.event});
+
+  @override
+  Widget build(BuildContext context) {
+    final placeholder = EventCoverPlaceholder(seed: event.id);
+    final image = event.thumbnailUrl != null
+        ? Image.network(
+            event.thumbnailUrl!,
+            cacheWidth: nileDecodeWidth(600),
+            fit: BoxFit.cover,
+            errorBuilder: (_, _, _) => placeholder,
+          )
+        : placeholder;
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        image,
+        const DecoratedBox(decoration: NileEffects.coverScrim),
+        Positioned(top: 8, left: 8, child: EventCoverPill(event: event)),
+        Positioned(
+          top: 8,
+          right: 8,
+          child: _ViewerCountPill(count: event.viewerCount),
+        ),
+      ],
+    );
+  }
+}
+
+class _ViewerCountPill extends StatelessWidget {
+  final int count;
+  const _ViewerCountPill({required this.count});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: NileSpacing.s8,
+        vertical: NileSpacing.s4,
+      ),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.6),
+        borderRadius: BorderRadius.circular(NileRadius.pill),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.visibility, size: 12, color: Colors.white),
+          const SizedBox(width: 4),
+          Text(
+            '$count',
+            style: NileTextStyles.caption().copyWith(
+              color: Colors.white,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Empty / error states ──────────────────────────────────────────────────────
+
+/// One-line header above the cold-start starter section. In zero-follow mode
+/// it explains why the fill is shown and can be dismissed; in thin-feed mode
+/// it's a plain "Suggested for you" divider.
+class _StarterHeader extends StatelessWidget {
+  final String label;
+  final VoidCallback? onDismiss;
+  const _StarterHeader({required this.label, this.onDismiss});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        NileSpacing.s16,
+        NileSpacing.s16,
+        NileSpacing.s8,
+        0,
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.auto_awesome, size: 16, color: NileColors.volt),
+          const SizedBox(width: 8),
+          Expanded(child: Text(label, style: NileTextStyles.labelMd())),
+          if (onDismiss != null)
+            IconButton(
+              onPressed: onDismiss,
+              iconSize: 18,
+              visualDensity: VisualDensity.compact,
+              color: NileColors.txtTertiary,
+              tooltip: 'Dismiss',
+              icon: const Icon(Icons.close),
+            ),
+        ],
+      ),
+    );
   }
 }
 
 class _EmptyFollows extends StatelessWidget {
-  const _EmptyFollows();
+  const _EmptyFollows({this.onFindPeople});
+  final VoidCallback? onFindPeople;
 
   @override
-  Widget build(BuildContext context) => const _StateView(
+  Widget build(BuildContext context) => NileEmptyState(
     icon: Icons.person_add_outlined,
     title: 'Follow creators',
-    body: 'Events from people you follow will appear here.',
+    body: 'Follow people to fill your feed with their events and posts.',
+    actionLabel: onFindPeople == null ? null : 'Find people to follow',
+    onAction: onFindPeople,
   );
 }
 
 class _EmptyFeed extends StatelessWidget {
-  const _EmptyFeed();
+  const _EmptyFeed({this.onFindPeople});
+  final VoidCallback? onFindPeople;
 
   @override
-  Widget build(BuildContext context) => const _StateView(
+  Widget build(BuildContext context) => NileEmptyState(
     icon: Icons.live_tv,
     title: 'No events right now',
-    body: 'Check back later when the people you follow go live.',
+    body: 'Check back later, or find more creators to follow.',
+    actionLabel: onFindPeople == null ? null : 'Discover creators',
+    onAction: onFindPeople,
   );
 }
 

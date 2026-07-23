@@ -9,6 +9,7 @@ class Comment {
   final String authorId;
   final String authorUsername;
   final String? authorAvatarUrl;
+  final bool authorIsOfficial;
   final String body;
   final DateTime createdAt;
   final DateTime updatedAt;
@@ -19,6 +20,7 @@ class Comment {
     required this.authorId,
     required this.authorUsername,
     this.authorAvatarUrl,
+    this.authorIsOfficial = false,
     required this.body,
     required this.createdAt,
     required this.updatedAt,
@@ -32,6 +34,7 @@ class Comment {
       authorId: json['user_id'] as String,
       authorUsername: profile['username'] as String? ?? 'unknown',
       authorAvatarUrl: profile['avatar_url'] as String?,
+      authorIsOfficial: profile['is_official'] as bool? ?? false,
       body: json['body'] as String,
       createdAt: DateTime.parse(json['created_at'] as String),
       updatedAt: DateTime.parse(json['updated_at'] as String),
@@ -43,7 +46,7 @@ class Comment {
 
 class CommentService {
   static const _select =
-      '*, profiles!post_comments_user_id_fkey(username, avatar_url)';
+      '*, profiles!post_comments_user_id_fkey(username, avatar_url, is_official)';
 
   /// Comments on a post, newest first. Keyset-paged by created_at via [cursor].
   static Future<Paged<Comment>> listForPost(

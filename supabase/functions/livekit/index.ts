@@ -33,6 +33,7 @@
 
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { corsHeaders as corsHeadersFor } from "../_shared/cors.ts";
 import {
   AccessToken,
   EgressClient,
@@ -65,11 +66,6 @@ const REPLAYS_S3_REGION = Deno.env.get("REPLAYS_S3_REGION") ?? "us-east-1";
 const REPLAYS_S3_ACCESS_KEY = Deno.env.get("REPLAYS_S3_ACCESS_KEY") ?? "";
 const REPLAYS_S3_SECRET_KEY = Deno.env.get("REPLAYS_S3_SECRET_KEY") ?? "";
 const REPLAYS_BUCKET = "replays";
-
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-};
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -128,6 +124,13 @@ function log(level: "info" | "warn" | "error", fields: Record<string, unknown>) 
 // ── Handler ───────────────────────────────────────────────────────────────────
 
 serve(async (req) => {
+  // Per-request CORS (fix #4): allowlisted origins only — see _shared/cors.ts.
+  const corsHeaders = corsHeadersFor(req);
+  const json = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
   const ctx: ReqCtx = { reqId: crypto.randomUUID().slice(0, 8) };
@@ -789,9 +792,3 @@ async function viewerToken(body: any, userId: string, admin: any): Promise<Respo
   return json({ mode: "webrtc", token, wsUrl: LIVEKIT_URL });
 }
 
-function json(body: unknown, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-  });
-}

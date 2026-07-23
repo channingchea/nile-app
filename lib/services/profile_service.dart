@@ -30,6 +30,9 @@ class UserProfile {
   final DateTime createdAt;
   final DateTime? onboardedAt;
 
+  /// Official Nile account (house account). Badge-only; never owner-writable.
+  final bool isOfficial;
+
   const UserProfile({
     required this.id,
     required this.username,
@@ -42,6 +45,7 @@ class UserProfile {
     this.stripeAccountId,
     required this.createdAt,
     this.onboardedAt,
+    this.isOfficial = false,
   });
 
   /// True once the host has begun Stripe Connect onboarding. Live
@@ -64,6 +68,7 @@ class UserProfile {
       onboardedAt: map['onboarded_at'] != null
           ? DateTime.parse(map['onboarded_at'] as String)
           : null,
+      isOfficial: map['is_official'] as bool? ?? false,
     );
   }
 
@@ -89,6 +94,7 @@ class UserProfile {
       stripeAccountId: stripeAccountId ?? this.stripeAccountId,
       createdAt: createdAt,
       onboardedAt: onboardedAt,
+      isOfficial: isOfficial,
     );
   }
 }

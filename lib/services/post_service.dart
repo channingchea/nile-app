@@ -13,6 +13,7 @@ class Post {
   final String authorId; // maps to posts.user_id
   final String authorUsername;
   final String? authorAvatarUrl;
+  final bool authorIsOfficial;
   final String? content; // maps to posts.content (the caption/body)
   final String? imageUrl; // first image — mirror of imageUrls[0], legacy compat
   final List<String> imageUrls; // up to 5; image_url remains the first
@@ -36,6 +37,7 @@ class Post {
     required this.authorId,
     required this.authorUsername,
     this.authorAvatarUrl,
+    this.authorIsOfficial = false,
     this.content,
     this.imageUrl,
     this.imageUrls = const [],
@@ -75,6 +77,7 @@ class Post {
       authorId: authorId,
       authorUsername: authorUsername,
       authorAvatarUrl: authorAvatarUrl,
+      authorIsOfficial: authorIsOfficial,
       content: content,
       imageUrl: imageUrl,
       imageUrls: imageUrls,
@@ -100,6 +103,7 @@ class Post {
       authorId: json['user_id'] as String,
       authorUsername: profile['username'] as String? ?? 'unknown',
       authorAvatarUrl: profile['avatar_url'] as String?,
+      authorIsOfficial: profile['is_official'] as bool? ?? false,
       content: json['content'] as String?,
       imageUrl: json['image_url'] as String?,
       imageUrls:
@@ -122,7 +126,7 @@ class Post {
 
 class PostService {
   static const _postSelect =
-      '*, profiles!posts_user_id_fkey(username, avatar_url)';
+      '*, profiles!posts_user_id_fkey(username, avatar_url, is_official)';
 
   /// Posts from followed authors, newest first. Keyset-paged by created_at
   /// via [cursor] (the previous page's last created_at).

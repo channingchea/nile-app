@@ -8,6 +8,7 @@ import '../theme.dart';
 import '../widgets/empty_state.dart';
 import '../widgets/nile_glass_nav_bar.dart';
 import '../widgets/offline_banner.dart';
+import '../widgets/official_badge.dart';
 import 'conversation_screen.dart';
 
 class MessagesScreen extends StatefulWidget {
@@ -236,7 +237,7 @@ class _ConversationTile extends StatelessWidget {
                 children: [
                   Row(
                     children: [
-                      Expanded(
+                      Flexible(
                         child: Text(
                           '@${conv.otherUsername}',
                           style: NileTextStyles.bodyMd().copyWith(
@@ -250,6 +251,11 @@ class _ConversationTile extends StatelessWidget {
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
+                      if (conv.otherIsOfficial) ...[
+                        const SizedBox(width: 4),
+                        const OfficialBadge(size: 13),
+                      ],
+                      const Spacer(),
                       Text(
                         _timeAgo(conv.lastMessageAt),
                         style: NileTextStyles.caption(),

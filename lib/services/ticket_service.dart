@@ -111,7 +111,7 @@ class TicketService {
         .from('tickets')
         .select(
           '*, events!tickets_event_id_fkey('
-          '*, profiles!events_host_id_fkey(username, avatar_url))',
+          '*, profiles!events_host_id_fkey(username, avatar_url, is_official))',
         );
     if (cursor != null) b = b.lt('created_at', cursor);
     final rows = await b.order('created_at', ascending: false).limit(kPageSize);

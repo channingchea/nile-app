@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import '../services/human_check.dart';
 import '../services/supabase_client.dart';
 import '../theme.dart';
 import 'auth/reset_password_screen.dart' show NilePasswordField;
@@ -41,9 +42,11 @@ class _ChangePasswordScreenState extends State<ChangePasswordScreen> {
     setState(() => _loading = true);
     try {
       // Re-authenticate to confirm the current password is correct.
+      // captchaToken required once Supabase captcha protection is enabled.
       await supabase.auth.signInWithPassword(
         email: email,
         password: _currentCtrl.text,
+        captchaToken: await HumanCheck.captchaToken(),
       );
       await supabase.auth.updateUser(UserAttributes(password: _passCtrl.text));
       if (!mounted) return;

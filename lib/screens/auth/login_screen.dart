@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import '../../services/human_check.dart';
 import '../../services/supabase_client.dart';
 import '../../theme.dart';
 import '../../widgets/nile_logo.dart';
@@ -37,6 +38,9 @@ class _LoginScreenState extends State<LoginScreen> {
       await supabase.auth.signInWithPassword(
         email: _emailCtrl.text.trim(),
         password: _passCtrl.text,
+        // Required once Supabase captcha protection is enabled — it applies
+        // to sign-in as well as sign-up.
+        captchaToken: await HumanCheck.captchaToken(),
       );
       // _AuthGate in main.dart handles the navigation automatically
       // once the auth state stream emits a session.

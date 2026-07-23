@@ -13,9 +13,9 @@ import '../services/report_service.dart';
 import '../services/repost_service.dart';
 import '../theme.dart';
 import '../widgets/event_cover_pill.dart';
-import '../widgets/nile_glass_app_bar.dart';
 import '../widgets/event_link_card.dart';
 import '../widgets/nile_glass_nav_bar.dart';
+import '../widgets/official_badge.dart';
 import '../widgets/nile_skeleton.dart';
 import '../widgets/post_image_carousel.dart';
 import '../widgets/share_to_sheet.dart';
@@ -633,56 +633,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
     return Scaffold(
       backgroundColor: NileColors.bgPage,
-      // Content scrolls behind the translucent glass app bar.
-      extendBodyBehindAppBar: true,
-      // AppBar sits above the cover — keep it minimal.
-      appBar: NileGlassBar.appBar(
-        title: Text('@${p.username}', style: NileTextStyles.headingSm()),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            tooltip: 'Refresh',
-            onPressed: _load,
-          ),
-          if (_isOwnProfile)
-            IconButton(
-              icon: const Icon(Icons.settings_outlined),
-              tooltip: 'Settings',
-              onPressed: _openSettings,
-            )
-          else
-            PopupMenuButton<String>(
-              icon: const Icon(Icons.more_vert),
-              color: NileColors.bgRaised,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(NileRadius.sm),
-              ),
-              onSelected: (v) {
-                switch (v) {
-                  case 'report':
-                    _reportUser();
-                  case 'block':
-                    _blockUser();
-                  case 'unblock':
-                    _unblockUser();
-                }
-              },
-              itemBuilder: (_) => [
-                const PopupMenuItem(value: 'report', child: Text('Report')),
-                if (_isBlocked)
-                  const PopupMenuItem(value: 'unblock', child: Text('Unblock'))
-                else
-                  PopupMenuItem(
-                    value: 'block',
-                    child: Text(
-                      'Block',
-                      style: TextStyle(color: NileColors.error),
-                    ),
-                  ),
-              ],
-            ),
-        ],
-      ),
+      // No app bar — the cover photo is the top of the page. The settings /
+      // menu action floats over the cover's top corner (see _buildHeader).
       // Create "+" now lives in the glass nav bar (see home_screen.dart),
       // so the profile no longer renders its own FAB.
       body: NileMaxWidth(
@@ -692,13 +644,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
           child: CustomScrollView(
             controller: _scroll,
             slivers: [
-              // Spacer so the cover starts below the glass bar (not cut by it),
-              // matching the home feed; content still scrolls up behind it.
-              SliverToBoxAdapter(
-                child: SizedBox(
-                  height: MediaQuery.of(context).padding.top + kToolbarHeight,
-                ),
-              ),
               SliverToBoxAdapter(child: _buildHeader(p)),
               SliverToBoxAdapter(child: _buildTabToggle()),
               if (_isOwnProfile && _tab == _ProfileTab.drafts)
@@ -714,14 +659,73 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
   // ─── Header ───────────────────────────────────────────────────────────────
 
+  /// Floating action over the cover's top corner: settings (own profile) or a
+  /// report/block menu (other profiles). Dark disc keeps it legible on any cover.
+  Widget _buildCoverActions() {
+    final bg = Colors.black.withValues(alpha: 0.35);
+    if (_isOwnProfile) {
+      return Material(
+        color: bg,
+        shape: const CircleBorder(),
+        child: IconButton(
+          icon: const Icon(Icons.settings_outlined, color: Colors.white),
+          tooltip: 'Settings',
+          onPressed: _openSettings,
+        ),
+      );
+    }
+    return Material(
+      color: bg,
+      shape: const CircleBorder(),
+      child: PopupMenuButton<String>(
+        icon: const Icon(Icons.more_vert, color: Colors.white),
+        color: NileColors.bgRaised,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(NileRadius.sm),
+        ),
+        onSelected: (v) {
+          switch (v) {
+            case 'report':
+              _reportUser();
+            case 'block':
+              _blockUser();
+            case 'unblock':
+              _unblockUser();
+          }
+        },
+        itemBuilder: (_) => [
+          const PopupMenuItem(value: 'report', child: Text('Report')),
+          if (_isBlocked)
+            const PopupMenuItem(value: 'unblock', child: Text('Unblock'))
+          else
+            PopupMenuItem(
+              value: 'block',
+              child: Text('Block', style: TextStyle(color: NileColors.error)),
+            ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildHeader(UserProfile p) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         // ── Cover photo ─────────────────────────────────────────────────────
+        // The cover is the top of the page (no app bar). Settings / menu floats
+        // over its top corner, pushed clear of the status bar.
         // The avatar is rendered AFTER the cover (in the row below, pulled up),
         // so the cover never overlaps the avatar.
-        CoverPhoto(url: p.coverUrl, height: _coverHeight),
+        Stack(
+          children: [
+            CoverPhoto(url: p.coverUrl, height: _coverHeight),
+            Positioned(
+              top: MediaQuery.of(context).padding.top + NileSpacing.s8,
+              right: NileSpacing.s8,
+              child: _buildCoverActions(),
+            ),
+          ],
+        ),
 
         // ── Avatar + primary action, straddling the cover's bottom edge ─────
         Transform.translate(
@@ -777,12 +781,31 @@ class _ProfileScreenState extends State<ProfileScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  p.displayName,
-                  style: NileTextStyles.displayMd(),
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                ),
+                if (p.isOfficial)
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Flexible(
+                        child: Text(
+                          p.displayName,
+                          style: NileTextStyles.displayMd(),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      const Padding(
+                        padding: EdgeInsets.only(left: NileSpacing.s6, top: 6),
+                        child: OfficialBadge(size: 22),
+                      ),
+                    ],
+                  )
+                else
+                  Text(
+                    p.displayName,
+                    style: NileTextStyles.displayMd(),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
                 const SizedBox(height: 2),
                 Text(
                   '@${p.username}',
@@ -1413,10 +1436,20 @@ class _ProfilePostCard extends StatelessWidget {
                   ),
                   const SizedBox(width: 8),
                   Expanded(
-                    child: Text(
-                      '@${post.authorUsername}',
-                      style: NileTextStyles.bodySm(),
-                      overflow: TextOverflow.ellipsis,
+                    child: Row(
+                      children: [
+                        Flexible(
+                          child: Text(
+                            '@${post.authorUsername}',
+                            style: NileTextStyles.bodySm(),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        if (post.authorIsOfficial) ...[
+                          const SizedBox(width: 4),
+                          const OfficialBadge(size: 13),
+                        ],
+                      ],
                     ),
                   ),
                   Text(

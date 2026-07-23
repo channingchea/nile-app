@@ -17,6 +17,7 @@ import '../services/supabase_client.dart';
 import '../services/ticket_service.dart';
 import '../theme.dart';
 import '../widgets/live_badge.dart';
+import '../widgets/official_badge.dart';
 import '../widgets/rolling_number.dart';
 import 'attendee_list_screen.dart';
 import 'audio_screen.dart';
@@ -306,6 +307,7 @@ class _EventDetailScreenState extends State<EventDetailScreen>
           'profiles': {
             'username': _event!.hostUsername,
             'avatar_url': _event!.hostAvatarUrl,
+            'is_official': _event!.hostIsOfficial,
           },
         };
         setState(() => _event = Event.fromJson(merged));
@@ -884,7 +886,21 @@ class _HostRow extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text('@${event.hostUsername}', style: NileTextStyles.labelMd()),
+                Row(
+                  children: [
+                    Flexible(
+                      child: Text(
+                        '@${event.hostUsername}',
+                        style: NileTextStyles.labelMd(),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    if (event.hostIsOfficial) ...[
+                      const SizedBox(width: 4),
+                      const OfficialBadge(size: 15),
+                    ],
+                  ],
+                ),
                 Text('Host', style: NileTextStyles.caption()),
               ],
             ),

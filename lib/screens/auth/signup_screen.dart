@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import '../../services/human_check.dart';
 import '../../services/supabase_client.dart';
 import '../../theme.dart';
 import '../../widgets/nile_logo.dart';
@@ -40,14 +41,22 @@ class _SignupScreenState extends State<SignupScreen> {
     setState(() => _loading = true);
 
     try {
+      // Bot protection: invisible captcha + device attestation (both null
+      // until configured — see human_check.dart).
+      final captcha = await HumanCheck.captchaToken();
+      final attestation = await HumanCheck.attestationToken();
+
       final response = await supabase.auth.signUp(
         email: _emailCtrl.text.trim(),
         password: _passCtrl.text,
+        captchaToken: captcha,
         data: {
           // Passed to raw_user_meta_data and picked up by the
           // handle_new_user trigger to populate profiles.
           'username': _usernameCtrl.text.trim().toLowerCase(),
           'display_name': _nameCtrl.text.trim(),
+          // Verified (and stripped) by the before-user-created auth hook.
+          'app_check_token': ?attestation,
         },
       );
 

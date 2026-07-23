@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:firebase_app_check/firebase_app_check.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/foundation.dart'
     show kDebugMode, kIsWeb, defaultTargetPlatform, TargetPlatform;
@@ -67,6 +68,20 @@ Future<void> _bootstrap() async {
             )
           : null,
     );
+
+    // Device attestation (bot protection on signup — see human_check.dart).
+    // Debug builds use the debug provider; register its printed token under
+    // Firebase console → App Check → Apps → Manage debug tokens. Web is
+    // skipped until a reCAPTCHA v3 key is configured there.
+    if (!kIsWeb) {
+      await FirebaseAppCheck.instance.activate(
+        androidProvider:
+            kDebugMode ? AndroidProvider.debug : AndroidProvider.playIntegrity,
+        appleProvider: kDebugMode
+            ? AppleProvider.debug
+            : AppleProvider.appAttestWithDeviceCheckFallback,
+      );
+    }
   }
 
   // Load the saved theme mode before the first frame paints (no flash).

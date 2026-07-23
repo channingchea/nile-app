@@ -19,6 +19,7 @@ class Conversation {
   final String otherUserId;
   final String otherUsername;
   final String? otherAvatarUrl;
+  final bool otherIsOfficial;
   final int unreadCount;
   final String? lastMessageContent;
 
@@ -34,6 +35,7 @@ class Conversation {
     required this.otherUserId,
     required this.otherUsername,
     this.otherAvatarUrl,
+    this.otherIsOfficial = false,
     this.unreadCount = 0,
     this.lastMessageContent,
     this.isLive = false,
@@ -63,6 +65,7 @@ class Conversation {
       otherUserId: isA ? bId : aId,
       otherUsername: otherProfile['username'] as String? ?? 'user',
       otherAvatarUrl: otherProfile['avatar_url'] as String?,
+      otherIsOfficial: otherProfile['is_official'] as bool? ?? false,
       unreadCount: unreadCount,
       lastMessageContent: lastMessageContent,
     );
@@ -192,16 +195,16 @@ class Message {
 
 class MessageService {
   static const _convSelect =
-      '*, profile_a:profiles!participant_a(username, avatar_url), '
-      'profile_b:profiles!participant_b(username, avatar_url)';
+      '*, profile_a:profiles!participant_a(username, avatar_url, is_official), '
+      'profile_b:profiles!participant_b(username, avatar_url, is_official)';
 
   // Joins the shared post/event (+ author/host) for rich card rendering, plus
   // this message's reactions (one row per user) for chip rendering.
   static const _msgSelect =
       '*, shared_post:posts!messages_shared_post_id_fkey('
-      '*, profiles!posts_user_id_fkey(username, avatar_url)), '
+      '*, profiles!posts_user_id_fkey(username, avatar_url, is_official)), '
       'shared_event:events!messages_shared_event_id_fkey('
-      '*, profiles!events_host_id_fkey(username, avatar_url)), '
+      '*, profiles!events_host_id_fkey(username, avatar_url, is_official)), '
       'message_reactions(user_id, emoji)';
 
   static String _requireUid() {
@@ -233,6 +236,7 @@ class MessageService {
       otherUserId: r['other_user_id'] as String,
       otherUsername: r['other_username'] as String? ?? 'user',
       otherAvatarUrl: r['other_avatar_url'] as String?,
+      otherIsOfficial: r['other_is_official'] as bool? ?? false,
       unreadCount: (r['unread_count'] as num?)?.toInt() ?? 0,
       lastMessageContent: r['last_message_content'] as String?,
       isLive: r['is_live'] as bool? ?? false,
@@ -361,9 +365,36 @@ class MessageService {
     return Message.fromJson(row);
   }
 
-  /// Uploads [bytes] to the public 'messages' bucket under the sender's folder
-  /// and sends an image message in [conversationId]. [caption] is the body
-  /// (the content CHECK requires 1..1000 chars), defaulting to 'Photo'.
+  /// Signed-URL cache for DM images. The 'messages' bucket is private
+  /// (security fix #3): stored image_url values are just identifiers, and the
+  /// dm-image-url edge function returns a ~1h signed URL after verifying the
+  /// caller participates in the message's conversation. Cached for 50 min so
+  /// a scroll session doesn't re-invoke per rebuild.
+  static final Map<String, ({String url, DateTime expires})> _signedImageCache =
+      {};
+
+  /// Returns a short-lived signed URL for the image attached to [messageId].
+  static Future<String> getSignedImageUrl(String messageId) => guard(() async {
+    final hit = _signedImageCache[messageId];
+    if (hit != null && hit.expires.isAfter(DateTime.now())) return hit.url;
+    final res = await supabase.functions.invoke(
+      'dm-image-url',
+      body: {'message_id': messageId},
+    );
+    final url = (res.data as Map)['url'] as String?;
+    if (url == null) throw StateError('No signed URL returned');
+    _signedImageCache[messageId] = (
+      url: url,
+      expires: DateTime.now().add(const Duration(minutes: 50)),
+    );
+    return url;
+  });
+
+  /// Uploads [bytes] to the private 'messages' bucket under the sender's
+  /// folder and sends an image message in [conversationId]. The stored
+  /// image_url is a public-style URL used as a path identifier — rendering
+  /// goes through [getSignedImageUrl]. [caption] is the body (the content
+  /// CHECK requires 1..1000 chars), defaulting to 'Photo'.
   static Future<Message> sendImageMessage(
     String conversationId,
     Uint8List bytes, {

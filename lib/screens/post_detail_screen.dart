@@ -8,6 +8,7 @@ import '../services/report_service.dart';
 import '../theme.dart';
 import '../widgets/event_link_card.dart';
 import '../widgets/like_button.dart';
+import '../widgets/official_badge.dart';
 import '../widgets/post_image_carousel.dart';
 import 'profile_screen.dart';
 import 'widgets/load_more_footer.dart';
@@ -374,10 +375,20 @@ class _PostBody extends StatelessWidget {
                   ),
                   const SizedBox(width: 8),
                   Expanded(
-                    child: Text(
-                      '@${post.authorUsername}',
-                      style: NileTextStyles.bodySm(),
-                      overflow: TextOverflow.ellipsis,
+                    child: Row(
+                      children: [
+                        Flexible(
+                          child: Text(
+                            '@${post.authorUsername}',
+                            style: NileTextStyles.bodySm(),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        if (post.authorIsOfficial) ...[
+                          const SizedBox(width: 4),
+                          const OfficialBadge(size: 13),
+                        ],
+                      ],
                     ),
                   ),
                   Text(
@@ -542,12 +553,19 @@ class _CommentTile extends StatelessWidget {
               children: [
                 Row(
                   children: [
-                    Text(
-                      '@${comment.authorUsername}',
-                      style: NileTextStyles.labelSm().copyWith(
-                        letterSpacing: 0,
+                    Flexible(
+                      child: Text(
+                        '@${comment.authorUsername}',
+                        style: NileTextStyles.labelSm().copyWith(
+                          letterSpacing: 0,
+                        ),
+                        overflow: TextOverflow.ellipsis,
                       ),
                     ),
+                    if (comment.authorIsOfficial) ...[
+                      const SizedBox(width: 4),
+                      const OfficialBadge(size: 12),
+                    ],
                     const SizedBox(width: 6),
                     Text(
                       _timeAgo(comment.createdAt),

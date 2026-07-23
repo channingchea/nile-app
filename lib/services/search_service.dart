@@ -101,7 +101,7 @@ class SearchService {
     if (q.isEmpty) return Paged.empty();
     var b = supabase
         .from('posts')
-        .select('*, profiles!posts_user_id_fkey(username, avatar_url)')
+        .select('*, profiles!posts_user_id_fkey(username, avatar_url, is_official)')
         .ilike('content', '%$q%');
     final myId = supabase.auth.currentUser?.id;
     if (myId != null) b = b.neq('user_id', myId);
@@ -137,7 +137,7 @@ class SearchService {
     final pattern = '%$q%';
     var b = supabase
         .from('events')
-        .select('*, profiles!events_host_id_fkey(username, avatar_url)')
+        .select('*, profiles!events_host_id_fkey(username, avatar_url, is_official)')
         .or('title.ilike.$pattern,description.ilike.$pattern')
         .neq('status', 'ended')
         .neq('status', 'draft');
@@ -154,7 +154,7 @@ class SearchService {
   static Future<Paged<Event>> discoverEvents({String? cursor}) async {
     var b = supabase
         .from('events')
-        .select('*, profiles!events_host_id_fkey(username, avatar_url)')
+        .select('*, profiles!events_host_id_fkey(username, avatar_url, is_official)')
         .neq('status', 'ended')
         .neq('status', 'draft');
     final myId = supabase.auth.currentUser?.id;
@@ -177,7 +177,7 @@ class SearchService {
     if (ids.isEmpty) return [];
     final rows = await supabase
         .from('posts')
-        .select('*, profiles!posts_user_id_fkey(username, avatar_url)')
+        .select('*, profiles!posts_user_id_fkey(username, avatar_url, is_official)')
         .inFilter('id', ids);
     final posts = (rows as List)
         .map((r) => Post.fromJson(r as Map<String, dynamic>))
@@ -193,7 +193,7 @@ class SearchService {
     if (ids.isEmpty) return [];
     final rows = await supabase
         .from('events')
-        .select('*, profiles!events_host_id_fkey(username, avatar_url)')
+        .select('*, profiles!events_host_id_fkey(username, avatar_url, is_official)')
         .inFilter('id', ids)
         .neq('status', 'draft');
     final events = (rows as List)
@@ -211,7 +211,7 @@ class SearchService {
     if (ids.isEmpty) return [];
     final rows = await supabase
         .from('events')
-        .select('*, profiles!events_host_id_fkey(username, avatar_url)')
+        .select('*, profiles!events_host_id_fkey(username, avatar_url, is_official)')
         .inFilter('id', ids)
         .neq('status', 'draft');
     final events = (rows as List)

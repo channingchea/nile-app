@@ -134,7 +134,7 @@ class AdService {
     if (ids.isEmpty) return [];
     final rows = await supabase
         .from('events')
-        .select('*, profiles!events_host_id_fkey(username, avatar_url)')
+        .select('*, profiles!events_host_id_fkey(username, avatar_url, is_official)')
         .inFilter('id', ids);
     final events = (rows as List)
         .map((r) => Event.fromJson(r as Map<String, dynamic>))
@@ -146,7 +146,7 @@ class AdService {
     if (ids.isEmpty) return [];
     final rows = await supabase
         .from('posts')
-        .select('*, profiles!posts_user_id_fkey(username, avatar_url)')
+        .select('*, profiles!posts_user_id_fkey(username, avatar_url, is_official)')
         .inFilter('id', ids);
     final posts = (rows as List)
         .map((r) => Post.fromJson(r as Map<String, dynamic>))

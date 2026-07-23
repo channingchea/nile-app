@@ -1,5 +1,6 @@
 import 'dart:ui' show ImageFilter;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../theme.dart';
 
 /// A floating, translucent "Liquid Glass" bottom navigation bar.
@@ -41,6 +42,13 @@ class NileGlassNavBar extends StatelessWidget {
   /// Add to it the view's own MediaQuery bottom padding (safe area).
   static double reservedHeight = _barHeight + _vMargin * 2;
 
+  /// Route selection through here so a different tab triggers a light haptic
+  /// (mobile only; a no-op on web/desktop) before notifying the host.
+  void _select(int index) {
+    if (index != selectedIndex) HapticFeedback.lightImpact();
+    onDestinationSelected(index);
+  }
+
   @override
   Widget build(BuildContext context) {
     final bottomInset = MediaQuery.of(context).padding.bottom;
@@ -69,14 +77,15 @@ class NileGlassNavBar extends StatelessWidget {
             ],
           ),
           child: Row(
+            // Content-sized tabs spread across the pill: the selected tab is
+            // wider (icon + label) so neighbours slide as selection moves.
+            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
             children: [
               for (final (i, d) in destinations.indexed)
-                Expanded(
-                  child: _GlassTab(
-                    destination: d,
-                    selected: i == selectedIndex,
-                    onTap: () => onDestinationSelected(i),
-                  ),
+                _GlassTab(
+                  destination: d,
+                  selected: i == selectedIndex,
+                  onTap: () => _select(i),
                 ),
             ],
           ),
@@ -145,44 +154,71 @@ class _GlassTab extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // Mirrors discover_screen's tab colors: dark/bold text on selection,
-    // volt reserved for the accent pill behind the tab — not the icon or label.
+    // Icon inherits txtPrimary when active (sitting on the volt pill), muted
+    // txtSecondary otherwise. Volt stays the pill accent — never the glyph.
     final color = selected ? NileColors.txtPrimary : NileColors.txtSecondary;
     return Semantics(
       button: true,
       selected: selected,
+      // Announce the label even while it's visually hidden on unselected tabs.
       label: destination.label,
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(NileRadius.lg),
+        borderRadius: BorderRadius.circular(NileRadius.pill),
         child: AnimatedContainer(
-          duration: NileMotion.fast,
+          duration: NileMotion.base,
           curve: NileMotion.curve,
-          margin: const EdgeInsets.symmetric(
-            horizontal: NileSpacing.s6,
+          padding: EdgeInsets.symmetric(
+            horizontal: selected ? NileSpacing.s16 : NileSpacing.s12,
             vertical: NileSpacing.s8,
           ),
           decoration: BoxDecoration(
-            // Soft volt pill behind the active tab, echoing the old indicator.
+            // Volt pill hugs the active tab and grows with it as the label
+            // reveals; transparent (icon-only) when unselected.
             color: selected
                 ? NileColors.volt.withValues(alpha: 0.15)
                 : Colors.transparent,
-            borderRadius: BorderRadius.circular(NileRadius.lg),
+            borderRadius: BorderRadius.circular(NileRadius.pill),
           ),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
             children: [
               Icon(
                 selected ? destination.selectedIcon : destination.icon,
                 color: color,
                 size: 24,
               ),
-              const SizedBox(height: NileSpacing.s2),
-              Text(
-                destination.label,
-                style: NileTextStyles.caption().copyWith(
-                  color: color,
-                  fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
+              // Label reveal: its width animates 0 → full (so the pill grows and
+              // neighbours slide over) while the text fades in. Collapsed and
+              // faded out when unselected.
+              ClipRect(
+                child: AnimatedAlign(
+                  duration: NileMotion.base,
+                  curve: NileMotion.curve,
+                  alignment: Alignment.centerLeft,
+                  widthFactor: selected ? 1.0 : 0.0,
+                  child: AnimatedOpacity(
+                    duration: NileMotion.base,
+                    curve: NileMotion.curve,
+                    opacity: selected ? 1.0 : 0.0,
+                    child: Padding(
+                      padding: const EdgeInsets.only(left: NileSpacing.s6),
+                      child: ConstrainedBox(
+                        // Cap so an extreme text scale can't blow out the bar.
+                        constraints: const BoxConstraints(maxWidth: 120),
+                        child: Text(
+                          destination.label,
+                          maxLines: 1,
+                          softWrap: false,
+                          overflow: TextOverflow.ellipsis,
+                          style: NileTextStyles.caption().copyWith(
+                            color: color,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
                 ),
               ),
             ],

@@ -1,6 +1,7 @@
 import 'dart:typed_data';
 
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'block_service.dart';
 import 'event_repost_service.dart';
 import 'like_service.dart';
 import 'net.dart';
@@ -29,6 +30,7 @@ class Event {
   final String hostId;
   final String hostUsername;
   final String? hostAvatarUrl;
+  final bool hostIsOfficial;
   final String title;
   final String? description;
   final String status; // 'scheduled' | 'live' | 'ended'
@@ -59,6 +61,7 @@ class Event {
     required this.hostId,
     required this.hostUsername,
     this.hostAvatarUrl,
+    this.hostIsOfficial = false,
     required this.title,
     this.description,
     required this.status,
@@ -93,6 +96,7 @@ class Event {
       hostId: hostId,
       hostUsername: hostUsername,
       hostAvatarUrl: hostAvatarUrl,
+      hostIsOfficial: hostIsOfficial,
       title: title,
       description: description,
       status: status,
@@ -135,6 +139,7 @@ class Event {
       hostId: json['host_id'] as String,
       hostUsername: profile['username'] as String? ?? 'unknown',
       hostAvatarUrl: profile['avatar_url'] as String?,
+      hostIsOfficial: profile['is_official'] as bool? ?? false,
       title: json['title'] as String,
       description: json['description'] as String?,
       status: json['status'] as String,
@@ -169,6 +174,50 @@ class Event {
 // ── Service ───────────────────────────────────────────────────────────────────
 
 class EventService {
+  /// PostgREST value list for a `not(col,'in',...)` filter, or null if empty.
+  static String? _notInList(List<String> ids) =>
+      ids.isEmpty ? null : '(${ids.join(',')})';
+
+  /// Live events across the whole platform (not follow-scoped), most-watched
+  /// first. Powers the zero-follow starter feed and the Live Now rail.
+  /// Excludes the caller's own events and blocked hosts.
+  static Future<List<Event>> getLiveNow({int limit = 20}) => guard(() async {
+    var b = supabase
+        .from('events')
+        .select('*, profiles!events_host_id_fkey(username, avatar_url, is_official)')
+        .eq('status', 'live');
+    final myId = supabase.auth.currentUser?.id;
+    if (myId != null) b = b.neq('host_id', myId);
+    final blocked = _notInList(await BlockService.blockedIds());
+    if (blocked != null) b = b.not('host_id', 'in', blocked);
+    final rows = await b.order('viewer_count', ascending: false).limit(limit);
+    return (rows as List)
+        .map((r) => Event.fromJson(r as Map<String, dynamic>))
+        .toList();
+  });
+
+  /// Upcoming scheduled events across the platform, soonest-first — the
+  /// cold-start workhorse (scheduled shows exist before social content does).
+  /// Only future-scheduled, non-ended, non-draft events; excludes the caller
+  /// and blocked hosts.
+  static Future<List<Event>> getUpcoming({int limit = 20}) => guard(() async {
+    final nowIso = DateTime.now().toUtc().toIso8601String();
+    var b = supabase
+        .from('events')
+        .select('*, profiles!events_host_id_fkey(username, avatar_url, is_official)')
+        .neq('status', 'ended')
+        .neq('status', 'draft')
+        .gte('scheduled_at', nowIso);
+    final myId = supabase.auth.currentUser?.id;
+    if (myId != null) b = b.neq('host_id', myId);
+    final blocked = _notInList(await BlockService.blockedIds());
+    if (blocked != null) b = b.not('host_id', 'in', blocked);
+    final rows = await b.order('scheduled_at', ascending: true).limit(limit);
+    return (rows as List)
+        .map((r) => Event.fromJson(r as Map<String, dynamic>))
+        .toList();
+  });
+
   /// Feed: every event from [followingIds] that hasn't passed yet, live-first.
   ///
   /// "Passed" = status is `ended`, OR it was scheduled and the scheduled time
@@ -182,7 +231,7 @@ class EventService {
 
     var b = supabase
         .from('events')
-        .select('*, profiles!events_host_id_fkey(username, avatar_url)')
+        .select('*, profiles!events_host_id_fkey(username, avatar_url, is_official)')
         .inFilter('host_id', followingIds)
         .neq('status', 'ended')
         .neq('status', 'draft');
@@ -234,7 +283,7 @@ class EventService {
   }) async {
     var b = supabase
         .from('events')
-        .select('*, profiles!events_host_id_fkey(username, avatar_url)')
+        .select('*, profiles!events_host_id_fkey(username, avatar_url, is_official)')
         .eq('host_id', hostId)
         .neq('status', 'draft');
     if (cursor != null) b = b.lt('created_at', cursor);
@@ -262,7 +311,7 @@ class EventService {
     if (uid == null) return Paged.empty();
     var b = supabase
         .from('events')
-        .select('*, profiles!events_host_id_fkey(username, avatar_url)')
+        .select('*, profiles!events_host_id_fkey(username, avatar_url, is_official)')
         .eq('host_id', uid)
         .eq('status', 'draft');
     if (cursor != null) b = b.lt('created_at', cursor);
@@ -286,7 +335,7 @@ class EventService {
         .update({'status': 'scheduled'})
         .eq('id', eventId)
         .eq('status', 'draft')
-        .select('*, profiles!events_host_id_fkey(username, avatar_url)')
+        .select('*, profiles!events_host_id_fkey(username, avatar_url, is_official)')
         .single();
     return Event.fromJson(row);
   }
@@ -330,7 +379,7 @@ class EventService {
           'ticket_limit': ?ticketLimit,
           'camera_count': ?cameraCount,
         })
-        .select('*, profiles!events_host_id_fkey(username, avatar_url)')
+        .select('*, profiles!events_host_id_fkey(username, avatar_url, is_official)')
         .single();
     final event = Event.fromJson(row);
     if (topicIds != null && topicIds.isNotEmpty) {
@@ -383,7 +432,7 @@ class EventService {
     if (updates.isEmpty) {
       final row = await supabase
           .from('events')
-          .select('*, profiles!events_host_id_fkey(username, avatar_url)')
+          .select('*, profiles!events_host_id_fkey(username, avatar_url, is_official)')
           .eq('id', eventId)
           .single();
       return Event.fromJson(row);
@@ -393,7 +442,7 @@ class EventService {
         .from('events')
         .update(updates)
         .eq('id', eventId)
-        .select('*, profiles!events_host_id_fkey(username, avatar_url)')
+        .select('*, profiles!events_host_id_fkey(username, avatar_url, is_official)')
         .single();
 
     return Event.fromJson(row);
@@ -474,7 +523,7 @@ class EventService {
         .select(
           'created_at, reposter:profiles!event_reposts_user_id_fkey(username), '
           'event:events!event_reposts_event_id_fkey('
-          '*, profiles!events_host_id_fkey(username, avatar_url))',
+          '*, profiles!events_host_id_fkey(username, avatar_url, is_official))',
         )
         .inFilter('user_id', reposterIds)
         .order('created_at', ascending: false)
@@ -500,7 +549,7 @@ class EventService {
   static Future<Event?> fetchById(String eventId) async {
     final rows = await supabase
         .from('events')
-        .select('*, profiles!events_host_id_fkey(username, avatar_url)')
+        .select('*, profiles!events_host_id_fkey(username, avatar_url, is_official)')
         .eq('id', eventId)
         .limit(1);
     final list = rows as List;

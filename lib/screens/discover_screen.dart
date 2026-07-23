@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../services/event_service.dart';
+import '../services/featured_service.dart';
 import '../services/follow_service.dart';
 import '../services/like_service.dart';
 import '../services/pagination.dart' show Paged;
@@ -15,7 +16,10 @@ import '../widgets/like_button.dart';
 import '../widgets/post_image_carousel.dart';
 import '../widgets/nile_glass_nav_bar.dart';
 import '../widgets/nile_skeleton.dart';
+import '../widgets/official_badge.dart';
 import '../widgets/pressable.dart';
+import 'create_event_flow.dart';
+import 'create_post_screen.dart';
 import 'event_detail_screen.dart';
 import 'post_detail_screen.dart';
 import 'profile_screen.dart';
@@ -25,7 +29,11 @@ import 'widgets/load_more_footer.dart';
 enum _Tab { posts, events, people }
 
 class DiscoverScreen extends StatefulWidget {
-  const DiscoverScreen({super.key});
+  const DiscoverScreen({super.key, this.initialTab = 0});
+
+  /// Tab to open on: 0 posts, 1 events, 2 people. Home's empty-state CTAs
+  /// remount Discover with this set so the user lands where they intended.
+  final int initialTab;
 
   @override
   State<DiscoverScreen> createState() => _DiscoverScreenState();
@@ -46,6 +54,12 @@ class _DiscoverScreenState extends State<DiscoverScreen>
   // "From your network" rails (follow-graph recs). Only shown when not searching.
   List<Post> _recPosts = [];
   List<Event> _recEvents = [];
+
+  // Editorially-curated "Featured" rails + the "Coming up" upcoming-shows rail
+  // (Phase 4). Platform-wide, loaded once on open; only shown when not searching.
+  List<Event> _featuredEvents = [];
+  List<UserProfile> _featuredCreators = [];
+  List<Event> _upcoming = [];
 
   bool _isSearching = false;
   final Map<_Tab, bool> _loading = {
@@ -78,12 +92,40 @@ class _DiscoverScreenState extends State<DiscoverScreen>
   @override
   void initState() {
     super.initState();
-    _tabs = TabController(length: 3, vsync: this)..addListener(_onTabChanged);
+    _tabs = TabController(
+      length: 3,
+      vsync: this,
+      initialIndex: widget.initialTab.clamp(0, 2),
+    )..addListener(_onTabChanged);
     for (final t in _Tab.values) {
       _scroll[t] = ScrollController()..addListener(() => _onScroll(t));
     }
     _controller.addListener(_onQueryChanged);
     _loadActive();
+    _loadFeatured();
+    _loadUpcoming();
+  }
+
+  /// Curated Featured rails (events + creators). Best-effort; hidden when empty.
+  Future<void> _loadFeatured() async {
+    try {
+      final f = await FeaturedService.getFeatured();
+      await _loadFollowStates(f.creators); // for the creator cards' follow button
+      if (!mounted) return;
+      setState(() {
+        _featuredEvents = f.events;
+        _featuredCreators = f.creators;
+      });
+    } catch (_) {}
+  }
+
+  /// "Coming up on Nile" — upcoming scheduled shows across the platform.
+  Future<void> _loadUpcoming() async {
+    try {
+      final up = await EventService.getUpcoming();
+      if (!mounted) return;
+      setState(() => _upcoming = up);
+    } catch (_) {}
   }
 
   @override
@@ -368,6 +410,24 @@ class _DiscoverScreenState extends State<DiscoverScreen>
     _focusNode.unfocus();
   }
 
+  /// Empty-state CTAs: create content, then reload the active tab so the new
+  /// item shows without a manual refresh.
+  Future<void> _createEvent() async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const CreateEventFlow()),
+    );
+    if (mounted) _loadActive();
+  }
+
+  Future<void> _createPost() async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const CreatePostScreen()),
+    );
+    if (mounted) _loadActive();
+  }
+
   @override
   Widget build(BuildContext context) {
     // bottom:false lets content scroll behind the translucent glass nav bar.
@@ -450,7 +510,11 @@ class _DiscoverScreenState extends State<DiscoverScreen>
       return _EmptyState(
         icon: _isSearching ? Icons.search_off : Icons.article_outlined,
         title: _isSearching ? 'No posts found' : 'No posts yet',
-        subtitle: _isSearching ? 'Try a different search.' : 'Check back soon.',
+        subtitle: _isSearching
+            ? 'Try a different search.'
+            : 'Be the first to share something.',
+        actionLabel: _isSearching ? null : 'Create a post',
+        onAction: _isSearching ? null : _createPost,
       );
     }
     final showRail = !_isSearching && _recPosts.isNotEmpty;
@@ -513,13 +577,47 @@ class _DiscoverScreenState extends State<DiscoverScreen>
         subtitle: _isSearching
             ? 'Try a different search.'
             : 'Be the first to go live.',
+        actionLabel: _isSearching ? null : 'Host a show',
+        onAction: _isSearching ? null : _createEvent,
       );
     }
-    final showRail = !_isSearching && _recEvents.isNotEmpty;
-    final header = showRail ? 1 : 0;
-    // Rail cards own the Hero for their events; main-list duplicates disable
-    // theirs (two live Heroes with one tag abort every flight).
-    final railIds = showRail ? {for (final e in _recEvents) e.id} : <String>{};
+    final searching = _isSearching;
+    // Stacked rails above the list: Featured → Coming up → From your network.
+    // Rail event cards never own the Hero, so the vertical list's cards below
+    // always do — that keeps a featured/upcoming event that also appears in the
+    // list from creating two Heroes with the same tag.
+    final headers = <Widget>[
+      if (!searching && _featuredEvents.isNotEmpty)
+        _RailShelf(
+          icon: Icons.star,
+          iconColor: NileColors.amber,
+          title: 'Featured',
+          subtitle: 'Picked by the Nile team',
+          children: [
+            for (final ev in _featuredEvents)
+              _RecEventCard(event: ev, onTap: () => _openEvent(ev)),
+          ],
+        ),
+      if (!searching && _upcoming.isNotEmpty)
+        _RailShelf(
+          icon: Icons.event_outlined,
+          iconColor: NileColors.volt,
+          title: 'Coming up on Nile',
+          subtitle: 'Scheduled shows, soonest first',
+          children: [
+            for (final ev in _upcoming)
+              _UpcomingEventCard(event: ev, onTap: () => _openEvent(ev)),
+          ],
+        ),
+      if (!searching && _recEvents.isNotEmpty)
+        _NetworkRail(
+          children: [
+            for (final ev in _recEvents)
+              _RecEventCard(event: ev, onTap: () => _openEvent(ev)),
+          ],
+        ),
+    ];
+    final featuredIds = {for (final e in _featuredEvents) e.id};
     return RefreshIndicator(
       color: NileColors.volt,
       backgroundColor: NileColors.bgSurface,
@@ -528,23 +626,17 @@ class _DiscoverScreenState extends State<DiscoverScreen>
         controller: _scroll[_Tab.events],
         physics: const AlwaysScrollableScrollPhysics(),
         padding: EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s12, NileSpacing.s16, NileGlassNavBar.reservedHeight + NileSpacing.s24),
-        itemCount: header + events.length + (_hasMore[_Tab.events]! ? 1 : 0),
+        itemCount:
+            headers.length + events.length + (_hasMore[_Tab.events]! ? 1 : 0),
         separatorBuilder: (_, i) =>
-            SizedBox(height: showRail && i == 0 ? 20 : 12),
+            SizedBox(height: i < headers.length ? 20 : 12),
         itemBuilder: (_, i) {
-          if (showRail && i == 0) {
-            return _NetworkRail(
-              children: [
-                for (final ev in _recEvents)
-                  _RecEventCard(event: ev, onTap: () => _openEvent(ev)),
-              ],
-            );
-          }
-          final idx = i - header;
+          if (i < headers.length) return headers[i];
+          final idx = i - headers.length;
           if (idx >= events.length) return const LoadMoreFooter();
           return _DiscoverEventCard(
             event: events[idx],
-            hero: !railIds.contains(events[idx].id),
+            featured: featuredIds.contains(events[idx].id),
             onLikeToggle: () => _toggleEventLike(idx),
             onTap: () => _openEvent(events[idx]),
           );
@@ -566,8 +658,13 @@ class _DiscoverScreenState extends State<DiscoverScreen>
         subtitle: _isSearching
             ? 'Try a different name.'
             : 'Be the first to go live.',
+        actionLabel: _isSearching ? null : 'Host a show',
+        onAction: _isSearching ? null : _createEvent,
       );
     }
+    // Featured creators rail pinned above the suggested list (index 0).
+    final showFeatured = !_isSearching && _featuredCreators.isNotEmpty;
+    final header = showFeatured ? 1 : 0;
     return RefreshIndicator(
       color: NileColors.volt,
       backgroundColor: NileColors.bgSurface,
@@ -576,29 +673,62 @@ class _DiscoverScreenState extends State<DiscoverScreen>
         controller: _scroll[_Tab.people],
         physics: const AlwaysScrollableScrollPhysics(),
         padding: EdgeInsets.only(top: NileSpacing.s4, bottom: NileGlassNavBar.reservedHeight + NileSpacing.s24),
-        itemCount: users.length + (_hasMore[_Tab.people]! ? 1 : 0),
-        separatorBuilder: (_, i) => i >= users.length - 1
-            ? const SizedBox.shrink()
-            : Divider(height: 1, indent: 72, color: NileColors.border),
+        itemCount: header + users.length + (_hasMore[_Tab.people]! ? 1 : 0),
+        separatorBuilder: (_, i) {
+          if (showFeatured && i == 0) return const SizedBox(height: 8);
+          final idx = i - header;
+          return idx >= users.length - 1
+              ? const SizedBox.shrink()
+              : Divider(height: 1, indent: 72, color: NileColors.border);
+        },
         itemBuilder: (_, i) {
-          if (i >= users.length) return const LoadMoreFooter();
+          if (showFeatured && i == 0) {
+            return Padding(
+              padding: const EdgeInsets.fromLTRB(
+                NileSpacing.s16, NileSpacing.s12, NileSpacing.s16, NileSpacing.s4,
+              ),
+              child: _RailShelf(
+                icon: Icons.star,
+                iconColor: NileColors.amber,
+                title: 'Featured creators',
+                subtitle: 'Picked by the Nile team',
+                children: [
+                  for (final u in _featuredCreators)
+                    _FeaturedCreatorCard(
+                      user: u,
+                      isFollowing: _followState[u.id] ?? false,
+                      isLoading: _followLoading.contains(u.id),
+                      onFollowTap: () => _toggleFollow(u),
+                      onTap: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => ProfileScreen(userId: u.id),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            );
+          }
+          final idx = i - header;
+          if (idx >= users.length) return const LoadMoreFooter();
           return _UserTile(
-            user: users[i],
-            isFollowing: _followState[users[i].id] ?? false,
-            isLoading: _followLoading.contains(users[i].id),
-            onFollowTap: () => _toggleFollow(users[i]),
+            user: users[idx],
+            isFollowing: _followState[users[idx].id] ?? false,
+            isLoading: _followLoading.contains(users[idx].id),
+            onFollowTap: () => _toggleFollow(users[idx]),
             onTap: () =>
                 Navigator.push(
                   context,
                   MaterialPageRoute(
-                    builder: (_) => ProfileScreen(userId: users[i].id),
+                    builder: (_) => ProfileScreen(userId: users[idx].id),
                   ),
                 ).then((_) {
                   if (!mounted) return;
-                  _followState.remove(users[i].id);
+                  _followState.remove(users[idx].id);
                   setState(() {});
-                  FollowService.isFollowing(users[i].id).then((v) {
-                    if (mounted) setState(() => _followState[users[i].id] = v);
+                  FollowService.isFollowing(users[idx].id).then((v) {
+                    if (mounted) setState(() => _followState[users[idx].id] = v);
                   });
                 }),
           );
@@ -807,10 +937,20 @@ class _DiscoverPostCard extends StatelessWidget {
                   ),
                   const SizedBox(width: 8),
                   Expanded(
-                    child: Text(
-                      '@${post.authorUsername}',
-                      style: NileTextStyles.bodySm(),
-                      overflow: TextOverflow.ellipsis,
+                    child: Row(
+                      children: [
+                        Flexible(
+                          child: Text(
+                            '@${post.authorUsername}',
+                            style: NileTextStyles.bodySm(),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        if (post.authorIsOfficial) ...[
+                          const SizedBox(width: 4),
+                          const OfficialBadge(size: 13),
+                        ],
+                      ],
                     ),
                   ),
                   Text(
@@ -873,12 +1013,12 @@ class _DiscoverPostCard extends StatelessWidget {
 
 class _DiscoverEventCard extends StatelessWidget {
   final Event event;
-  final bool hero;
+  final bool featured; // shows a "Featured" chip when this event is also curated
   final VoidCallback onTap;
   final VoidCallback? onLikeToggle;
   const _DiscoverEventCard({
     required this.event,
-    this.hero = true,
+    this.featured = false,
     required this.onTap,
     this.onLikeToggle,
   });
@@ -895,12 +1035,16 @@ class _DiscoverEventCard extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              _EventThumbnail(event: event, hero: hero),
+              _EventThumbnail(event: event),
               Padding(
                 padding: const EdgeInsets.all(NileSpacing.s12),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
+                    if (featured) ...[
+                      const _FeaturedTag(),
+                      const SizedBox(height: 6),
+                    ],
                     Row(
                       children: [
                         CircleAvatar(
@@ -918,10 +1062,20 @@ class _DiscoverEventCard extends StatelessWidget {
                         ),
                         const SizedBox(width: 8),
                         Expanded(
-                          child: Text(
-                            '@${event.hostUsername}',
-                            style: NileTextStyles.bodySm(),
-                            overflow: TextOverflow.ellipsis,
+                          child: Row(
+                            children: [
+                              Flexible(
+                                child: Text(
+                                  '@${event.hostUsername}',
+                                  style: NileTextStyles.bodySm(),
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                              if (event.hostIsOfficial) ...[
+                                const SizedBox(width: 4),
+                                const OfficialBadge(size: 13),
+                              ],
+                            ],
                           ),
                         ),
                         if (event.isLive) ...[
@@ -1089,10 +1243,20 @@ class _RecPostCard extends StatelessWidget {
                   ),
                   const SizedBox(width: 8),
                   Expanded(
-                    child: Text(
-                      '@${post.authorUsername}',
-                      style: NileTextStyles.bodySm(),
-                      overflow: TextOverflow.ellipsis,
+                    child: Row(
+                      children: [
+                        Flexible(
+                          child: Text(
+                            '@${post.authorUsername}',
+                            style: NileTextStyles.bodySm(),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        if (post.authorIsOfficial) ...[
+                          const SizedBox(width: 4),
+                          const OfficialBadge(size: 12),
+                        ],
+                      ],
                     ),
                   ),
                 ],
@@ -1148,16 +1312,28 @@ class _RecEventCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Expanded(child: _EventThumbnail(event: event, flexible: true)),
+            Expanded(
+              child: _EventThumbnail(event: event, flexible: true, hero: false),
+            ),
             Padding(
               padding: const EdgeInsets.all(NileSpacing.s12),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    '@${event.hostUsername}',
-                    style: NileTextStyles.bodySm(),
-                    overflow: TextOverflow.ellipsis,
+                  Row(
+                    children: [
+                      Flexible(
+                        child: Text(
+                          '@${event.hostUsername}',
+                          style: NileTextStyles.bodySm(),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      if (event.hostIsOfficial) ...[
+                        const SizedBox(width: 4),
+                        const OfficialBadge(size: 13),
+                      ],
+                    ],
                   ),
                   const SizedBox(height: 4),
                   Text(
@@ -1170,6 +1346,239 @@ class _RecEventCard extends StatelessWidget {
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+// ── Featured / Coming-up rails (Phase 4) ──────────────────────────────────────
+
+/// Generic horizontal rail shelf: header (icon + title + subtitle) over a row
+/// of 220-wide cards. Mirrors [_NetworkRail] but with a caller-supplied label,
+/// so Featured / Coming up / network rails all read as one pattern.
+class _RailShelf extends StatelessWidget {
+  final IconData icon;
+  final Color iconColor;
+  final String title;
+  final String subtitle;
+  final List<Widget> children;
+  const _RailShelf({
+    required this.icon,
+    required this.iconColor,
+    required this.title,
+    required this.subtitle,
+    required this.children,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Icon(icon, size: 16, color: iconColor),
+            const SizedBox(width: 6),
+            Text(title, style: NileTextStyles.labelMd()),
+          ],
+        ),
+        const SizedBox(height: 4),
+        Text(
+          subtitle,
+          style: NileTextStyles.caption().copyWith(
+            color: NileColors.txtTertiary,
+          ),
+        ),
+        const SizedBox(height: 12),
+        SizedBox(
+          height: 184,
+          child: ListView.separated(
+            scrollDirection: Axis.horizontal,
+            clipBehavior: Clip.none,
+            itemCount: children.length,
+            separatorBuilder: (_, _) => const SizedBox(width: 12),
+            itemBuilder: (_, i) => SizedBox(width: 220, child: children[i]),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Small "Featured" chip on a main-list event card that's also curated (same
+/// visual weight as the feed's Sponsored / network tags).
+class _FeaturedTag extends StatelessWidget {
+  const _FeaturedTag();
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(Icons.star, size: 14, color: NileColors.amber),
+        const SizedBox(width: 4),
+        Text(
+          'Featured',
+          style: NileTextStyles.caption().copyWith(
+            color: NileColors.txtTertiary,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Rail card for "Coming up on Nile": cover (its pill already shows the
+/// scheduled date·time), title, host, and ticket price if set.
+class _UpcomingEventCard extends StatelessWidget {
+  final Event event;
+  final VoidCallback onTap;
+  const _UpcomingEventCard({required this.event, required this.onTap});
+
+  String? get _price {
+    final p = event.price;
+    if (p == null || p <= 0) return null;
+    final dollars = p / 100;
+    return dollars == dollars.roundToDouble()
+        ? '\$${dollars.toStringAsFixed(0)}'
+        : '\$${dollars.toStringAsFixed(2)}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final price = _price;
+    return Material(
+      color: NileColors.bgSurface,
+      borderRadius: BorderRadius.circular(NileRadius.lg),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Expanded(
+              child: _EventThumbnail(event: event, flexible: true, hero: false),
+            ),
+            Padding(
+              padding: const EdgeInsets.all(NileSpacing.s12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    event.title,
+                    style: NileTextStyles.labelMd(),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  const SizedBox(height: 2),
+                  Row(
+                    children: [
+                      Flexible(
+                        child: Text(
+                          '@${event.hostUsername}',
+                          style: NileTextStyles.bodySm(),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      if (event.hostIsOfficial) ...[
+                        const SizedBox(width: 4),
+                        const OfficialBadge(size: 13),
+                      ],
+                      const Spacer(),
+                      if (price != null)
+                        Text(
+                          price,
+                          style: NileTextStyles.labelSm().copyWith(
+                            color: NileColors.volt,
+                            letterSpacing: 0,
+                          ),
+                        ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Rail card for a featured creator: avatar, name, follower count, follow button.
+class _FeaturedCreatorCard extends StatelessWidget {
+  final UserProfile user;
+  final bool isFollowing;
+  final bool isLoading;
+  final VoidCallback onFollowTap;
+  final VoidCallback onTap;
+  const _FeaturedCreatorCard({
+    required this.user,
+    required this.isFollowing,
+    required this.isLoading,
+    required this.onFollowTap,
+    required this.onTap,
+  });
+
+  String _fmt(int n) {
+    if (n >= 1000000) return '${(n / 1000000).toStringAsFixed(1)}M';
+    if (n >= 1000) return '${(n / 1000).toStringAsFixed(1)}K';
+    return n.toString();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: NileColors.bgSurface,
+      borderRadius: BorderRadius.circular(NileRadius.lg),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.all(NileSpacing.s12),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              CircleAvatar(
+                radius: 28,
+                backgroundColor: NileColors.bgRaised,
+                backgroundImage: user.avatarUrl != null
+                    ? nileAvatarImage(user.avatarUrl!, 28)
+                    : null,
+                child: user.avatarUrl == null
+                    ? Text(
+                        user.username[0].toUpperCase(),
+                        style: NileTextStyles.headingSm().copyWith(
+                          color: NileColors.txtSecondary,
+                        ),
+                      )
+                    : null,
+              ),
+              const SizedBox(height: 8),
+              Text(
+                user.displayName,
+                style: NileTextStyles.labelMd(),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              Text(
+                user.followerCount > 0
+                    ? '${_fmt(user.followerCount)} followers'
+                    : '@${user.username}',
+                style: NileTextStyles.caption(),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              const SizedBox(height: 8),
+              _FollowButton(
+                isFollowing: isFollowing,
+                isLoading: isLoading,
+                onTap: onFollowTap,
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -1199,10 +1608,14 @@ class _EmptyState extends StatelessWidget {
   final IconData icon;
   final String title;
   final String subtitle;
+  final String? actionLabel;
+  final VoidCallback? onAction;
   const _EmptyState({
     required this.icon,
     required this.title,
     required this.subtitle,
+    this.actionLabel,
+    this.onAction,
   });
 
   @override
@@ -1224,6 +1637,10 @@ class _EmptyState extends StatelessWidget {
                 color: NileColors.txtSecondary,
               ),
             ),
+            if (actionLabel != null && onAction != null) ...[
+              const SizedBox(height: 24),
+              FilledButton(onPressed: onAction, child: Text(actionLabel!)),
+            ],
           ],
         ),
       ),

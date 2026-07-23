@@ -12,6 +12,7 @@ import '../services/profile_service.dart';
 import '../services/realtime.dart';
 import '../theme.dart';
 import '../widgets/offline_banner.dart';
+import '../widgets/official_badge.dart';
 import 'event_detail_screen.dart';
 import 'messages_screen.dart' show NileAvatar;
 import 'post_detail_screen.dart';
@@ -750,10 +751,20 @@ class _AppBar extends StatelessWidget {
                   builder: (_) => ProfileScreen(userId: conv.otherUserId),
                 ),
               ),
-              child: Text(
-                '@${conv.otherUsername}',
-                style: NileTextStyles.headingSm(),
-                overflow: TextOverflow.ellipsis,
+              child: Row(
+                children: [
+                  Flexible(
+                    child: Text(
+                      '@${conv.otherUsername}',
+                      style: NileTextStyles.headingSm(),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  if (conv.otherIsOfficial) ...[
+                    const SizedBox(width: 4),
+                    const OfficialBadge(size: 15),
+                  ],
+                ],
               ),
             ),
           ),
@@ -872,7 +883,7 @@ class _MessageBubble extends StatelessWidget {
                 child: ConstrainedBox(
                 constraints: BoxConstraints(maxWidth: maxBubble),
                 child: message.isImage
-                    ? _ImageBubble(imageUrl: message.imageUrl!, maxWidth: maxBubble)
+                    ? _ImageBubble(messageId: message.id, maxWidth: maxBubble)
                     : message.isSharedPost
                     ? _SharedPostBubble(post: message.sharedPost)
                     : message.isSharedEvent
@@ -1080,7 +1091,7 @@ class _MessageBubbleVisual extends StatelessWidget {
 
   Widget _content() {
     if (message.isImage) {
-      return _ImageBubble(imageUrl: message.imageUrl!, maxWidth: 280);
+      return _ImageBubble(messageId: message.id, maxWidth: 280);
     }
     if (message.isSharedPost) return _SharedPostBubble(post: message.sharedPost);
     if (message.isSharedEvent) {
@@ -1476,54 +1487,62 @@ class _TypingBubbleState extends State<_TypingBubble>
 // ── Image attachment bubble ─────────────────────────────────────────────────
 
 class _ImageBubble extends StatelessWidget {
-  final String imageUrl;
+  final String messageId;
   final double maxWidth;
-  const _ImageBubble({required this.imageUrl, required this.maxWidth});
+  const _ImageBubble({required this.messageId, required this.maxWidth});
 
   @override
   Widget build(BuildContext context) {
     // Bounded height so tall photos don't dominate the thread; width is the
     // bubble cap passed from the parent (column-relative, not window-relative).
+    // The messages bucket is private: the image renders from a short-lived
+    // signed URL resolved (and cached) by MessageService.
     final maxW = maxWidth;
-    return GestureDetector(
-      onTap: () => Navigator.push(
-        context,
-        MaterialPageRoute(builder: (_) => _ImageViewer(imageUrl: imageUrl)),
-      ),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(NileRadius.lg),
-        child: ConstrainedBox(
-          constraints: BoxConstraints(maxWidth: maxW, maxHeight: 280),
-          child: Image.network(
-            imageUrl,
-            fit: BoxFit.contain,
-            cacheWidth: nileDecodeWidth(maxW),
-            loadingBuilder: (_, child, progress) => progress == null
-                ? child
-                : Container(
-                    width: maxW,
-                    height: 180,
-                    color: NileColors.bgSurface,
-                    child: Center(
-                      child: SizedBox(
-                        width: 20,
-                        height: 20,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: NileColors.txtTertiary,
-                        ),
-                      ),
-                    ),
-                  ),
-            errorBuilder: (context, error, stack) => Container(
-              padding: const EdgeInsets.symmetric(
-                horizontal: NileSpacing.s12,
-                vertical: NileSpacing.s8,
-              ),
-              color: NileColors.bgSurface,
+    Widget placeholder({bool error = false}) => Container(
+      width: maxW,
+      height: 180,
+      color: NileColors.bgSurface,
+      child: error
+          ? Center(
               child: Text('Image unavailable', style: NileTextStyles.caption()),
+            )
+          : Center(
+              child: SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: NileColors.txtTertiary,
+                ),
+              ),
             ),
-          ),
+    );
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(NileRadius.lg),
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxWidth: maxW, maxHeight: 280),
+        child: FutureBuilder<String>(
+          future: MessageService.getSignedImageUrl(messageId),
+          builder: (context, snap) {
+            if (snap.hasError) return placeholder(error: true);
+            final url = snap.data;
+            if (url == null) return placeholder();
+            return GestureDetector(
+              onTap: () => Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => _ImageViewer(imageUrl: url)),
+              ),
+              child: Image.network(
+                url,
+                fit: BoxFit.contain,
+                cacheWidth: nileDecodeWidth(maxW),
+                loadingBuilder: (_, child, progress) =>
+                    progress == null ? child : placeholder(),
+                errorBuilder: (context, error, stack) =>
+                    placeholder(error: true),
+              ),
+            );
+          },
         ),
       ),
     );
@@ -1617,6 +1636,10 @@ class _SharedPostBubble extends StatelessWidget {
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
+                      if (p.authorIsOfficial) ...[
+                        const SizedBox(width: 4),
+                        const OfficialBadge(size: 11),
+                      ],
                     ],
                   ),
                   if (p.hasCaption) ...[
@@ -1713,7 +1736,21 @@ class _SharedEventBubble extends StatelessWidget {
                     style: NileTextStyles.bodyMd(),
                   ),
                   const SizedBox(height: 2),
-                  Text('@${e.hostUsername}', style: NileTextStyles.caption()),
+                  Row(
+                    children: [
+                      Flexible(
+                        child: Text(
+                          '@${e.hostUsername}',
+                          style: NileTextStyles.caption(),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      if (e.hostIsOfficial) ...[
+                        const SizedBox(width: 4),
+                        const OfficialBadge(size: 11),
+                      ],
+                    ],
+                  ),
                 ],
               ),
             ),
