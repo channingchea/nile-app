@@ -2,9 +2,9 @@ import 'event_service.dart';
 import 'post_service.dart';
 import 'supabase_client.dart';
 
-/// A Rapids video ad (docs/plans/rapids.md, Phase 4): a self-uploaded ≤60s
-/// video + headline + CTA served between Rapids in the vertical player.
-class RapidAd {
+/// A Currents video ad (docs/plans/currents.md, Phase 4): a self-uploaded ≤60s
+/// video + headline + CTA served between Currents in the vertical player.
+class CurrentAd {
   final String campaignId;
   final String videoUrl;
   final String? thumbUrl;
@@ -13,7 +13,7 @@ class RapidAd {
   final String clickUrl;
   final String advertiserName;
   final int durationMs;
-  const RapidAd({
+  const CurrentAd({
     required this.campaignId,
     required this.videoUrl,
     this.thumbUrl,
@@ -198,19 +198,19 @@ class AdService {
   static Future<void> logNotInterested(String campaignId) =>
       _log(campaignId, 'not_interested');
 
-  /// Active Rapids video-ad campaigns for this viewer, in serving order.
-  /// Mirrors [feedAds]: the get_rapids_ads RPC returns campaign + creative
+  /// Active Currents video-ad campaigns for this viewer, in serving order.
+  /// Mirrors [feedAds]: the get_currents_ads RPC returns campaign + creative
   /// columns; video/thumb paths live in the ad-videos bucket (0068).
   /// Best-effort: [] on any failure so the player never breaks.
-  static Future<List<RapidAd>> rapidsAds({int limit = 5}) async {
+  static Future<List<CurrentAd>> currentsAds({int limit = 5}) async {
     try {
       final rows =
-          await supabase.rpc('get_rapids_ads', params: {'page_limit': limit});
-      final ads = <RapidAd>[];
+          await supabase.rpc('get_currents_ads', params: {'page_limit': limit});
+      final ads = <CurrentAd>[];
       for (final r in (rows as List).cast<Map<String, dynamic>>()) {
         final videoPath = r['video_path'] as String?;
         if (videoPath == null) continue;
-        ads.add(RapidAd(
+        ads.add(CurrentAd(
           campaignId: r['campaign_id'] as String,
           videoUrl:
               supabase.storage.from('ad-videos').getPublicUrl(videoPath),
@@ -232,18 +232,18 @@ class AdService {
     }
   }
 
-  /// Server-tunable ad cadence for the Rapids player: one ad slot after every
-  /// Nth Rapid. Falls back to 5 on any failure.
-  static Future<int> rapidsAdFrequency() async {
+  /// Server-tunable ad cadence for the Currents player: one ad slot after every
+  /// Nth Current. Falls back to 5 on any failure.
+  static Future<int> currentsAdFrequency() async {
     try {
       final rows = await supabase
           .from('app_config')
-          .select('rapids_ad_frequency')
+          .select('currents_ad_frequency')
           .eq('id', 1)
           .limit(1);
       final v = (rows as List).isEmpty
           ? null
-          : (rows.first['rapids_ad_frequency'] as num?)?.toInt();
+          : (rows.first['currents_ad_frequency'] as num?)?.toInt();
       return (v == null || v < 1) ? 5 : v;
     } catch (_) {
       return 5;

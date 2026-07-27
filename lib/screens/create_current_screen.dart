@@ -7,26 +7,31 @@ import 'package:video_compress/video_compress.dart';
 import 'package:video_player/video_player.dart';
 import 'package:video_thumbnail/video_thumbnail.dart';
 
-import '../services/rapid_service.dart';
+import '../services/current_service.dart';
 import '../theme.dart';
 
-/// Create a Rapid: record with the camera or pick from the gallery, trim to
+/// Create a Current: record with the camera or pick from the gallery, trim to
 /// ≤60s on a visual timeline, caption, post. Trimming + 720p compression run
 /// on-device via video_compress (native encoders — no ffmpeg dependency).
-class CreateRapidScreen extends StatefulWidget {
-  const CreateRapidScreen({super.key});
+class CreateCurrentScreen extends StatefulWidget {
+  const CreateCurrentScreen({super.key});
 
   @override
-  State<CreateRapidScreen> createState() => _CreateRapidScreenState();
+  State<CreateCurrentScreen> createState() => _CreateCurrentScreenState();
 }
 
-class _CreateRapidScreenState extends State<CreateRapidScreen> {
+class _CreateCurrentScreenState extends State<CreateCurrentScreen> {
   final _picker = ImagePicker();
   final _captionController = TextEditingController();
 
   File? _video;
   VideoPlayerController? _player;
   List<Uint8List> _stripFrames = [];
+
+  // Image-slideshow mode: non-empty means the user is building an image Current.
+  final List<_ImageDraft> _images = [];
+  bool get _isImageMode => _images.isNotEmpty;
+  static const int _defaultImageMs = 4000;
 
   // Trim window, ms.
   int _videoMs = 0;
@@ -40,7 +45,7 @@ class _CreateRapidScreenState extends State<CreateRapidScreen> {
   String? _errorMessage;
   Subscription? _compressSub;
 
-  static const int _maxMs = RapidService.maxDurationMs;
+  static const int _maxMs = CurrentService.maxDurationMs;
   static const int _minMs = 1000;
   static const int _stripFrameCount = 8;
 
@@ -57,6 +62,18 @@ class _CreateRapidScreenState extends State<CreateRapidScreen> {
   // ── Pick / record ──────────────────────────────────────────────────────────
 
   Future<void> _pick(ImageSource source) async {
+    // image_picker only backs the camera on iOS/Android. On desktop/web it
+    // throws a raw "cameraDelegate" error, so steer to the gallery instead.
+    if (source == ImageSource.camera &&
+        !(Platform.isIOS || Platform.isAndroid)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Recording is only available in the mobile app — '
+              'choose a video from your gallery instead.'),
+        ),
+      );
+      return;
+    }
     setState(() => _picking = true);
     try {
       final picked = await _picker.pickVideo(
@@ -78,6 +95,32 @@ class _CreateRapidScreenState extends State<CreateRapidScreen> {
       if (mounted) setState(() => _picking = false);
     }
   }
+
+  Future<void> _pickImages({bool append = false}) async {
+    setState(() => _picking = true);
+    try {
+      final picked = await _picker.pickMultiImage();
+      if (picked.isEmpty) return;
+      final room = CurrentService.maxImages - (append ? _images.length : 0);
+      final drafts = picked
+          .take(room < 0 ? 0 : room)
+          .map((x) => _ImageDraft(File(x.path), _defaultImageMs))
+          .toList();
+      setState(() {
+        if (!append) _images.clear();
+        _images.addAll(drafts);
+      });
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('$e')));
+      }
+    } finally {
+      if (mounted) setState(() => _picking = false);
+    }
+  }
+
+  int get _imagesTotalMs => _images.fold(0, (s, d) => s + d.durationMs);
 
   Future<void> _load(File video) async {
     await _player?.dispose();
@@ -146,10 +189,41 @@ class _CreateRapidScreenState extends State<CreateRapidScreen> {
 
   // ── Submit ─────────────────────────────────────────────────────────────────
 
-  bool get _canPost => _video != null && !_submitting && _spanMs >= _minMs;
+  bool get _canPost {
+    if (_submitting) return false;
+    if (_isImageMode) {
+      return _imagesTotalMs <= _maxMs && _imagesTotalMs > 0;
+    }
+    return _video != null && _spanMs >= _minMs;
+  }
+
+  Future<void> _submitImages() async {
+    if (!_canPost) return;
+    setState(() {
+      _submitting = true;
+      _errorMessage = null;
+      _stage = 'Uploading…';
+    });
+    try {
+      final current = await CurrentService.createImages(
+        images: [for (final d in _images) (file: d.file, durationMs: d.durationMs)],
+        caption: _captionController.text,
+      );
+      if (!mounted) return;
+      Navigator.pop(context, current);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _errorMessage = 'Failed to post: $e';
+        _submitting = false;
+        _stage = null;
+      });
+    }
+  }
 
   Future<void> _submit() async {
     if (!_canPost) return;
+    if (_isImageMode) return _submitImages();
     setState(() {
       _submitting = true;
       _errorMessage = null;
@@ -191,7 +265,7 @@ class _CreateRapidScreenState extends State<CreateRapidScreen> {
       } catch (_) {}
 
       if (mounted) setState(() => _stage = 'Uploading…');
-      final rapid = await RapidService.create(
+      final current = await CurrentService.create(
         video: out,
         thumbnail: thumb,
         caption: _captionController.text,
@@ -199,7 +273,7 @@ class _CreateRapidScreenState extends State<CreateRapidScreen> {
       );
 
       if (!mounted) return;
-      Navigator.pop(context, rapid);
+      Navigator.pop(context, current);
     } catch (e) {
       _compressSub?.unsubscribe();
       _compressSub = null;
@@ -219,10 +293,10 @@ class _CreateRapidScreenState extends State<CreateRapidScreen> {
     return Scaffold(
       backgroundColor: NileColors.bgPage,
       appBar: AppBar(
-        title: Text('New Rapid', style: NileTextStyles.headingMd()),
+        title: Text('New Current', style: NileTextStyles.headingMd()),
         backgroundColor: Colors.transparent,
         actions: [
-          if (_video != null)
+          if (_video != null || _isImageMode)
             Padding(
               padding: const EdgeInsets.only(
                   right: NileSpacing.s12,
@@ -256,7 +330,11 @@ class _CreateRapidScreenState extends State<CreateRapidScreen> {
         ],
       ),
       body: NileMaxWidth(
-        child: _video == null ? _pickBody() : _trimBody(),
+        child: _isImageMode
+            ? _imageEditor()
+            : _video == null
+                ? _pickBody()
+                : _trimBody(),
       ),
     );
   }
@@ -271,13 +349,14 @@ class _CreateRapidScreenState extends State<CreateRapidScreen> {
           Icon(Icons.bolt, size: 56, color: NileColors.volt),
           const SizedBox(height: NileSpacing.s12),
           Text(
-            'Share a Rapid',
+            'Share a Current',
             textAlign: TextAlign.center,
             style: NileTextStyles.headingLg(),
           ),
           const SizedBox(height: NileSpacing.s8),
           Text(
-            'A quick video up to 60 seconds. It stays up for 24 hours.',
+            'A quick video or photo slideshow up to 60 seconds. '
+            'It stays up for 24 hours.',
             textAlign: TextAlign.center,
             style: NileTextStyles.bodyMd()
                 .copyWith(color: NileColors.txtSecondary),
@@ -304,11 +383,153 @@ class _CreateRapidScreenState extends State<CreateRapidScreen> {
                         strokeWidth: 2, color: NileColors.volt),
                   )
                 : const Icon(Icons.video_library_outlined),
-            label: Text(_picking ? 'Loading…' : 'Choose from gallery'),
+            label: Text(_picking ? 'Loading…' : 'Choose video from gallery'),
             style: OutlinedButton.styleFrom(
               padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
               side: BorderSide(color: NileColors.border),
             ),
+          ),
+          const SizedBox(height: NileSpacing.s12),
+          OutlinedButton.icon(
+            onPressed: _picking ? null : () => _pickImages(),
+            icon: const Icon(Icons.photo_library_outlined),
+            label: const Text('Add photos'),
+            style: OutlinedButton.styleFrom(
+              padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
+              side: BorderSide(color: NileColors.border),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ── Image editor ────────────────────────────────────────────────────────────
+
+  Widget _imageEditor() {
+    final totalS = _imagesTotalMs / 1000;
+    final over = _imagesTotalMs > _maxMs;
+    return AbsorbPointer(
+      absorbing: _submitting,
+      child: Column(
+        children: [
+          Expanded(
+            child: ReorderableListView.builder(
+              padding: const EdgeInsets.fromLTRB(NileSpacing.s16,
+                  NileSpacing.s16, NileSpacing.s16, NileSpacing.s8),
+              itemCount: _images.length,
+              onReorderItem: (oldI, newI) => setState(() {
+                _images.insert(newI, _images.removeAt(oldI));
+              }),
+              itemBuilder: (_, i) => _imageRow(i),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(
+                horizontal: NileSpacing.s16, vertical: NileSpacing.s4),
+            child: Row(
+              children: [
+                Text(
+                  '${totalS.toStringAsFixed(1)}s total',
+                  style: NileTextStyles.caption()
+                      .copyWith(color: over ? NileColors.error : null)
+                      .tabular,
+                ),
+                const Spacer(),
+                if (over)
+                  Text('Max 60s',
+                      style: NileTextStyles.caption()
+                          .copyWith(color: NileColors.error)),
+                if (!over && _images.length < CurrentService.maxImages)
+                  TextButton.icon(
+                    onPressed: _picking ? null : () => _pickImages(append: true),
+                    icon: const Icon(Icons.add, size: 18),
+                    label: const Text('Add more'),
+                    style: TextButton.styleFrom(
+                        foregroundColor: NileColors.volt),
+                  ),
+              ],
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(
+                NileSpacing.s16, 0, NileSpacing.s16, NileSpacing.s8),
+            child: TextField(
+              controller: _captionController,
+              maxLength: CurrentService.maxCaption,
+              maxLines: 2,
+              minLines: 1,
+              textCapitalization: TextCapitalization.sentences,
+              style: NileTextStyles.bodyMd(),
+              decoration: const InputDecoration(
+                hintText: 'Add a caption…',
+                counterText: '',
+              ),
+            ),
+          ),
+          if (_errorMessage != null)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(
+                  NileSpacing.s16, 0, NileSpacing.s16, NileSpacing.s8),
+              child: Text(
+                _errorMessage!,
+                style:
+                    NileTextStyles.bodySm().copyWith(color: NileColors.error),
+              ),
+            ),
+          SizedBox(
+              height: MediaQuery.of(context).padding.bottom + NileSpacing.s8),
+        ],
+      ),
+    );
+  }
+
+  Widget _imageRow(int i) {
+    final d = _images[i];
+    return Padding(
+      key: ValueKey(d.file.path),
+      padding: const EdgeInsets.only(bottom: NileSpacing.s12),
+      child: Row(
+        children: [
+          ClipRRect(
+            borderRadius: BorderRadius.circular(NileRadius.sm),
+            child: Image.file(d.file,
+                width: 44, height: 60, fit: BoxFit.cover),
+          ),
+          const SizedBox(width: NileSpacing.s12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('${(d.durationMs / 1000).round()}s',
+                    style: NileTextStyles.labelMd().tabular),
+                SliderTheme(
+                  data: SliderThemeData(
+                    trackHeight: 2,
+                    overlayShape: SliderComponentShape.noOverlay,
+                  ),
+                  child: Slider(
+                    value: (d.durationMs / 1000).toDouble(),
+                    min: CurrentService.minImageMs / 1000,
+                    max: CurrentService.maxImageMs / 1000,
+                    divisions: (CurrentService.maxImageMs - CurrentService.minImageMs)
+                        ~/ 1000,
+                    activeColor: NileColors.volt,
+                    onChanged: (v) =>
+                        setState(() => d.durationMs = v.round() * 1000),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          IconButton(
+            visualDensity: VisualDensity.compact,
+            onPressed: () => setState(() => _images.removeAt(i)),
+            icon: Icon(Icons.close, size: 18, color: NileColors.txtTertiary),
+          ),
+          ReorderableDragStartListener(
+            index: i,
+            child: Icon(Icons.drag_handle, color: NileColors.txtTertiary),
           ),
         ],
       ),
@@ -419,7 +640,7 @@ class _CreateRapidScreenState extends State<CreateRapidScreen> {
                 NileSpacing.s16, 0, NileSpacing.s16, NileSpacing.s8),
             child: TextField(
               controller: _captionController,
-              maxLength: RapidService.maxCaption,
+              maxLength: CurrentService.maxCaption,
               maxLines: 2,
               minLines: 1,
               textCapitalization: TextCapitalization.sentences,
@@ -620,4 +841,11 @@ class _TrimBar extends StatelessWidget {
       ),
     );
   }
+}
+
+/// A pending slideshow image + its chosen on-screen duration (2–10s).
+class _ImageDraft {
+  final File file;
+  int durationMs;
+  _ImageDraft(this.file, this.durationMs);
 }

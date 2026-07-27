@@ -1,11 +1,11 @@
 import 'supabase_client.dart';
 
-enum ReportTargetType { user, post, event, comment, ad, rapid, rapidComment }
+enum ReportTargetType { user, post, event, comment, ad, current, currentComment }
 
 extension ReportTargetTypeX on ReportTargetType {
-  /// Matches the report_target_type Postgres enum (0066 adds the rapid values).
+  /// Matches the report_target_type Postgres enum (0066 adds the current values).
   String get dbValue => switch (this) {
-    ReportTargetType.rapidComment => 'rapid_comment',
+    ReportTargetType.currentComment => 'current_comment',
     _ => name,
   };
 }

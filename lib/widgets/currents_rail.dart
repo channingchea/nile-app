@@ -1,14 +1,14 @@
 import 'package:flutter/material.dart';
 
-import '../services/rapid_service.dart';
+import '../services/current_service.dart';
 import '../theme.dart';
 
-/// Horizontally scrollable Rapids rail for the top of the home feed.
-/// First slot is the caller's "Your Rapid" create entry; then one circle per
-/// creator with live Rapids — volt gradient ring while unwatched, dimmed once
+/// Horizontally scrollable Currents rail for the top of the home feed.
+/// First slot is the caller's "Your Current" create entry; then one circle per
+/// creator with live Currents — volt gradient ring while unwatched, dimmed once
 /// fully watched.
-class RapidsRail extends StatelessWidget {
-  const RapidsRail({
+class CurrentsRail extends StatelessWidget {
+  const CurrentsRail({
     super.key,
     required this.entries,
     required this.onCreate,
@@ -16,9 +16,9 @@ class RapidsRail extends StatelessWidget {
     this.myAvatarUrl,
   });
 
-  final List<RapidRailEntry> entries;
+  final List<CurrentRailEntry> entries;
   final VoidCallback onCreate;
-  final void Function(RapidRailEntry entry) onTapCreator;
+  final void Function(CurrentRailEntry entry) onTapCreator;
   final String? myAvatarUrl;
 
   static const double _circle = 64;
@@ -26,7 +26,7 @@ class RapidsRail extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return SizedBox(
-      height: 96,
+      height: 104,
       child: ListView.separated(
         scrollDirection: Axis.horizontal,
         padding: const EdgeInsets.symmetric(
@@ -44,7 +44,7 @@ class RapidsRail extends StatelessWidget {
 
   Widget _createSlot(BuildContext context) {
     return _Slot(
-      label: 'Your Rapid',
+      label: 'Your Current',
       onTap: onCreate,
       child: Stack(
         clipBehavior: Clip.none,
@@ -86,7 +86,7 @@ class RapidsRail extends StatelessWidget {
     );
   }
 
-  Widget _creatorSlot(BuildContext context, RapidRailEntry e) {
+  Widget _creatorSlot(BuildContext context, CurrentRailEntry e) {
     final ring = e.hasUnwatched
         ? LinearGradient(
             begin: Alignment.topLeft,

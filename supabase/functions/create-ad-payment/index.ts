@@ -10,9 +10,9 @@
 //   2) STANDALONE CREATIVE AD (A-4 Part 2).
 //      { advertiser_account_id, headline, body, click_url, image_url,
 //        topic_ids?, budget_cents, duration_days }
-//      Rapids VIDEO variant (0068): pass creative_kind: "video" with
+//      Currents VIDEO variant (0068): pass creative_kind: "video" with
 //      { video_url, thumb_url?, duration_ms } instead of image_url; body is
-//      optional. Same checkout/review flow; serves in the Rapids player.
+//      optional. Same checkout/review flow; serves in the Currents player.
 //      External brand runs a creative ad targeting neither event nor post.
 //      This fn creates the campaign (pending_payment, advertiser_account_id set,
 //      advertiser_id null) + ad_creatives + ad_targeting rows server-side, then a
@@ -179,7 +179,7 @@ async function createStandaloneAd(
     topic_ids, budget_cents, duration_days,
     creative_kind, video_url, thumb_url, duration_ms,
   } = body;
-  const isVideo = creative_kind === "video"; // Rapids video ad (0068)
+  const isVideo = creative_kind === "video"; // Currents video ad (0068)
 
   // Validate creative fields. Body is required for image creatives, optional
   // for video (the video carries the message).

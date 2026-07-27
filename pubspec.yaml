@@ -55,8 +55,8 @@ dependencies:
   firebase_app_check: ^0.3.1  # device attestation (App Attest / Play Integrity)
   cloudflare_turnstile: ^3.7.2  # invisible captcha for Supabase Auth
   video_player: ^2.9.2
-  video_compress: ^3.1.4  # Rapids: on-device trim + 720p H.264 (native encoders)
-  video_thumbnail: ^0.5.6  # Rapids: poster frame + trim filmstrip
+  video_compress: ^3.1.4  # Currents: on-device trim + 720p H.264 (native encoders)
+  video_thumbnail: ^0.5.6  # Currents: poster frame + trim filmstrip
   visibility_detector: ^0.4.0+2
   connectivity_plus: ^7.0.0
   package_info_plus: ^8.1.0

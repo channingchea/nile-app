@@ -11,6 +11,8 @@ PODS:
     - FlutterMacOS
     - WebRTC-SDK (= 144.7559.01)
   - OrderedSet (6.0.3)
+  - video_compress (0.3.0):
+    - FlutterMacOS
   - WebRTC-SDK (144.7559.01)
 
 DEPENDENCIES:
@@ -18,6 +20,7 @@ DEPENDENCIES:
   - flutter_webrtc (from `Flutter/ephemeral/.symlinks/plugins/flutter_webrtc/macos`)
   - FlutterMacOS (from `Flutter/ephemeral`)
   - livekit_client (from `Flutter/ephemeral/.symlinks/plugins/livekit_client/macos`)
+  - video_compress (from `Flutter/ephemeral/.symlinks/plugins/video_compress/macos`)
 
 SPEC REPOS:
   trunk:
@@ -33,6 +36,8 @@ EXTERNAL SOURCES:
     :path: Flutter/ephemeral
   livekit_client:
     :path: Flutter/ephemeral/.symlinks/plugins/livekit_client/macos
+  video_compress:
+    :path: Flutter/ephemeral/.symlinks/plugins/video_compress/macos
 
 SPEC CHECKSUMS:
   flutter_inappwebview_macos: bdf207b8f4ebd58e86ae06cd96b147de99a67c9b
@@ -40,6 +45,7 @@ SPEC CHECKSUMS:
   FlutterMacOS: d0db08ddef1a9af05a5ec4b724367152bb0500b1
   livekit_client: 1860bf9a11ce01fcce4bc726f9affdb4ad2a61fb
   OrderedSet: e539b66b644ff081c73a262d24ad552a69be3a94
+  video_compress: c896234f100791b5fef7f049afa38f6d2ef7b42f
   WebRTC-SDK: ab9b5319e458c2bfebdc92b3600740da35d5630d
 
 PODFILE CHECKSUM: 54d867c82ac51cbd61b565781b9fada492027009

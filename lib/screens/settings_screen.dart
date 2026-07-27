@@ -11,7 +11,7 @@ import 'auth/mfa_settings_screen.dart';
 import 'blocked_accounts_screen.dart';
 import 'change_password_screen.dart';
 import 'edit_profile_screen.dart';
-import 'my_rapids_screen.dart';
+import 'my_currents_screen.dart';
 import 'my_tickets_screen.dart';
 import 'notification_preferences_screen.dart';
 import 'payouts_screen.dart';
@@ -38,10 +38,10 @@ class SettingsScreen extends StatelessWidget {
     );
   }
 
-  void _myRapids(BuildContext context) {
+  void _myCurrents(BuildContext context) {
     Navigator.push(
       context,
-      MaterialPageRoute(builder: (_) => const MyRapidsScreen()),
+      MaterialPageRoute(builder: (_) => const MyCurrentsScreen()),
     );
   }
 
@@ -175,8 +175,8 @@ class SettingsScreen extends StatelessWidget {
                 ),
                 _SettingsRow(
                   icon: Icons.bolt_outlined,
-                  label: 'My Rapids',
-                  onTap: () => _myRapids(context),
+                  label: 'My Currents',
+                  onTap: () => _myCurrents(context),
                 ),
                 _SettingsRow(
                   icon: Icons.notifications_outlined,

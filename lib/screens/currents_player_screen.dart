@@ -5,7 +5,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:video_player/video_player.dart';
 
 import '../services/ad_service.dart';
-import '../services/rapid_service.dart';
+import '../services/current_service.dart';
 import '../services/report_service.dart';
 import 'package:share_plus/share_plus.dart';
 
@@ -16,39 +16,40 @@ import '../widgets/official_badge.dart';
 import 'profile_screen.dart';
 import 'widgets/moderation_menu.dart';
 
-/// Full-screen vertical Rapids player: swipe between ≤60s videos, autoplay,
+/// Full-screen vertical Currents player: swipe between ≤60s videos, autoplay,
 /// auto-advance on completion, with a sponsored video slot after every Nth
-/// Rapid (cadence from app_config, docs/plans/rapids.md Phase 4).
-class RapidsPlayerScreen extends StatefulWidget {
-  /// Jump to this creator's first unwatched Rapid (rail tap). Null starts at
+/// Current (cadence from app_config, docs/plans/currents.md Phase 4).
+class CurrentsPlayerScreen extends StatefulWidget {
+  /// Jump to this creator's first unwatched Current (rail tap). Null starts at
   /// the top of the feed.
   final String? startUserId;
 
-  const RapidsPlayerScreen({super.key, this.startUserId});
+  const CurrentsPlayerScreen({super.key, this.startUserId});
 
   @override
-  State<RapidsPlayerScreen> createState() => _RapidsPlayerScreenState();
+  State<CurrentsPlayerScreen> createState() => _CurrentsPlayerScreenState();
 }
 
 sealed class _PlayerItem {
   String get videoUrl;
 }
 
-class _RapidItem extends _PlayerItem {
-  Rapid rapid;
-  _RapidItem(this.rapid);
+class _CurrentItem extends _PlayerItem {
+  Current current;
+  _CurrentItem(this.current);
   @override
-  String get videoUrl => rapid.videoUrl;
+  String get videoUrl => current.videoUrl;
 }
 
 class _AdItem extends _PlayerItem {
-  final RapidAd ad;
+  final CurrentAd ad;
   _AdItem(this.ad);
   @override
   String get videoUrl => ad.videoUrl;
 }
 
-class _RapidsPlayerScreenState extends State<RapidsPlayerScreen> {
+class _CurrentsPlayerScreenState extends State<CurrentsPlayerScreen>
+    with TickerProviderStateMixin {
   List<_PlayerItem>? _items;
   String? _error;
 
@@ -56,6 +57,11 @@ class _RapidsPlayerScreenState extends State<RapidsPlayerScreen> {
   final Map<int, VideoPlayerController> _controllers = {};
   int _index = 0;
   bool _advancing = false;
+
+  /// Drives the current image Current's slideshow (null while a video is active).
+  /// One controller runs the whole slideshow; its value maps to the current
+  /// frame via [_slideAt].
+  AnimationController? _slideCtrl;
 
   /// Session-wide mute preference.
   static bool muted = false;
@@ -78,6 +84,7 @@ class _RapidsPlayerScreenState extends State<RapidsPlayerScreen> {
   @override
   void dispose() {
     _dwellTimer?.cancel();
+    _slideCtrl?.dispose();
     for (final c in _controllers.values) {
       c.dispose();
     }
@@ -88,34 +95,34 @@ class _RapidsPlayerScreenState extends State<RapidsPlayerScreen> {
   Future<void> _load() async {
     try {
       final (feed, ads, freq) = await (
-        RapidService.feed(),
-        AdService.rapidsAds(),
-        AdService.rapidsAdFrequency(),
+        CurrentService.feed(),
+        AdService.currentsAds(),
+        AdService.currentsAdFrequency(),
       ).wait;
       if (feed.isEmpty) {
-        if (mounted) setState(() => _error = 'No Rapids to watch right now.');
+        if (mounted) setState(() => _error = 'No Currents to watch right now.');
         return;
       }
 
-      // Interleave: one ad after every [freq] Rapids, each ad served once.
+      // Interleave: one ad after every [freq] Currents, each ad served once.
       final items = <_PlayerItem>[];
       var adIdx = 0;
       for (var i = 0; i < feed.length; i++) {
-        items.add(_RapidItem(feed[i]));
+        items.add(_CurrentItem(feed[i]));
         if ((i + 1) % freq == 0 && adIdx < ads.length) {
           items.add(_AdItem(ads[adIdx++]));
         }
       }
 
-      // Rail tap: start at the creator's first unwatched Rapid (or their first).
+      // Rail tap: start at the creator's first unwatched Current (or their first).
       var start = 0;
       if (widget.startUserId != null) {
         final unwatched = items.indexWhere((it) =>
-            it is _RapidItem &&
-            it.rapid.authorId == widget.startUserId &&
-            !it.rapid.watchedByMe);
+            it is _CurrentItem &&
+            it.current.authorId == widget.startUserId &&
+            !it.current.watchedByMe);
         final first = items.indexWhere(
-            (it) => it is _RapidItem && it.rapid.authorId == widget.startUserId);
+            (it) => it is _CurrentItem && it.current.authorId == widget.startUserId);
         start = unwatched >= 0 ? unwatched : (first >= 0 ? first : 0);
       }
 
@@ -151,6 +158,8 @@ class _RapidsPlayerScreenState extends State<RapidsPlayerScreen> {
   void _onPageChanged(int i) {
     _dwellTimer?.cancel();
     _advancing = false;
+    _slideCtrl?.dispose();
+    _slideCtrl = null;
     setState(() => _index = i);
 
     // Keep only a {previous, current, next} controller window alive.
@@ -166,11 +175,23 @@ class _RapidsPlayerScreenState extends State<RapidsPlayerScreen> {
       if (e.key != i) e.value.pause();
     }
     _playCurrent(i);
-    if (i + 1 < _items!.length) _controllerFor(i + 1); // prefetch
+    if (i + 1 < _items!.length && !_isImageItem(i + 1)) {
+      _controllerFor(i + 1); // prefetch next video
+    }
     _armDwell(i);
   }
 
+  bool _isImageItem(int i) {
+    final it = _items![i];
+    return it is _CurrentItem && it.current.isImage;
+  }
+
   Future<void> _playCurrent(int i) async {
+    final it = _items![i];
+    if (it is _CurrentItem && it.current.isImage) {
+      _startSlideshow(i, it);
+      return;
+    }
     final c = await _controllerFor(i);
     if (!mounted || _index != i) return;
     c
@@ -180,19 +201,53 @@ class _RapidsPlayerScreenState extends State<RapidsPlayerScreen> {
     c.addListener(() => _maybeAdvance(i, c));
   }
 
-  /// Auto-advance when the current video finishes; pop after the last one.
+  /// Run an image Current as a timed slideshow: one controller spans all frames,
+  /// its value * total = elapsed ms. On completion, advance to the next Current.
+  void _startSlideshow(int i, _CurrentItem it) {
+    _slideCtrl?.dispose();
+    final total = it.current.images.fold<int>(0, (s, im) => s + im.durationMs);
+    final ctrl = AnimationController(
+      vsync: this,
+      duration: Duration(milliseconds: total <= 0 ? 1 : total),
+    )..addStatusListener((s) {
+        if (s == AnimationStatus.completed) _advanceFrom(i);
+      });
+    _slideCtrl = ctrl;
+    ctrl.forward();
+    if (mounted) setState(() {});
+  }
+
+  /// Which frame is showing at normalized progress [t] (0–1).
+  int _slideAt(List<CurrentImage> imgs, double t) {
+    final total = imgs.fold<int>(0, (s, im) => s + im.durationMs);
+    final elapsed = t * total;
+    var acc = 0.0;
+    for (var k = 0; k < imgs.length; k++) {
+      acc += imgs[k].durationMs;
+      if (elapsed < acc) return k;
+    }
+    return imgs.isEmpty ? 0 : imgs.length - 1;
+  }
+
+  /// Advance to the next item, or pop after the last one.
+  void _advanceFrom(int i) {
+    if (!mounted || _index != i || _advancing) return;
+    _advancing = true;
+    if (i + 1 < _items!.length) {
+      _pager.nextPage(duration: NileMotion.base, curve: NileMotion.curve);
+    } else {
+      Navigator.pop(context);
+    }
+  }
+
+  /// Auto-advance when the current video finishes.
   void _maybeAdvance(int i, VideoPlayerController c) {
     if (!mounted || _index != i || _advancing) return;
     final v = c.value;
     if (v.duration > Duration.zero &&
         v.position >= v.duration &&
         !v.isPlaying) {
-      _advancing = true;
-      if (i + 1 < _items!.length) {
-        _pager.nextPage(duration: NileMotion.base, curve: NileMotion.curve);
-      } else {
-        Navigator.pop(context);
-      }
+      _advanceFrom(i);
     }
   }
 
@@ -200,12 +255,12 @@ class _RapidsPlayerScreenState extends State<RapidsPlayerScreen> {
     _dwellTimer = Timer(_dwell, () {
       if (!mounted || _index != i) return;
       final it = _items![i];
-      if (it is _RapidItem) {
-        if (_viewLogged.add(it.rapid.id)) {
-          RapidService.logView(it.rapid.id);
+      if (it is _CurrentItem) {
+        if (_viewLogged.add(it.current.id)) {
+          CurrentService.logView(it.current.id);
           setState(() {
-            it.rapid = it.rapid
-                .copyWith(watchedByMe: true, viewCount: it.rapid.viewCount + 1);
+            it.current = it.current
+                .copyWith(watchedByMe: true, viewCount: it.current.viewCount + 1);
           });
         }
       } else if (it is _AdItem) {
@@ -217,6 +272,12 @@ class _RapidsPlayerScreenState extends State<RapidsPlayerScreen> {
   }
 
   void _togglePause() {
+    if (_isImageItem(_index)) {
+      final s = _slideCtrl;
+      if (s == null) return;
+      setState(() => s.isAnimating ? s.stop() : s.forward());
+      return;
+    }
     final c = _controllers[_index];
     if (c == null || !c.value.isInitialized) return;
     setState(() => c.value.isPlaying ? c.pause() : c.play());
@@ -229,28 +290,45 @@ class _RapidsPlayerScreenState extends State<RapidsPlayerScreen> {
     }
   }
 
+  /// Pause whatever is playing on the current page (video or slideshow) — used
+  /// while a modal sheet is open.
+  void _pauseCurrent() {
+    if (_isImageItem(_index)) {
+      _slideCtrl?.stop();
+    } else {
+      _controllers[_index]?.pause();
+    }
+  }
+
+  void _resumeCurrent() {
+    if (_isImageItem(_index)) {
+      _slideCtrl?.forward();
+    } else {
+      _controllers[_index]?.play();
+    }
+  }
+
   // ── Actions ────────────────────────────────────────────────────────────────
 
-  Future<void> _toggleLike(_RapidItem it) async {
-    final r = it.rapid;
+  Future<void> _toggleLike(_CurrentItem it) async {
+    final r = it.current;
     setState(() {
-      it.rapid = r.copyWith(
+      it.current = r.copyWith(
         likedByMe: !r.likedByMe,
         likeCount: r.likeCount + (r.likedByMe ? -1 : 1),
       );
     });
     try {
       r.likedByMe
-          ? await RapidService.unlike(r.id)
-          : await RapidService.like(r.id);
+          ? await CurrentService.unlike(r.id)
+          : await CurrentService.like(r.id);
     } catch (_) {
-      if (mounted) setState(() => it.rapid = r); // revert
+      if (mounted) setState(() => it.current = r); // revert
     }
   }
 
-  Future<void> _openComments(_RapidItem it) async {
-    final c = _controllers[_index];
-    c?.pause();
+  Future<void> _openComments(_CurrentItem it) async {
+    _pauseCurrent();
     await showModalBottomSheet(
       context: context,
       backgroundColor: NileColors.bgSurface,
@@ -259,32 +337,31 @@ class _RapidsPlayerScreenState extends State<RapidsPlayerScreen> {
         borderRadius:
             BorderRadius.vertical(top: Radius.circular(NileRadius.lg)),
       ),
-      builder: (_) => _RapidCommentsSheet(
-        rapid: it.rapid,
+      builder: (_) => _CurrentCommentsSheet(
+        current: it.current,
         onCountChanged: (delta) => setState(() {
-          it.rapid =
-              it.rapid.copyWith(commentCount: it.rapid.commentCount + delta);
+          it.current =
+              it.current.copyWith(commentCount: it.current.commentCount + delta);
         }),
       ),
     );
-    if (mounted) c?.play();
+    if (mounted) _resumeCurrent();
   }
 
-  void _share(_RapidItem it) {
-    // Rapids expire in 24h, so the durable share target is the creator's
-    // profile link (rich DM cards for rapids are a non-goal in v1).
+  void _share(_CurrentItem it) {
+    // Currents expire in 24h, so the durable share target is the creator's
+    // profile link (rich DM cards for currents are a non-goal in v1).
     Share.share(
-      '@${it.rapid.authorUsername} on Nile\n'
-      '${ShareUrls.profile(it.rapid.authorUsername)}',
+      '@${it.current.authorUsername} on Nile\n'
+      '${ShareUrls.profile(it.current.authorUsername)}',
     );
   }
 
   Future<void> _moreMenu(_PlayerItem item) async {
-    final c = _controllers[_index];
-    c?.pause();
+    _pauseCurrent();
     final myId = supabase.auth.currentUser?.id;
-    if (item is _RapidItem) {
-      final own = item.rapid.authorId == myId;
+    if (item is _CurrentItem) {
+      final own = item.current.authorId == myId;
       await showModalBottomSheet(
         context: context,
         backgroundColor: NileColors.bgSurface,
@@ -300,7 +377,7 @@ class _RapidsPlayerScreenState extends State<RapidsPlayerScreen> {
                 ListTile(
                   leading: const Icon(Icons.delete_outline,
                       color: NileColors.error),
-                  title: Text('Delete Rapid',
+                  title: Text('Delete Current',
                       style: NileTextStyles.bodyLg()
                           .copyWith(color: NileColors.error)),
                   onTap: () {
@@ -311,26 +388,26 @@ class _RapidsPlayerScreenState extends State<RapidsPlayerScreen> {
               else ...[
                 ListTile(
                   leading: const Icon(Icons.flag_outlined),
-                  title: Text('Report Rapid', style: NileTextStyles.bodyLg()),
+                  title: Text('Report Current', style: NileTextStyles.bodyLg()),
                   onTap: () {
                     Navigator.pop(sheetCtx);
                     Moderation.showReportSheet(
                       context,
-                      targetType: ReportTargetType.rapid,
-                      targetId: item.rapid.id,
+                      targetType: ReportTargetType.current,
+                      targetId: item.current.id,
                     );
                   },
                 ),
                 ListTile(
                   leading: const Icon(Icons.block),
-                  title: Text('Block @${item.rapid.authorUsername}',
+                  title: Text('Block @${item.current.authorUsername}',
                       style: NileTextStyles.bodyLg()),
                   onTap: () async {
                     Navigator.pop(sheetCtx);
                     final blocked = await Moderation.confirmBlock(
                       context,
-                      userId: item.rapid.authorId,
-                      username: item.rapid.authorUsername,
+                      userId: item.current.authorId,
+                      username: item.current.authorUsername,
                     );
                     if (blocked && mounted) Navigator.pop(context);
                   },
@@ -364,15 +441,15 @@ class _RapidsPlayerScreenState extends State<RapidsPlayerScreen> {
         ),
       );
     }
-    if (mounted) c?.play();
+    if (mounted) _resumeCurrent();
   }
 
-  Future<void> _deleteOwn(_RapidItem it) async {
+  Future<void> _deleteOwn(_CurrentItem it) async {
     try {
-      await RapidService.delete(it.rapid);
+      await CurrentService.delete(it.current);
       if (!mounted) return;
       final items = _items!..remove(it);
-      if (items.whereType<_RapidItem>().isEmpty) {
+      if (items.whereType<_CurrentItem>().isEmpty) {
         Navigator.pop(context);
       } else {
         setState(() {});
@@ -386,7 +463,7 @@ class _RapidsPlayerScreenState extends State<RapidsPlayerScreen> {
     }
   }
 
-  Future<void> _openAd(RapidAd ad) async {
+  Future<void> _openAd(CurrentAd ad) async {
     AdService.logClick(ad.campaignId);
     final uri = Uri.tryParse(ad.clickUrl);
     if (uri != null) {
@@ -483,6 +560,7 @@ class _RapidsPlayerScreenState extends State<RapidsPlayerScreen> {
   }
 
   Widget _page(_PlayerItem item, int i) {
+    if (item is _CurrentItem && item.current.isImage) return _imagePage(item, i);
     final c = _controllers[i];
     final ready = c != null && c.value.isInitialized;
     return GestureDetector(
@@ -529,7 +607,7 @@ class _RapidsPlayerScreenState extends State<RapidsPlayerScreen> {
               ),
             ),
           switch (item) {
-            _RapidItem() => _rapidOverlay(item),
+            _CurrentItem() => _currentOverlay(item),
             _AdItem() => _adOverlay(item),
           },
         ],
@@ -537,9 +615,112 @@ class _RapidsPlayerScreenState extends State<RapidsPlayerScreen> {
     );
   }
 
+  Widget _imagePage(_CurrentItem it, int i) {
+    final imgs = it.current.images;
+    final active = i == _index && _slideCtrl != null;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: _togglePause,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          if (active)
+            AnimatedBuilder(
+              animation: _slideCtrl!,
+              builder: (_, _) {
+                final k = _slideAt(imgs, _slideCtrl!.value);
+                return _slideImage(imgs.isEmpty ? null : imgs[k].url);
+              },
+            )
+          else
+            _slideImage(imgs.isEmpty ? it.current.thumbUrl : imgs.first.url),
+          // Paused glyph.
+          if (active)
+            AnimatedBuilder(
+              animation: _slideCtrl!,
+              builder: (_, _) => _slideCtrl!.isAnimating
+                  ? const SizedBox.shrink()
+                  : const Center(
+                      child: Icon(Icons.play_arrow_rounded,
+                          size: 72, color: Colors.white70),
+                    ),
+            ),
+          const DecoratedBox(decoration: NileEffects.coverScrim),
+          // Segmented slideshow progress (bottom, like the video bar).
+          if (active)
+            Positioned(
+              left: NileSpacing.s2,
+              right: NileSpacing.s2,
+              bottom: 0,
+              child: AnimatedBuilder(
+                animation: _slideCtrl!,
+                builder: (_, _) => _segments(imgs, _slideCtrl!.value),
+              ),
+            ),
+          _currentOverlay(it),
+        ],
+      ),
+    );
+  }
+
+  Widget _slideImage(String? url) {
+    if (url == null || url.isEmpty) {
+      return const ColoredBox(color: Colors.black);
+    }
+    return Image.network(
+      url,
+      fit: BoxFit.cover,
+      errorBuilder: (_, _, _) => const ColoredBox(color: Colors.black),
+    );
+  }
+
+  /// One thin bar per frame; completed frames full, current frame fills.
+  Widget _segments(List<CurrentImage> imgs, double t) {
+    if (imgs.isEmpty) return const SizedBox.shrink();
+    final durs = [for (final im in imgs) im.durationMs];
+    final total = durs.fold<int>(0, (s, d) => s + d);
+    final elapsed = t * total;
+    final starts = <int>[];
+    var acc = 0;
+    for (final d in durs) {
+      starts.add(acc);
+      acc += d;
+    }
+    return Padding(
+      padding: const EdgeInsets.only(bottom: NileSpacing.s2),
+      child: Row(
+        children: [
+          for (var k = 0; k < durs.length; k++)
+            Expanded(
+              flex: durs[k],
+              child: Container(
+                height: 3,
+                margin: const EdgeInsets.symmetric(horizontal: 1),
+                decoration: BoxDecoration(
+                  color: Colors.white24,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+                child: FractionallySizedBox(
+                  alignment: Alignment.centerLeft,
+                  widthFactor:
+                      ((elapsed - starts[k]) / durs[k]).clamp(0.0, 1.0),
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: NileColors.volt,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
   Widget _poster(_PlayerItem item) {
     final thumb = switch (item) {
-      _RapidItem(:final rapid) => rapid.thumbUrl,
+      _CurrentItem(:final current) => current.thumbUrl,
       _AdItem(:final ad) => ad.thumbUrl,
     };
     return thumb != null
@@ -549,8 +730,8 @@ class _RapidsPlayerScreenState extends State<RapidsPlayerScreen> {
             child: CircularProgressIndicator(color: NileColors.volt));
   }
 
-  Widget _rapidOverlay(_RapidItem it) {
-    final r = it.rapid;
+  Widget _currentOverlay(_CurrentItem it) {
+    final r = it.current;
     return SafeArea(
       child: Padding(
         padding: const EdgeInsets.fromLTRB(
@@ -775,19 +956,19 @@ class _RapidsPlayerScreenState extends State<RapidsPlayerScreen> {
 
 // ── Comments sheet ────────────────────────────────────────────────────────────
 
-class _RapidCommentsSheet extends StatefulWidget {
-  final Rapid rapid;
+class _CurrentCommentsSheet extends StatefulWidget {
+  final Current current;
   final void Function(int delta) onCountChanged;
-  const _RapidCommentsSheet(
-      {required this.rapid, required this.onCountChanged});
+  const _CurrentCommentsSheet(
+      {required this.current, required this.onCountChanged});
 
   @override
-  State<_RapidCommentsSheet> createState() => _RapidCommentsSheetState();
+  State<_CurrentCommentsSheet> createState() => _CurrentCommentsSheetState();
 }
 
-class _RapidCommentsSheetState extends State<_RapidCommentsSheet> {
+class _CurrentCommentsSheetState extends State<_CurrentCommentsSheet> {
   final _input = TextEditingController();
-  List<RapidComment>? _comments;
+  List<CurrentComment>? _comments;
   String? _cursor;
   bool _hasMore = false;
   bool _loadingMore = false;
@@ -807,7 +988,7 @@ class _RapidCommentsSheetState extends State<_RapidCommentsSheet> {
 
   Future<void> _load() async {
     try {
-      final page = await RapidService.comments(widget.rapid.id);
+      final page = await CurrentService.comments(widget.current.id);
       if (!mounted) return;
       setState(() {
         _comments = page.items;
@@ -824,7 +1005,7 @@ class _RapidCommentsSheetState extends State<_RapidCommentsSheet> {
     setState(() => _loadingMore = true);
     try {
       final page =
-          await RapidService.comments(widget.rapid.id, cursor: _cursor);
+          await CurrentService.comments(widget.current.id, cursor: _cursor);
       if (!mounted) return;
       setState(() {
         _comments = [..._comments!, ...page.items];
@@ -842,7 +1023,7 @@ class _RapidCommentsSheetState extends State<_RapidCommentsSheet> {
     setState(() => _sending = true);
     try {
       final c =
-          await RapidService.addComment(rapidId: widget.rapid.id, body: body);
+          await CurrentService.addComment(currentId: widget.current.id, body: body);
       if (!mounted) return;
       setState(() {
         _comments = [c, ..._comments ?? []];
@@ -859,7 +1040,7 @@ class _RapidCommentsSheetState extends State<_RapidCommentsSheet> {
     }
   }
 
-  Future<void> _commentMenu(RapidComment c) async {
+  Future<void> _commentMenu(CurrentComment c) async {
     final myId = supabase.auth.currentUser?.id;
     final own = c.authorId == myId;
     await showModalBottomSheet(
@@ -879,7 +1060,7 @@ class _RapidCommentsSheetState extends State<_RapidCommentsSheet> {
                         .copyWith(color: NileColors.error)),
                 onTap: () async {
                   Navigator.pop(sheetCtx);
-                  await RapidService.deleteComment(c.id);
+                  await CurrentService.deleteComment(c.id);
                   if (!mounted) return;
                   setState(() => _comments!.removeWhere((x) => x.id == c.id));
                   widget.onCountChanged(-1);
@@ -892,7 +1073,7 @@ class _RapidCommentsSheetState extends State<_RapidCommentsSheet> {
                   Navigator.pop(sheetCtx);
                   Moderation.showReportSheet(
                     context,
-                    targetType: ReportTargetType.rapidComment,
+                    targetType: ReportTargetType.currentComment,
                     targetId: c.id,
                   );
                 },
@@ -1001,7 +1182,7 @@ class _RapidCommentsSheetState extends State<_RapidCommentsSheet> {
     );
   }
 
-  Widget _commentTile(RapidComment c) {
+  Widget _commentTile(CurrentComment c) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: NileSpacing.s8),
       child: Row(

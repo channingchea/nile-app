@@ -7,7 +7,7 @@
 // leaves a row in `moderation_audit` (fire-and-forget; never fails the call).
 //
 //   { target_type: "user" | "post" | "event" | "comment" | "ad"
-//                | "rapid" | "rapid_comment",
+//                | "current" | "current_comment",
 //     target_id: uuid,
 //     action: "resolve" | "dismiss" | "remove_content" | "restore_content"
 //           | "suspend_user" | "unsuspend_user",
@@ -18,13 +18,13 @@
 //                          Valid for every target_type, including "ad" (the
 //                          portal calls review-ad-campaign separately for
 //                          the actual pause/reject of an ad campaign).
-//   remove_content       — post/comment/event/rapid/rapid_comment. Sets
+//   remove_content       — post/comment/event/current/current_comment. Sets
 //                          removed_at/removed_by (0053/0065 RLS then hides it
 //                          app-wide) and resolves the target's open/reviewing
 //                          reports. Decrements the parent's comment_count for
 //                          comment-shaped targets (soft-remove doesn't fire
 //                          the delete trigger).
-//   restore_content      — post/comment/event/rapid/rapid_comment. Clears
+//   restore_content      — post/comment/event/current/current_comment. Clears
 //                          removed_at/removed_by. Reports are left resolved —
 //                          restoring doesn't reopen them. Re-increments the
 //                          parent's comment_count for comment-shaped targets.
@@ -46,19 +46,19 @@ const CONTENT_TABLES: Record<string, string> = {
   post: "posts",
   comment: "post_comments",
   event: "events",
-  rapid: "rapids",
-  rapid_comment: "rapid_comments",
+  current: "currents",
+  current_comment: "current_comments",
 };
 
 // Comment-shaped tables keep a denormalized count on their parent; soft
 // removal doesn't fire the count trigger, so it's adjusted by hand.
 const COMMENT_PARENTS: Record<string, { parentTable: string; parentCol: string }> = {
   post_comments: { parentTable: "posts", parentCol: "post_id" },
-  rapid_comments: { parentTable: "rapids", parentCol: "rapid_id" },
+  current_comments: { parentTable: "currents", parentCol: "current_id" },
 };
 
 const TARGET_TYPES = new Set([
-  "user", "post", "event", "comment", "ad", "rapid", "rapid_comment",
+  "user", "post", "event", "comment", "ad", "current", "current_comment",
 ]);
 const ACTIONS = new Set([
   "resolve", "dismiss", "remove_content", "restore_content",
