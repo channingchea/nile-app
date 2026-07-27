@@ -19,6 +19,9 @@ class CurrentRailEntry {
   final bool hasUnwatched;
   final bool isFollowed;
 
+  /// True for the caller's own slot — rendered as the leading "Your Current".
+  final bool isSelf;
+
   const CurrentRailEntry({
     required this.userId,
     required this.username,
@@ -28,6 +31,7 @@ class CurrentRailEntry {
     required this.latestCurrentAt,
     required this.hasUnwatched,
     required this.isFollowed,
+    this.isSelf = false,
   });
 
   factory CurrentRailEntry.fromJson(Map<String, dynamic> j) => CurrentRailEntry(
@@ -39,6 +43,7 @@ class CurrentRailEntry {
         latestCurrentAt: DateTime.parse(j['latest_current_at'] as String),
         hasUnwatched: j['has_unwatched'] as bool? ?? false,
         isFollowed: j['is_followed'] as bool? ?? false,
+        isSelf: j['is_self'] as bool? ?? false,
       );
 
   CurrentRailEntry copyWith({bool? hasUnwatched}) => CurrentRailEntry(
@@ -50,6 +55,7 @@ class CurrentRailEntry {
         latestCurrentAt: latestCurrentAt,
         hasUnwatched: hasUnwatched ?? this.hasUnwatched,
         isFollowed: isFollowed,
+        isSelf: isSelf,
       );
 }
 
@@ -247,6 +253,11 @@ class CurrentComment {
 class CurrentService {
   static const int maxDurationMs = 60000;
   static const int maxCaption = 200;
+
+  /// Storage rejects anything over 50 MB (the `currents` bucket limit, which
+  /// also matches the project-wide cap). Aim below it so the multipart
+  /// envelope can't tip an otherwise-fine file over.
+  static const int maxUploadBytes = 45 * 1024 * 1024;
 
   // Image-slideshow bounds.
   static const int minImageMs = 2000;

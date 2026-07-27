@@ -49,6 +49,13 @@ class _CreateCurrentScreenState extends State<CreateCurrentScreen> {
   static const int _minMs = 1000;
   static const int _stripFrameCount = 8;
 
+  /// Encode ladder, tried in order until the output fits the upload cap.
+  static const _qualitySteps = [
+    VideoQuality.Res1280x720Quality,
+    VideoQuality.Res960x540Quality,
+    VideoQuality.Res640x480Quality,
+  ];
+
   @override
   void dispose() {
     _captionController.dispose();
@@ -99,7 +106,13 @@ class _CreateCurrentScreenState extends State<CreateCurrentScreen> {
   Future<void> _pickImages({bool append = false}) async {
     setState(() => _picking = true);
     try {
-      final picked = await _picker.pickMultiImage();
+      // Downscale on pick: a full-res phone photo is 3–8 MB, and 20 of them
+      // blow past the upload cap. 1920px/85% keeps each frame a few hundred KB.
+      final picked = await _picker.pickMultiImage(
+        maxWidth: 1920,
+        maxHeight: 1920,
+        imageQuality: 85,
+      );
       if (picked.isEmpty) return;
       final room = CurrentService.maxImages - (append ? _images.length : 0);
       final drafts = picked
@@ -214,11 +227,25 @@ class _CreateCurrentScreenState extends State<CreateCurrentScreen> {
     } catch (e) {
       if (!mounted) return;
       setState(() {
-        _errorMessage = 'Failed to post: $e';
+        _errorMessage = _friendlyError(e);
         _submitting = false;
         _stage = null;
       });
     }
+  }
+
+  /// Storage's 413 reads as a raw StorageException — say something useful.
+  String _friendlyError(Object e) {
+    if (e is _TooLarge) return e.message;
+    final s = e.toString();
+    if (s.contains('413') ||
+        s.contains('exceeded the maximum allowed size') ||
+        s.toLowerCase().contains('payload too large')) {
+      return _isImageMode
+          ? 'These images are too large to upload. Try posting fewer of them.'
+          : 'This video is too large to upload. Try trimming it shorter.';
+    }
+    return 'Failed to post: $e';
   }
 
   Future<void> _submit() async {
@@ -238,19 +265,41 @@ class _CreateCurrentScreenState extends State<CreateCurrentScreen> {
       });
 
       final needsTrim = _startMs > 0 || _endMs < _videoMs;
-      final info = await VideoCompress.compressVideo(
-        _video!.path,
-        quality: VideoQuality.Res1280x720Quality,
-        deleteOrigin: false,
-        includeAudio: true,
-        startTime: needsTrim ? _startMs ~/ 1000 : null,
-        duration: needsTrim ? (_spanMs / 1000).ceil() : null,
-      );
+      // Encode at 720p, then step down until the result fits the upload cap.
+      // A high-bitrate 4K source can survive a 720p export well over 50 MB —
+      // and video_compress hands back the original when it can't encode at all.
+      File? out;
+      int outMs = 0;
+      for (final q in _qualitySteps) {
+        if (q != _qualitySteps.first && mounted) {
+          setState(() {
+            _stage = 'Compressing… (reducing quality)';
+            _compressProgress = 0;
+          });
+        }
+        final info = await VideoCompress.compressVideo(
+          _video!.path,
+          quality: q,
+          deleteOrigin: false,
+          includeAudio: true,
+          startTime: needsTrim ? _startMs ~/ 1000 : null,
+          duration: needsTrim ? (_spanMs / 1000).ceil() : null,
+        );
+        final f = info?.file;
+        if (f == null) throw StateError('Video processing failed.');
+        if (await f.length() <= CurrentService.maxUploadBytes) {
+          out = f;
+          outMs = (info!.duration ?? _spanMs.toDouble()).round();
+          break;
+        }
+      }
       _compressSub?.unsubscribe();
       _compressSub = null;
-      final out = info?.file;
-      if (out == null) throw StateError('Video processing failed.');
-      final outMs = (info!.duration ?? _spanMs.toDouble()).round();
+      if (out == null) {
+        throw const _TooLarge(
+            'This video is too large to post even at reduced quality. '
+            'Try trimming it shorter.');
+      }
 
       // Poster frame from the trim start.
       Uint8List? thumb;
@@ -279,7 +328,7 @@ class _CreateCurrentScreenState extends State<CreateCurrentScreen> {
       _compressSub = null;
       if (!mounted) return;
       setState(() {
-        _errorMessage = 'Failed to post: $e';
+        _errorMessage = _friendlyError(e);
         _submitting = false;
         _stage = null;
       });
@@ -848,4 +897,13 @@ class _ImageDraft {
   final File file;
   int durationMs;
   _ImageDraft(this.file, this.durationMs);
+}
+
+/// Raised when even the lowest encode still exceeds the upload cap; carries
+/// the message shown to the user verbatim.
+class _TooLarge implements Exception {
+  final String message;
+  const _TooLarge(this.message);
+  @override
+  String toString() => message;
 }

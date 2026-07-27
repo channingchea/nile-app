@@ -256,6 +256,9 @@ class _CurrentsPlayerScreenState extends State<CurrentsPlayerScreen>
       if (!mounted || _index != i) return;
       final it = _items![i];
       if (it is _CurrentItem) {
+        // Watching your own Current isn't a view — it would inflate the count
+        // and dim your own rail ring.
+        if (it.current.authorId == supabase.auth.currentUser?.id) return;
         if (_viewLogged.add(it.current.id)) {
           CurrentService.logView(it.current.id);
           setState(() {
@@ -269,6 +272,50 @@ class _CurrentsPlayerScreenState extends State<CurrentsPlayerScreen>
         }
       }
     });
+  }
+
+  /// Tap zones: left third back, right third forward, middle play/pause.
+  /// Inside a multi-image Current the side zones step frames first, and only
+  /// move to the next/previous Current once its frames run out. Forward past
+  /// the last item closes the player, like auto-advance does.
+  void _onTapZone(TapUpDetails d) {
+    final w = MediaQuery.sizeOf(context).width;
+    final dx = d.localPosition.dx;
+    if (dx < w / 3) {
+      if (_stepFrame(-1)) return;
+      if (_index > 0) {
+        _pager.previousPage(
+            duration: NileMotion.base, curve: NileMotion.curve);
+      }
+    } else if (dx > w * 2 / 3) {
+      if (_stepFrame(1)) return;
+      _advanceFrom(_index);
+    } else {
+      _togglePause();
+    }
+  }
+
+  /// Jump [delta] frames within the image Current on screen. False when there
+  /// is no such frame (or this isn't a slideshow), so the caller can page on.
+  bool _stepFrame(int delta) {
+    final it = _items![_index];
+    final ctrl = _slideCtrl;
+    if (ctrl == null || it is! _CurrentItem || !it.current.isImage) return false;
+    final imgs = it.current.images;
+    if (imgs.length < 2) return false;
+    final k = _slideAt(imgs, ctrl.value) + delta;
+    if (k < 0 || k >= imgs.length) return false;
+    final total = imgs.fold<int>(0, (s, im) => s + im.durationMs);
+    if (total <= 0) return false;
+    var start = 0;
+    for (var j = 0; j < k; j++) {
+      start += imgs[j].durationMs;
+    }
+    // forward() from here runs the remaining fraction of the total duration,
+    // so each frame keeps its own dwell time.
+    ctrl.value = start / total;
+    ctrl.forward();
+    return true;
   }
 
   void _togglePause() {
@@ -517,44 +564,64 @@ class _CurrentsPlayerScreenState extends State<CurrentsPlayerScreen>
 
   Widget _pagerBody() {
     final items = _items!;
-    return Stack(
-      children: [
-        PageView.builder(
-          controller: _pager,
-          scrollDirection: Axis.vertical,
-          onPageChanged: _onPageChanged,
-          itemCount: items.length,
-          itemBuilder: (_, i) => _page(items[i], i),
-        ),
-        SafeArea(
-          child: Stack(
-            children: [
-              _closeButton(),
-              Positioned(
-                top: NileSpacing.s4,
-                right: NileSpacing.s8,
-                child: IconButton(
-                  onPressed: _toggleMute,
-                  icon: Icon(
+    // Horizontal paging leaves the vertical axis free for swipe-down-to-exit.
+    return GestureDetector(
+      onVerticalDragEnd: _maybeDismiss,
+      child: Stack(
+        children: [
+          PageView.builder(
+            controller: _pager,
+            scrollDirection: Axis.horizontal,
+            onPageChanged: _onPageChanged,
+            itemCount: items.length,
+            itemBuilder: (_, i) => _page(items[i], i),
+          ),
+          SafeArea(
+            child: Stack(
+              children: [
+                _closeButton(),
+                Positioned(
+                  top: NileSpacing.s4,
+                  right: NileSpacing.s8,
+                  child: _topButton(
                     muted ? Icons.volume_off : Icons.volume_up,
-                    color: Colors.white,
+                    _toggleMute,
                   ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
-        ),
-      ],
+        ],
+      ),
     );
+  }
+
+  /// A flick downwards closes the player (the pager owns horizontal drags).
+  void _maybeDismiss(DragEndDetails d) {
+    if ((d.primaryVelocity ?? 0) > 250) Navigator.pop(context);
   }
 
   Widget _closeButton() {
     return Positioned(
       top: NileSpacing.s4,
       left: NileSpacing.s8,
-      child: IconButton(
-        onPressed: () => Navigator.pop(context),
-        icon: const Icon(Icons.close, color: Colors.white),
+      child: _topButton(Icons.close, () => Navigator.pop(context)),
+    );
+  }
+
+  /// Top control on a dark disc — the video behind can be any brightness, so a
+  /// bare white glyph disappears against pale footage.
+  Widget _topButton(IconData icon, VoidCallback onTap) {
+    return Material(
+      color: Colors.black45,
+      shape: const CircleBorder(),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.all(NileSpacing.s8),
+          child: Icon(icon, color: Colors.white, size: 22),
+        ),
       ),
     );
   }
@@ -565,17 +632,16 @@ class _CurrentsPlayerScreenState extends State<CurrentsPlayerScreen>
     final ready = c != null && c.value.isInitialized;
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
-      onTap: _togglePause,
+      onTapUp: _onTapZone,
       child: Stack(
         fit: StackFit.expand,
         children: [
           if (ready)
-            FittedBox(
-              fit: BoxFit.cover,
-              clipBehavior: Clip.hardEdge,
-              child: SizedBox(
-                width: c.value.size.width,
-                height: c.value.size.height,
+            // Fit the full frame to the screen width (height-bound only when
+            // the clip is taller than the viewport) — never crop the sides.
+            Center(
+              child: AspectRatio(
+                aspectRatio: c.value.aspectRatio,
                 child: VideoPlayer(c),
               ),
             )
@@ -620,7 +686,7 @@ class _CurrentsPlayerScreenState extends State<CurrentsPlayerScreen>
     final active = i == _index && _slideCtrl != null;
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
-      onTap: _togglePause,
+      onTapUp: _onTapZone,
       child: Stack(
         fit: StackFit.expand,
         children: [
@@ -667,9 +733,11 @@ class _CurrentsPlayerScreenState extends State<CurrentsPlayerScreen>
     if (url == null || url.isEmpty) {
       return const ColoredBox(color: Colors.black);
     }
+    // contain, not cover: landscape and portrait frames both size to the
+    // screen width rather than being cropped to fill.
     return Image.network(
       url,
-      fit: BoxFit.cover,
+      fit: BoxFit.contain,
       errorBuilder: (_, _, _) => const ColoredBox(color: Colors.black),
     );
   }
@@ -724,7 +792,7 @@ class _CurrentsPlayerScreenState extends State<CurrentsPlayerScreen>
       _AdItem(:final ad) => ad.thumbUrl,
     };
     return thumb != null
-        ? Image.network(thumb, fit: BoxFit.cover,
+        ? Image.network(thumb, fit: BoxFit.contain,
             errorBuilder: (_, _, _) => const ColoredBox(color: Colors.black))
         : Center(
             child: CircularProgressIndicator(color: NileColors.volt));
@@ -935,6 +1003,8 @@ class _CurrentsPlayerScreenState extends State<CurrentsPlayerScreen>
     return Padding(
       padding: const EdgeInsets.only(bottom: NileSpacing.s12),
       child: GestureDetector(
+        // Opaque so a slightly-off tap hits the action, not the "next" zone.
+        behavior: HitTestBehavior.opaque,
         onTap: onTap,
         child: Column(
           mainAxisSize: MainAxisSize.min,
