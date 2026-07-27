@@ -626,11 +626,11 @@ class _FeedTabState extends State<_FeedTab> {
     } catch (_) {}
   }
 
+  // Live Now rail taps go to the event's landing page, not straight into the
+  // stream — the detail screen has the join CTA.
   void _openLive(Event event) => Navigator.push(
     context,
-    MaterialPageRoute(
-      builder: (_) => ViewerScreen(initialEventId: event.liveKitEventId),
-    ),
+    MaterialPageRoute(builder: (_) => EventDetailScreen(event: event)),
   );
 
   void _onScroll() {
@@ -1083,11 +1083,6 @@ class _FeedTabState extends State<_FeedTab> {
             NileGlassBar.sliverAppBar(
               title: const NileLogo(size: 'small', height: 28),
               actions: [
-                IconButton(
-                  onPressed: _load,
-                  tooltip: 'Refresh',
-                  icon: const Icon(Icons.refresh),
-                ),
                 IconButton(
                   onPressed: _openNotifications,
                   icon: Badge(
