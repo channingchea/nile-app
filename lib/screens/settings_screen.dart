@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../services/account_service.dart';
@@ -6,6 +7,7 @@ import '../theme.dart';
 import '../widgets/nile_glass_app_bar.dart';
 import '../widgets/pressable.dart';
 import 'appearance_screen.dart';
+import 'auth/feature_intro_screen.dart';
 import 'auth/interest_picker_screen.dart';
 import 'auth/mfa_settings_screen.dart';
 import 'blocked_accounts_screen.dart';
@@ -116,6 +118,14 @@ class SettingsScreen extends StatelessWidget {
     if (confirm == true) await Supabase.instance.client.auth.signOut();
   }
 
+  /// Debug-only. Clears the feature-intro seen flag and signs out so the next
+  /// screen is the tour itself, no reinstall needed. Only ever rendered when
+  /// kDebugMode is true, so this never reaches a release build.
+  Future<void> _replayFeatureIntro(BuildContext context) async {
+    await FeatureIntroScreen.resetForTesting();
+    if (context.mounted) await Supabase.instance.client.auth.signOut();
+  }
+
   Future<void> _deleteAccount(BuildContext context) async {
     final confirm = await showDialog<bool>(
       context: context,
@@ -220,6 +230,17 @@ class SettingsScreen extends StatelessWidget {
                 ),
               ],
             ),
+            if (kDebugMode)
+              _SettingsSection(
+                header: 'DEVELOPER',
+                rows: [
+                  _SettingsRow(
+                    icon: Icons.replay,
+                    label: 'Replay feature intro',
+                    onTap: () => _replayFeatureIntro(context),
+                  ),
+                ],
+              ),
             _SettingsSection(
               rows: [
                 _SettingsRow(

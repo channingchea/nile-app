@@ -9,10 +9,12 @@ import 'package:flutter/material.dart';
 import 'package:sentry_flutter/sentry_flutter.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'config.dart';
+import 'screens/auth/feature_intro_screen.dart';
 import 'screens/auth/login_screen.dart';
 import 'screens/auth/mfa_challenge_screen.dart';
 import 'screens/auth/onboarding_screen.dart';
 import 'screens/auth/reset_password_screen.dart';
+import 'screens/auth/signup_screen.dart';
 import 'screens/home_screen.dart';
 import 'screens/splash_screen.dart';
 import 'services/app_lifecycle.dart';
@@ -175,6 +177,7 @@ class _NileAppState extends State<NileApp> with WidgetsBindingObserver {
 /// Listens to Supabase auth state and routes accordingly.
 /// - Authenticated, onboarded     → HomeScreen
 /// - Authenticated, not onboarded → OnboardingScreen (onboarded_at IS NULL)
+/// - Unauthenticated, first launch → FeatureIntroScreen (native apps only, once)
 /// - Unauthenticated              → LoginScreen
 ///
 /// On sign-out, also clears any pushed routes (e.g. Settings) so the user
@@ -203,6 +206,18 @@ class _AuthGateState extends State<_AuthGate> {
   bool _splashDone = false;
   // null = unknown (fetch in flight or no session); the splash covers latency.
   bool? _onboarded;
+  // First-launch feature tour. null = local flag still being read; the splash
+  // covers it. Only ever consulted while signed out.
+  bool? _introSeen;
+
+  /// The tour runs on the native app builds (mobile + macOS). Web has the
+  /// marketing site instead, and its async session restore would flash the
+  /// tour on every refresh.
+  static bool get _introSupported =>
+      !kIsWeb &&
+      (defaultTargetPlatform == TargetPlatform.iOS ||
+          defaultTargetPlatform == TargetPlatform.android ||
+          defaultTargetPlatform == TargetPlatform.macOS);
 
   /// Fetch onboarded_at for the current session and cache it. Guarded against
   /// stale responses when the user changes mid-flight.
@@ -226,6 +241,18 @@ class _AuthGateState extends State<_AuthGate> {
       _resolveOnboarded();
       // New device with empty local prefs: adopt profiles.theme_mode.
       ThemeService.instance.onSignIn();
+    }
+    if (!_introSupported) {
+      _introSeen = true;
+    } else if (_session != null) {
+      // Already signed in, so this is an existing user updating the app:
+      // stamp the flag now rather than showing them the tour if they sign out.
+      _introSeen = true;
+      FeatureIntroScreen.markSeen();
+    } else {
+      FeatureIntroScreen.hasSeen().then((seen) {
+        if (mounted) setState(() => _introSeen = seen);
+      });
     }
     // On web, skip the splash entirely — the session is restored asynchronously
     // via the auth stream (currentSession is always null at initState on web),
@@ -254,6 +281,16 @@ class _AuthGateState extends State<_AuthGate> {
           nav?.popUntil((r) => r.isFirst);
           PushService.onSignOut();
           _onboarded = null;
+          // Debug builds only: Settings has a "Replay feature intro" row that
+          // clears the local flag then signs out, so re-read it here rather
+          // than trusting the cached value. Production never resets the flag,
+          // so this never fires there and stays a one-time-per-device check.
+          if (kDebugMode && _introSupported) {
+            _introSeen = null;
+            FeatureIntroScreen.hasSeen().then((seen) {
+              if (mounted) setState(() => _introSeen = seen);
+            });
+          }
         case AuthChangeEvent.passwordRecovery:
           // Opened a recovery link: force the set-new-password screen on top of
           // whatever the gate resolves to underneath.
@@ -281,6 +318,19 @@ class _AuthGateState extends State<_AuthGate> {
     super.dispose();
   }
 
+  /// Leave the tour for good. [startSignup] comes from the closing CTA, and
+  /// pushes signup on top of the login screen the gate falls through to.
+  void _dismissIntro(bool startSignup) {
+    FeatureIntroScreen.markSeen();
+    setState(() => _introSeen = true);
+    if (!startSignup) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      widget.navigatorKey.currentState?.push(
+        MaterialPageRoute(builder: (_) => const SignupScreen()),
+      );
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     // Before the first auth event resolves with no existing session, show a
@@ -290,7 +340,13 @@ class _AuthGateState extends State<_AuthGate> {
     if (!_splashDone || !_initialized) {
       return const SplashScreen();
     }
-    if (_session == null) return const LoginScreen();
+    if (_session == null) {
+      // Hold the splash while the local seen-flag resolves, so the tour never
+      // flashes in behind the login screen.
+      if (_introSeen == null) return const SplashScreen();
+      if (!_introSeen!) return FeatureIntroScreen(onDone: _dismissIntro);
+      return const LoginScreen();
+    }
     // Session present but at aal1 with a verified factor pending — challenge for
     // the second step before anything else (also covers cold-start restore).
     if (MfaService.needsChallenge()) {
