@@ -14,6 +14,7 @@ import '../services/repost_service.dart';
 import '../theme.dart';
 import '../widgets/event_cover_pill.dart';
 import '../widgets/event_link_card.dart';
+import '../widgets/nile_cover_action.dart';
 import '../widgets/nile_glass_nav_bar.dart';
 import '../widgets/official_badge.dart';
 import '../widgets/nile_skeleton.dart';
@@ -575,34 +576,39 @@ class _ProfileScreenState extends State<ProfileScreen> {
       return Scaffold(
         backgroundColor: NileColors.bgPage,
         body: NileMaxWidth(
-          child: SingleChildScrollView(
-            child: NileSkeletonPulse(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  // Cover strip
-                  const NileSkeleton(width: double.infinity, height: 120, radius: 0),
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s16, NileSpacing.s16, 0),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Hero(
-                          tag: heroTag,
-                          child: const NileSkeleton.circle(size: 72),
+          child: Stack(
+            children: [
+              SingleChildScrollView(
+                child: NileSkeletonPulse(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      // Cover strip
+                      const NileSkeleton(width: double.infinity, height: 120, radius: 0),
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s16, NileSpacing.s16, 0),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Hero(
+                              tag: heroTag,
+                              child: const NileSkeleton.circle(size: 72),
+                            ),
+                            const SizedBox(height: 12),
+                            const NileSkeleton(width: 160, height: 16),
+                            const SizedBox(height: 8),
+                            const NileSkeleton(width: 100),
+                          ],
                         ),
-                        const SizedBox(height: 12),
-                        const NileSkeleton(width: 160, height: 16),
-                        const SizedBox(height: 8),
-                        const NileSkeleton(width: 100),
-                      ],
-                    ),
+                      ),
+                      const SizedBox(height: 20),
+                      const NileSkeletonList(count: 2),
+                    ],
                   ),
-                  const SizedBox(height: 20),
-                  const NileSkeletonList(count: 2),
-                ],
+                ),
               ),
-            ),
+              _buildCoverBack(),
+            ],
           ),
         ),
       );
@@ -611,18 +617,25 @@ class _ProfileScreenState extends State<ProfileScreen> {
     if (_error != null) {
       return Scaffold(
         backgroundColor: NileColors.bgPage,
-        body: Center(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
+        body: NileMaxWidth(
+          child: Stack(
             children: [
-              Text(
-                _error!,
-                style: NileTextStyles.bodyMd().copyWith(
-                  color: NileColors.error,
+              Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      _error!,
+                      style: NileTextStyles.bodyMd().copyWith(
+                        color: NileColors.error,
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    FilledButton(onPressed: _load, child: const Text('Retry')),
+                  ],
                 ),
               ),
-              const SizedBox(height: 12),
-              FilledButton(onPressed: _load, child: const Text('Retry')),
+              _buildCoverBack(),
             ],
           ),
         ),
@@ -633,8 +646,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
     return Scaffold(
       backgroundColor: NileColors.bgPage,
-      // No app bar — the cover photo is the top of the page. The settings /
-      // menu action floats over the cover's top corner (see _buildHeader).
+      // No app bar — the cover photo is the top of the page. Back (when pushed)
+      // and settings / menu float over the cover's top corners (_buildHeader).
       // Create "+" now lives in the glass nav bar (see home_screen.dart),
       // so the profile no longer renders its own FAB.
       body: NileMaxWidth(
@@ -659,14 +672,22 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
   // ─── Header ───────────────────────────────────────────────────────────────
 
+  /// Back control over the cover's top-left corner, mirroring the action on the
+  /// right. Hides itself on the Profile *tab* (nothing to pop) and appears on
+  /// every pushed instance — see [NileCoverBackButton].
+  Widget _buildCoverBack() {
+    return Positioned(
+      top: MediaQuery.of(context).padding.top + NileSpacing.s8,
+      left: NileSpacing.s8,
+      child: const NileCoverBackButton(),
+    );
+  }
+
   /// Floating action over the cover's top corner: settings (own profile) or a
   /// report/block menu (other profiles). Dark disc keeps it legible on any cover.
   Widget _buildCoverActions() {
-    final bg = Colors.black.withValues(alpha: 0.35);
     if (_isOwnProfile) {
-      return Material(
-        color: bg,
-        shape: const CircleBorder(),
+      return NileCoverAction(
         child: IconButton(
           icon: const Icon(Icons.settings_outlined, color: Colors.white),
           tooltip: 'Settings',
@@ -674,9 +695,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
         ),
       );
     }
-    return Material(
-      color: bg,
-      shape: const CircleBorder(),
+    return NileCoverAction(
       child: PopupMenuButton<String>(
         icon: const Icon(Icons.more_vert, color: Colors.white),
         color: NileColors.bgRaised,
@@ -719,6 +738,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
         Stack(
           children: [
             CoverPhoto(url: p.coverUrl, height: _coverHeight),
+            _buildCoverBack(),
             Positioned(
               top: MediaQuery.of(context).padding.top + NileSpacing.s8,
               right: NileSpacing.s8,

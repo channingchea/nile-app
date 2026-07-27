@@ -577,13 +577,19 @@ class _EventDetailScreenState extends State<EventDetailScreen>
   Widget _buildBody() {
     // Render immediately when an event was passed in so the Hero flight from
     // the previous screen can run; follow/ticket state hydrates in place.
+    // Back lives on the SliverAppBar below, which only exists once the event
+    // has loaded — so these two branches carry their own, or a slow/failed
+    // fetch strands the user (this screen is often opened by id alone).
     if (_event == null) {
-      if (_loading) {
-        return Center(
-          child: CircularProgressIndicator(color: NileColors.volt),
-        );
-      }
-      return _ErrorView(message: _error ?? 'Event not found', onRetry: _load);
+      return Stack(
+        children: [
+          if (_loading)
+            Center(child: CircularProgressIndicator(color: NileColors.volt))
+          else
+            _ErrorView(message: _error ?? 'Event not found', onRetry: _load),
+          const Align(alignment: Alignment.topLeft, child: BackButton()),
+        ],
+      );
     }
     return CustomScrollView(
       slivers: [

@@ -403,8 +403,16 @@ class _RapidsPlayerScreenState extends State<RapidsPlayerScreen> {
       body: _error != null
           ? _errorBody()
           : _items == null
-              ? Center(
-                  child: CircularProgressIndicator(color: NileColors.volt))
+              ? SafeArea(
+                  child: Stack(
+                    children: [
+                      Center(
+                          child:
+                              CircularProgressIndicator(color: NileColors.volt)),
+                      _closeButton(),
+                    ],
+                  ),
+                )
               : _pagerBody(),
     );
   }

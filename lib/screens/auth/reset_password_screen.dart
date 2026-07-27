@@ -63,6 +63,13 @@ class _ResetPasswordScreenState extends State<ResetPasswordScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: NileColors.bgPage,
+      // Recovery links land here on top of the auth gate; without a back the
+      // only way out is completing the reset.
+      appBar: AppBar(
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        iconTheme: IconThemeData(color: NileColors.txtPrimary),
+      ),
       body: NileMaxWidth(
         child: SafeArea(
           child: SingleChildScrollView(
