@@ -52,6 +52,21 @@ serve(async (req) => {
 
   // ── 2. Pull the App Check token out of signup metadata ───────────────────
   const user = (payload.user ?? payload.record ?? {}) as Record<string, unknown>;
+
+  // OAuth signups (Google / Apple via signInWithIdToken) carry no App Check
+  // token — the native flow can't attach one — and both providers run their
+  // own fraud screening. Exempt them from attestation.
+  const appMeta = (user.app_metadata ?? user.raw_app_meta_data ?? {}) as Record<
+    string,
+    unknown
+  >;
+  const provider = typeof appMeta.provider === "string"
+    ? appMeta.provider
+    : "email";
+  if (provider === "google" || provider === "apple") {
+    return allow();
+  }
+
   const meta = (user.user_metadata ?? user.raw_user_meta_data ?? {}) as Record<
     string,
     unknown

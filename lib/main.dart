@@ -9,6 +9,7 @@ import 'package:flutter/material.dart';
 import 'package:sentry_flutter/sentry_flutter.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'config.dart';
+import 'screens/auth/claim_username_screen.dart';
 import 'screens/auth/feature_intro_screen.dart';
 import 'screens/auth/login_screen.dart';
 import 'screens/auth/mfa_challenge_screen.dart';
@@ -205,7 +206,9 @@ class _AuthGateState extends State<_AuthGate> {
   bool _initialized = false;
   bool _splashDone = false;
   // null = unknown (fetch in flight or no session); the splash covers latency.
-  bool? _onboarded;
+  // Carries both onboarding state and whether an OAuth signup still holds an
+  // auto-generated username that must be claimed first.
+  ({bool onboarded, bool needsUsernameClaim})? _gate;
   // First-launch feature tour. null = local flag still being read; the splash
   // covers it. Only ever consulted while signed out.
   bool? _introSeen;
@@ -219,14 +222,14 @@ class _AuthGateState extends State<_AuthGate> {
           defaultTargetPlatform == TargetPlatform.android ||
           defaultTargetPlatform == TargetPlatform.macOS);
 
-  /// Fetch onboarded_at for the current session and cache it. Guarded against
-  /// stale responses when the user changes mid-flight.
-  Future<void> _resolveOnboarded() async {
+  /// Fetch onboarding + username-claim state for the current session and cache
+  /// it. Guarded against stale responses when the user changes mid-flight.
+  Future<void> _resolveGate() async {
     final uid = _session?.user.id;
     if (uid == null) return;
-    final done = await ProfileService.isOnboarded();
+    final gate = await ProfileService.gateState();
     if (mounted && _session?.user.id == uid) {
-      setState(() => _onboarded = done);
+      setState(() => _gate = gate);
     }
   }
 
@@ -238,7 +241,7 @@ class _AuthGateState extends State<_AuthGate> {
     // stream, so treat its presence as already-resolved.
     _initialized = _session != null;
     if (_session != null) {
-      _resolveOnboarded();
+      _resolveGate();
       // New device with empty local prefs: adopt profiles.theme_mode.
       ThemeService.instance.onSignIn();
     }
@@ -276,11 +279,11 @@ class _AuthGateState extends State<_AuthGate> {
           nav?.popUntil((r) => r.isFirst);
           PushService.onSignIn();
           ThemeService.instance.onSignIn();
-          _onboarded = null; // fresh signup/sign-in: re-check below
+          _gate = null; // fresh signup/sign-in: re-check below
         case AuthChangeEvent.signedOut:
           nav?.popUntil((r) => r.isFirst);
           PushService.onSignOut();
-          _onboarded = null;
+          _gate = null;
           // Debug builds only: Settings has a "Replay feature intro" row that
           // clears the local flag then signs out, so re-read it here rather
           // than trusting the cached value. Production never resets the flag,
@@ -307,7 +310,7 @@ class _AuthGateState extends State<_AuthGate> {
         _session = state.session;
         _initialized = true;
       });
-      if (_session != null && _onboarded == null) _resolveOnboarded();
+      if (_session != null && _gate == null) _resolveGate();
     });
   }
 
@@ -352,10 +355,24 @@ class _AuthGateState extends State<_AuthGate> {
     if (MfaService.needsChallenge()) {
       return MfaChallengeScreen(onVerified: () => setState(() {}));
     }
-    // Session present but onboarding state still loading — hold the splash.
-    if (_onboarded == null) return const SplashScreen();
-    if (!_onboarded!) {
-      return OnboardingScreen(onDone: () => setState(() => _onboarded = true));
+    // Session present but gate state still loading — hold the splash.
+    final gate = _gate;
+    if (gate == null) return const SplashScreen();
+    // OAuth signup holding a generated username: claim screen comes before
+    // onboarding, and there is no way around it.
+    if (gate.needsUsernameClaim) {
+      return ClaimUsernameScreen(
+        onDone: () => setState(
+          () => _gate = (onboarded: gate.onboarded, needsUsernameClaim: false),
+        ),
+      );
+    }
+    if (!gate.onboarded) {
+      return OnboardingScreen(
+        onDone: () => setState(
+          () => _gate = (onboarded: true, needsUsernameClaim: false),
+        ),
+      );
     }
     return const HomeScreen();
   }

@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../services/human_check.dart';
+import '../../services/profile_service.dart';
 import '../../services/supabase_client.dart';
 import '../../theme.dart';
 import '../../widgets/nile_logo.dart';
+import '../../widgets/social_auth_buttons.dart';
 
 class SignupScreen extends StatefulWidget {
   const SignupScreen({super.key});
@@ -41,6 +43,17 @@ class _SignupScreenState extends State<SignupScreen> {
     setState(() => _loading = true);
 
     try {
+      // Username availability pre-check — a collision inside the signup
+      // trigger would otherwise surface as an opaque server error.
+      final username = _usernameCtrl.text.trim().toLowerCase();
+      if (!await ProfileService.isUsernameAvailable(username)) {
+        if (mounted) {
+          _showError('That username is taken. Please choose another.');
+          setState(() => _loading = false);
+        }
+        return;
+      }
+
       // Bot protection: invisible captcha + device attestation (both null
       // until configured — see human_check.dart).
       final captcha = await HumanCheck.captchaToken();
@@ -70,7 +83,12 @@ class _SignupScreenState extends State<SignupScreen> {
         setState(() => _submitted = true);
       }
     } on AuthException catch (e) {
-      if (mounted) _showError(e.message);
+      // A race on the username pre-check still fails inside the signup
+      // trigger and surfaces as a generic database error — translate it.
+      final msg = e.message.toLowerCase().contains('database error')
+          ? 'That username may already be taken. Please try another.'
+          : e.message;
+      if (mounted) _showError(msg);
     } catch (_) {
       if (mounted) _showError('Something went wrong. Please try again.');
     } finally {
@@ -332,6 +350,10 @@ class _SignupScreenState extends State<SignupScreen> {
                       )
                     : const Text('Create Account'),
               ),
+              const SizedBox(height: 24),
+
+              // ── Social sign-in ───────────────────────────────────────
+              const SocialAuthButtons(),
               const SizedBox(height: 24),
 
               // ── Back to sign in ──────────────────────────────────────

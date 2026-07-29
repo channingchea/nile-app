@@ -15,6 +15,12 @@ class ImageTooLargeException implements Exception {
   String toString() => 'Image is too large. Please choose one under 5 MB.';
 }
 
+/// Thrown when a profile update fails because the username is already taken.
+class UsernameTakenException implements Exception {
+  @override
+  String toString() => 'That username is taken.';
+}
+
 // ── Model ─────────────────────────────────────────────────────────────────────
 
 class UserProfile {
@@ -33,6 +39,10 @@ class UserProfile {
   /// Official Nile account (house account). Badge-only; never owner-writable.
   final bool isOfficial;
 
+  /// True while the username is an auto-generated placeholder (OAuth signups).
+  /// Cleared when the user claims a username of their own.
+  final bool usernameIsProvisional;
+
   const UserProfile({
     required this.id,
     required this.username,
@@ -46,6 +56,7 @@ class UserProfile {
     required this.createdAt,
     this.onboardedAt,
     this.isOfficial = false,
+    this.usernameIsProvisional = false,
   });
 
   /// True once the host has begun Stripe Connect onboarding. Live
@@ -69,6 +80,7 @@ class UserProfile {
           ? DateTime.parse(map['onboarded_at'] as String)
           : null,
       isOfficial: map['is_official'] as bool? ?? false,
+      usernameIsProvisional: map['username_is_provisional'] as bool? ?? false,
     );
   }
 
@@ -81,6 +93,7 @@ class UserProfile {
     int? followerCount,
     int? followingCount,
     String? stripeAccountId,
+    bool? usernameIsProvisional,
   }) {
     return UserProfile(
       id: id,
@@ -95,6 +108,8 @@ class UserProfile {
       createdAt: createdAt,
       onboardedAt: onboardedAt,
       isOfficial: isOfficial,
+      usernameIsProvisional:
+          usernameIsProvisional ?? this.usernameIsProvisional,
     );
   }
 }
@@ -157,26 +172,57 @@ class ProfileService {
   // ─── Write ────────────────────────────────────────────────────────────────
 
   /// Update mutable profile fields. Pass only the fields you want to change.
+  ///
+  /// Throws [UsernameTakenException] when [username] collides with an
+  /// existing account (Postgres unique violation 23505).
   static Future<UserProfile> updateProfile({
     required String userId,
     String? displayName,
     String? username,
     String? bio,
+    bool? usernameIsProvisional,
   }) async {
     final updates = <String, dynamic>{
       'display_name': ?displayName,
       'username': ?username,
       'bio': ?bio,
+      'username_is_provisional': ?usernameIsProvisional,
     };
 
-    final data = await supabase
-        .from('profiles')
-        .update(updates)
-        .eq('id', userId)
-        .select()
-        .single();
+    try {
+      final data = await supabase
+          .from('profiles')
+          .update(updates)
+          .eq('id', userId)
+          .select()
+          .single();
+      return UserProfile.fromMap(data);
+    } on PostgrestException catch (e) {
+      if (e.code == '23505') throw UsernameTakenException();
+      rethrow;
+    }
+  }
 
-    return UserProfile.fromMap(data);
+  /// True when [username] is not currently held by another account
+  /// (case-insensitive). [excludeUserId] lets the current user keep their
+  /// own username while editing.
+  static Future<bool> isUsernameAvailable(
+    String username, {
+    String? excludeUserId,
+  }) async {
+    // Escape ilike wildcards — '_' is a legal username character but a
+    // single-char wildcard in ilike patterns.
+    final pattern = username
+        .trim()
+        .replaceAll(r'\', r'\\')
+        .replaceAll('%', r'\%')
+        .replaceAll('_', r'\_');
+    var query = supabase.from('profiles').select('id').ilike('username', pattern);
+    if (excludeUserId != null) {
+      query = query.neq('id', excludeUserId);
+    }
+    final rows = await query.limit(1);
+    return (rows as List).isEmpty;
   }
 
   /// True once the signed-in user has completed (or skipped through)
@@ -189,8 +235,31 @@ class ProfileService {
         .select('onboarded_at')
         .eq('id', uid)
         .maybeSingle();
-    // Fail-open: a missing row (trigger lag) shouldn't trap the user.
-    return row == null || row['onboarded_at'] != null;
+    // Fail-closed: a missing row means the signup trigger failed — routing
+    // the user into HomeScreen with no profile produces a broken account.
+    return row != null && row['onboarded_at'] != null;
+  }
+
+  /// Routing state for _AuthGate in a single query: whether onboarding is
+  /// complete and whether the username is still an auto-generated placeholder
+  /// (OAuth signup) that must be claimed before anything else.
+  ///
+  /// Fail-closed: a missing profile row reads as not-onboarded.
+  static Future<({bool onboarded, bool needsUsernameClaim})> gateState() async {
+    final uid = supabase.auth.currentUser?.id;
+    if (uid == null) {
+      return (onboarded: true, needsUsernameClaim: false);
+    }
+    final row = await supabase
+        .from('profiles')
+        .select('onboarded_at, username_is_provisional')
+        .eq('id', uid)
+        .maybeSingle();
+    if (row == null) return (onboarded: false, needsUsernameClaim: false);
+    return (
+      onboarded: row['onboarded_at'] != null,
+      needsUsernameClaim: row['username_is_provisional'] == true,
+    );
   }
 
   /// Stamp onboarding as complete. Final action of the onboarding flow.

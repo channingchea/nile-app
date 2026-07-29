@@ -10,7 +10,7 @@
 	<key>RTCScreenSharingExtension</key>
 	<string>com.nilestreaming.app.BroadcastExtension</string>
 	<key>RTCAppGroupIdentifier</key>
-	<string>group.com.nilestreaming.app</string>
+	<string>group.com.nilestreaming.shared</string>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
@@ -31,6 +31,15 @@
 			<key>CFBundleURLSchemes</key>
 			<array>
 				<string>nile</string>
+			</array>
+		</dict>
+		<!-- Google sign-in callback (reversed iOS OAuth client ID). -->
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>google-oauth</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>com.googleusercontent.apps.907048556625-1cl82rkemt4g164mtuj6448r3aujnasc</string>
 			</array>
 		</dict>
 	</array>

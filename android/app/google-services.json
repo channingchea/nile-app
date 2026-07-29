@@ -12,7 +12,20 @@
           "package_name": "com.nilestreaming.app"
         }
       },
-      "oauth_client": [],
+      "oauth_client": [
+        {
+          "client_id": "907048556625-nni26mo1cf5t748k6344ge28186qqsfd.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.nilestreaming.app",
+            "certificate_hash": "d3bbabf6861fb1129076153f10349f81d0b6b237"
+          }
+        },
+        {
+          "client_id": "907048556625-jt3a7h1ddm8gi648eea9j6hddvvimqb6.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
       "api_key": [
         {
           "current_key": "AIzaSyAceVRbDWXLLQCS0mxJH-iQ1bVo9Ucypok"
@@ -20,7 +33,19 @@
       ],
       "services": {
         "appinvite_service": {
-          "other_platform_oauth_client": []
+          "other_platform_oauth_client": [
+            {
+              "client_id": "907048556625-jt3a7h1ddm8gi648eea9j6hddvvimqb6.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "907048556625-1cl82rkemt4g164mtuj6448r3aujnasc.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.nilestreaming.app"
+              }
+            }
+          ]
         }
       }
     }

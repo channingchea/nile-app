@@ -22,6 +22,16 @@ const String turnstileSiteKey = '';
 // Must match a hostname on the Turnstile widget's domain list.
 const String turnstileBaseUrl = 'https://joinnile.com';
 
+// ── Google / Apple sign-in ────────────────────────────────────────────────────
+// OAuth client IDs from Google Cloud project nile-35c48 (public identifiers,
+// like the Supabase anon key). The web client ID is the ID-token audience for
+// BOTH mobile platforms (`serverClientId`); the iOS client ID also appears
+// reversed in Info.plist as a URL scheme.
+const String googleWebClientId =
+    '907048556625-jt3a7h1ddm8gi648eea9j6hddvvimqb6.apps.googleusercontent.com';
+const String googleIosClientId =
+    '907048556625-1cl82rkemt4g164mtuj6448r3aujnasc.apps.googleusercontent.com';
+
 // ── Sentry (crash / error reporting) ──────────────────────────────────────────
 // Injected at build time so the DSN never lives in the repo:
 //   flutter run --dart-define=SENTRY_DSN=https://...@oXXXX.ingest.sentry.io/XXXX

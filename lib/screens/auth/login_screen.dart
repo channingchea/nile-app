@@ -5,6 +5,7 @@ import '../../services/human_check.dart';
 import '../../services/supabase_client.dart';
 import '../../theme.dart';
 import '../../widgets/nile_logo.dart';
+import '../../widgets/social_auth_buttons.dart';
 import 'forgot_password_screen.dart';
 import 'signup_screen.dart';
 
@@ -206,6 +207,10 @@ class _LoginScreenState extends State<LoginScreen> {
                             )
                           : const Text('Sign In'),
                     ),
+                    const SizedBox(height: 24),
+
+                    // ── Social sign-in ───────────────────────────────────────
+                    const SocialAuthButtons(),
                     const SizedBox(height: 24),
 
                     // ── Sign up link ─────────────────────────────────────────

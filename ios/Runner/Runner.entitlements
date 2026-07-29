@@ -10,11 +10,16 @@
 		<string>applinks:links.nile.app</string>
 	</array>
 	-->
+	<!-- Sign in with Apple (also enabled on the App ID in the developer portal). -->
+	<key>com.apple.developer.applesignin</key>
+	<array>
+		<string>Default</string>
+	</array>
 	<!-- Shared container between the app and the Broadcast Upload Extension —
 	     the screen-share frames travel over a socket in this group. -->
 	<key>com.apple.security.application-groups</key>
 	<array>
-		<string>group.com.nilestreaming.app</string>
+		<string>group.com.nilestreaming.shared</string>
 	</array>
 </dict>
 </plist>

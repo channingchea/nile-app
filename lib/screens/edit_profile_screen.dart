@@ -166,6 +166,12 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
         coverUrl: _remoteCoverUrl,
       );
       if (mounted) Navigator.of(context).pop(withImages);
+    } on UsernameTakenException {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('That username is taken.')),
+        );
+      }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(
