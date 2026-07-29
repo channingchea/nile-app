@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:livekit_client/livekit_client.dart' hide ChatMessage;
+import 'package:flutter_webrtc/flutter_webrtc.dart' as rtc;
 import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart' show RealtimeChannel;
 import '../services/supabase_client.dart';
@@ -9,6 +10,7 @@ import '../services/chat_service.dart';
 import '../services/crew_service.dart';
 import '../services/event_service.dart';
 import '../services/livekit_service.dart';
+import '../services/shake_detector.dart';
 import '../widgets/audio_meter.dart';
 import '../widgets/screen_share_picker.dart';
 import '../widgets/viewer_preview_overlay.dart';
@@ -46,6 +48,9 @@ class _CameraScreenState extends State<CameraScreen> {
   @override
   void initState() {
     super.initState();
+    // A phone acting as a camera gets knocked constantly — never let a shake
+    // throw the report form over a live shot.
+    ShakeDetector.instance.pause();
     if (widget.initialEventId != null) {
       _eventIdController.text = widget.initialEventId!;
     }
@@ -449,6 +454,7 @@ class _CameraScreenState extends State<CameraScreen> {
 
   @override
   void dispose() {
+    ShakeDetector.instance.resume();
     // A drop or back-swipe never ends a live show anymore — the show stays
     // 'live' and viewers' resilience logic treats it as reconnect-and-wait.
     // Ending only ever happens via the explicit End Stream confirm path.
@@ -840,16 +846,29 @@ class _CameraScreenState extends State<CameraScreen> {
     try {
       final track = _cameraPub(_room?.localParticipant)?.track;
       if (track is LocalVideoTrack) {
-        // Restart the existing track on the other position. The
-        // unpublish/republish path ignores cameraPosition on Android (the
-        // capturer reopens the same device), so only the preview mirror
-        // flipped — this actually switches the camera.
-        await track.setCameraPosition(
-          newFront ? CameraPosition.front : CameraPosition.back,
-        );
+        var nowFront = newFront;
+        if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+          // Android can't reopen the other lens while this one is still
+          // releasing: getUserMedia falls back to the first device, so the old
+          // camera came back and only the preview mirror flipped. The native
+          // capturer switch has no such race and reports the resulting lens.
+          nowFront = await rtc.Helper.switchCamera(track.mediaStreamTrack);
+          // Keep the SDK's own options honest so a later mute/unmute or
+          // republish doesn't snap back to the previous position.
+          track.currentOptions = CameraCaptureOptions(
+            cameraPosition:
+                nowFront ? CameraPosition.front : CameraPosition.back,
+            maxFrameRate: track.currentOptions.maxFrameRate,
+            params: track.currentOptions.params,
+          );
+        } else {
+          await track.setCameraPosition(
+            newFront ? CameraPosition.front : CameraPosition.back,
+          );
+        }
         if (!mounted) return;
         setState(() {
-          _isFrontCamera = newFront;
+          _isFrontCamera = nowFront;
           _selectedCameraId = null; // flipping means the built-in cameras
           _localVideoTrack = track;
         });

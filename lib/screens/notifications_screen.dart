@@ -7,6 +7,7 @@ import '../theme.dart';
 import '../widgets/empty_state.dart';
 import 'conversation_screen.dart';
 import 'event_detail_screen.dart';
+import 'my_report_screen.dart';
 import 'post_detail_screen.dart';
 import 'profile_screen.dart';
 import 'replay_pricing_screen.dart';
@@ -140,6 +141,14 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
           context,
           MaterialPageRoute(builder: (_) => ReplayPricingScreen(event: ev)),
         );
+      case NotificationType.feedbackResolved:
+        if (n.entityId == null) return;
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => MyReportScreen(reportId: n.entityId!),
+          ),
+        );
     }
   }
 
@@ -259,6 +268,8 @@ class _NotificationTile extends StatelessWidget {
       '@${notification.actorUsername} opened sound check — join to get ready',
     NotificationType.replayPricePrompt =>
       'Your replay is ready — set a price to publish it',
+    NotificationType.feedbackResolved =>
+      'Your report has an update — tap to read it',
   };
 
   IconData _icon() => switch (notification.type) {
@@ -274,6 +285,7 @@ class _NotificationTile extends StatelessWidget {
     NotificationType.replayReady => Icons.play_circle_fill,
     NotificationType.soundcheckOpen => Icons.tune,
     NotificationType.replayPricePrompt => Icons.sell,
+    NotificationType.feedbackResolved => Icons.bug_report,
   };
 
   Color _iconColor() => switch (notification.type) {
@@ -289,6 +301,7 @@ class _NotificationTile extends StatelessWidget {
     NotificationType.replayReady => NileColors.volt,
     NotificationType.soundcheckOpen => NileColors.azure,
     NotificationType.replayPricePrompt => NileColors.volt,
+    NotificationType.feedbackResolved => NileColors.azure,
   };
 
   String _timeAgo(DateTime dt) {

@@ -24,6 +24,11 @@ class CurrentsRail extends StatelessWidget {
 
   static const double _circle = 72;
 
+  /// Label metrics, pinned so the rail's height math is exact rather than
+  /// depending on whatever line box the platform font happens to report.
+  static const double _labelSize = 11; // NileTextStyles.caption()
+  static const double labelLineHeight = 1.35;
+
   @override
   Widget build(BuildContext context) {
     CurrentRailEntry? mine;
@@ -36,8 +41,18 @@ class CurrentsRail extends StatelessWidget {
       }
     }
 
+    // Height follows the label's real line box. A hard-coded 116 was 1px short
+    // on Android, and any system font scale above 1.0 would overflow it.
+    final labelBox =
+        (MediaQuery.textScalerOf(context).scale(_labelSize) * labelLineHeight)
+            .ceilToDouble();
+
     return SizedBox(
-      height: 116,
+      height: NileSpacing.s16 +
+          _circle +
+          NileSpacing.s4 +
+          labelBox +
+          NileSpacing.s8,
       child: ListView.separated(
         scrollDirection: Axis.horizontal,
         padding: const EdgeInsets.fromLTRB(
@@ -169,7 +184,8 @@ class _Slot extends StatelessWidget {
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 textAlign: TextAlign.center,
-                style: NileTextStyles.caption(),
+                style: NileTextStyles.caption()
+                    .copyWith(height: CurrentsRail.labelLineHeight),
               ),
             ),
           ],

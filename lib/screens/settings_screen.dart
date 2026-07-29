@@ -17,6 +17,7 @@ import 'my_currents_screen.dart';
 import 'my_tickets_screen.dart';
 import 'notification_preferences_screen.dart';
 import 'payouts_screen.dart';
+import 'report_issue_screen.dart';
 
 /// Own-profile settings hub: edit profile, my tickets, payouts, sign out.
 class SettingsScreen extends StatelessWidget {
@@ -44,6 +45,13 @@ class SettingsScreen extends StatelessWidget {
     Navigator.push(
       context,
       MaterialPageRoute(builder: (_) => const MyCurrentsScreen()),
+    );
+  }
+
+  void _reportIssue(BuildContext context) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const ReportIssueScreen()),
     );
   }
 
@@ -227,6 +235,16 @@ class SettingsScreen extends StatelessWidget {
                   icon: Icons.block,
                   label: 'Blocked accounts',
                   onTap: () => _blockedAccounts(context),
+                ),
+              ],
+            ),
+            _SettingsSection(
+              header: 'SUPPORT',
+              rows: [
+                _SettingsRow(
+                  icon: Icons.bug_report_outlined,
+                  label: 'Report a bug or idea',
+                  onTap: () => _reportIssue(context),
                 ),
               ],
             ),

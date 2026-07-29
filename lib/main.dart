@@ -17,13 +17,16 @@ import 'screens/auth/onboarding_screen.dart';
 import 'screens/auth/reset_password_screen.dart';
 import 'screens/auth/signup_screen.dart';
 import 'screens/home_screen.dart';
+import 'screens/report_issue_screen.dart';
 import 'screens/splash_screen.dart';
 import 'services/app_lifecycle.dart';
 import 'services/connectivity_service.dart';
 import 'services/deep_link_service.dart';
+import 'services/error_log.dart';
 import 'services/mfa_service.dart';
 import 'services/profile_service.dart';
 import 'services/push_service.dart';
+import 'services/shake_detector.dart';
 import 'services/theme_service.dart';
 import 'theme.dart';
 import 'widgets/force_update_gate.dart';
@@ -54,6 +57,11 @@ Future<void> _bootstrap() async {
   // Must run INSIDE the Sentry zone (appRunner) — initializing the binding in
   // main() and then calling runApp here throws "Zone mismatch" (FLUTTER-1).
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Keep the last handful of uncaught errors in memory so a bug report can say
+  // what actually blew up. Installed AFTER Sentry so it chains onto Sentry's
+  // handlers rather than displacing them.
+  ErrorLog.install();
 
   // Firebase (FCM) is only configured for web, iOS, and Android. Desktop
   // targets (macOS) have no Firebase app registered, so initializing there
@@ -122,6 +130,9 @@ class NileApp extends StatefulWidget {
 class _NileAppState extends State<NileApp> with WidgetsBindingObserver {
   final _navigatorKey = GlobalKey<NavigatorState>();
 
+  /// Guards against a second shake stacking another report form.
+  bool _reportOpen = false;
+
   @override
   void initState() {
     super.initState();
@@ -132,13 +143,68 @@ class _NileAppState extends State<NileApp> with WidgetsBindingObserver {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_firebaseSupported) PushService.init(_navigatorKey);
       DeepLinkService.init(_navigatorKey);
+      ShakeDetector.instance.start(_onShake);
     });
   }
 
   @override
   void dispose() {
+    ShakeDetector.instance.stop();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
+  }
+
+  /// Beta builds: a shake opens the report form pre-filled with a capture of
+  /// whatever was on screen. Captured BEFORE the consent dialog so the dialog
+  /// itself isn't what gets attached; discarded if they decline.
+  Future<void> _onShake() async {
+    if (_reportOpen) return;
+    final nav = _navigatorKey.currentState;
+    if (nav == null) return;
+    // The form inserts as the reporter, so it needs a session.
+    if (Supabase.instance.client.auth.currentUser == null) return;
+
+    _reportOpen = true;
+    try {
+      final shot = await ShakeDetector.capture();
+      if (!await ShakeDetector.hasConsented()) {
+        final ctx = _navigatorKey.currentContext;
+        if (ctx == null || !ctx.mounted) return;
+        final ok = await showDialog<bool>(
+          context: ctx,
+          builder: (d) => AlertDialog(
+            backgroundColor: NileColors.bgSurface,
+            title: Text('Shake to report', style: NileTextStyles.headingSm()),
+            content: Text(
+              'Shaking your phone opens a bug report with a screenshot of the '
+              'screen you were on. Check it before sending — it could show a '
+              'private message or your payout details.',
+              style: NileTextStyles.bodySm(),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(d, false),
+                child: const Text('Not now'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(d, true),
+                child: const Text('Got it'),
+              ),
+            ],
+          ),
+        );
+        if (ok != true) return;
+        await ShakeDetector.markConsented();
+      }
+      await nav.push(
+        MaterialPageRoute(
+          builder: (_) =>
+              ReportIssueScreen(initialImage: shot, source: 'shake'),
+        ),
+      );
+    } finally {
+      _reportOpen = false;
+    }
   }
 
   @override
@@ -166,6 +232,12 @@ class _NileAppState extends State<NileApp> with WidgetsBindingObserver {
         // on web/desktop, where only touch is enabled by default.
         scrollBehavior: const _NileScrollBehavior(),
         navigatorKey: _navigatorKey,
+        // Root repaint boundary so shake-to-report can grab the current frame
+        // without a screenshot plugin.
+        builder: (_, child) => RepaintBoundary(
+          key: ShakeDetector.captureKey,
+          child: child ?? const SizedBox.shrink(),
+        ),
         // Startup version gate wraps the whole app (fails open on any error).
         home: ForceUpdateGate(
           child: _AuthGate(navigatorKey: _navigatorKey),

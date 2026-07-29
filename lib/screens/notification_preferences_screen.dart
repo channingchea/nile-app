@@ -153,6 +153,13 @@ class _NotificationPreferencesScreenState
           p.replayPricePrompt,
           (v) => _set(p.copyWith(replayPricePrompt: v), p),
         ),
+        _section('Support'),
+        _toggle(
+          'Report updates',
+          'When a bug or idea you reported is resolved',
+          p.feedbackResolved,
+          (v) => _set(p.copyWith(feedbackResolved: v), p),
+        ),
         _section('Messages'),
         _toggle(
           'Direct messages',

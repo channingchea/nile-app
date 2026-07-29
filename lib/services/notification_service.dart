@@ -16,6 +16,7 @@ enum NotificationType {
   replayReady,
   soundcheckOpen,
   replayPricePrompt,
+  feedbackResolved,
 }
 
 class AppNotification {
@@ -73,6 +74,7 @@ class AppNotification {
     'replay_ready' => NotificationType.replayReady,
     'soundcheck_open' => NotificationType.soundcheckOpen,
     'replay_price_prompt' => NotificationType.replayPricePrompt,
+    'feedback_resolved' => NotificationType.feedbackResolved,
     _ => NotificationType.follow,
   };
 }

@@ -14,6 +14,7 @@ class NotificationPreferences {
   final bool replayReady;
   final bool soundcheckOpen;
   final bool replayPricePrompt;
+  final bool feedbackResolved;
 
   const NotificationPreferences({
     this.postLike = true,
@@ -28,6 +29,7 @@ class NotificationPreferences {
     this.replayReady = true,
     this.soundcheckOpen = true,
     this.replayPricePrompt = true,
+    this.feedbackResolved = true,
   });
 
   factory NotificationPreferences.fromJson(Map<String, dynamic> j) =>
@@ -44,6 +46,7 @@ class NotificationPreferences {
         replayReady: j['replay_ready'] as bool? ?? true,
         soundcheckOpen: j['soundcheck_open'] as bool? ?? true,
         replayPricePrompt: j['replay_price_prompt'] as bool? ?? true,
+        feedbackResolved: j['feedback_resolved'] as bool? ?? true,
       );
 
   NotificationPreferences copyWith({
@@ -59,6 +62,7 @@ class NotificationPreferences {
     bool? replayReady,
     bool? soundcheckOpen,
     bool? replayPricePrompt,
+    bool? feedbackResolved,
   }) => NotificationPreferences(
     postLike: postLike ?? this.postLike,
     postComment: postComment ?? this.postComment,
@@ -72,6 +76,7 @@ class NotificationPreferences {
     replayReady: replayReady ?? this.replayReady,
     soundcheckOpen: soundcheckOpen ?? this.soundcheckOpen,
     replayPricePrompt: replayPricePrompt ?? this.replayPricePrompt,
+    feedbackResolved: feedbackResolved ?? this.feedbackResolved,
   );
 
   Map<String, dynamic> toColumns() => {
@@ -87,6 +92,7 @@ class NotificationPreferences {
     'replay_ready': replayReady,
     'soundcheck_open': soundcheckOpen,
     'replay_price_prompt': replayPricePrompt,
+    'feedback_resolved': feedbackResolved,
   };
 }
 
