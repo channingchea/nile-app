@@ -1,10 +1,13 @@
 import 'package:flutter/material.dart';
 
 import '../theme.dart';
+import 'photo_viewer.dart';
 
 /// Swipeable 4:3 image carousel for posts. Renders a single image inline when
 /// there's only one; shows page dots + a count badge for multiple. Used by both
-/// the feed card and post detail.
+/// the feed card and post detail. Tapping an image opens it full-screen in
+/// [PhotoViewerScreen] (swipeable at full-screen too, starting on the tapped
+/// image); taps elsewhere on the card still open the post as before.
 class PostImageCarousel extends StatefulWidget {
   final List<String> imageUrls;
   final double decodeWidth;
@@ -40,13 +43,13 @@ class _PostImageCarouselState extends State<PostImageCarousel> {
           fit: StackFit.expand,
           children: [
             if (urls.length == 1)
-              _image(urls.first)
+              _image(0)
             else
               PageView.builder(
                 controller: _controller,
                 itemCount: urls.length,
                 onPageChanged: (i) => setState(() => _index = i),
-                itemBuilder: (_, i) => _image(urls[i]),
+                itemBuilder: (_, i) => _image(i),
               ),
             if (urls.length > 1) ...[
               Positioned(
@@ -67,14 +70,22 @@ class _PostImageCarouselState extends State<PostImageCarousel> {
     );
   }
 
-  Widget _image(String url) => Image.network(
-    url,
-    cacheWidth: nileDecodeWidth(widget.decodeWidth),
-    fit: BoxFit.cover,
-    errorBuilder: (_, _, _) => Container(
-      color: NileColors.bgRaised,
-      child: Center(
-        child: Icon(Icons.broken_image, color: NileColors.border),
+  Widget _image(int i) => GestureDetector(
+    onTap: () => PhotoViewerScreen.openGallery(
+      context,
+      // Full-res originals in the viewer (the inline copy is downsampled).
+      images: [for (final u in widget.imageUrls) NetworkImage(u)],
+      initialIndex: i,
+    ),
+    child: Image.network(
+      widget.imageUrls[i],
+      cacheWidth: nileDecodeWidth(widget.decodeWidth),
+      fit: BoxFit.cover,
+      errorBuilder: (_, _, _) => Container(
+        color: NileColors.bgRaised,
+        child: Center(
+          child: Icon(Icons.broken_image, color: NileColors.border),
+        ),
       ),
     ),
   );

@@ -18,6 +18,7 @@ import '../services/ticket_service.dart';
 import '../theme.dart';
 import '../widgets/live_badge.dart';
 import '../widgets/official_badge.dart';
+import '../widgets/photo_viewer.dart';
 import '../widgets/rolling_number.dart';
 import 'attendee_list_screen.dart';
 import 'audio_screen.dart';
@@ -775,24 +776,36 @@ class _CoverImage extends StatelessWidget {
     return Stack(
       fit: StackFit.expand,
       children: [
-        Hero(
-          tag: 'event-cover-${event.id}',
-          child: event.thumbnailUrl != null
-              ? Image.network(
-                  event.thumbnailUrl!,
-                  cacheWidth: nileDecodeWidth(600),
-                  fit: BoxFit.cover,
-                  errorBuilder: (_, _, _) => placeholder,
-                )
-              : placeholder,
+        GestureDetector(
+          // Tap the cover to view it full-screen (no-op when there's none).
+          onTap: event.thumbnailUrl == null
+              ? null
+              : () => PhotoViewerScreen.open(
+                    context,
+                    image: NetworkImage(event.thumbnailUrl!),
+                  ),
+          child: Hero(
+            tag: 'event-cover-${event.id}',
+            child: event.thumbnailUrl != null
+                ? Image.network(
+                    event.thumbnailUrl!,
+                    cacheWidth: nileDecodeWidth(600),
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, _, _) => placeholder,
+                  )
+                : placeholder,
+          ),
         ),
-        DecoratedBox(
-          decoration: BoxDecoration(
-            gradient: LinearGradient(
-              begin: Alignment.topCenter,
-              end: Alignment.bottomCenter,
-              colors: [Colors.transparent, NileColors.bgPage],
-              stops: [0.5, 1.0],
+        // IgnorePointer so the scrim doesn't swallow the tap-to-expand hit.
+        IgnorePointer(
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [Colors.transparent, NileColors.bgPage],
+                stops: [0.5, 1.0],
+              ),
             ),
           ),
         ),
