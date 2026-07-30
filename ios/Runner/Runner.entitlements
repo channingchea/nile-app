@@ -10,6 +10,12 @@
 		<string>applinks:links.nile.app</string>
 	</array>
 	-->
+	<!-- Push notifications (APNs). Without this key iOS never issues an APNs
+	     device token, so FCM getToken() silently fails and no push arrives.
+	     Codesigning flips "development" to "production" automatically in
+	     App Store / TestFlight builds via the provisioning profile. -->
+	<key>aps-environment</key>
+	<string>development</string>
 	<!-- Sign in with Apple (also enabled on the App ID in the developer portal). -->
 	<key>com.apple.developer.applesignin</key>
 	<array>

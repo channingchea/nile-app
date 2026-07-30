@@ -18,6 +18,7 @@ import '../widgets/nile_cover_action.dart';
 import '../widgets/nile_glass_nav_bar.dart';
 import '../widgets/official_badge.dart';
 import '../widgets/nile_skeleton.dart';
+import '../widgets/photo_viewer.dart';
 import '../widgets/post_image_carousel.dart';
 import '../widgets/share_to_sheet.dart';
 import 'widgets/moderation_menu.dart';
@@ -737,7 +738,18 @@ class _ProfileScreenState extends State<ProfileScreen> {
         // so the cover never overlaps the avatar.
         Stack(
           children: [
-            CoverPhoto(url: p.coverUrl, height: _coverHeight),
+            CoverPhoto(
+              url: p.coverUrl,
+              height: _coverHeight,
+              showEditChip: false,
+              // Tap the cover to view it full-screen.
+              onTap: p.coverUrl == null
+                  ? null
+                  : () => PhotoViewerScreen.open(
+                        context,
+                        image: NetworkImage(p.coverUrl!),
+                      ),
+            ),
             _buildCoverBack(),
             Positioned(
               top: MediaQuery.of(context).padding.top + NileSpacing.s8,
@@ -755,36 +767,50 @@ class _ProfileScreenState extends State<ProfileScreen> {
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
-                Container(
-                  padding: const EdgeInsets.all(NileSpacing.s4),
-                  decoration: BoxDecoration(
-                    color: NileColors.bgPage,
-                    shape: BoxShape.circle,
-                  ),
-                  child: Hero(
-                    tag: 'avatar-${p.id}',
-                    child: CircleAvatar(
-                      radius: _avatarRadius,
-                      backgroundColor: NileColors.bgRaised,
-                      backgroundImage: p.avatarUrl != null
-                          ? nileAvatarImage(p.avatarUrl!, _avatarRadius)
-                          : null,
-                      child: p.avatarUrl == null
-                          ? Icon(
-                              Icons.person,
-                              size: _avatarRadius,
-                              color: NileColors.txtTertiary,
-                            )
-                          : null,
+                GestureDetector(
+                  // Tap the avatar to view it full-screen.
+                  onTap: p.avatarUrl == null
+                      ? null
+                      : () => PhotoViewerScreen.open(
+                            context,
+                            image: NetworkImage(p.avatarUrl!),
+                            heroTag: 'avatar-${p.id}',
+                          ),
+                  child: Container(
+                    padding: const EdgeInsets.all(NileSpacing.s4),
+                    decoration: BoxDecoration(
+                      color: NileColors.bgPage,
+                      shape: BoxShape.circle,
+                    ),
+                    child: Hero(
+                      tag: 'avatar-${p.id}',
+                      child: CircleAvatar(
+                        radius: _avatarRadius,
+                        backgroundColor: NileColors.bgRaised,
+                        backgroundImage: p.avatarUrl != null
+                            ? nileAvatarImage(p.avatarUrl!, _avatarRadius)
+                            : null,
+                        child: p.avatarUrl == null
+                            ? Icon(
+                                Icons.person,
+                                size: _avatarRadius,
+                                color: NileColors.txtTertiary,
+                              )
+                            : null,
+                      ),
                     ),
                   ),
                 ),
                 const Spacer(),
-                // Action button sits at the avatar's baseline (its bottom),
-                // matching the "Edit profile" placement in the design.
-                Padding(
-                  padding: const EdgeInsets.only(bottom: NileSpacing.s8),
-                  child: _headerAction(p),
+                // Action button sits at the avatar's baseline, nudged DOWN a
+                // little (Transform doesn't affect layout) so it clears the
+                // cover's bottom edge instead of sitting nearly flush to it.
+                Transform.translate(
+                  offset: const Offset(0, NileSpacing.s16),
+                  child: Padding(
+                    padding: const EdgeInsets.only(bottom: NileSpacing.s8),
+                    child: _headerAction(p),
+                  ),
                 ),
               ],
             ),
@@ -1250,12 +1276,17 @@ class CoverPhoto extends StatelessWidget {
   final Uint8List? localBytes;
   final VoidCallback? onTap;
 
+  /// EditProfileScreen taps to change the cover, so it shows the camera chip;
+  /// ProfileScreen taps to view it full-screen, so it hides the chip.
+  final bool showEditChip;
+
   const CoverPhoto({
     super.key,
     this.url,
     required this.height,
     this.localBytes,
     this.onTap,
+    this.showEditChip = true,
   });
 
   @override
@@ -1280,7 +1311,7 @@ class CoverPhoto extends StatelessWidget {
         ),
         child: image == null
             ? const _CoverPlaceholder()
-            : onTap != null
+            : (onTap != null && showEditChip)
             ? _editOverlay()
             : null,
       ),

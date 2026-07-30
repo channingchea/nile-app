@@ -78,6 +78,12 @@
 			</array>
 		</dict>
 	</dict>
+	<!-- Lets FCM wake the app for background/data pushes; recommended by
+	     firebase_messaging for reliable delivery when the app isn't foreground. -->
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>remote-notification</string>
+	</array>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 	<key>UILaunchStoryboardName</key>

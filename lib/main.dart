@@ -234,9 +234,16 @@ class _NileAppState extends State<NileApp> with WidgetsBindingObserver {
         navigatorKey: _navigatorKey,
         // Root repaint boundary so shake-to-report can grab the current frame
         // without a screenshot plugin.
-        builder: (_, child) => RepaintBoundary(
-          key: ShakeDetector.captureKey,
-          child: child ?? const SizedBox.shrink(),
+        // The GestureDetector is the global keyboard-dismiss: any tap that no
+        // other widget claims (empty space, static text) drops focus, which
+        // retracts the keyboard. Taps on text fields/buttons win the gesture
+        // arena and are unaffected.
+        builder: (_, child) => GestureDetector(
+          onTap: () => FocusManager.instance.primaryFocus?.unfocus(),
+          child: RepaintBoundary(
+            key: ShakeDetector.captureKey,
+            child: child ?? const SizedBox.shrink(),
+          ),
         ),
         // Startup version gate wraps the whole app (fails open on any error).
         home: ForceUpdateGate(
