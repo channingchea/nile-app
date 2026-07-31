@@ -36,6 +36,16 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import Stripe from "https://esm.sh/stripe@14?target=deno";
 import { corsHeaders as corsHeadersFor } from "../_shared/cors.ts";
 
+// CORS headers are per-request, so the JSON responder is built per-request too
+// and handed to the helpers below (they run outside the handler's scope).
+type Json = (body: unknown, status?: number) => Response;
+const makeJson = (cors: Record<string, string>): Json =>
+  (body, status = 200) =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { ...cors, "Content-Type": "application/json" },
+    });
+
 const stripe = new Stripe(Deno.env.get("STRIPE_SECRET_KEY")!, {
   apiVersion: "2023-10-16",
   httpClient: Stripe.createFetchHttpClient(),
@@ -58,11 +68,7 @@ function portalUrl() {
 serve(async (req) => {
   // Per-request CORS (fix #4): allowlisted origins only — see _shared/cors.ts.
   const corsHeaders = corsHeadersFor(req);
-  const json = (body: unknown, status = 200) =>
-    new Response(JSON.stringify(body), {
-      status,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+  const json = makeJson(corsHeaders);
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
   }
@@ -97,9 +103,9 @@ serve(async (req) => {
     // Branch: standalone creative ad vs. host boost. advertiser_account_id present
     // ⇒ standalone; otherwise fall through to the legacy event-boost path.
     if (body.advertiser_account_id) {
-      return await createStandaloneAd(admin, user.id, body, now, endsAt);
+      return await createStandaloneAd(admin, user.id, body, now, endsAt, json);
     }
-    return await createHostBoost(admin, user.id, body, now, endsAt);
+    return await createHostBoost(admin, user.id, body, now, endsAt, json);
   } catch (err) {
     console.error(err);
     return json({ error: String(err) }, 500);
@@ -113,6 +119,7 @@ async function createHostBoost(
   body: any,
   now: Date,
   endsAt: Date,
+  json: Json,
 ) {
   const { event_id, budget_cents, duration_days } = body;
   if (!event_id) return json({ error: "Missing event_id" }, 400);
@@ -173,6 +180,7 @@ async function createStandaloneAd(
   body: any,
   now: Date,
   endsAt: Date,
+  json: Json,
 ) {
   const {
     advertiser_account_id, headline, body: adBody, click_url, image_url,

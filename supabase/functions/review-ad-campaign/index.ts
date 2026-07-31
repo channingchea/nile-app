@@ -31,6 +31,16 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import Stripe from "https://esm.sh/stripe@14?target=deno";
 import { corsHeaders as corsHeadersFor } from "../_shared/cors.ts";
 
+// CORS headers are per-request, so the JSON responder is built per-request too
+// and handed to the helpers below (they run outside the handler's scope).
+type Json = (body: unknown, status?: number) => Response;
+const makeJson = (cors: Record<string, string>): Json =>
+  (body, status = 200) =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { ...cors, "Content-Type": "application/json" },
+    });
+
 const stripe = new Stripe(Deno.env.get("STRIPE_SECRET_KEY")!, {
   apiVersion: "2023-10-16",
   httpClient: Stripe.createFetchHttpClient(),
@@ -47,11 +57,7 @@ const TRANSITIONS: Record<string, { from: string; to: string }> = {
 serve(async (req) => {
   // Per-request CORS (fix #4): allowlisted origins only — see _shared/cors.ts.
   const corsHeaders = corsHeadersFor(req);
-  const json = (body: unknown, status = 200) =>
-    new Response(JSON.stringify(body), {
-      status,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+  const json = makeJson(corsHeaders);
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
   try {
@@ -76,7 +82,7 @@ serve(async (req) => {
     // withdraw is owner-gated (advertiser deletes their own unapproved ad);
     // everything else stays admins-only.
     if (action === "withdraw") {
-      return await withdraw(admin, user.id, campaign_id);
+      return await withdraw(admin, user.id, campaign_id, json);
     }
 
     // Admin gate — service-role read of the admins table (RLS-independent).
@@ -259,7 +265,7 @@ async function releaseHold(piId: string) {
 
 // Owner hard-delete of an unapproved (pending_review/rejected) campaign.
 // deno-lint-ignore no-explicit-any
-async function withdraw(admin: any, userId: string, campaignId: string) {
+async function withdraw(admin: any, userId: string, campaignId: string, json: Json) {
   if (!campaignId) return json({ error: "Invalid campaign_id" }, 400);
 
   const { data: c } = await admin

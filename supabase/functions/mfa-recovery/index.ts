@@ -29,6 +29,16 @@ import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders as corsHeadersFor } from "../_shared/cors.ts";
 
+// CORS headers are per-request, so the JSON responder is built per-request too
+// and handed to the helpers below (they run outside the handler's scope).
+type Json = (body: unknown, status?: number) => Response;
+const makeJson = (cors: Record<string, string>): Json =>
+  (body, status = 200) =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { ...cors, "Content-Type": "application/json" },
+    });
+
 const CODE_COUNT = 10;
 // 12 chars from an unambiguous alphabet (no 0/O/1/I), grouped 4-4-4.
 const ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -37,11 +47,7 @@ const CODE_LEN = 12;
 serve(async (req) => {
   // Per-request CORS (fix #4): allowlisted origins only — see _shared/cors.ts.
   const corsHeaders = corsHeadersFor(req);
-  const json = (body: unknown, status = 200) =>
-    new Response(JSON.stringify(body), {
-      status,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+  const json = makeJson(corsHeaders);
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
   }
@@ -70,10 +76,10 @@ serve(async (req) => {
     const body = await req.json().catch(() => ({}));
     const action = body?.action as string | undefined;
 
-    if (action === "generate") return await generate(admin, uid);
-    if (action === "status") return await status(admin, uid);
-    if (action === "clear") return await clear(admin, uid);
-    if (action === "consume") return await consume(admin, uid, body?.code);
+    if (action === "generate") return await generate(admin, uid, json);
+    if (action === "status") return await status(admin, uid, json);
+    if (action === "clear") return await clear(admin, uid, json);
+    if (action === "consume") return await consume(admin, uid, body?.code, json);
     return json({ error: "Unknown action" }, 400);
   } catch (err) {
     console.error(err);
@@ -84,7 +90,7 @@ serve(async (req) => {
 // Generate a fresh set of codes. Any previous (used or unused) codes are wiped
 // so there are never stale valid codes floating around after a regenerate.
 // deno-lint-ignore no-explicit-any
-async function generate(admin: any, uid: string): Promise<Response> {
+async function generate(admin: any, uid: string, json: Json): Promise<Response> {
   await admin.from("mfa_recovery_codes").delete().eq("user_id", uid);
 
   const codes: string[] = [];
@@ -100,7 +106,7 @@ async function generate(admin: any, uid: string): Promise<Response> {
 }
 
 // deno-lint-ignore no-explicit-any
-async function status(admin: any, uid: string): Promise<Response> {
+async function status(admin: any, uid: string, json: Json): Promise<Response> {
   const { data, error } = await admin
     .from("mfa_recovery_codes")
     .select("used_at")
@@ -113,7 +119,7 @@ async function status(admin: any, uid: string): Promise<Response> {
 
 // Delete all of a user's recovery codes (used when 2FA is turned off).
 // deno-lint-ignore no-explicit-any
-async function clear(admin: any, uid: string): Promise<Response> {
+async function clear(admin: any, uid: string, json: Json): Promise<Response> {
   const { error } = await admin
     .from("mfa_recovery_codes")
     .delete()
@@ -125,7 +131,7 @@ async function clear(admin: any, uid: string): Promise<Response> {
 // Verify a submitted code, mark it used, and unenroll TOTP factors so the client
 // can re-enroll. Constant work regardless of match to avoid trivial oracles.
 // deno-lint-ignore no-explicit-any
-async function consume(admin: any, uid: string, raw: unknown): Promise<Response> {
+async function consume(admin: any, uid: string, raw: unknown, json: Json): Promise<Response> {
   if (typeof raw !== "string" || !raw.trim()) {
     return json({ error: "Missing code" }, 400);
   }

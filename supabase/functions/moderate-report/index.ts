@@ -42,6 +42,16 @@ import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders as corsHeadersFor } from "../_shared/cors.ts";
 
+// CORS headers are per-request, so the JSON responder is built per-request too
+// and handed to the helpers below (they run outside the handler's scope).
+type Json = (body: unknown, status?: number) => Response;
+const makeJson = (cors: Record<string, string>): Json =>
+  (body, status = 200) =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { ...cors, "Content-Type": "application/json" },
+    });
+
 const CONTENT_TABLES: Record<string, string> = {
   post: "posts",
   comment: "post_comments",
@@ -71,11 +81,7 @@ const BAN_DURATION = "876000h";
 serve(async (req) => {
   // Per-request CORS (fix #4): allowlisted origins only — see _shared/cors.ts.
   const corsHeaders = corsHeadersFor(req);
-  const json = (body: unknown, status = 200) =>
-    new Response(JSON.stringify(body), {
-      status,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+  const json = makeJson(corsHeaders);
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
   try {
@@ -112,19 +118,19 @@ serve(async (req) => {
     const trimmedNote = typeof note === "string" ? note.trim().slice(0, 300) || null : null;
 
     if (action === "resolve" || action === "dismiss") {
-      return await resolveOrDismiss(admin, user.id, target_type, target_id, action, trimmedNote);
+      return await resolveOrDismiss(admin, user.id, target_type, target_id, action, trimmedNote, json);
     }
     if (action === "remove_content") {
-      return await removeContent(admin, user.id, target_type, target_id, trimmedNote);
+      return await removeContent(admin, user.id, target_type, target_id, trimmedNote, json);
     }
     if (action === "restore_content") {
-      return await restoreContent(admin, user.id, target_type, target_id, trimmedNote);
+      return await restoreContent(admin, user.id, target_type, target_id, trimmedNote, json);
     }
     if (action === "suspend_user") {
-      return await suspendUser(admin, user.id, target_id, trimmedNote);
+      return await suspendUser(admin, user.id, target_id, trimmedNote, json);
     }
     // action === "unsuspend_user"
-    return await unsuspendUser(admin, user.id, target_id, trimmedNote);
+    return await unsuspendUser(admin, user.id, target_id, trimmedNote, json);
   } catch (err) {
     console.error(err);
     return json({ error: String(err) }, 500);
@@ -135,7 +141,7 @@ serve(async (req) => {
 // deno-lint-ignore no-explicit-any
 async function resolveOrDismiss(
   admin: any, actorId: string, targetType: string, targetId: string,
-  action: "resolve" | "dismiss", note: string | null,
+  action: "resolve" | "dismiss", note: string | null, json: Json,
 ) {
   const toStatus = action === "resolve" ? "resolved" : "dismissed";
   const { data: updated, error } = await admin
@@ -158,6 +164,7 @@ async function resolveOrDismiss(
 // deno-lint-ignore no-explicit-any
 async function removeContent(
   admin: any, actorId: string, targetType: string, targetId: string, note: string | null,
+  json: Json,
 ) {
   const table = CONTENT_TABLES[targetType];
   if (!table) return json({ error: "remove_content is only valid for content targets" }, 400);
@@ -203,6 +210,7 @@ async function removeContent(
 // deno-lint-ignore no-explicit-any
 async function restoreContent(
   admin: any, actorId: string, targetType: string, targetId: string, note: string | null,
+  json: Json,
 ) {
   const table = CONTENT_TABLES[targetType];
   if (!table) return json({ error: "restore_content is only valid for content targets" }, 400);
@@ -242,7 +250,7 @@ async function bumpCommentCount(admin: any, parentTable: string, parentId: strin
 
 // ── suspend_user / unsuspend_user ────────────────────────────────────────
 // deno-lint-ignore no-explicit-any
-async function suspendUser(admin: any, actorId: string, targetId: string, note: string | null) {
+async function suspendUser(admin: any, actorId: string, targetId: string, note: string | null, json: Json) {
   const { data: profile, error: pErr } = await admin
     .from("profiles").select("id, suspended_at").eq("id", targetId).maybeSingle();
   if (pErr) return json({ error: "Lookup failed" }, 500);
@@ -273,7 +281,7 @@ async function suspendUser(admin: any, actorId: string, targetId: string, note: 
 }
 
 // deno-lint-ignore no-explicit-any
-async function unsuspendUser(admin: any, actorId: string, targetId: string, note: string | null) {
+async function unsuspendUser(admin: any, actorId: string, targetId: string, note: string | null, json: Json) {
   const { data: profile, error: pErr } = await admin
     .from("profiles").select("id, suspended_at").eq("id", targetId).maybeSingle();
   if (pErr) return json({ error: "Lookup failed" }, 500);

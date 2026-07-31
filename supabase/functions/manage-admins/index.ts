@@ -19,14 +19,20 @@ import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders as corsHeadersFor } from "../_shared/cors.ts";
 
+// CORS headers are per-request, so the JSON responder is built per-request too
+// and handed to the helpers below (they run outside the handler's scope).
+type Json = (body: unknown, status?: number) => Response;
+const makeJson = (cors: Record<string, string>): Json =>
+  (body, status = 200) =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { ...cors, "Content-Type": "application/json" },
+    });
+
 serve(async (req) => {
   // Per-request CORS (fix #4): allowlisted origins only — see _shared/cors.ts.
   const corsHeaders = corsHeadersFor(req);
-  const json = (body: unknown, status = 200) =>
-    new Response(JSON.stringify(body), {
-      status,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+  const json = makeJson(corsHeaders);
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
   try {
@@ -53,9 +59,9 @@ serve(async (req) => {
 
     const { action, email, user_id } = await req.json();
 
-    if (action === "list") return await list(admin);
-    if (action === "add") return await add(admin, user.id, email);
-    if (action === "remove") return await remove(admin, user.id, user_id);
+    if (action === "list") return await list(admin, json);
+    if (action === "add") return await add(admin, user.id, email, json);
+    if (action === "remove") return await remove(admin, user.id, user_id, json);
     return json({ error: "Invalid action" }, 400);
   } catch (err) {
     console.error(err);
@@ -64,7 +70,7 @@ serve(async (req) => {
 });
 
 // deno-lint-ignore no-explicit-any
-async function list(admin: any) {
+async function list(admin: any, json: Json) {
   const { data: admins, error } = await admin.rpc("admin_list_admins");
   if (error) return json({ error: "Failed to load admins" }, 500);
 
@@ -86,7 +92,7 @@ async function list(admin: any) {
 }
 
 // deno-lint-ignore no-explicit-any
-async function add(admin: any, actorId: string, email: unknown) {
+async function add(admin: any, actorId: string, email: unknown, json: Json) {
   const cleaned = typeof email === "string" ? email.trim() : "";
   if (!cleaned || !cleaned.includes("@")) return json({ error: "Enter a valid email" }, 400);
 
@@ -110,7 +116,7 @@ async function add(admin: any, actorId: string, email: unknown) {
 }
 
 // deno-lint-ignore no-explicit-any
-async function remove(admin: any, actorId: string, targetId: unknown) {
+async function remove(admin: any, actorId: string, targetId: unknown, json: Json) {
   if (typeof targetId !== "string" || !targetId) return json({ error: "Invalid user_id" }, 400);
 
   if (targetId === actorId) {

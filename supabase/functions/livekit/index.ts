@@ -34,6 +34,16 @@
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders as corsHeadersFor } from "../_shared/cors.ts";
+
+// CORS headers are per-request, so the JSON responder is built per-request too
+// and handed to the helpers below (they run outside the handler's scope).
+type Json = (body: unknown, status?: number) => Response;
+const makeJson = (cors: Record<string, string>): Json =>
+  (body, status = 200) =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { ...cors, "Content-Type": "application/json" },
+    });
 import {
   AccessToken,
   EgressClient,
@@ -126,17 +136,13 @@ function log(level: "info" | "warn" | "error", fields: Record<string, unknown>) 
 serve(async (req) => {
   // Per-request CORS (fix #4): allowlisted origins only — see _shared/cors.ts.
   const corsHeaders = corsHeadersFor(req);
-  const json = (body: unknown, status = 200) =>
-    new Response(JSON.stringify(body), {
-      status,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+  const json = makeJson(corsHeaders);
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
   const ctx: ReqCtx = { reqId: crypto.randomUUID().slice(0, 8) };
   const t0 = Date.now();
   try {
-    const res = await handle(req, ctx);
+    const res = await handle(req, ctx, json);
     log(res.status < 400 ? "info" : "warn", {
       reqId: ctx.reqId,
       action: ctx.action,
@@ -159,7 +165,7 @@ serve(async (req) => {
   }
 });
 
-async function handle(req: Request, ctx: ReqCtx): Promise<Response> {
+async function handle(req: Request, ctx: ReqCtx, json: Json): Promise<Response> {
   // Identity from the verified JWT — the gateway already enforced verify-jwt,
   // but we re-derive the user so we never trust an id from the body (3.3).
   const authHeader = req.headers.get("Authorization");
@@ -187,29 +193,29 @@ async function handle(req: Request, ctx: ReqCtx): Promise<Response> {
 
   switch (action) {
     case "create-room":
-      return await createRoom(body, user.id, admin);
+      return await createRoom(body, user.id, admin, json);
     case "camera-token":
-      return await cameraToken(body, user.id, admin);
+      return await cameraToken(body, user.id, admin, json);
     case "audio-token":
-      return await audioToken(body, user.id, admin);
+      return await audioToken(body, user.id, admin, json);
     case "list-cameras":
-      return await listCameras(body, user.id, admin);
+      return await listCameras(body, user.id, admin, json);
     case "set-master-audio":
-      return await setMasterAudio(body, user.id, admin);
+      return await setMasterAudio(body, user.id, admin, json);
     case "set-ready":
-      return await setReady(body, user.id, admin);
+      return await setReady(body, user.id, admin, json);
     case "start-show":
-      return await startShow(body, user.id, admin);
+      return await startShow(body, user.id, admin, json);
     case "stop-egress":
-      return await stopEgress(body, user.id, admin);
+      return await stopEgress(body, user.id, admin, json);
     case "replay-exists":
-      return await replayExists(body, user.id, admin);
+      return await replayExists(body, user.id, admin, json);
     case "replay-url":
-      return await replayUrl(body, user.id, admin);
+      return await replayUrl(body, user.id, admin, json);
     case "viewer-token":
-      return await viewerToken(body, user.id, admin);
+      return await viewerToken(body, user.id, admin, json);
     case "reconcile-viewers":
-      return await reconcileViewers(body, user.id, admin);
+      return await reconcileViewers(body, user.id, admin, json);
     default:
       return json({ error: `Unknown action: ${action}` }, 400);
   }
@@ -230,6 +236,7 @@ async function requireOperator(
   eventId: string,
   userId: string,
   admin: ReturnType<typeof createClient>,
+  json: Json,
 ): Promise<{ event: { id: string; host_id: string; livekit_room: string | null } } | Response> {
   // `eventId` here is the client-side LiveKit slug (events.livekit_room), NOT
   // the events PK (a uuid). Every live-time screen carries the slug, so resolve
@@ -275,7 +282,7 @@ async function isAuthorizedOperator(
 // which is the right bar for "may create a room for an event I'm about to own".
 // eventId is a client-generated slug; a stray room with no backing event simply
 // auto-closes after emptyTimeout.
-async function createRoom(body: any, _userId: string, _admin: any): Promise<Response> {
+async function createRoom(body: any, _userId: string, _admin: any, json: Json): Promise<Response> {
   const { eventId, eventName } = body;
   if (!eventId || !eventName) {
     return json({ error: "eventId and eventName are required" }, 400);
@@ -293,13 +300,13 @@ async function createRoom(body: any, _userId: string, _admin: any): Promise<Resp
 }
 
 // camera-token (was POST /api/camera-token)
-async function cameraToken(body: any, userId: string, admin: any): Promise<Response> {
+async function cameraToken(body: any, userId: string, admin: any, json: Json): Promise<Response> {
   const { eventId, cameraId, cameraName } = body;
   if (!eventId || !cameraId || !cameraName) {
     return json({ error: "eventId, cameraId, and cameraName are required" }, 400);
   }
 
-  const gate = await requireOperator(eventId, userId, admin);
+  const gate = await requireOperator(eventId, userId, admin, json);
   if (gate instanceof Response) return gate;
 
   const roomName = roomNameFor(eventId);
@@ -334,11 +341,11 @@ async function cameraToken(body: any, userId: string, admin: any): Promise<Respo
 }
 
 // audio-token (was POST /api/audio-token) — audio-only master publisher
-async function audioToken(body: any, userId: string, admin: any): Promise<Response> {
+async function audioToken(body: any, userId: string, admin: any, json: Json): Promise<Response> {
   const { eventId } = body;
   if (!eventId) return json({ error: "eventId is required" }, 400);
 
-  const gate = await requireOperator(eventId, userId, admin);
+  const gate = await requireOperator(eventId, userId, admin, json);
   if (gate instanceof Response) return gate;
 
   const roomName = roomNameFor(eventId);
@@ -357,11 +364,11 @@ async function audioToken(body: any, userId: string, admin: any): Promise<Respon
 }
 
 // list-cameras (was GET /api/event/:id/cameras) — feeds the viewer angle picker
-async function listCameras(body: any, userId: string, admin: any): Promise<Response> {
+async function listCameras(body: any, userId: string, admin: any, json: Json): Promise<Response> {
   const { eventId } = body;
   if (!eventId) return json({ error: "eventId is required" }, 400);
 
-  const gate = await requireOperator(eventId, userId, admin);
+  const gate = await requireOperator(eventId, userId, admin, json);
   if (gate instanceof Response) return gate;
 
   const roomName = roomNameFor(eventId);
@@ -387,13 +394,13 @@ async function listCameras(body: any, userId: string, admin: any): Promise<Respo
 }
 
 // set-master-audio (was POST /api/set-master-audio) — re-assign master flag
-async function setMasterAudio(body: any, userId: string, admin: any): Promise<Response> {
+async function setMasterAudio(body: any, userId: string, admin: any, json: Json): Promise<Response> {
   const { eventId, cameraIdentity } = body;
   if (!eventId || !cameraIdentity) {
     return json({ error: "eventId and cameraIdentity are required" }, 400);
   }
 
-  const gate = await requireOperator(eventId, userId, admin);
+  const gate = await requireOperator(eventId, userId, admin, json);
   if (gate instanceof Response) return gate;
 
   const roomName = roomNameFor(eventId);
@@ -416,13 +423,13 @@ async function setMasterAudio(body: any, userId: string, admin: any): Promise<Re
 // set-ready — a crew member flags their own feed as ready (or not) during
 // Sound Check. Self-targeted: we find the caller's publisher(s) by the userId
 // stamped into their token metadata, never by an identity from the body.
-async function setReady(body: any, userId: string, admin: any): Promise<Response> {
+async function setReady(body: any, userId: string, admin: any, json: Json): Promise<Response> {
   const { eventId, ready } = body;
   if (!eventId || typeof ready !== "boolean") {
     return json({ error: "eventId and ready (boolean) are required" }, 400);
   }
 
-  const gate = await requireOperator(eventId, userId, admin);
+  const gate = await requireOperator(eventId, userId, admin, json);
   if (gate instanceof Response) return gate;
 
   const roomName = roomNameFor(eventId);
@@ -447,11 +454,11 @@ async function setReady(body: any, userId: string, admin: any): Promise<Response
 // metadata. The viewer reads this anchor plus each publisher's joinedAt to
 // align switchable camera angles against the master-audio timeline. Existing
 // room metadata (eventName, eventId) is preserved.
-async function startShow(body: any, userId: string, admin: any): Promise<Response> {
+async function startShow(body: any, userId: string, admin: any, json: Json): Promise<Response> {
   const { eventId } = body;
   if (!eventId) return json({ error: "eventId is required" }, 400);
 
-  const gate = await requireOperator(eventId, userId, admin);
+  const gate = await requireOperator(eventId, userId, admin, json);
   if (gate instanceof Response) return gate;
 
   const roomName = roomNameFor(eventId);
@@ -550,11 +557,11 @@ async function startReplayEgress(
 // finalizes. The egress_ended webhook flips the replay row to ready/failed.
 // Called by the host client on End Show; the server-side auto-end cron + the
 // hourly fail_stuck_replays sweep cover the cases where the client never fires.
-async function stopEgress(body: any, userId: string, admin: any): Promise<Response> {
+async function stopEgress(body: any, userId: string, admin: any, json: Json): Promise<Response> {
   const { eventId } = body;
   if (!eventId) return json({ error: "eventId is required" }, 400);
 
-  const gate = await requireOperator(eventId, userId, admin);
+  const gate = await requireOperator(eventId, userId, admin, json);
   if (gate instanceof Response) return gate;
 
   const { data: replay } = await admin
@@ -581,7 +588,7 @@ async function stopEgress(body: any, userId: string, admin: any): Promise<Respon
 // the room's actual participants, so it can't be gamed and self-heals. Cameras/
 // audio operators (role != 'viewer') are excluded; identity is unique per user
 // (`viewer-<userId>`) so multiple tabs count once.
-async function reconcileViewers(body: any, userId: string, admin: any): Promise<Response> {
+async function reconcileViewers(body: any, userId: string, admin: any, json: Json): Promise<Response> {
   const { eventId, excludeSelf } = body;
   if (!eventId) return json({ error: "eventId is required" }, 400);
 
@@ -625,6 +632,7 @@ async function gateReplayAccess(
   eventId: string,
   userId: string,
   admin: any,
+  json: Json,
 ): Promise<{ id: string } | Response> {
   if (!eventId) return json({ error: "eventId is required" }, 400);
 
@@ -666,7 +674,7 @@ async function gateReplayAccess(
 // because that returns null both when no replay exists AND when the user lacks a
 // ticket. This returns { available: false } (never an error) for the no-ticket
 // case so the client can still surface a "buy a ticket to watch the replay" CTA.
-async function replayExists(body: any, userId: string, admin: any): Promise<Response> {
+async function replayExists(body: any, userId: string, admin: any, json: Json): Promise<Response> {
   const { eventId } = body;
   if (!eventId) return json({ error: "eventId is required" }, 400);
 
@@ -689,7 +697,7 @@ async function replayExists(body: any, userId: string, admin: any): Promise<Resp
   const published = !!event.replay_published_at;
 
   // Is the caller authorized (crew, or published + free/ticketed)?
-  const gate = await gateReplayAccess(eventId, userId, admin);
+  const gate = await gateReplayAccess(eventId, userId, admin, json);
   const authorized = !(gate instanceof Response);
 
   // available = there's a ready replay AND the caller may watch it now.
@@ -706,9 +714,9 @@ async function replayExists(body: any, userId: string, admin: any): Promise<Resp
 
 // replay-url — mint a short-lived signed playback URL for a ready replay, after
 // the SAME paid-ticket gate as viewer-token. `eventId` is the LiveKit slug.
-async function replayUrl(body: any, userId: string, admin: any): Promise<Response> {
+async function replayUrl(body: any, userId: string, admin: any, json: Json): Promise<Response> {
   const { eventId } = body;
-  const gate = await gateReplayAccess(eventId, userId, admin);
+  const gate = await gateReplayAccess(eventId, userId, admin, json);
   if (gate instanceof Response) return gate; // 403 (no ticket) or 404 (no event)
 
   const { data: replay } = await admin
@@ -730,7 +738,7 @@ async function replayUrl(body: any, userId: string, admin: any): Promise<Respons
 }
 
 // viewer-token (was POST /api/viewer-token) — JWT-derived identity + mode seam
-async function viewerToken(body: any, userId: string, admin: any): Promise<Response> {
+async function viewerToken(body: any, userId: string, admin: any, json: Json): Promise<Response> {
   const { eventId } = body;
   if (!eventId) return json({ error: "eventId is required" }, 400);
 
