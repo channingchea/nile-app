@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import '../../config.dart';
 import '../../services/human_check.dart';
 import '../../services/profile_service.dart';
 import '../../services/supabase_client.dart';
@@ -63,6 +64,9 @@ class _SignupScreenState extends State<SignupScreen> {
         email: _emailCtrl.text.trim(),
         password: _passCtrl.text,
         captchaToken: captcha,
+        // Without this the confirmation email falls back to the project's
+        // Site URL (localhost) and the link dead-ends in a browser.
+        emailRedirectTo: emailConfirmRedirect,
         data: {
           // Passed to raw_user_meta_data and picked up by the
           // handle_new_user trigger to populate profiles.

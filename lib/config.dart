@@ -6,6 +6,19 @@
 /// reached via supabase.functions.invoke — there is no standalone backend URL.)
 library;
 
+import 'package:flutter/foundation.dart' show kIsWeb;
+
+// ── Auth email redirects ──────────────────────────────────────────────────────
+// Where Supabase auth emails (confirm signup, password reset) send the user
+// back to. Native uses the `nile://` custom scheme registered in Info.plist /
+// AndroidManifest; web uses whatever origin the app is served from. Both values
+// must be listed in Supabase Dashboard → Authentication → URL Configuration →
+// Redirect URLs — otherwise Supabase silently falls back to the Site URL.
+String get emailConfirmRedirect =>
+    kIsWeb ? Uri.base.origin : 'nile://login-callback';
+String get passwordResetRedirect =>
+    kIsWeb ? Uri.base.origin : 'nile://reset-callback';
+
 // ── Supabase ──────────────────────────────────────────────────────────────────
 const String supabaseUrl =
     'https://jelmkkvyrliywcdkzhuu.supabase.co'; // https://xxxx.supabase.co

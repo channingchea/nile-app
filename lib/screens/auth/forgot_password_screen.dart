@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import '../../config.dart';
 import '../../services/human_check.dart';
 import '../../services/supabase_client.dart';
 import '../../theme.dart';
@@ -34,7 +35,7 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
     try {
       await supabase.auth.resetPasswordForEmail(
         _emailCtrl.text.trim(),
-        redirectTo: 'nile://reset-callback',
+        redirectTo: passwordResetRedirect,
         // Required once Supabase captcha protection is enabled.
         captchaToken: await HumanCheck.captchaToken(),
       );
