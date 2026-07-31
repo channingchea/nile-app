@@ -237,7 +237,7 @@ class _NileAppState extends State<NileApp> with WidgetsBindingObserver {
         // The GestureDetector is the global keyboard-dismiss: any tap that no
         // other widget claims (empty space, static text) drops focus, which
         // retracts the keyboard. Taps on text fields/buttons win the gesture
-        // arena and are unaffected.
+        // arena and are unaffected. Covered by test/keyboard_dismiss_test.dart.
         builder: (_, child) => GestureDetector(
           onTap: () => FocusManager.instance.primaryFocus?.unfocus(),
           child: RepaintBoundary(

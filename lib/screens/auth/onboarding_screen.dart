@@ -160,6 +160,9 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
 
   Future<void> _next({bool skip = false}) async {
     if (_busy) return;
+    // The bio field keeps focus while the PageView animates, so without this
+    // the keyboard rides along and covers the next step.
+    FocusManager.instance.primaryFocus?.unfocus();
     setState(() => _busy = true);
     try {
       if (!skip) await _persistCurrentStep();
@@ -512,6 +515,8 @@ class _StepBody extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return SingleChildScrollView(
+      // Dragging the step content puts the keyboard away too, not just tapping.
+      keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
       padding: const EdgeInsets.fromLTRB(NileSpacing.s24, NileSpacing.s8, NileSpacing.s24, NileSpacing.s24),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,

@@ -78,6 +78,8 @@ class _ClaimUsernameScreenState extends State<ClaimUsernameScreen> {
     if (!_formKey.currentState!.validate()) return;
     final uid = supabase.auth.currentUser?.id;
     if (uid == null) return;
+    // Otherwise the keyboard follows us into the onboarding steps.
+    FocusManager.instance.primaryFocus?.unfocus();
 
     setState(() => _saving = true);
     try {
@@ -139,6 +141,8 @@ class _ClaimUsernameScreenState extends State<ClaimUsernameScreen> {
           child: SafeArea(
             child: Center(
               child: SingleChildScrollView(
+                keyboardDismissBehavior:
+                    ScrollViewKeyboardDismissBehavior.onDrag,
                 padding: const EdgeInsets.symmetric(
                   horizontal: NileSpacing.s32,
                   vertical: NileSpacing.s24,
