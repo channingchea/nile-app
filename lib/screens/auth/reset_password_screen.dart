@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../services/supabase_client.dart';
 import '../../theme.dart';
@@ -33,6 +34,8 @@ class _ResetPasswordScreenState extends State<ResetPasswordScreen> {
     setState(() => _loading = true);
     try {
       await supabase.auth.updateUser(UserAttributes(password: _passCtrl.text));
+      // Offers the OS password manager the chance to update the saved entry.
+      TextInput.finishAutofillContext();
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -77,68 +80,72 @@ class _ResetPasswordScreenState extends State<ResetPasswordScreen> {
               horizontal: NileSpacing.s32,
               vertical: NileSpacing.s24,
             ),
-            child: Form(
-              key: _formKey,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  const SizedBox(height: NileSpacing.s24),
-                  Text('Set a new password', style: NileTextStyles.headingMd()),
-                  const SizedBox(height: 8),
-                  Text(
-                    'Choose a new password for your account.',
-                    style: NileTextStyles.bodyMd()
-                        .copyWith(color: NileColors.txtTertiary),
-                  ),
-                  const SizedBox(height: 32),
-                  NilePasswordField(
-                    controller: _passCtrl,
-                    label: 'New password',
-                    obscure: _obscure,
-                    onToggle: () => setState(() => _obscure = !_obscure),
-                    validator: (v) {
-                      if (v == null || v.isEmpty) return 'Password is required';
-                      if (v.length < 8) {
-                        return 'Use at least 8 characters';
-                      }
-                      return null;
-                    },
-                  ),
-                  const SizedBox(height: 16),
-                  NilePasswordField(
-                    controller: _confirmCtrl,
-                    label: 'Confirm password',
-                    obscure: _obscure,
-                    onToggle: () => setState(() => _obscure = !_obscure),
-                    textInputAction: TextInputAction.done,
-                    onSubmitted: (_) => _save(),
-                    validator: (v) {
-                      if (v != _passCtrl.text) return 'Passwords don\'t match';
-                      return null;
-                    },
-                  ),
-                  const SizedBox(height: 32),
-                  FilledButton(
-                    onPressed: _loading ? null : _save,
-                    style: FilledButton.styleFrom(
-                      padding:
-                          const EdgeInsets.symmetric(vertical: NileSpacing.s16),
-                      backgroundColor: NileColors.volt,
-                      foregroundColor: NileColors.onVolt,
-                      disabledBackgroundColor: NileColors.bgRaised,
+            child: AutofillGroup(
+              child: Form(
+                key: _formKey,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    const SizedBox(height: NileSpacing.s24),
+                    Text('Set a new password', style: NileTextStyles.headingMd()),
+                    const SizedBox(height: 8),
+                    Text(
+                      'Choose a new password for your account.',
+                      style: NileTextStyles.bodyMd()
+                          .copyWith(color: NileColors.txtTertiary),
                     ),
-                    child: _loading
-                        ? SizedBox(
-                            height: 20,
-                            width: 20,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              color: NileColors.onVolt,
-                            ),
-                          )
-                        : const Text('Update password'),
-                  ),
-                ],
+                    const SizedBox(height: 32),
+                    NilePasswordField(
+                      controller: _passCtrl,
+                      label: 'New password',
+                      autofillHints: const [AutofillHints.newPassword],
+                      obscure: _obscure,
+                      onToggle: () => setState(() => _obscure = !_obscure),
+                      validator: (v) {
+                        if (v == null || v.isEmpty) return 'Password is required';
+                        if (v.length < 8) {
+                          return 'Use at least 8 characters';
+                        }
+                        return null;
+                      },
+                    ),
+                    const SizedBox(height: 16),
+                    NilePasswordField(
+                      controller: _confirmCtrl,
+                      label: 'Confirm password',
+                      autofillHints: const [AutofillHints.newPassword],
+                      obscure: _obscure,
+                      onToggle: () => setState(() => _obscure = !_obscure),
+                      textInputAction: TextInputAction.done,
+                      onSubmitted: (_) => _save(),
+                      validator: (v) {
+                        if (v != _passCtrl.text) return 'Passwords don\'t match';
+                        return null;
+                      },
+                    ),
+                    const SizedBox(height: 32),
+                    FilledButton(
+                      onPressed: _loading ? null : _save,
+                      style: FilledButton.styleFrom(
+                        padding:
+                            const EdgeInsets.symmetric(vertical: NileSpacing.s16),
+                        backgroundColor: NileColors.volt,
+                        foregroundColor: NileColors.onVolt,
+                        disabledBackgroundColor: NileColors.bgRaised,
+                      ),
+                      child: _loading
+                          ? SizedBox(
+                              height: 20,
+                              width: 20,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: NileColors.onVolt,
+                              ),
+                            )
+                          : const Text('Update password'),
+                    ),
+                  ],
+                ),
               ),
             ),
           ),
@@ -157,6 +164,7 @@ class NilePasswordField extends StatelessWidget {
   final FormFieldValidator<String>? validator;
   final TextInputAction textInputAction;
   final ValueChanged<String>? onSubmitted;
+  final Iterable<String>? autofillHints;
 
   const NilePasswordField({
     super.key,
@@ -167,6 +175,7 @@ class NilePasswordField extends StatelessWidget {
     this.validator,
     this.textInputAction = TextInputAction.next,
     this.onSubmitted,
+    this.autofillHints,
   });
 
   @override
@@ -176,6 +185,7 @@ class NilePasswordField extends StatelessWidget {
       obscureText: obscure,
       textInputAction: textInputAction,
       onFieldSubmitted: onSubmitted,
+      autofillHints: autofillHints,
       autocorrect: false,
       enableSuggestions: false,
       style: NileTextStyles.bodyMd(),

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../config.dart';
 import '../../services/human_check.dart';
@@ -77,6 +78,10 @@ class _SignupScreenState extends State<SignupScreen> {
         },
       );
 
+      // Offers the OS password manager (Apple Passwords / Google) the
+      // chance to save the new credentials.
+      TextInput.finishAutofillContext();
+
       if (!mounted) return;
 
       if (response.session != null) {
@@ -127,7 +132,9 @@ class _SignupScreenState extends State<SignupScreen> {
       ),
       body: NileMaxWidth(
         child: SafeArea(
-          child: _submitted ? _buildCheckEmailView() : _buildForm(),
+          child: _submitted
+              ? _buildCheckEmailView()
+              : AutofillGroup(child: _buildForm()),
         ),
       ),
     );
@@ -228,6 +235,7 @@ class _SignupScreenState extends State<SignupScreen> {
               // ── Display name ─────────────────────────────────────────
               TextFormField(
                 controller: _nameCtrl,
+                autofillHints: const [AutofillHints.name],
                 textInputAction: TextInputAction.next,
                 style: NileTextStyles.bodyMd(),
                 decoration: InputDecoration(
@@ -250,6 +258,10 @@ class _SignupScreenState extends State<SignupScreen> {
               // ── Email ────────────────────────────────────────────────
               TextFormField(
                 controller: _emailCtrl,
+                autofillHints: const [
+                  AutofillHints.username,
+                  AutofillHints.email,
+                ],
                 keyboardType: TextInputType.emailAddress,
                 textInputAction: TextInputAction.next,
                 autocorrect: false,
@@ -272,6 +284,7 @@ class _SignupScreenState extends State<SignupScreen> {
               // ── Password ─────────────────────────────────────────────
               TextFormField(
                 controller: _passCtrl,
+                autofillHints: const [AutofillHints.newPassword],
                 obscureText: _obscurePass,
                 textInputAction: TextInputAction.next,
                 style: NileTextStyles.bodyMd(),
@@ -303,6 +316,7 @@ class _SignupScreenState extends State<SignupScreen> {
               // ── Confirm password ─────────────────────────────────────
               TextFormField(
                 controller: _confirmCtrl,
+                autofillHints: const [AutofillHints.newPassword],
                 obscureText: _obscureConf,
                 textInputAction: TextInputAction.done,
                 onFieldSubmitted: (_) => _signUp(),

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../services/human_check.dart';
@@ -43,6 +44,8 @@ class _LoginScreenState extends State<LoginScreen> {
         // to sign-in as well as sign-up.
         captchaToken: await HumanCheck.captchaToken(),
       );
+      // Offers the OS password manager the chance to save the credentials.
+      TextInput.finishAutofillContext();
       // _AuthGate in main.dart handles the navigation automatically
       // once the auth state stream emits a session.
     } on AuthException catch (e) {
@@ -69,178 +72,185 @@ class _LoginScreenState extends State<LoginScreen> {
       backgroundColor: NileColors.bgPage,
       body: NileMaxWidth(
         child: SafeArea(
-          child: Center(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s32, vertical: NileSpacing.s48),
-              child: Form(
-                key: _formKey,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    // ── Logo / wordmark ──────────────────────────────────────
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      crossAxisAlignment: CrossAxisAlignment.center,
-                      children: [
-                        NileLogo(size: 'medium', height: 48),
-                        const SizedBox(width: 10),
-                        Text(
-                          'Nile',
-                          style: GoogleFonts.syne(
-                            fontSize: 34,
-                            fontWeight: FontWeight.w800,
-                            color: NileColors.volt,
-                            letterSpacing: -0.5,
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      'Sign in to continue',
-                      textAlign: TextAlign.center,
-                      style: NileTextStyles.bodyMd().copyWith(
-                        color: NileColors.txtTertiary,
-                      ),
-                    ),
-                    const SizedBox(height: 48),
-
-                    // ── Email ────────────────────────────────────────────────
-                    TextFormField(
-                      controller: _emailCtrl,
-                      keyboardType: TextInputType.emailAddress,
-                      textInputAction: TextInputAction.next,
-                      autocorrect: false,
-                      style: NileTextStyles.bodyMd(),
-                      decoration: InputDecoration(
-                        labelText: 'Email',
-                        prefixIcon: Icon(
-                          Icons.mail_outline,
-                          color: NileColors.txtTertiary,
-                        ),
-                      ),
-                      validator: (v) {
-                        if (v == null || v.trim().isEmpty) {
-                          return 'Email is required';
-                        }
-                        if (!v.contains('@')) return 'Enter a valid email';
-                        return null;
-                      },
-                    ),
-                    const SizedBox(height: 16),
-
-                    // ── Password ─────────────────────────────────────────────
-                    TextFormField(
-                      controller: _passCtrl,
-                      obscureText: _obscurePass,
-                      textInputAction: TextInputAction.done,
-                      onFieldSubmitted: (_) => _signIn(),
-                      style: NileTextStyles.bodyMd(),
-                      decoration: InputDecoration(
-                        labelText: 'Password',
-                        prefixIcon: Icon(
-                          Icons.lock_outline,
-                          color: NileColors.txtTertiary,
-                        ),
-                        suffixIcon: IconButton(
-                          icon: Icon(
-                            _obscurePass
-                                ? Icons.visibility_outlined
-                                : Icons.visibility_off_outlined,
-                            color: NileColors.txtTertiary,
-                          ),
-                          onPressed: () =>
-                              setState(() => _obscurePass = !_obscurePass),
-                        ),
-                      ),
-                      validator: (v) {
-                        if (v == null || v.isEmpty) {
-                          return 'Password is required';
-                        }
-                        return null;
-                      },
-                    ),
-                    const SizedBox(height: 8),
-
-                    // ── Forgot password ──────────────────────────────────────
-                    Align(
-                      alignment: Alignment.centerRight,
-                      child: TextButton(
-                        onPressed: () => Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder: (_) => ForgotPasswordScreen(
-                              initialEmail: _emailCtrl.text.trim().isEmpty
-                                  ? null
-                                  : _emailCtrl.text.trim(),
+          child: AutofillGroup(
+            child: Center(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s32, vertical: NileSpacing.s48),
+                child: Form(
+                  key: _formKey,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      // ── Logo / wordmark ──────────────────────────────────────
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        crossAxisAlignment: CrossAxisAlignment.center,
+                        children: [
+                          NileLogo(size: 'medium', height: 48),
+                          const SizedBox(width: 10),
+                          Text(
+                            'Nile',
+                            style: GoogleFonts.syne(
+                              fontSize: 34,
+                              fontWeight: FontWeight.w800,
+                              color: NileColors.volt,
+                              letterSpacing: -0.5,
                             ),
                           ),
-                        ),
-                        child: Text(
-                          'Forgot password?',
-                          style: NileTextStyles.bodyMd().copyWith(
-                            color: NileColors.volt,
-                            fontWeight: FontWeight.w600,
-                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        'Sign in to continue',
+                        textAlign: TextAlign.center,
+                        style: NileTextStyles.bodyMd().copyWith(
+                          color: NileColors.txtTertiary,
                         ),
                       ),
-                    ),
-                    const SizedBox(height: 16),
+                      const SizedBox(height: 48),
 
-                    // ── Sign in button ───────────────────────────────────────
-                    FilledButton(
-                      onPressed: _loading ? null : _signIn,
-                      style: FilledButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
-                        backgroundColor: NileColors.volt,
-                        foregroundColor: NileColors.onVolt,
-                        disabledBackgroundColor: NileColors.bgRaised,
-                      ),
-                      child: _loading
-                          ? SizedBox(
-                              height: 20,
-                              width: 20,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                color: NileColors.onVolt,
-                              ),
-                            )
-                          : const Text('Sign In'),
-                    ),
-                    const SizedBox(height: 24),
-
-                    // ── Social sign-in ───────────────────────────────────────
-                    const SocialAuthButtons(),
-                    const SizedBox(height: 24),
-
-                    // ── Sign up link ─────────────────────────────────────────
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Text(
-                          "Don't have an account?",
-                          style: NileTextStyles.bodyMd().copyWith(
+                      // ── Email ────────────────────────────────────────────────
+                      TextFormField(
+                        controller: _emailCtrl,
+                        autofillHints: const [
+                          AutofillHints.username,
+                          AutofillHints.email,
+                        ],
+                        keyboardType: TextInputType.emailAddress,
+                        textInputAction: TextInputAction.next,
+                        autocorrect: false,
+                        style: NileTextStyles.bodyMd(),
+                        decoration: InputDecoration(
+                          labelText: 'Email',
+                          prefixIcon: Icon(
+                            Icons.mail_outline,
                             color: NileColors.txtTertiary,
                           ),
                         ),
-                        TextButton(
+                        validator: (v) {
+                          if (v == null || v.trim().isEmpty) {
+                            return 'Email is required';
+                          }
+                          if (!v.contains('@')) return 'Enter a valid email';
+                          return null;
+                        },
+                      ),
+                      const SizedBox(height: 16),
+
+                      // ── Password ─────────────────────────────────────────────
+                      TextFormField(
+                        controller: _passCtrl,
+                        autofillHints: const [AutofillHints.password],
+                        obscureText: _obscurePass,
+                        textInputAction: TextInputAction.done,
+                        onFieldSubmitted: (_) => _signIn(),
+                        style: NileTextStyles.bodyMd(),
+                        decoration: InputDecoration(
+                          labelText: 'Password',
+                          prefixIcon: Icon(
+                            Icons.lock_outline,
+                            color: NileColors.txtTertiary,
+                          ),
+                          suffixIcon: IconButton(
+                            icon: Icon(
+                              _obscurePass
+                                  ? Icons.visibility_outlined
+                                  : Icons.visibility_off_outlined,
+                              color: NileColors.txtTertiary,
+                            ),
+                            onPressed: () =>
+                                setState(() => _obscurePass = !_obscurePass),
+                          ),
+                        ),
+                        validator: (v) {
+                          if (v == null || v.isEmpty) {
+                            return 'Password is required';
+                          }
+                          return null;
+                        },
+                      ),
+                      const SizedBox(height: 8),
+
+                      // ── Forgot password ──────────────────────────────────────
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: TextButton(
                           onPressed: () => Navigator.push(
                             context,
                             MaterialPageRoute(
-                              builder: (_) => const SignupScreen(),
+                              builder: (_) => ForgotPasswordScreen(
+                                initialEmail: _emailCtrl.text.trim().isEmpty
+                                    ? null
+                                    : _emailCtrl.text.trim(),
+                              ),
                             ),
                           ),
                           child: Text(
-                            'Sign Up',
+                            'Forgot password?',
                             style: NileTextStyles.bodyMd().copyWith(
                               color: NileColors.volt,
                               fontWeight: FontWeight.w600,
                             ),
                           ),
                         ),
-                      ],
-                    ),
-                  ],
+                      ),
+                      const SizedBox(height: 16),
+
+                      // ── Sign in button ───────────────────────────────────────
+                      FilledButton(
+                        onPressed: _loading ? null : _signIn,
+                        style: FilledButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
+                          backgroundColor: NileColors.volt,
+                          foregroundColor: NileColors.onVolt,
+                          disabledBackgroundColor: NileColors.bgRaised,
+                        ),
+                        child: _loading
+                            ? SizedBox(
+                                height: 20,
+                                width: 20,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: NileColors.onVolt,
+                                ),
+                              )
+                            : const Text('Sign In'),
+                      ),
+                      const SizedBox(height: 24),
+
+                      // ── Social sign-in ───────────────────────────────────────
+                      const SocialAuthButtons(),
+                      const SizedBox(height: 24),
+
+                      // ── Sign up link ─────────────────────────────────────────
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Text(
+                            "Don't have an account?",
+                            style: NileTextStyles.bodyMd().copyWith(
+                              color: NileColors.txtTertiary,
+                            ),
+                          ),
+                          TextButton(
+                            onPressed: () => Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                builder: (_) => const SignupScreen(),
+                              ),
+                            ),
+                            child: Text(
+                              'Sign Up',
+                              style: NileTextStyles.bodyMd().copyWith(
+                                color: NileColors.volt,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),

@@ -8,7 +8,12 @@
 	<key>com.apple.developer.associated-domains</key>
 	<array>
 		<string>applinks:links.nile.app</string>
+		<string>webcredentials:nile.app</string>
 	</array>
+	     webcredentials lets Apple Passwords share saved logins between the
+	     website and the app; it needs a "webcredentials" section in the
+	     apple-app-site-association file too. In-app save/fill works without it,
+	     just scoped to the bundle ID.
 	-->
 	<!-- Push notifications (APNs). Without this key iOS never issues an APNs
 	     device token, so FCM getToken() silently fails and no push arrives.
