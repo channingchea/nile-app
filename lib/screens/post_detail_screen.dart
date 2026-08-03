@@ -10,6 +10,7 @@ import '../widgets/event_link_card.dart';
 import '../widgets/like_button.dart';
 import '../widgets/official_badge.dart';
 import '../widgets/post_image_carousel.dart';
+import 'like_list_screen.dart';
 import 'profile_screen.dart';
 import 'widgets/load_more_footer.dart';
 import 'widgets/moderation_menu.dart';
@@ -440,6 +441,7 @@ class _ActionsRow extends StatelessWidget {
           count: post.likeCount,
           iconSize: 20,
           onTap: busy ? null : onLike,
+          onCountTap: () => LikeListScreen.openPost(context, post.id),
         ),
         const SizedBox(width: 20),
         _IconCount(
@@ -553,25 +555,32 @@ class _CommentTile extends StatelessWidget {
               children: [
                 Row(
                   children: [
-                    Flexible(
-                      child: Text(
-                        '@${comment.authorUsername}',
-                        style: NileTextStyles.labelSm().copyWith(
-                          letterSpacing: 0,
-                        ),
-                        overflow: TextOverflow.ellipsis,
+                    // Expanded (not Flexible + Spacer) so the menu stays
+                    // flush right regardless of username length.
+                    Expanded(
+                      child: Row(
+                        children: [
+                          Flexible(
+                            child: Text(
+                              '@${comment.authorUsername}',
+                              style: NileTextStyles.labelSm().copyWith(
+                                letterSpacing: 0,
+                              ),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          if (comment.authorIsOfficial) ...[
+                            const SizedBox(width: 4),
+                            const OfficialBadge(size: 12),
+                          ],
+                          const SizedBox(width: 6),
+                          Text(
+                            _timeAgo(comment.createdAt),
+                            style: NileTextStyles.caption(),
+                          ),
+                        ],
                       ),
                     ),
-                    if (comment.authorIsOfficial) ...[
-                      const SizedBox(width: 4),
-                      const OfficialBadge(size: 12),
-                    ],
-                    const SizedBox(width: 6),
-                    Text(
-                      _timeAgo(comment.createdAt),
-                      style: NileTextStyles.caption(),
-                    ),
-                    const Spacer(),
                     if (canDelete || !isMine)
                       _CommentMenu(
                         canDelete: canDelete,

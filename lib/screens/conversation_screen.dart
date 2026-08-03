@@ -737,14 +737,10 @@ class _AppBar extends StatelessWidget {
             ),
             onPressed: () => Navigator.pop(context),
           ),
-          NileAvatar(
-            username: conv.otherUsername,
-            avatarUrl: conv.otherAvatarUrl,
-            radius: 18,
-          ),
-          const SizedBox(width: 10),
+          // Avatar and name are one tap target — both open the profile.
           Expanded(
             child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
               onTap: () => Navigator.push(
                 context,
                 MaterialPageRoute(
@@ -753,6 +749,12 @@ class _AppBar extends StatelessWidget {
               ),
               child: Row(
                 children: [
+                  NileAvatar(
+                    username: conv.otherUsername,
+                    avatarUrl: conv.otherAvatarUrl,
+                    radius: 18,
+                  ),
+                  const SizedBox(width: 10),
                   Flexible(
                     child: Text(
                       '@${conv.otherUsername}',

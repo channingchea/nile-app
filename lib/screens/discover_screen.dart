@@ -21,6 +21,7 @@ import '../widgets/pressable.dart';
 import 'create_event_flow.dart';
 import 'create_post_screen.dart';
 import 'event_detail_screen.dart';
+import 'like_list_screen.dart';
 import 'post_detail_screen.dart';
 import 'profile_screen.dart';
 import 'viewer_screen.dart';
@@ -984,6 +985,8 @@ class _DiscoverPostCard extends StatelessWidget {
                       liked: post.likedByMe,
                       count: post.likeCount,
                       onTap: onLikeToggle!,
+                      onCountTap: () =>
+                          LikeListScreen.openPost(context, post.id),
                     ),
                     const SizedBox(width: 14),
                     Icon(
@@ -1109,6 +1112,8 @@ class _DiscoverEventCard extends StatelessWidget {
                         liked: event.likedByMe,
                         count: event.likeCount,
                         onTap: onLikeToggle!,
+                        onCountTap: () =>
+                            LikeListScreen.openEvent(context, event.id),
                       ),
                     ],
                   ],
@@ -1474,19 +1479,26 @@ class _UpcomingEventCard extends StatelessWidget {
                   const SizedBox(height: 2),
                   Row(
                     children: [
-                      Flexible(
-                        child: Text(
-                          '@${event.hostUsername}',
-                          style: NileTextStyles.bodySm(),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
+                      // Expanded (not Flexible + Spacer) so the price stays
+                      // flush right regardless of username length.
+                      Expanded(
+                        child: Row(
+                          children: [
+                            Flexible(
+                              child: Text(
+                                '@${event.hostUsername}',
+                                style: NileTextStyles.bodySm(),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                            if (event.hostIsOfficial) ...[
+                              const SizedBox(width: 4),
+                              const OfficialBadge(size: 13),
+                            ],
+                          ],
                         ),
                       ),
-                      if (event.hostIsOfficial) ...[
-                        const SizedBox(width: 4),
-                        const OfficialBadge(size: 13),
-                      ],
-                      const Spacer(),
                       if (price != null)
                         Text(
                           price,

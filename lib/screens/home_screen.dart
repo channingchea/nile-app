@@ -40,6 +40,7 @@ import 'discover_screen.dart';
 import 'edit_event_screen.dart';
 import 'edit_post_screen.dart';
 import 'event_detail_screen.dart';
+import 'like_list_screen.dart';
 import 'messages_screen.dart';
 import 'notifications_screen.dart';
 import 'post_detail_screen.dart';
@@ -1350,6 +1351,8 @@ class _EventCard extends StatelessWidget {
                             liked: event.likedByMe,
                             count: event.likeCount,
                             onTap: onLikeToggle!,
+                            onCountTap: () =>
+                                LikeListScreen.openEvent(context, event.id),
                           ),
                         if (onRepostToggle != null) ...[
                           const SizedBox(width: 16),
@@ -1781,6 +1784,8 @@ class _PostCard extends StatelessWidget {
                         liked: post.likedByMe,
                         count: post.likeCount,
                         onTap: onLikeToggle!,
+                        onCountTap: () =>
+                            LikeListScreen.openPost(context, post.id),
                       ),
                     const SizedBox(width: 16),
                     InkWell(

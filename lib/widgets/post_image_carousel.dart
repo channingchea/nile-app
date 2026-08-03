@@ -3,6 +3,9 @@ import 'package:flutter/material.dart';
 import '../theme.dart';
 import 'photo_viewer.dart';
 
+/// Aspect ratio post images are cropped to at upload and displayed at.
+const double _kPostAspectRatio = 4 / 3;
+
 /// Swipeable 4:3 image carousel for posts. Renders a single image inline when
 /// there's only one; shows page dots + a count badge for multiple. Used by both
 /// the feed card and post detail. Tapping an image opens it full-screen in
@@ -38,7 +41,7 @@ class _PostImageCarouselState extends State<PostImageCarousel> {
     return ClipRRect(
       borderRadius: BorderRadius.circular(NileRadius.sm),
       child: AspectRatio(
-        aspectRatio: 4 / 3,
+        aspectRatio: _kPostAspectRatio,
         child: Stack(
           fit: StackFit.expand,
           children: [
@@ -76,6 +79,9 @@ class _PostImageCarouselState extends State<PostImageCarousel> {
       // Full-res originals in the viewer (the inline copy is downsampled).
       images: [for (final u in widget.imageUrls) NetworkImage(u)],
       initialIndex: i,
+      // Keep the 4:3 crop the card shows — older posts stored pre-crop-
+      // enforcement would otherwise expand to their raw aspect ratio.
+      aspectRatio: _kPostAspectRatio,
     ),
     child: Image.network(
       widget.imageUrls[i],

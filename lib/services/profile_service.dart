@@ -456,12 +456,66 @@ class ProfileService {
         format: ui.ImageByteFormat.png,
       );
       bytes = byteData!.buffer.asUint8List();
+    } else if (allowedAspectRatios != null &&
+        allowedAspectRatios.length == 1 &&
+        allowedAspectRatios.first != null) {
+      // Crop was dismissed but the ratio is mandatory — center-crop to it so
+      // the stored image always matches how it's displayed.
+      final r = allowedAspectRatios.first!;
+      bytes = await centerCropToRatio(pickedBytes, r.width / r.height);
     } else {
       bytes = pickedBytes;
     }
 
     if (bytes.length > kMaxImageBytes) throw ImageTooLargeException();
     return bytes;
+  }
+
+  /// Center-crops [bytes] to [ratio] (width / height), returning PNG bytes.
+  /// Returns [bytes] unchanged if it already matches the ratio or can't be
+  /// decoded.
+  static Future<Uint8List> centerCropToRatio(
+    Uint8List bytes,
+    double ratio,
+  ) async {
+    try {
+      final codec = await ui.instantiateImageCodec(bytes);
+      final src = (await codec.getNextFrame()).image;
+      final w = src.width.toDouble();
+      final h = src.height.toDouble();
+
+      final double cw, ch;
+      if (w / h > ratio) {
+        ch = h;
+        cw = h * ratio;
+      } else {
+        cw = w;
+        ch = w / ratio;
+      }
+      // Already the right shape (within a rounding pixel) — leave it alone.
+      if ((w - cw) < 1 && (h - ch) < 1) {
+        src.dispose();
+        return bytes;
+      }
+
+      final recorder = ui.PictureRecorder();
+      Canvas(recorder).drawImageRect(
+        src,
+        Rect.fromLTWH((w - cw) / 2, (h - ch) / 2, cw, ch),
+        Rect.fromLTWH(0, 0, cw, ch),
+        Paint()..filterQuality = FilterQuality.high,
+      );
+      final picture = recorder.endRecording();
+      final out = await picture.toImage(cw.round(), ch.round());
+      final data = await out.toByteData(format: ui.ImageByteFormat.png);
+
+      src.dispose();
+      out.dispose();
+      picture.dispose();
+      return data?.buffer.asUint8List() ?? bytes;
+    } catch (_) {
+      return bytes;
+    }
   }
 
   static Future<String> _uploadImage({

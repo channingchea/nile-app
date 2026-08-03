@@ -4,10 +4,14 @@ import '../theme.dart';
 import 'rolling_number.dart';
 
 /// Heart icon + count with a scale "pop" and light haptic on tap.
+///
+/// Two tap targets: the heart toggles the like, the count opens [onCountTap]
+/// (the "liked by" list). When [onCountTap] is null the whole row toggles.
 class LikeButton extends StatefulWidget {
   final bool liked;
   final int count;
   final VoidCallback? onTap;
+  final VoidCallback? onCountTap;
   final double iconSize;
 
   const LikeButton({
@@ -15,6 +19,7 @@ class LikeButton extends StatefulWidget {
     required this.liked,
     required this.count,
     required this.onTap,
+    this.onCountTap,
     this.iconSize = 18,
   });
 
@@ -48,30 +53,63 @@ class _LikeButtonState extends State<LikeButton>
   @override
   Widget build(BuildContext context) {
     final color = widget.liked ? NileColors.coral : NileColors.txtSecondary;
-    return InkWell(
-      onTap: widget.onTap == null ? null : _handleTap,
-      borderRadius: BorderRadius.circular(NileRadius.sm),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s4, vertical: NileSpacing.s4),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ScaleTransition(
-              scale: _pop,
-              child: Icon(
-                widget.liked ? Icons.favorite : Icons.favorite_border,
-                size: widget.iconSize,
-                color: color,
-              ),
-            ),
-            const SizedBox(width: NileSpacing.s4),
-            NileRollingNumber(
-              value: widget.count,
-              style: NileTextStyles.bodySm().copyWith(color: color),
-            ),
-          ],
-        ),
+    // Nothing to show when there are no likes yet.
+    final countTap = widget.count > 0 ? widget.onCountTap : null;
+
+    final heart = ScaleTransition(
+      scale: _pop,
+      child: Icon(
+        widget.liked ? Icons.favorite : Icons.favorite_border,
+        size: widget.iconSize,
+        color: color,
       ),
+    );
+    final count = NileRollingNumber(
+      value: widget.count,
+      style: NileTextStyles.bodySm().copyWith(color: color),
+    );
+
+    const pad = EdgeInsets.symmetric(
+      horizontal: NileSpacing.s4,
+      vertical: NileSpacing.s4,
+    );
+
+    // Single target: the whole row toggles (original behaviour).
+    if (countTap == null) {
+      return InkWell(
+        onTap: widget.onTap == null ? null : _handleTap,
+        borderRadius: BorderRadius.circular(NileRadius.sm),
+        child: Padding(
+          padding: pad,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [heart, const SizedBox(width: NileSpacing.s4), count],
+          ),
+        ),
+      );
+    }
+
+    // Split targets: heart toggles, count opens the "liked by" list.
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        InkWell(
+          onTap: widget.onTap == null ? null : _handleTap,
+          borderRadius: BorderRadius.circular(NileRadius.sm),
+          child: Padding(padding: pad, child: heart),
+        ),
+        InkWell(
+          onTap: countTap,
+          borderRadius: BorderRadius.circular(NileRadius.sm),
+          child: Padding(
+            padding: pad,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(minWidth: 16),
+              child: count,
+            ),
+          ),
+        ),
+      ],
     );
   }
 }

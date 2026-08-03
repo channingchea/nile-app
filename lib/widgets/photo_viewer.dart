@@ -12,11 +12,17 @@ class PhotoViewerScreen extends StatefulWidget {
   final int initialIndex;
   final Object? heroTag;
 
+  /// When set, images are shown cover-cropped to this width/height ratio
+  /// instead of fitted whole — so the full-screen view matches the crop the
+  /// thumbnail shows. Null keeps the original "fit the whole image" behaviour.
+  final double? aspectRatio;
+
   const PhotoViewerScreen({
     super.key,
     required this.images,
     this.initialIndex = 0,
     this.heroTag,
+    this.aspectRatio,
   });
 
   /// Single image (profile avatar / cover photo).
@@ -24,8 +30,13 @@ class PhotoViewerScreen extends StatefulWidget {
     BuildContext context, {
     required ImageProvider image,
     Object? heroTag,
-  }) =>
-      openGallery(context, images: [image], heroTag: heroTag);
+    double? aspectRatio,
+  }) => openGallery(
+    context,
+    images: [image],
+    heroTag: heroTag,
+    aspectRatio: aspectRatio,
+  );
 
   /// Multiple images (post carousels), starting at [initialIndex].
   static Future<void> openGallery(
@@ -33,6 +44,7 @@ class PhotoViewerScreen extends StatefulWidget {
     required List<ImageProvider> images,
     int initialIndex = 0,
     Object? heroTag,
+    double? aspectRatio,
   }) {
     return Navigator.of(context).push(
       PageRouteBuilder(
@@ -42,6 +54,7 @@ class PhotoViewerScreen extends StatefulWidget {
           images: images,
           initialIndex: initialIndex,
           heroTag: heroTag,
+          aspectRatio: aspectRatio,
         ),
         transitionsBuilder: (_, anim, _, child) =>
             FadeTransition(opacity: anim, child: child),
@@ -65,9 +78,12 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen> {
   }
 
   Widget _photo(int i) {
+    final ar = widget.aspectRatio;
     Widget photo = Image(
       image: widget.images[i],
-      fit: BoxFit.contain,
+      // Cover + a fixed ratio box reproduces the thumbnail's crop; contain
+      // shows the whole image.
+      fit: ar == null ? BoxFit.contain : BoxFit.cover,
       loadingBuilder: (_, child, progress) => progress == null
           ? child
           : const Center(
@@ -78,6 +94,12 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen> {
             color: Colors.white38, size: 48),
       ),
     );
+    if (ar != null) {
+      photo = AspectRatio(
+        aspectRatio: ar,
+        child: ClipRect(child: photo),
+      );
+    }
     if (widget.heroTag != null && i == widget.initialIndex) {
       photo = Hero(tag: widget.heroTag!, child: photo);
     }

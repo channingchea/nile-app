@@ -237,25 +237,31 @@ class _ConversationTile extends StatelessWidget {
                 children: [
                   Row(
                     children: [
-                      Flexible(
-                        child: Text(
-                          '@${conv.otherUsername}',
-                          style: NileTextStyles.bodyMd().copyWith(
-                            fontWeight: hasUnread
-                                ? FontWeight.w600
-                                : FontWeight.w400,
-                            color: hasUnread
-                                ? NileColors.txtPrimary
-                                : NileColors.txtPrimary,
-                          ),
-                          overflow: TextOverflow.ellipsis,
+                      // Expanded (not Flexible + Spacer) so the timestamp
+                      // sits flush against the right edge of the row.
+                      Expanded(
+                        child: Row(
+                          children: [
+                            Flexible(
+                              child: Text(
+                                '@${conv.otherUsername}',
+                                style: NileTextStyles.bodyMd().copyWith(
+                                  fontWeight: hasUnread
+                                      ? FontWeight.w600
+                                      : FontWeight.w400,
+                                  color: NileColors.txtPrimary,
+                                ),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                            if (conv.otherIsOfficial) ...[
+                              const SizedBox(width: 4),
+                              const OfficialBadge(size: 13),
+                            ],
+                          ],
                         ),
                       ),
-                      if (conv.otherIsOfficial) ...[
-                        const SizedBox(width: 4),
-                        const OfficialBadge(size: 13),
-                      ],
-                      const Spacer(),
+                      const SizedBox(width: NileSpacing.s8),
                       Text(
                         _timeAgo(conv.lastMessageAt),
                         style: NileTextStyles.caption(),
