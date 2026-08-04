@@ -661,14 +661,19 @@ class EventService {
     );
   }
 
-  /// Fetch current viewer_count, status, and scheduled_at for an event by
-  /// liveKitEventId. scheduled_at gates how early a host may enter sound check.
+  /// Fetch current viewer_count, status, and the timing anchors for an event by
+  /// liveKitEventId. scheduled_at gates how early a host may enter sound check;
+  /// scheduled_at/end_at/started_at together give the camera screen the same
+  /// effective end time the server's auto-end uses (migration 0056).
   static Future<Map<String, dynamic>?> fetchEventState(
     String liveKitEventId,
   ) => guard(() async {
     final rows = await supabase
         .from('events')
-        .select('id, host_id, title, viewer_count, status, scheduled_at')
+        .select(
+          'id, host_id, title, viewer_count, status, '
+          'scheduled_at, end_at, started_at',
+        )
         .eq('livekit_room', liveKitEventId)
         .limit(1);
     return rows.isNotEmpty ? rows.first : null;

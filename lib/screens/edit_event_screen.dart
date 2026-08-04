@@ -4,12 +4,14 @@ import 'package:flutter/services.dart';
 
 import '../services/crew_service.dart';
 import '../services/event_service.dart';
+import '../services/pricing_service.dart';
 import '../services/profile_service.dart';
 import '../services/topic_service.dart';
 import '../theme.dart';
 import '../widgets/crew_editor.dart';
 import '../widgets/duration_field.dart';
 import '../widgets/payout_gate.dart';
+import '../widgets/payout_preview_card.dart';
 import '../widgets/topic_chips.dart';
 
 /// Edit an event the signed-in user hosts. Mirrors the create flow's fields
@@ -54,10 +56,19 @@ class _EditEventScreenState extends State<EditEventScreen> {
   bool _saving = false;
   String? _error;
 
+  // Server pricing constants; local fallback until the real config loads.
+  PricingConfig _pricing = PricingService.current;
+
   @override
   void initState() {
     super.initState();
+    PricingService.load().then((c) {
+      if (mounted) setState(() => _pricing = c);
+    });
     final e = widget.event;
+    // Seed cameras from the event row so the ticket floor is right before the
+    // crew fetch resolves; _loadCrew refines it from the saved camera slots.
+    _crew.cameraCount = e.cameraCount;
     _nameController = TextEditingController(text: e.title);
     _descriptionController = TextEditingController(text: e.description ?? '');
     _priceController = TextEditingController(
@@ -77,9 +88,46 @@ class _EditEventScreenState extends State<EditEventScreen> {
       text: _trimNum(mins / 60),
     ); // hours by default
     _durationController.addListener(() => setState(() {}));
+    _priceController.addListener(() => setState(() {}));
 
     _loadCrew();
     _loadTopics();
+  }
+
+  // ── Pricing (mirrors the create flow) ───────────────────────────────────────
+
+  int get _cameraCount => _crew.cameraCount;
+
+  int get _minPriceCents => _pricing.minTicketCentsFor(
+    durationMinutes: _parsedDurationMinutes() ?? 60,
+    cameraCount: _cameraCount,
+  );
+
+  int get _typedPriceCents {
+    final raw = _priceController.text.trim();
+    if (raw.isEmpty) return 0;
+    final n = double.tryParse(raw);
+    return n == null || n < 0 ? 0 : (n * 100).round();
+  }
+
+  static String _money(int cents) => '\$${(cents / 100).toStringAsFixed(2)}';
+
+  String? _validatePrice(String? v) {
+    final cents = (v == null || v.trim().isEmpty)
+        ? 0
+        : ((double.tryParse(v.trim()) ?? -1) * 100).round();
+    if (cents < 0) return 'Invalid';
+    if (cents == 0) {
+      return _cameraCount > 1 ? 'Needs a price' : null;
+    }
+    if (cents < _minPriceCents) return 'Min ${_money(_minPriceCents)}';
+    return null;
+  }
+
+  void _changeCameraCount(int delta) {
+    final next = _cameraCount + delta;
+    if (next < 1 || next > CrewState.maxCameras) return;
+    setState(() => _crew.cameraCount = next);
   }
 
   Future<void> _loadTopics() async {
@@ -381,7 +429,7 @@ class _EditEventScreenState extends State<EditEventScreen> {
       if (!mounted) return;
       setState(() {
         _saving = false;
-        _error = 'Failed to save: $e';
+        _error = PricingService.friendlyError(e) ?? 'Failed to save: $e';
       });
     }
   }
@@ -497,6 +545,26 @@ class _EditEventScreenState extends State<EditEventScreen> {
                     inHours: _durationInHours,
                     onUnitChanged: _changeUnit,
                     preview: _durationPreview(),
+                    maxMinutes: _pricing.maxStreamMinutes,
+                  ),
+                  const SizedBox(height: 20),
+                  _SectionLabel('Cameras'),
+                  const SizedBox(height: 6),
+                  CameraStepper(
+                    count: _cameraCount,
+                    max: CrewState.maxCameras,
+                    onAdd: () => _changeCameraCount(1),
+                    onRemove: () => _changeCameraCount(-1),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    _cameraCount > 1
+                        ? 'Multi-camera streams need a ticket — minimum '
+                              '${_money(_minPriceCents)} for this event.'
+                        : 'Single-camera streams can be free.',
+                    style: NileTextStyles.caption().copyWith(
+                      color: NileColors.txtTertiary,
+                    ),
                   ),
                   const SizedBox(height: 20),
                   Row(
@@ -518,16 +586,13 @@ class _EditEventScreenState extends State<EditEventScreen> {
                                   RegExp(r'^\d*\.?\d{0,2}'),
                                 ),
                               ],
-                              decoration: const InputDecoration(
+                              decoration: InputDecoration(
                                 prefixText: '\$ ',
-                                hintText: 'Free',
+                                hintText: _cameraCount > 1
+                                    ? (_minPriceCents / 100).toStringAsFixed(2)
+                                    : 'Free',
                               ),
-                              validator: (v) {
-                                if (v == null || v.isEmpty) return null;
-                                final n = double.tryParse(v);
-                                if (n == null || n < 0) return 'Invalid';
-                                return null;
-                              },
+                              validator: _validatePrice,
                             ),
                           ],
                         ),
@@ -560,11 +625,21 @@ class _EditEventScreenState extends State<EditEventScreen> {
                       ),
                     ],
                   ),
+                  if (_cameraCount > 1 || _typedPriceCents > 0) ...[
+                    const SizedBox(height: 16),
+                    PayoutPreviewCard(
+                      priceCents: _typedPriceCents,
+                      minCents: _minPriceCents,
+                      cameraCount: _cameraCount,
+                      config: _pricing,
+                    ),
+                  ],
                   const SizedBox(height: 24),
                   Divider(color: NileColors.border),
                   const SizedBox(height: 16),
 
-                  // Crew editor (cameras + operators) — same as the create flow.
+                  // Crew editor (operators only — cameras live above, next to
+                  // the price they drive).
                   if (_crewLoading)
                     Padding(
                       padding: EdgeInsets.symmetric(vertical: NileSpacing.s24),
@@ -575,7 +650,11 @@ class _EditEventScreenState extends State<EditEventScreen> {
                       ),
                     )
                   else
-                    CrewEditor(state: _crew, onChanged: () => setState(() {})),
+                    CrewEditor(
+                      state: _crew,
+                      showCameras: false,
+                      onChanged: () => setState(() {}),
+                    ),
 
                   if (_crewError != null) ...[
                     const SizedBox(height: 12),

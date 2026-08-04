@@ -31,7 +31,17 @@ class CrewEditor extends StatefulWidget {
   final CrewState state;
   final VoidCallback? onChanged;
 
-  const CrewEditor({super.key, required this.state, this.onChanged});
+  /// Whether to render the camera-count stepper. False where the count is
+  /// captured earlier (create page 1, edit screen) because pricing depends on
+  /// it — this editor then covers crew membership only.
+  final bool showCameras;
+
+  const CrewEditor({
+    super.key,
+    required this.state,
+    this.onChanged,
+    this.showCameras = true,
+  });
 
   @override
   State<CrewEditor> createState() => _CrewEditorState();
@@ -184,23 +194,25 @@ class _CrewEditorState extends State<CrewEditor> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        if (widget.showCameras) ...[
+          _StepHeader(
+            number: 1,
+            title: 'Cameras',
+            subtitle: 'How many cameras will this stream use?',
+          ),
+          const SizedBox(height: 12),
+          CameraStepper(
+            count: _s.cameraCount,
+            max: CrewState.maxCameras,
+            onAdd: _addCamera,
+            onRemove: _removeCamera,
+          ),
+          const SizedBox(height: 16),
+          Divider(color: NileColors.border),
+          const SizedBox(height: 16),
+        ],
         _StepHeader(
-          number: 1,
-          title: 'Cameras',
-          subtitle: 'How many cameras will this stream use?',
-        ),
-        const SizedBox(height: 12),
-        _CameraStepper(
-          count: _s.cameraCount,
-          max: CrewState.maxCameras,
-          onAdd: _addCamera,
-          onRemove: _removeCamera,
-        ),
-        const SizedBox(height: 16),
-        Divider(color: NileColors.border),
-        const SizedBox(height: 16),
-        _StepHeader(
-          number: 2,
+          number: widget.showCameras ? 2 : 1,
           title: 'Choose Your Crew',
           subtitle:
               'Crew members get free access and a notification. '
@@ -320,13 +332,17 @@ class _StepHeader extends StatelessWidget {
   }
 }
 
-class _CameraStepper extends StatelessWidget {
+/// Minus / count / plus control for the number of cameras. Public so the
+/// create flow and edit screen can host it next to the price field, where the
+/// count drives the ticket floor.
+class CameraStepper extends StatelessWidget {
   final int count;
   final int max;
   final VoidCallback onAdd;
   final VoidCallback onRemove;
 
-  const _CameraStepper({
+  const CameraStepper({
+    super.key,
     required this.count,
     required this.max,
     required this.onAdd,

@@ -431,6 +431,84 @@ class _CameraScreenState extends State<CameraScreen> {
   // status (the single source of truth) via realtime.
   RealtimeChannel? _statusChannel;
 
+  // ── Show clock ──────────────────────────────────────────────────────────────
+  // Every show gets its purchased duration measured from the ACTUAL start
+  // (same rule as the server's auto-end, migration 0056). Crew see a countdown
+  // for the last 10 minutes; at zero the HOST's device ends the show and the
+  // server cron stays as the backstop. Viewers never see any of this.
+  static const Duration _countdownWindow = Duration(minutes: 10);
+  Timer? _countdownTimer;
+  Duration? _plannedDuration; // end_at − scheduled_at
+  DateTime? _plannedEndAt; // end_at, used when there's no start anchor
+  DateTime? _startedAt;
+  Duration? _remaining; // non-null only inside the countdown window
+  bool _autoEnding = false;
+
+  DateTime? get _effectiveEndAt {
+    final started = _startedAt;
+    final planned = _plannedDuration;
+    if (started != null && planned != null) return started.add(planned);
+    return _plannedEndAt;
+  }
+
+  /// Pull the timing anchors for this room. Best-effort: with no anchors the
+  /// countdown simply never appears and the server cron still ends the show.
+  Future<void> _loadTimingAnchors(String eventId) async {
+    try {
+      final state = await EventService.fetchEventState(eventId);
+      if (!mounted || state == null) return;
+      final sched = state['scheduled_at'] as String?;
+      final end = state['end_at'] as String?;
+      setState(() {
+        _plannedEndAt = end == null ? null : DateTime.parse(end);
+        _plannedDuration = (sched != null && end != null)
+            ? DateTime.parse(end).difference(DateTime.parse(sched))
+            : null;
+        _captureStartedAt(state['started_at']);
+      });
+    } catch (_) {
+      /* best-effort */
+    }
+  }
+
+  /// Record the show's start anchor from a row/realtime record. Call inside
+  /// setState (or before one).
+  void _captureStartedAt(dynamic raw) {
+    if (raw is String) _startedAt = DateTime.tryParse(raw);
+  }
+
+  void _startCountdownTicker() {
+    _countdownTimer?.cancel();
+    _countdownTimer = Timer.periodic(
+      const Duration(seconds: 1),
+      (_) => _tickCountdown(),
+    );
+  }
+
+  void _tickCountdown() {
+    if (!mounted || _autoEnding) return;
+    final end = _effectiveEndAt;
+    if (_state != CameraState.live || end == null) {
+      if (_remaining != null) setState(() => _remaining = null);
+      return;
+    }
+    final left = end.difference(DateTime.now());
+    final next = left > _countdownWindow
+        ? null
+        : (left.isNegative ? Duration.zero : left);
+    if (next != _remaining) setState(() => _remaining = next);
+    if (!left.isNegative) return;
+
+    // Time's up. Only the host ends the show — operator devices just watch the
+    // room close when the status flips.
+    if (!widget.isHost) return;
+    setState(() => _autoEnding = true);
+    _countdownTimer?.cancel();
+    Future.delayed(const Duration(milliseconds: 1500), () {
+      if (mounted) _endStream();
+    });
+  }
+
   // Host Sound Check: "View as Viewer" overlay is open. The host's publishing
   // mic is force-muted for its lifetime (feedback guard) and restored on close.
   bool _viewerPreviewOpen = false;
@@ -463,6 +541,7 @@ class _CameraScreenState extends State<CameraScreen> {
     if (_eventId != null && widget.isHost && _state == CameraState.soundCheck) {
       EventService.revertToScheduled(_eventId!).catchError((_) {});
     }
+    _countdownTimer?.cancel();
     _statusChannel?.unsubscribe();
     _chatChannel?.unsubscribe();
     _deviceChangeSub?.cancel();
@@ -638,6 +717,11 @@ class _CameraScreenState extends State<CameraScreen> {
       // Join the live-chat broadcast so the host/operator can watch the room.
       _chatChannel = ChatService.subscribe(eventId, _onChatMessage);
 
+      // Show clock: fetch the timing anchors and start the 1s ticker that
+      // drives the crew-only countdown (and the host's auto-end at zero).
+      _loadTimingAnchors(eventId);
+      _startCountdownTicker();
+
       // Host: load the assigned-crew roster for the readiness panel.
       // Non-host: follow the DB status so the UI flips to LIVE when the host
       // presses Start Show, and tears down when the show ends.
@@ -678,6 +762,7 @@ class _CameraScreenState extends State<CameraScreen> {
           liveKitEventId: eventId,
           onUpdate: (record) {
             if (!mounted) return;
+            _captureStartedAt(record['started_at']);
             if (record['status'] == 'live' &&
                 _state == CameraState.soundCheck) {
               setState(() => _state = CameraState.live);
@@ -701,6 +786,7 @@ class _CameraScreenState extends State<CameraScreen> {
           liveKitEventId: eventId,
           onUpdate: (record) {
             if (!mounted) return;
+            _captureStartedAt(record['started_at']);
             final status = record['status'];
             if (status == 'live' &&
                 _state == CameraState.soundCheck &&
@@ -805,7 +891,12 @@ class _CameraScreenState extends State<CameraScreen> {
 
   Future<void> _startShow() async {
     if (_eventId == null) return;
-    setState(() => _state = CameraState.live);
+    setState(() {
+      _state = CameraState.live;
+      // Anchor the show clock locally — the DB write below stamps the same
+      // instant, and the countdown shouldn't wait on a round-trip.
+      _startedAt = DateTime.now();
+    });
     EventService.goLive(_eventId!).catchError((_) {});
     // Stamp the camera-sync anchor (showStartedAt) into the room metadata.
     LivekitService.startShow(eventId: _eventId!).catchError((_) {});
@@ -1422,6 +1513,41 @@ class _CameraScreenState extends State<CameraScreen> {
     );
   }
 
+  /// mm:ss countdown chip. Turns coral inside the last 2 minutes, and swaps to
+  /// an "Ending stream…" beat once the host's device takes over at zero.
+  Widget _buildCountdownPill() {
+    final left = _remaining ?? Duration.zero;
+    final urgent = left <= const Duration(minutes: 2);
+    final label = _autoEnding
+        ? 'Ending stream…'
+        : '${left.inMinutes.toString().padLeft(2, '0')}:'
+              '${(left.inSeconds % 60).toString().padLeft(2, '0')} left';
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: NileSpacing.s12,
+        vertical: NileSpacing.s6,
+      ),
+      decoration: BoxDecoration(
+        color: urgent ? NileColors.coral : Colors.black54,
+        borderRadius: BorderRadius.circular(NileRadius.pill),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.timer_outlined, size: 14, color: Colors.white),
+          const SizedBox(width: 6),
+          Text(
+            label,
+            style: NileTextStyles.labelSm().copyWith(
+              color: Colors.white,
+              letterSpacing: 0.5,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildLive() {
     return Stack(
       children: [
@@ -1510,6 +1636,17 @@ class _CameraScreenState extends State<CameraScreen> {
             ),
           ),
         ),
+
+        // ── Show countdown — top centre, crew only ─────────────────────
+        // Appears for the last 10 minutes of the purchased duration so the
+        // host and operators can wrap up. Viewers never see this screen.
+        if (_remaining != null)
+          Positioned(
+            top: 16,
+            left: 0,
+            right: 0,
+            child: Center(child: _buildCountdownPill()),
+          ),
 
         // ── Master audio status — top right ───────────────────────────
         Positioned(

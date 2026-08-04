@@ -7,11 +7,13 @@ import '../services/crew_service.dart';
 import '../services/share_urls.dart';
 import '../services/event_service.dart';
 import '../services/livekit_service.dart';
+import '../services/pricing_service.dart';
 import '../services/profile_service.dart';
 import '../theme.dart';
 import '../widgets/crew_editor.dart';
 import '../widgets/duration_field.dart';
 import '../widgets/payout_gate.dart';
+import '../widgets/payout_preview_card.dart';
 import '../widgets/topic_chips.dart';
 import 'create_post_screen.dart';
 import 'event_detail_screen.dart';
@@ -119,11 +121,18 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
   // Duration unit toggle: false = minutes, true = hours.
   bool _durationInHours = true;
 
+  // Server pricing constants; starts on the local fallback and swaps in the
+  // real config as soon as it loads.
+  PricingConfig _pricing = PricingService.current;
+
   EventDraft get _draft => widget.draft;
 
   @override
   void initState() {
     super.initState();
+    PricingService.load().then((c) {
+      if (mounted) setState(() => _pricing = c);
+    });
     _nameController = TextEditingController(text: _draft.name);
     _descriptionController = TextEditingController(text: _draft.description);
     _priceController = TextEditingController(
@@ -138,8 +147,49 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
     _durationController = TextEditingController(
       text: _trimNum(_draft.durationMinutes / 60),
     );
-    // Live preview: rebuild on every keystroke so the "ends at" caption tracks.
+    // Live preview: rebuild on every keystroke so the "ends at" caption and the
+    // payout card track what's typed.
     _durationController.addListener(() => setState(() {}));
+    _priceController.addListener(() => setState(() {}));
+  }
+
+  // ── Pricing ─────────────────────────────────────────────────────────────────
+
+  int get _cameraCount => _draft.crew.cameraCount;
+
+  /// Break-even ticket floor for the currently-entered duration + cameras.
+  int get _minPriceCents => _pricing.minTicketCentsFor(
+    durationMinutes: _parsedDurationMinutes() ?? 60,
+    cameraCount: _cameraCount,
+  );
+
+  /// Price typed right now, in cents (0 when blank).
+  int get _typedPriceCents {
+    final raw = _priceController.text.trim();
+    if (raw.isEmpty) return 0;
+    final n = double.tryParse(raw);
+    return n == null || n < 0 ? 0 : (n * 100).round();
+  }
+
+  static String _money(int cents) => '\$${(cents / 100).toStringAsFixed(2)}';
+
+  /// Free is single-camera only; anything priced must clear the floor.
+  String? _validatePrice(String? v) {
+    final cents = (v == null || v.trim().isEmpty)
+        ? 0
+        : ((double.tryParse(v.trim()) ?? -1) * 100).round();
+    if (cents < 0) return 'Invalid';
+    if (cents == 0) {
+      return _cameraCount > 1 ? 'Needs a price' : null;
+    }
+    if (cents < _minPriceCents) return 'Min ${_money(_minPriceCents)}';
+    return null;
+  }
+
+  void _changeCameraCount(int delta) {
+    final next = _cameraCount + delta;
+    if (next < 1 || next > CrewState.maxCameras) return;
+    setState(() => _draft.crew.cameraCount = next);
   }
 
   /// Formats a number without a trailing ".0" (e.g. 2.0 → "2", 2.5 → "2.5").
@@ -365,6 +415,7 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
         endAt: _draft.endAt,
         price: _draft.priceCents,
         ticketLimit: _draft.ticketLimit,
+        cameraCount: _draft.crew.cameraCount,
         asDraft: true,
         topicIds: _draft.topicIds.toList(),
       );
@@ -379,7 +430,10 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
       );
     } catch (e) {
       if (!mounted) return;
-      setState(() => _errorMessage = 'Failed to create event: $e');
+      setState(
+        () => _errorMessage =
+            PricingService.friendlyError(e) ?? 'Failed to create event: $e',
+      );
     } finally {
       if (mounted) setState(() => _submitting = false);
     }
@@ -469,6 +523,26 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
                     inHours: _durationInHours,
                     onUnitChanged: _changeUnit,
                     preview: _durationPreview(),
+                    maxMinutes: _pricing.maxStreamMinutes,
+                  ),
+                  const SizedBox(height: 20),
+                  _SectionLabel('Cameras'),
+                  const SizedBox(height: 6),
+                  CameraStepper(
+                    count: _cameraCount,
+                    max: CrewState.maxCameras,
+                    onAdd: () => _changeCameraCount(1),
+                    onRemove: () => _changeCameraCount(-1),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    _cameraCount > 1
+                        ? 'Multi-camera streams need a ticket — minimum '
+                              '${_money(_minPriceCents)} for this event.'
+                        : 'Single-camera streams can be free.',
+                    style: NileTextStyles.caption().copyWith(
+                      color: NileColors.txtTertiary,
+                    ),
                   ),
                   const SizedBox(height: 20),
                   Row(
@@ -490,16 +564,13 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
                                   RegExp(r'^\d*\.?\d{0,2}'),
                                 ),
                               ],
-                              decoration: const InputDecoration(
+                              decoration: InputDecoration(
                                 prefixText: '\$ ',
-                                hintText: 'Free',
+                                hintText: _cameraCount > 1
+                                    ? (_minPriceCents / 100).toStringAsFixed(2)
+                                    : 'Free',
                               ),
-                              validator: (v) {
-                                if (v == null || v.isEmpty) return null;
-                                final n = double.tryParse(v);
-                                if (n == null || n < 0) return 'Invalid';
-                                return null;
-                              },
+                              validator: _validatePrice,
                             ),
                           ],
                         ),
@@ -532,6 +603,15 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
                       ),
                     ],
                   ),
+                  if (_cameraCount > 1 || _typedPriceCents > 0) ...[
+                    const SizedBox(height: 16),
+                    PayoutPreviewCard(
+                      priceCents: _typedPriceCents,
+                      minCents: _minPriceCents,
+                      cameraCount: _cameraCount,
+                      config: _pricing,
+                    ),
+                  ],
                   if (_errorMessage != null) ...[
                     const SizedBox(height: 20),
                     Container(
@@ -664,8 +744,14 @@ class _ChooseCrewPageState extends State<ChooseCrewPage> {
         ),
       );
     } catch (e) {
+      // A pre-0078 draft can still be holding free-multicam state; the server
+      // trigger catches it here, so show the host what to fix rather than a
+      // raw failure.
       if (!mounted) return;
-      setState(() => _error = 'Couldn\'t save crew: $e');
+      setState(
+        () => _error =
+            PricingService.friendlyError(e) ?? 'Couldn\'t save crew: $e',
+      );
     } finally {
       if (mounted) setState(() => _committing = false);
     }
@@ -695,7 +781,11 @@ class _ChooseCrewPageState extends State<ChooseCrewPage> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                CrewEditor(state: _crew, onChanged: () => setState(() {})),
+                CrewEditor(
+                  state: _crew,
+                  showCameras: false,
+                  onChanged: () => setState(() {}),
+                ),
                 const SizedBox(height: 16),
                 Text(
                   'Publishing makes your event visible to followers. Not ready? '

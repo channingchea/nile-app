@@ -13,12 +13,17 @@ class DurationField extends StatelessWidget {
   final ValueChanged<bool> onUnitChanged;
   final String? preview;
 
+  /// Hard cap on the stream length, in minutes. Surfaced in the hint and
+  /// enforced by the validator (the server enforces it too).
+  final int? maxMinutes;
+
   const DurationField({
     super.key,
     required this.controller,
     required this.inHours,
     required this.onUnitChanged,
     required this.preview,
+    this.maxMinutes,
   });
 
   @override
@@ -38,12 +43,23 @@ class DurationField extends StatelessWidget {
                   ),
                 ],
                 decoration: InputDecoration(
-                  hintText: inHours ? 'e.g. 1.5' : 'e.g. 90',
+                  hintText: maxMinutes == null
+                      ? (inHours ? 'e.g. 1.5' : 'e.g. 90')
+                      : (inHours
+                            ? 'e.g. 1.5 · max ${maxMinutes! ~/ 60}'
+                            : 'e.g. 90 · max $maxMinutes'),
                 ),
                 validator: (v) {
                   if (v == null || v.trim().isEmpty) return 'Required';
                   final n = double.tryParse(v.trim());
                   if (n == null || n <= 0) return 'Invalid';
+                  final max = maxMinutes;
+                  if (max != null) {
+                    final mins = inHours ? (n * 60).round() : n.round();
+                    if (mins > max) {
+                      return 'Streams are capped at ${max ~/ 60}h';
+                    }
+                  }
                   return null;
                 },
               ),
