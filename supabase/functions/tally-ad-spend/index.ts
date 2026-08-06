@@ -35,6 +35,12 @@
 
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import Stripe from "https://esm.sh/stripe@14?target=deno";
+
+const stripe = new Stripe(Deno.env.get("STRIPE_SECRET_KEY")!, {
+  apiVersion: "2023-10-16",
+  httpClient: Stripe.createFetchHttpClient(),
+});
 
 serve(async (_req) => {
   try {
@@ -53,12 +59,181 @@ serve(async (_req) => {
     // this fn's existing nightly cron rather than adding new infra.
     await checkAgingReviews(admin);
 
-    return json({ ok: true, updated: row?.updated ?? 0, completed: row?.completed ?? 0 });
+    // Sponsorship housekeeping (0079): dead events → refunds, stale locks freed.
+    const refunds = await sweepSponsorships(admin);
+
+    return json({
+      ok: true,
+      updated: row?.updated ?? 0,
+      completed: row?.completed ?? 0,
+      sponsorship_refunds: refunds,
+    });
   } catch (err) {
     console.error(err);
     return json({ error: String(err) }, 500);
   }
 });
+
+// ── Sponsorship sweep (0079) ──────────────────────────────────────────────────
+// Event-death triggers (delete / cancel / started-unreviewed) enqueue rows in
+// sponsorship_refunds; the DB can't call Stripe, so the money work happens
+// here. This sweep also catches the one death no trigger sees — an event that
+// simply never started — and frees event locks held by abandoned checkouts.
+// Never throws: a Stripe failure marks the row 'failed' for the next run.
+// deno-lint-ignore no-explicit-any
+async function sweepSponsorships(admin: any): Promise<number> {
+  let processed = 0;
+  try {
+    // 1) Events that never started: still 'scheduled' 24h+ past their slot,
+    //    with a paid lobby campaign. Reject + enqueue, then process below.
+    const dayAgo = new Date(Date.now() - 86_400_000).toISOString();
+    const { data: zombies } = await admin
+      .from("ad_campaigns")
+      .select("id, advertiser_account_id, stripe_payment_intent_id, split_status, status, events!inner(status, scheduled_at, title)")
+      .eq("placement", "lobby")
+      .in("status", ["pending_review", "active"])
+      .eq("events.status", "scheduled")
+      .lt("events.scheduled_at", dayAgo);
+    // deno-lint-ignore no-explicit-any
+    for (const c of (zombies ?? []) as any[]) {
+      const { data: flipped } = await admin
+        .from("ad_campaigns")
+        .update({
+          status: "rejected",
+          review_note: "The event never started — your payment has been refunded.",
+        })
+        .eq("id", c.id)
+        .eq("status", c.status)
+        .select("id")
+        .maybeSingle();
+      if (flipped) {
+        await admin.from("sponsorship_refunds").insert({
+          campaign_id: c.id,
+          advertiser_account_id: c.advertiser_account_id,
+          stripe_payment_intent_id: c.stripe_payment_intent_id,
+          split_status: c.split_status,
+          event_title: (c as any).events?.title ?? null,
+          reason: "event_never_started",
+        });
+      }
+    }
+
+    // 2) Process the queue: cancel an uncaptured hold, refund a captured split.
+    const { data: due } = await admin
+      .from("sponsorship_refunds")
+      .select("id, campaign_id, advertiser_account_id, stripe_payment_intent_id, split_status, event_title, reason")
+      .eq("status", "due");
+    // deno-lint-ignore no-explicit-any
+    for (const r of (due ?? []) as any[]) {
+      const piId = r.stripe_payment_intent_id as string | null;
+      let ok = true;
+      let note: string | null = null;
+      try {
+        if (piId?.startsWith("pi_")) {
+          const pi = await stripe.paymentIntents.retrieve(piId);
+          if (pi.status === "requires_capture") {
+            await stripe.paymentIntents.cancel(piId);
+            note = "authorization cancelled";
+          } else if (pi.status === "succeeded") {
+            await stripe.refunds.create(
+              r.split_status === "split"
+                ? { payment_intent: piId, reverse_transfer: true, refund_application_fee: true }
+                : { payment_intent: piId },
+            );
+            note = "payment refunded";
+          } else {
+            note = `no money to move (pi status ${pi.status})`;
+          }
+        } else {
+          note = "no PaymentIntent on record";
+        }
+      } catch (err) {
+        ok = false;
+        note = String(err).slice(0, 300);
+        console.error("sponsorship refund failed:", r.id, err);
+      }
+      await admin
+        .from("sponsorship_refunds")
+        .update({
+          status: ok ? "done" : "failed",
+          note,
+          processed_at: new Date().toISOString(),
+        })
+        .eq("id", r.id);
+      if (ok) {
+        processed++;
+        await notifySponsorRefunded(admin, r);
+      }
+    }
+
+    // 3) Abandoned checkouts: a pending_payment lobby row locks its event, and
+    //    Checkout Sessions expire after 24h — delete stale ones to free the
+    //    lock (nothing was authorized; the creative cascade-deletes).
+    await admin
+      .from("ad_campaigns")
+      .delete()
+      .eq("placement", "lobby")
+      .eq("status", "pending_payment")
+      .lt("created_at", dayAgo);
+  } catch (err) {
+    console.error("sponsorship sweep error:", err);
+  }
+  return processed;
+}
+
+// Tell the advertiser their sponsorship was refunded/released. Reuses the
+// "Nile Ad Rejected" metric (the existing flow carries a reason string), so no
+// new Klaviyo flow is needed. Env-gated on KLAVIYO_API_KEY; never throws.
+const REFUND_REASONS: Record<string, string> = {
+  event_deleted: "The event was removed by its host — your payment has been refunded.",
+  event_cancelled: "The event was cancelled — your payment has been refunded.",
+  not_approved_in_time: "The event started before this sponsorship could be reviewed. Your card was not charged.",
+  event_never_started: "The event never started — your payment has been refunded.",
+};
+// deno-lint-ignore no-explicit-any
+async function notifySponsorRefunded(admin: any, r: any) {
+  try {
+    const key = Deno.env.get("KLAVIYO_API_KEY");
+    if (!key || !r.advertiser_account_id) return;
+    const { data: acct } = await admin
+      .from("advertiser_accounts")
+      .select("name, contact_email")
+      .eq("id", r.advertiser_account_id)
+      .maybeSingle();
+    const to = acct?.contact_email as string | undefined;
+    if (!to) return;
+    const payload = {
+      data: {
+        type: "event",
+        attributes: {
+          unique_id: `${r.campaign_id}:sponsorship_refund`,
+          properties: {
+            brand: acct?.name ?? "there",
+            headline: r.event_title ? `Sponsorship: ${r.event_title}` : "Your event sponsorship",
+            campaign_id: r.campaign_id,
+            reason: REFUND_REASONS[r.reason as string] ?? "Your payment has been refunded.",
+            dashboard_url: "https://ads.joinnile.com/advertise/portal",
+          },
+          metric: { data: { type: "metric", attributes: { name: "Nile Ad Rejected" } } },
+          profile: { data: { type: "profile", attributes: { email: to } } },
+        },
+      },
+    };
+    const res = await fetch("https://a.klaviyo.com/api/events/", {
+      method: "POST",
+      headers: {
+        Authorization: `Klaviyo-API-Key ${key}`,
+        revision: "2024-10-15",
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) console.error("sponsor refund notify failed:", res.status, await res.text());
+  } catch (err) {
+    console.error("sponsor refund notify error:", err);
+  }
+}
 
 // Fires one "Nile Ads Awaiting Review" digest if anything has sat in
 // pending_review for more than 3 days (half the ~7-day Stripe auth window)

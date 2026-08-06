@@ -95,7 +95,7 @@ serve(async (req) => {
 
     const { data: c } = await admin
       .from("ad_campaigns")
-      .select("id, name, status, starts_at, ends_at, stripe_payment_intent_id, advertiser_accounts(name, contact_email), ad_creatives(headline)")
+      .select("id, name, status, starts_at, ends_at, stripe_payment_intent_id, placement, split_status, advertiser_accounts(name, contact_email), ad_creatives(headline), events(title, host_id)")
       .eq("id", campaign_id)
       .maybeSingle();
     if (!c) return json({ error: "Campaign not found" }, 404);
@@ -124,7 +124,9 @@ serve(async (req) => {
       // pi.status === "succeeded" ⇒ legacy auto-capture payment; nothing to do.
     }
 
-    if (action === "reject" && hasPi) await releaseHold(piId);
+    if (action === "reject" && hasPi) {
+      await releaseHold(piId, (c as any).split_status === "split");
+    }
 
     // ── DB transition (status-guarded against races) ────────────────────────
     const update: Record<string, string> = { status: t.to };
@@ -133,9 +135,10 @@ serve(async (req) => {
       const trimmed = typeof note === "string" ? note.trim().slice(0, 300) : "";
       if (trimmed) update.review_note = trimmed;
     }
-    if (action === "approve") {
+    if (action === "approve" && (c as any).placement !== "lobby") {
       // Flight clock starts at activation: preserve the purchased duration but
       // shift the window to now (fixes daily-burn accruing before serving).
+      // Lobby sponsorships skip this: the event's schedule is the flight.
       const durationMs =
         new Date(c.ends_at).getTime() - new Date(c.starts_at).getTime();
       const now = new Date();
@@ -173,6 +176,18 @@ serve(async (req) => {
           campaign_id, update.review_note,
         );
       }
+    }
+
+    // Sponsorship approved → tell the host their event has a sponsor (0079).
+    // Fire-and-forget, same posture as the advertiser notify.
+    if (action === "approve" && (c as any).placement === "lobby") {
+      await notifyHostSponsored(
+        admin,
+        (c as any).events?.host_id,
+        (c as any).events?.title ?? "your event",
+        (c as any).advertiser_accounts?.name ?? "A sponsor",
+        campaign_id,
+      );
     }
 
     return json({ campaign: updated });
@@ -253,13 +268,64 @@ async function logAudit(admin: any, row: {
 }
 
 // Release an authorization: cancel if still a hold, refund if a legacy
-// pre-manual-capture payment already moved money.
-async function releaseHold(piId: string) {
+// pre-manual-capture payment already moved money. Split payments (lobby
+// sponsorships — Connect destination charges) must also pull the host's
+// transfer back and return the platform fee.
+async function releaseHold(piId: string, isSplit = false) {
   const pi = await stripe.paymentIntents.retrieve(piId);
   if (pi.status === "requires_capture") {
     await stripe.paymentIntents.cancel(piId); // releases the hold, no charge
   } else if (pi.status === "succeeded") {
-    await stripe.refunds.create({ payment_intent: piId });
+    await stripe.refunds.create(
+      isSplit
+        ? { payment_intent: piId, reverse_transfer: true, refund_application_fee: true }
+        : { payment_intent: piId },
+    );
+  }
+}
+
+// Host notification when their event's sponsorship is approved (0079). Klaviyo
+// metric "Nile Event Sponsored" against the host's auth email — same pipeline
+// as the advertiser approve/reject emails; a Klaviyo flow owns the template.
+// Env-gated on KLAVIYO_API_KEY; never throws.
+// deno-lint-ignore no-explicit-any
+async function notifyHostSponsored(
+  admin: any,
+  hostId: string | undefined,
+  eventTitle: string,
+  brand: string,
+  campaignId: string,
+) {
+  try {
+    const key = Deno.env.get("KLAVIYO_API_KEY");
+    if (!key || !hostId) return;
+    const { data: userData } = await admin.auth.admin.getUserById(hostId);
+    const to = userData?.user?.email as string | undefined;
+    if (!to) return;
+    const payload = {
+      data: {
+        type: "event",
+        attributes: {
+          unique_id: `${campaignId}:host_sponsored`,
+          properties: { brand, event_title: eventTitle, campaign_id: campaignId },
+          metric: { data: { type: "metric", attributes: { name: "Nile Event Sponsored" } } },
+          profile: { data: { type: "profile", attributes: { email: to } } },
+        },
+      },
+    };
+    const res = await fetch("https://a.klaviyo.com/api/events/", {
+      method: "POST",
+      headers: {
+        Authorization: `Klaviyo-API-Key ${key}`,
+        revision: "2024-10-15",
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) console.error("host sponsored event failed:", res.status, await res.text());
+  } catch (err) {
+    console.error("host sponsored event error:", err);
   }
 }
 
@@ -270,7 +336,7 @@ async function withdraw(admin: any, userId: string, campaignId: string, json: Js
 
   const { data: c } = await admin
     .from("ad_campaigns")
-    .select("id, name, status, stripe_payment_intent_id, advertiser_account_id, ad_creatives(image_url, kind, video_path, thumb_path)")
+    .select("id, name, status, stripe_payment_intent_id, advertiser_account_id, split_status, ad_creatives(image_url, kind, video_path, thumb_path)")
     .eq("id", campaignId)
     .maybeSingle();
   if (!c) return json({ error: "Campaign not found" }, 404);
@@ -291,7 +357,7 @@ async function withdraw(admin: any, userId: string, campaignId: string, json: Js
   // 1) Release the card hold first (rejected ads already had it released).
   const piId = c.stripe_payment_intent_id ?? "";
   if (c.status === "pending_review" && piId.startsWith("pi_")) {
-    await releaseHold(piId);
+    await releaseHold(piId, c.split_status === "split");
   }
 
   // 2) Delete the campaign (creative/targeting/events cascade), guarded

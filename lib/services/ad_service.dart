@@ -25,6 +25,32 @@ class CurrentAd {
   });
 }
 
+/// An event sponsorship creative for the Pre-Show lobby (0079): the single
+/// active lobby campaign for an event — a full-bleed image or looping muted
+/// video shown while the host is in Sound Check.
+class LobbySponsorship {
+  final String campaignId;
+  final String kind; // 'image' | 'video'
+  final String? imageUrl;
+  final String? videoUrl;
+  final String? thumbUrl;
+  final int durationMs;
+  final String headline;
+  final String clickUrl;
+  final String advertiserName;
+  const LobbySponsorship({
+    required this.campaignId,
+    required this.kind,
+    this.imageUrl,
+    this.videoUrl,
+    this.thumbUrl,
+    required this.durationMs,
+    required this.headline,
+    required this.clickUrl,
+    required this.advertiserName,
+  });
+}
+
 /// A standalone advertiser creative (Phase A-4): a self-uploaded image +
 /// headline + body that opens an external [clickUrl], referencing no event/post.
 class AdCreative {
@@ -191,6 +217,39 @@ class AdService {
 
   static Future<void> logImpression(String campaignId) => _log(campaignId, 'impression');
   static Future<void> logClick(String campaignId) => _log(campaignId, 'click');
+
+  /// The active sponsorship for an event's Pre-Show lobby, if any (0079
+  /// get_lobby_sponsorship). Best-effort: null on any failure so the lobby
+  /// falls back to the event cover.
+  static Future<LobbySponsorship?> lobbySponsorship(String eventId) async {
+    try {
+      final rows = await supabase
+          .rpc('get_lobby_sponsorship', params: {'p_event_id': eventId});
+      final list = (rows as List).cast<Map<String, dynamic>>();
+      if (list.isEmpty) return null;
+      final r = list.first;
+      final videoPath = r['video_path'] as String?;
+      return LobbySponsorship(
+        campaignId: r['campaign_id'] as String,
+        kind: r['kind'] as String? ?? 'image',
+        imageUrl: r['image_url'] as String?,
+        videoUrl: videoPath != null
+            ? supabase.storage.from('ad-videos').getPublicUrl(videoPath)
+            : null,
+        thumbUrl: r['thumb_path'] != null
+            ? supabase.storage
+                .from('ad-videos')
+                .getPublicUrl(r['thumb_path'] as String)
+            : null,
+        durationMs: (r['duration_ms'] as num?)?.toInt() ?? 0,
+        headline: r['headline'] as String? ?? '',
+        clickUrl: r['click_url'] as String? ?? '',
+        advertiserName: (r['advertiser_name'] as String?) ?? 'Sponsored',
+      );
+    } catch (_) {
+      return null;
+    }
+  }
 
   /// A soft "not interested" signal for a sponsored card. Logged like any other
   /// ad event (insert-only); never bills or affects spend (tally_ad_spend counts

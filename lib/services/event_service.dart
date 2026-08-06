@@ -44,6 +44,9 @@ class Event {
   final DateTime? replayPublishedAt; // null = replay not published to fans
   final int? ticketLimit;
   final int cameraCount;
+
+  /// Host opt-in to Pre-Show sponsorship (0079).
+  final bool sponsorshipOpen;
   final DateTime createdAt;
   final DateTime? startedAt;
   final DateTime? scheduledAt;
@@ -75,6 +78,7 @@ class Event {
     this.replayPublishedAt,
     this.ticketLimit,
     this.cameraCount = 1,
+    this.sponsorshipOpen = false,
     required this.createdAt,
     this.startedAt,
     this.scheduledAt,
@@ -110,6 +114,7 @@ class Event {
       replayPublishedAt: replayPublishedAt,
       ticketLimit: ticketLimit,
       cameraCount: cameraCount,
+      sponsorshipOpen: sponsorshipOpen,
       createdAt: createdAt,
       startedAt: startedAt,
       scheduledAt: scheduledAt,
@@ -157,6 +162,7 @@ class Event {
           : null,
       ticketLimit: (json['ticket_limit'] as num?)?.toInt(),
       cameraCount: (json['camera_count'] as num?)?.toInt() ?? 1,
+      sponsorshipOpen: json['sponsorship_open'] as bool? ?? false,
       createdAt: DateTime.parse(json['created_at'] as String),
       startedAt: json['started_at'] != null
           ? DateTime.parse(json['started_at'] as String)
@@ -356,6 +362,7 @@ class EventService {
     int? cameraCount,
     bool asDraft = false,
     List<String>? topicIds,
+    bool sponsorshipOpen = false, // host opt-in to Pre-Show sponsorship (0079)
   }) async {
     final uid = supabase.auth.currentUser?.id;
     if (uid == null) throw StateError('EventService: no authenticated user');
@@ -378,6 +385,7 @@ class EventService {
           'price': ?price,
           'ticket_limit': ?ticketLimit,
           'camera_count': ?cameraCount,
+          if (sponsorshipOpen) 'sponsorship_open': true,
         })
         .select('*, profiles!events_host_id_fkey(username, avatar_url, is_official)')
         .single();
@@ -407,6 +415,7 @@ class EventService {
     bool clearTicketLimit = false,
     int? cameraCount,
     List<String>? topicIds, // null = leave tags untouched; [] = clear all
+    bool? sponsorshipOpen, // Pre-Show sponsorship opt-in (0079)
   }) async {
     if (topicIds != null) {
       await TopicService.setEventTopics(eventId, topicIds);
@@ -426,6 +435,7 @@ class EventService {
       'ticket_limit': ?ticketLimit,
       if (clearTicketLimit) 'ticket_limit': null,
       'camera_count': ?cameraCount,
+      'sponsorship_open': ?sponsorshipOpen,
     };
 
     // Nothing changed — skip the update and just fetch the current row.
@@ -672,7 +682,10 @@ class EventService {
         .from('events')
         .select(
           'id, host_id, title, viewer_count, status, '
-          'scheduled_at, end_at, started_at',
+          'scheduled_at, end_at, started_at, '
+          // Pre-Show lobby (0079): cover + host identity for the upgraded lobby.
+          'description, cover_image_url, '
+          'profiles!events_host_id_fkey(username, display_name, avatar_url)',
         )
         .eq('livekit_room', liveKitEventId)
         .limit(1);

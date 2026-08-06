@@ -7,6 +7,8 @@ import 'package:flutter/material.dart';
 import 'package:livekit_client/livekit_client.dart' hide ChatMessage;
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:video_player/video_player.dart';
+import '../services/ad_service.dart';
 import '../services/chat_service.dart';
 import '../services/event_service.dart';
 import '../services/livekit_service.dart';
@@ -96,6 +98,19 @@ class _ViewerScreenState extends State<ViewerScreen>
   ResilientChannel? _eventConn;
   bool _hasIncrementedViewerCount = false;
 
+  // Pre-Show lobby (0079): event context for the upgraded lobby — cover image,
+  // countdown to showtime, host row — plus the sponsor creative when the event
+  // is sponsored. The video creative loops muted (tap the speaker to unmute).
+  DateTime? _scheduledAt;
+  String? _coverImageUrl;
+  String? _hostUsername;
+  String? _hostAvatarUrl;
+  LobbySponsorship? _sponsorship;
+  VideoPlayerController? _sponsorController;
+  bool _sponsorMuted = true;
+  bool _lobbyImpressionLogged = false;
+  Timer? _lobbyTicker; // 1s countdown refresh while the lobby is showing
+
   // Periodic server-authoritative viewer-count reconcile. Any watching client
   // re-derives the true count from LiveKit participants, so the number self-heals
   // from killed-app drift instead of relying on matched increment/decrement.
@@ -159,6 +174,7 @@ class _ViewerScreenState extends State<ViewerScreen>
   }
 
   void _decrementAndCleanup() {
+    _teardownLobby();
     _viewerReconcileTimer?.cancel();
     _viewerReconcileTimer = null;
     if (_hasIncrementedViewerCount && _streamEventId != null) {
@@ -184,6 +200,97 @@ class _ViewerScreenState extends State<ViewerScreen>
       if (!mounted || state == null) return;
       _onRealtimeUpdate(state);
     } catch (_) {}
+  }
+
+  // ── Pre-Show lobby (0079) ─────────────────────────────────────────────────
+
+  /// Fetches the event's sponsorship (if any), starts the countdown ticker,
+  /// and — for a video creative — starts muted looping playback. One
+  /// impression is logged per lobby entry: the creative IS the whole screen,
+  /// so no visibility detection is needed.
+  Future<void> _initLobby() async {
+    _lobbyTicker?.cancel();
+    _lobbyTicker = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted && _eventStatus == 'soundcheck' && !_streamEnded) {
+        setState(() {}); // refresh the countdown
+      }
+    });
+
+    final dbId = _eventDbId;
+    if (dbId == null) return;
+    final spons = await AdService.lobbySponsorship(dbId);
+    if (!mounted || spons == null || _eventStatus != 'soundcheck') return;
+
+    VideoPlayerController? controller;
+    if (spons.kind == 'video' && spons.videoUrl != null) {
+      try {
+        controller = VideoPlayerController.networkUrl(
+          Uri.parse(spons.videoUrl!),
+        );
+        await controller.initialize();
+        await controller.setLooping(true);
+        await controller.setVolume(0); // autoplay muted; tap to unmute
+        await controller.play();
+      } catch (_) {
+        controller?.dispose();
+        controller = null; // fall back to the thumb/cover
+      }
+    }
+    if (!mounted || _eventStatus != 'soundcheck') {
+      controller?.dispose();
+      return;
+    }
+    setState(() {
+      _sponsorship = spons;
+      _sponsorController = controller;
+      _sponsorMuted = true;
+    });
+    if (!_lobbyImpressionLogged) {
+      _lobbyImpressionLogged = true;
+      AdService.logImpression(spons.campaignId);
+    }
+  }
+
+  /// Stops the countdown and disposes the sponsor video. Called when the show
+  /// goes live (the realtime flip drops everyone into the stream) and on leave.
+  void _teardownLobby() {
+    _lobbyTicker?.cancel();
+    _lobbyTicker = null;
+    _sponsorController?.dispose();
+    _sponsorController = null;
+    _sponsorship = null;
+    _lobbyImpressionLogged = false;
+  }
+
+  void _toggleSponsorMute() {
+    final c = _sponsorController;
+    if (c == null) return;
+    setState(() => _sponsorMuted = !_sponsorMuted);
+    c.setVolume(_sponsorMuted ? 0 : 1);
+  }
+
+  Future<void> _openSponsorLink() async {
+    final spons = _sponsorship;
+    if (spons == null || spons.clickUrl.isEmpty) return;
+    AdService.logClick(spons.campaignId);
+    final uri = Uri.tryParse(spons.clickUrl);
+    if (uri != null) {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    }
+  }
+
+  /// "Starts in 2h 14m" → "Starting soon" once showtime passes.
+  String get _countdownLabel {
+    final at = _scheduledAt;
+    if (at == null) return 'Starting soon';
+    final diff = at.difference(DateTime.now());
+    if (diff.isNegative) return 'Starting soon';
+    final d = diff.inDays, h = diff.inHours % 24, m = diff.inMinutes % 60;
+    final s = diff.inSeconds % 60;
+    if (d > 0) return 'Starts in ${d}d ${h}h';
+    if (diff.inHours > 0) return 'Starts in ${h}h ${m}m';
+    if (diff.inMinutes > 0) return 'Starts in ${m}m ${s}s';
+    return 'Starts in ${s}s';
   }
 
   // ── Chat ──────────────────────────────────────────────────────────────────
@@ -397,7 +504,8 @@ class _ViewerScreenState extends State<ViewerScreen>
         _viewerCount = record['viewer_count'] as int;
       }
       // Status flips drive the Lobby → stream transition. When Start Show is
-      // pressed, status becomes 'live' and the build switches automatically.
+      // pressed, status becomes 'live' and the build switches automatically;
+      // the sponsor video is disposed so audio can't bleed into the stream.
       if (record['status'] is String) {
         _eventStatus = record['status'] as String;
       }
@@ -405,6 +513,9 @@ class _ViewerScreenState extends State<ViewerScreen>
         _streamEnded = true;
       }
     });
+    if (record['status'] == 'live' || record['status'] == 'ended') {
+      _teardownLobby();
+    }
   }
 
   // ── Join ──────────────────────────────────────────────────────────────────
@@ -524,6 +635,7 @@ class _ViewerScreenState extends State<ViewerScreen>
         _myAvatarUrl = p?.avatarUrl;
       }).catchError((_) => null);
 
+      final hostProfile = eventState?['profiles'] as Map<String, dynamic>?;
       setState(() {
         _room = room;
         _listener = listener;
@@ -534,11 +646,22 @@ class _ViewerScreenState extends State<ViewerScreen>
         _eventDbId = eventState?['id'] as String?;
         _eventTitle = eventState?['title'] as String?;
         _hostId = eventState?['host_id'] as String?;
+        _scheduledAt = eventState?['scheduled_at'] != null
+            ? DateTime.tryParse(eventState!['scheduled_at'] as String)?.toLocal()
+            : null;
+        _coverImageUrl = eventState?['cover_image_url'] as String?;
+        _hostUsername = (hostProfile?['display_name'] ??
+            hostProfile?['username']) as String?;
+        _hostAvatarUrl = hostProfile?['avatar_url'] as String?;
         _hasIncrementedViewerCount = true;
         _eventConn = eventConn;
         _chatChannel = chatChannel;
         _state = ViewerState.watching;
       });
+
+      // Entering during Sound Check → set up the Pre-Show lobby (sponsor
+      // creative + countdown). Live entry skips it entirely.
+      if (_eventStatus == 'soundcheck') _initLobby();
 
       _updateAudioRouting();
     } catch (e) {
@@ -993,6 +1116,10 @@ class _ViewerScreenState extends State<ViewerScreen>
       _eventStatus = null;
       _eventDbId = null;
       _hostId = null;
+      _scheduledAt = null;
+      _coverImageUrl = null;
+      _hostUsername = null;
+      _hostAvatarUrl = null;
       _tipPending = false;
       _chatMessages.clear();
       _chatController.clear();
@@ -1082,39 +1209,171 @@ class _ViewerScreenState extends State<ViewerScreen>
 
   // ── Lobby (host in Sound Check) ───────────────────────────────────────────
 
+  /// The Pre-Show lobby (0079): a full-bleed sponsor creative (or the event
+  /// cover when unsponsored) under a countdown + event/host overlay, with live
+  /// chat available before the show. The realtime flip to 'live' tears this
+  /// down and drops everyone into the stream.
   Widget _buildLobby() {
-    return Column(
+    final spons = _sponsorship;
+    final controller = _sponsorController;
+    final videoReady = controller != null && controller.value.isInitialized;
+    // Background priority: sponsor video → sponsor image → video thumb while
+    // buffering → event cover → plain surface.
+    final bgImageUrl = spons == null
+        ? _coverImageUrl
+        : (spons.kind == 'image' ? spons.imageUrl : (spons.thumbUrl ?? _coverImageUrl));
+
+    return Stack(
       children: [
-        _buildTopBar(),
-        Expanded(
-          child: Center(
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s32),
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(Icons.tune, size: 56, color: NileColors.volt),
-                  const SizedBox(height: 24),
-                  Text(
-                    'Your host is in Sound Check.',
-                    style: NileTextStyles.headingMd(),
-                    textAlign: TextAlign.center,
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    'The show will begin soon.',
-                    style: NileTextStyles.bodyMd().copyWith(
-                      color: NileColors.txtSecondary,
+        // Full-bleed creative/cover. Tapping a sponsored lobby opens the
+        // sponsor's link (and logs the click).
+        Positioned.fill(
+          child: GestureDetector(
+            onTap: spons != null ? _openSponsorLink : null,
+            child: videoReady
+                ? FittedBox(
+                    fit: BoxFit.cover,
+                    clipBehavior: Clip.hardEdge,
+                    child: SizedBox(
+                      width: controller.value.size.width,
+                      height: controller.value.size.height,
+                      child: VideoPlayer(controller),
                     ),
-                    textAlign: TextAlign.center,
-                  ),
-                  const SizedBox(height: 28),
-                  CircularProgressIndicator(color: NileColors.volt),
-                ],
+                  )
+                : bgImageUrl != null
+                    ? Image.network(
+                        bgImageUrl,
+                        fit: BoxFit.cover,
+                        errorBuilder: (_, _, _) =>
+                            ColoredBox(color: NileColors.bgSurface),
+                      )
+                    : ColoredBox(color: NileColors.bgSurface),
+          ),
+        ),
+        // Scrims so the top bar and overlay text stay readable on any creative.
+        Positioned.fill(
+          child: IgnorePointer(
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [
+                    Colors.black.withValues(alpha: 0.55),
+                    Colors.transparent,
+                    Colors.transparent,
+                    Colors.black.withValues(alpha: 0.75),
+                  ],
+                  stops: const [0, 0.25, 0.55, 1],
+                ),
               ),
             ),
           ),
         ),
+        Column(
+          children: [
+            _buildTopBar(),
+            const Spacer(),
+            // Event + countdown overlay (kept clear of the chat overlay's edge).
+            SafeArea(
+              top: false,
+              child: NileMaxWidth(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(
+                      NileSpacing.s16, 0, NileSpacing.s16, NileSpacing.s16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      // Persistent sponsorship disclosure.
+                      if (spons != null) ...[
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: NileSpacing.s8,
+                              vertical: NileSpacing.s4),
+                          decoration: BoxDecoration(
+                            color: Colors.black.withValues(alpha: 0.55),
+                            borderRadius:
+                                BorderRadius.circular(NileRadius.xs),
+                          ),
+                          child: Text(
+                            'Sponsored · ${spons.advertiserName}',
+                            style: NileTextStyles.caption().copyWith(
+                              color: Colors.white,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: NileSpacing.s8),
+                      ],
+                      Text(
+                        _countdownLabel,
+                        style: NileTextStyles.headingLg()
+                            .copyWith(color: Colors.white),
+                      ),
+                      if (_eventTitle != null) ...[
+                        const SizedBox(height: NileSpacing.s4),
+                        Text(
+                          _eventTitle!,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: NileTextStyles.bodyLg()
+                              .copyWith(color: Colors.white),
+                        ),
+                      ],
+                      if (_hostUsername != null) ...[
+                        const SizedBox(height: NileSpacing.s8),
+                        Row(
+                          children: [
+                            CircleAvatar(
+                              radius: 12,
+                              backgroundColor: NileColors.bgSurface,
+                              backgroundImage: _hostAvatarUrl != null
+                                  ? NetworkImage(_hostAvatarUrl!)
+                                  : null,
+                              child: _hostAvatarUrl == null
+                                  ? const Icon(Icons.person,
+                                      size: 14, color: Colors.white70)
+                                  : null,
+                            ),
+                            const SizedBox(width: NileSpacing.s8),
+                            Expanded(
+                              child: Text(
+                                _hostUsername!,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: NileTextStyles.bodySm().copyWith(
+                                  color: Colors.white.withValues(alpha: 0.85),
+                                ),
+                              ),
+                            ),
+                            // Tap-to-unmute for video creatives.
+                            if (videoReady)
+                              IconButton(
+                                icon: Icon(
+                                  _sponsorMuted
+                                      ? Icons.volume_off
+                                      : Icons.volume_up,
+                                ),
+                                color: Colors.white,
+                                iconSize: 20,
+                                tooltip:
+                                    _sponsorMuted ? 'Unmute' : 'Mute',
+                                onPressed: _toggleSponsorMute,
+                              ),
+                          ],
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+        // Live chat is open for business before the show (plan decision:
+        // chat pre-show yes; tips + reactions stay live-only).
+        if (!_streamEnded) _buildChatOverlay(),
       ],
     );
   }
@@ -1242,6 +1501,9 @@ class _ViewerScreenState extends State<ViewerScreen>
   // ── Top bar (viewer count + leave) ────────────────────────────────────────
 
   Widget _buildTopBar() {
+    // In the Lobby the bar floats over the full-bleed creative (the scrim
+    // keeps it readable); everywhere else it keeps its solid background.
+    final inLobbyBar = _eventStatus == 'soundcheck' && !_streamEnded;
     return Container(
       padding: EdgeInsets.only(
         top: MediaQuery.of(context).padding.top + 8,
@@ -1249,7 +1511,7 @@ class _ViewerScreenState extends State<ViewerScreen>
         right: 8,
         bottom: 8,
       ),
-      color: NileColors.bgPage,
+      color: inLobbyBar ? Colors.transparent : NileColors.bgPage,
       child: Row(
         children: [
           // Status badge — SOUND CHECK (volt) in the Lobby, LIVE (coral) once live
@@ -1302,8 +1564,8 @@ class _ViewerScreenState extends State<ViewerScreen>
               tooltip: 'Share',
               onPressed: _shareStream,
             ),
-          // Chat toggle (hidden in the Lobby — no live chat before the show)
-          if (_eventStatus != 'soundcheck' && !_streamEnded)
+          // Chat toggle — available in the Lobby too (pre-show chat, 0079)
+          if (!_streamEnded)
             Stack(
               clipBehavior: Clip.none,
               children: [

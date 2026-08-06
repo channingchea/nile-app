@@ -56,6 +56,9 @@ class _EditEventScreenState extends State<EditEventScreen> {
   bool _saving = false;
   String? _error;
 
+  // Pre-Show sponsorship opt-in (0079); seeded from the event row.
+  late bool _sponsorshipOpen;
+
   // Server pricing constants; local fallback until the real config loads.
   PricingConfig _pricing = PricingService.current;
 
@@ -78,6 +81,7 @@ class _EditEventScreenState extends State<EditEventScreen> {
       text: e.ticketLimit?.toString() ?? '',
     );
     _existingCoverUrl = e.coverImageUrl;
+    _sponsorshipOpen = e.sponsorshipOpen;
     // toLocal(): the server returns UTC; the picker and previews are all
     // wall-clock local. Save converts back with toUtc().
     _scheduledAt = e.scheduledAt?.toLocal();
@@ -331,6 +335,24 @@ class _EditEventScreenState extends State<EditEventScreen> {
     });
   }
 
+  /// Sponsorship opt-in requires an active payout account (the sponsor's 70%
+  /// share is a Connect destination charge). Mirrors the create flow.
+  Future<void> _toggleSponsorship(bool v) async {
+    if (!v) {
+      setState(() => _sponsorshipOpen = false);
+      return;
+    }
+    final ok = await ensurePaidPublishAllowed(
+      context,
+      title: 'Set up payouts first',
+      message:
+          'Sponsorship revenue is paid straight to your connected payout '
+          'account. Set it up, then open your event to sponsors.',
+    );
+    if (!mounted) return;
+    setState(() => _sponsorshipOpen = ok);
+  }
+
   Future<void> _save() async {
     final formOk = _formKey.currentState!.validate();
     final dateOk = _scheduledAt != null;
@@ -412,6 +434,9 @@ class _EditEventScreenState extends State<EditEventScreen> {
         topicIds: _setEquals(_topicIds, _savedTopicIds)
             ? null
             : _topicIds.toList(),
+        sponsorshipOpen: _sponsorshipOpen != widget.event.sponsorshipOpen
+            ? _sponsorshipOpen
+            : null,
       );
 
       // Persist crew: adjust camera count, add/remove crew members.
@@ -634,6 +659,26 @@ class _EditEventScreenState extends State<EditEventScreen> {
                       config: _pricing,
                     ),
                   ],
+                  const SizedBox(height: 20),
+                  _SectionLabel('Sponsorship'),
+                  SwitchListTile.adaptive(
+                    contentPadding: EdgeInsets.zero,
+                    value: _sponsorshipOpen,
+                    onChanged: _toggleSponsorship,
+                    title: Text(
+                      'Open to sponsorship',
+                      style: NileTextStyles.bodyMd(),
+                    ),
+                    subtitle: Text(
+                      'Let a brand sponsor your pre-show lobby. You keep 70% '
+                      'of the sponsorship price; every ad is reviewed by Nile '
+                      'before it can appear.',
+                      style: NileTextStyles.caption().copyWith(
+                        color: NileColors.txtTertiary,
+                      ),
+                    ),
+                    activeTrackColor: NileColors.volt,
+                  ),
                   const SizedBox(height: 24),
                   Divider(color: NileColors.border),
                   const SizedBox(height: 16),

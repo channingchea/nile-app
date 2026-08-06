@@ -6,6 +6,7 @@ import 'package:share_plus/share_plus.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../services/ad_service.dart';
 import '../services/calendar_ics.dart';
 import '../services/crew_service.dart';
 import '../services/share_urls.dart';
@@ -92,6 +93,9 @@ class _EventDetailScreenState extends State<EventDetailScreen>
   // Countdown
   Timer? _ticker;
   Duration _remaining = Duration.zero;
+
+  // Active sponsorship (0079): advertiser name for the "Sponsored by" line.
+  String? _sponsorName;
 
   // Realtime
   RealtimeChannel? _channel;
@@ -216,6 +220,14 @@ class _EventDetailScreenState extends State<EventDetailScreen>
       _initCountdown();
       _initRealtime();
       _checkReplay();
+
+      // Best-effort "Sponsored by" line (0079) — only set for an active,
+      // approved sponsorship; never blocks or fails the screen.
+      AdService.lobbySponsorship(_event!.id).then((s) {
+        if (mounted && s != null) {
+          setState(() => _sponsorName = s.advertiserName);
+        }
+      });
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -681,6 +693,26 @@ class _EventDetailScreenState extends State<EventDetailScreen>
                 onToggleFollow: _toggleFollow,
               ),
               const SizedBox(height: 20),
+              // Active sponsorship disclosure (0079) — mirrors the lobby's
+              // "Sponsored" tag so viewers aren't surprised at showtime.
+              if (_sponsorName != null) ...[
+                Row(
+                  children: [
+                    Icon(Icons.workspace_premium,
+                        size: 16, color: NileColors.volt),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        'Sponsored by $_sponsorName',
+                        style: NileTextStyles.bodySm().copyWith(
+                          color: NileColors.txtSecondary,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 16),
+              ],
               if (_event!.isScheduled) ...[
                 _CountdownBlock(
                   scheduledAt: _event!.scheduledAt,

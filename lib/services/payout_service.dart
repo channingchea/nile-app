@@ -67,6 +67,48 @@ class PayoutService {
     if (list.isEmpty) return TicketEarnings.empty;
     return TicketEarnings.fromRow(list.first as Map<String, dynamic>);
   }
+
+  /// Event sponsorship earnings (0081 host_sponsorship_earnings): the host's
+  /// share of Pre-Show lobby sponsorships, paid at approval via Connect.
+  static Future<SponsorshipEarnings> sponsorshipEarnings() async {
+    final rows = await supabase.rpc('host_sponsorship_earnings');
+    final list = rows as List;
+    if (list.isEmpty) return SponsorshipEarnings.empty;
+    return SponsorshipEarnings.fromRow(list.first as Map<String, dynamic>);
+  }
+}
+
+/// Host earnings from event sponsorships (net = price minus the platform fee
+/// frozen per campaign at purchase).
+class SponsorshipEarnings {
+  final int lifetimeNetCents;
+  final int monthNetCents;
+  final int lifetimeGrossCents;
+  final int count;
+
+  const SponsorshipEarnings({
+    required this.lifetimeNetCents,
+    required this.monthNetCents,
+    required this.lifetimeGrossCents,
+    required this.count,
+  });
+
+  static const empty = SponsorshipEarnings(
+    lifetimeNetCents: 0,
+    monthNetCents: 0,
+    lifetimeGrossCents: 0,
+    count: 0,
+  );
+
+  bool get hasEarnings => count > 0;
+
+  factory SponsorshipEarnings.fromRow(Map<String, dynamic> r) =>
+      SponsorshipEarnings(
+        lifetimeNetCents: (r['lifetime_net_cents'] as num?)?.toInt() ?? 0,
+        monthNetCents: (r['month_net_cents'] as num?)?.toInt() ?? 0,
+        lifetimeGrossCents: (r['lifetime_gross_cents'] as num?)?.toInt() ?? 0,
+        count: (r['sponsorship_count'] as num?)?.toInt() ?? 0,
+      );
 }
 
 /// Host ticket/replay earnings. Net = gross minus the platform application fee

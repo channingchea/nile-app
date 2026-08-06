@@ -30,6 +30,9 @@ class EventDraft {
   int? priceCents;
   int? ticketLimit;
 
+  /// Host opt-in: let a brand sponsor this event's Pre-Show lobby (0079).
+  bool sponsorshipOpen = false;
+
   /// Topic tags — what `recommend_events_by_topic` matches interests against.
   final Set<String> topicIds = {};
 
@@ -351,6 +354,25 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
     });
   }
 
+  /// Sponsorship opt-in requires an active payout account — the sponsor's 70%
+  /// share is a Connect destination charge, so there's nothing to sell without
+  /// one. Reuses the payout gate sheet with sponsorship copy.
+  Future<void> _toggleSponsorship(bool v) async {
+    if (!v) {
+      setState(() => _draft.sponsorshipOpen = false);
+      return;
+    }
+    final ok = await ensurePaidPublishAllowed(
+      context,
+      title: 'Set up payouts first',
+      message:
+          'Sponsorship revenue is paid straight to your connected payout '
+          'account. Set it up, then open your event to sponsors.',
+    );
+    if (!mounted) return;
+    setState(() => _draft.sponsorshipOpen = ok);
+  }
+
   /// Validate, persist the draft fields, create the LiveKit room + event row,
   /// then advance to the next page (crew). Crew page is built in a later step;
   /// for now Page 1 routes to a temporary "created" page so the flow runs
@@ -418,6 +440,7 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
         cameraCount: _draft.crew.cameraCount,
         asDraft: true,
         topicIds: _draft.topicIds.toList(),
+        sponsorshipOpen: _draft.sponsorshipOpen,
       );
       _draft.event = event;
 
@@ -612,6 +635,26 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
                       config: _pricing,
                     ),
                   ],
+                  const SizedBox(height: 20),
+                  _SectionLabel('Sponsorship'),
+                  SwitchListTile.adaptive(
+                    contentPadding: EdgeInsets.zero,
+                    value: _draft.sponsorshipOpen,
+                    onChanged: _toggleSponsorship,
+                    title: Text(
+                      'Open to sponsorship',
+                      style: NileTextStyles.bodyMd(),
+                    ),
+                    subtitle: Text(
+                      'Let a brand sponsor your pre-show lobby. You keep 70% '
+                      'of the sponsorship price; every ad is reviewed by Nile '
+                      'before it can appear.',
+                      style: NileTextStyles.caption().copyWith(
+                        color: NileColors.txtTertiary,
+                      ),
+                    ),
+                    activeTrackColor: NileColors.volt,
+                  ),
                   if (_errorMessage != null) ...[
                     const SizedBox(height: 20),
                     Container(

@@ -19,6 +19,7 @@ class _PayoutsScreenState extends State<PayoutsScreen> {
   PayoutStatus? _status;
   TipEarnings? _tips;
   TicketEarnings? _tickets;
+  SponsorshipEarnings? _sponsorships;
   String? _error;
   bool _busy = false;
 
@@ -40,8 +41,15 @@ class _PayoutsScreenState extends State<PayoutsScreen> {
       );
       final tickets = await PayoutService.ticketEarnings()
           .catchError((_) => TicketEarnings.empty);
+      final sponsorships = await PayoutService.sponsorshipEarnings()
+          .catchError((_) => SponsorshipEarnings.empty);
       if (mounted) {
-        setState(() { _status = s; _tips = tips; _tickets = tickets; });
+        setState(() {
+          _status = s;
+          _tips = tips;
+          _tickets = tickets;
+          _sponsorships = sponsorships;
+        });
       }
     } catch (e) {
       if (mounted) setState(() => _error = e.toString());
@@ -130,6 +138,10 @@ class _PayoutsScreenState extends State<PayoutsScreen> {
         if (_tips?.hasTips ?? false) ...[
           const SizedBox(height: 12),
           _TipsCard(tips: _tips!),
+        ],
+        if (_sponsorships?.hasEarnings ?? false) ...[
+          const SizedBox(height: 12),
+          _SponsorshipsCard(sponsorships: _sponsorships!),
         ],
         const SizedBox(height: 20),
         if (s.isActive) ...[
@@ -318,6 +330,49 @@ class _TipsCard extends StatelessWidget {
           ),
           Text(
             _money(tips.netCents),
+            style: NileTextStyles.headingSm().copyWith(color: NileColors.volt),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _SponsorshipsCard extends StatelessWidget {
+  final SponsorshipEarnings sponsorships;
+  const _SponsorshipsCard({required this.sponsorships});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(NileSpacing.s16),
+      decoration: BoxDecoration(
+        color: NileColors.bgSurface,
+        borderRadius: BorderRadius.circular(NileRadius.lg),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.workspace_premium, color: NileColors.volt, size: 20),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Sponsorships earned', style: NileTextStyles.headingSm()),
+                const SizedBox(height: 4),
+                Text(
+                  '${sponsorships.count} '
+                  '${sponsorships.count == 1 ? 'event' : 'events'} · '
+                  '${_money(sponsorships.monthNetCents)} this month',
+                  style: NileTextStyles.bodySm().copyWith(
+                    color: NileColors.txtSecondary,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Text(
+            _money(sponsorships.lifetimeNetCents),
             style: NileTextStyles.headingSm().copyWith(color: NileColors.volt),
           ),
         ],
