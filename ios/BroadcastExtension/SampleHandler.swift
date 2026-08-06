@@ -11,7 +11,7 @@ import OSLog
 let broadcastLogger = OSLog(subsystem: "com.nilestreaming.app", category: "Broadcast")
 private enum Constants {
     // the App Group ID value that the app and the broadcast extension targets are setup with. It differs for each app.
-    static let appGroupIdentifier = "group.com.nilestreaming.app"
+    static let appGroupIdentifier = "group.com.nilestreaming.shared"
 }
 
 class SampleHandler: RPBroadcastSampleHandler {

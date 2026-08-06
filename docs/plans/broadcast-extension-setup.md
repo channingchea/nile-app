@@ -18,7 +18,7 @@ target — Xcode owns that file format, so it's a short manual step:
    BroadcastExtension target membership. Set the target's Info.plist to
    `ios/BroadcastExtension/Info.plist` (Build Settings → `INFOPLIST_FILE`).
 4. Extension target → Signing & Capabilities → add **App Groups** →
-   `group.com.nilestreaming.app` (Runner already has it via
+   `group.com.nilestreaming.shared` (Runner already has it via
    `Runner.entitlements`; point the extension's Code Signing Entitlements at
    `ios/BroadcastExtension/BroadcastExtension.entitlements` or let Xcode
    manage it — either way the group must be ticked).
