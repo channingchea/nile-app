@@ -36,7 +36,12 @@ class NileGlassNavBar extends StatelessWidget {
   static const double _tintAlpha = 0.62; // surface tint over the blur
   static const double _barHeight = 60;
   static const double _hMargin = NileSpacing.s16; // inset from screen edges
-  static const double _vMargin = NileSpacing.s8; // gap above safe-area bottom
+  static const double _vMargin = NileSpacing.s8; // min gap above screen bottom
+
+  /// How far the bar is allowed to sit *inside* the bottom safe area (home
+  /// indicator). Matches how Instagram/X park their bars close to the edge
+  /// rather than fully clearing the inset. Never encroaches past [_vMargin].
+  static const double _safeAreaOverlap = 12;
 
   /// Height a scroll view must reserve at its bottom so content clears the bar.
   /// Add to it the view's own MediaQuery bottom padding (safe area).
@@ -52,6 +57,10 @@ class NileGlassNavBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final bottomInset = MediaQuery.of(context).padding.bottom;
+    final bottomGap = (bottomInset - _safeAreaOverlap).clamp(
+      _vMargin,
+      double.infinity,
+    );
 
     // The glass pill: backdrop blur + translucent tint + specular rim, holding
     // the nav tabs. Expands to fill whatever width the outer Row leaves it.
@@ -99,12 +108,7 @@ class NileGlassNavBar extends StatelessWidget {
     // loose constraint and pins the bar to the top.) Center horizontally with a
     // bounded ConstrainedBox instead.
     return Padding(
-      padding: EdgeInsets.fromLTRB(
-        _hMargin,
-        0,
-        _hMargin,
-        _vMargin + bottomInset,
-      ),
+      padding: EdgeInsets.fromLTRB(_hMargin, 0, _hMargin, bottomGap),
       child: Center(
         widthFactor: 1,
         heightFactor: 1,

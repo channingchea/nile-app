@@ -276,21 +276,9 @@ class _ActionSheet extends StatelessWidget {
               icon: const Icon(Icons.add_circle_outline),
               label: const Text('Create Event'),
             ),
-            const SizedBox(height: 12),
-            // Camera/audio quick-entry tiles removed: streaming is entered from
-            // the event detail screen, which knows whether you're the host (and
-            // therefore whether you get Start Show / End Stream).
-            OutlinedButton.icon(
-              onPressed: () {
-                Navigator.pop(context);
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(builder: (_) => const ViewerScreen()),
-                );
-              },
-              icon: const Icon(Icons.tv),
-              label: const Text('Watch as Viewer'),
-            ),
+            // Viewing/streaming is entered from the event detail screen, which
+            // knows whether you're the host (and so whether you get Start Show
+            // / End Stream) — not from this create sheet.
           ],
         ),
       ),
