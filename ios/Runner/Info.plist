@@ -103,5 +103,9 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+	<!-- App uses only Apple-provided TLS/HTTPS; exempt from export compliance
+	     so App Store Connect stops asking on every build. -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 </dict>
 </plist>
