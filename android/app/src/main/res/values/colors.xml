@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <color name="ic_launcher_background">#181818</color>
+    <!-- NilePalette.light.bgPage -->
+    <color name="nile_launch_bg">#F4F4F5</color>
 </resources>
