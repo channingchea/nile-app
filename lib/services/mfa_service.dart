@@ -84,18 +84,30 @@ class MfaService {
     FactorType factorType = FactorType.totp,
     String friendlyName = 'Nile',
   }) async {
+    // `issuer` is REQUIRED: gotrue 2.20's enroll() throws ArgumentError before
+    // it ever hits the network if a totp factor is enrolled without one. It is
+    // also what the authenticator app shows as the account's issuer.
     final res = await _mfa.enroll(
       factorType: factorType,
       friendlyName: friendlyName,
+      issuer: _issuer,
     );
     final totp = res.totp;
     return MfaEnrollment(
       factorId: res.id,
-      qrCodeSvg: totp?.qrCode ?? '',
+      qrCodeSvg: _stripSvgDataUri(totp?.qrCode ?? ''),
       secret: totp?.secret ?? '',
       uri: totp?.uri ?? '',
     );
   }
+
+  static const _issuer = 'joinnile.com';
+  static const _svgDataUriPrefix = 'data:image/svg+xml;utf-8,';
+
+  /// gotrue hands back the QR as a `data:` URI wrapping the raw SVG. Callers
+  /// render it with `SvgPicture.string`, which needs the bare markup.
+  static String _stripSvgDataUri(String qr) =>
+      qr.startsWith(_svgDataUriPrefix) ? qr.substring(_svgDataUriPrefix.length) : qr;
 
   /// Verify a factor with a code from the authenticator app. Used both to
   /// finish enrollment and to re-authorize sensitive actions (disable). On

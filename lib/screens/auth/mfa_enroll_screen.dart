@@ -47,7 +47,8 @@ class _MfaEnrollScreenState extends State<MfaEnrollScreen> {
     try {
       final e = await MfaService.enroll();
       if (mounted) setState(() => _enrollment = e);
-    } catch (_) {
+    } catch (e) {
+      debugPrint('MFA enroll failed: $e');
       if (mounted) {
         setState(() => _enrollError = 'Couldn\'t start setup. Please try again.');
       }

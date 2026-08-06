@@ -28,4 +28,4 @@ alter table public.mfa_recovery_codes enable row level security;
 -- so RLS denies every client mutation.
 drop policy if exists mfa_recovery_codes_select_own on public.mfa_recovery_codes;
 create policy mfa_recovery_codes_select_own on public.mfa_recovery_codes
-  for select using (user_id = auth.uid());
+  for select using (user_id = (select auth.uid()));
