@@ -103,9 +103,11 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
-	<!-- App uses only Apple-provided TLS/HTTPS; exempt from export compliance
-	     so App Store Connect stops asking on every build. -->
-	<key>ITSAppUsesNonExemptEncryption</key>
-	<false/>
+	<!-- Deliberately NO ITSAppUsesNonExemptEncryption key. Nile uses non-exempt
+	     encryption (WebRTC DTLS-SRTP), so `false` would be an inaccurate
+	     declaration; `true` is rejected at upload with error 90592 unless
+	     ITSEncryptionExportComplianceCode is also set, and Apple has not
+	     issued one. Answer the App Encryption questionnaire in App Store
+	     Connect after each build processes instead. -->
 </dict>
 </plist>
