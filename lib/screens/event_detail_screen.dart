@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:go_router/go_router.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -16,22 +17,13 @@ import '../services/livekit_service.dart';
 import '../services/report_service.dart';
 import '../services/supabase_client.dart';
 import '../services/ticket_service.dart';
+import '../router.dart';
 import '../theme.dart';
 import '../widgets/live_badge.dart';
 import '../widgets/official_badge.dart';
 import '../widgets/photo_viewer.dart';
 import '../widgets/rolling_number.dart';
-import 'attendee_list_screen.dart';
-import 'audio_screen.dart';
-import 'boost_performance_screen.dart';
-import 'camera_screen.dart';
-import 'crew_setup_screen.dart';
 import 'widgets/moderation_menu.dart';
-import 'edit_event_screen.dart';
-import 'profile_screen.dart';
-import 'replay_pricing_screen.dart';
-import 'replay_screen.dart';
-import 'viewer_screen.dart';
 
 /// Detail screen for a single event (scheduled, live, or ended).
 ///
@@ -275,9 +267,9 @@ class _EventDetailScreenState extends State<EventDetailScreen>
   Future<void> _priceReplay() async {
     final event = _event;
     if (event == null) return;
-    final published = await Navigator.push<bool>(
-      context,
-      MaterialPageRoute(builder: (_) => ReplayPricingScreen(event: event)),
+    final published = await context.push<bool>(
+      NileRoutes.eventReplayPricing(event.id),
+      extra: event,
     );
     if (published == true && mounted) {
       await _load();
@@ -287,10 +279,7 @@ class _EventDetailScreenState extends State<EventDetailScreen>
   void _watchReplay() {
     final event = _event;
     if (event == null) return;
-    Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => ReplayScreen(event: event)),
-    );
+    context.push(NileRoutes.eventReplay(event.id), extra: event);
   }
 
   void _initRealtime() {
@@ -424,22 +413,14 @@ class _EventDetailScreenState extends State<EventDetailScreen>
   /// clicks, CTR, and spend.
   void _openBoostPerformance() {
     if (!_isOwnEvent) return;
-    Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => const BoostPerformanceScreen()),
-    );
+    context.push(NileRoutes.boost);
   }
 
   void _watch() {
     // Allow entry once the show is live OR while the host is in Sound Check
     // (the viewer lands in the Lobby until Start Show).
     if (_event == null || !(_event!.isLive || _event!.isSoundCheck)) return;
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => ViewerScreen(initialEventId: _event!.liveKitEventId),
-      ),
-    );
+    context.push(NileRoutes.watch(_event!.liveKitEventId!));
   }
 
   /// Host/operator entry. The host kicking off a not-yet-started show first
@@ -450,46 +431,21 @@ class _EventDetailScreenState extends State<EventDetailScreen>
   void _enterAsCamera() {
     if (_event == null || !(_isOwnEvent || _isOperator)) return;
     final needsSetup = _isOwnEvent && !_event!.isSoundCheck && !_event!.isLive;
+    // Audio operators run the audio feed; everyone else runs a camera.
+    final audio = _assignment?.isAudioOperator == true;
     if (needsSetup) {
-      Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (_) => CrewSetupScreen(
-            eventId: _event!.id,
-            onContinue: () {
-              if (!mounted) return;
-              // Replace the setup screen with the streaming screen so Back
-              // from streaming returns to event detail, not the setup list.
-              Navigator.pushReplacement(
-                context,
-                MaterialPageRoute(builder: (_) => _streamScreen()),
-              );
-            },
-          ),
-        ),
-      );
+      // The crew route's Continue replaces the setup screen with the streaming
+      // screen, so Back from streaming returns to event detail, not the setup
+      // list.
+      context.push(NileRoutes.eventCrew(_event!.id, audio: audio));
       return;
     }
-    Navigator.push(context, MaterialPageRoute(builder: (_) => _streamScreen()));
-  }
-
-  /// The streaming screen for this user on this event: audio operators run the
-  /// audio feed; everyone else runs a camera. Operators get their assigned slot
-  /// label pre-filled; the host defaults to their own handle.
-  Widget _streamScreen() {
-    if (_assignment?.isAudioOperator == true) {
-      return AudioScreen(
-        initialEventId: _event!.liveKitEventId,
-        isHost: _isOwnEvent,
-      );
-    }
-    final cameraName =
-        _assignment?.cameraLabel ??
-        (_isOwnEvent ? '@${_event!.hostUsername}' : null);
-    return CameraScreen(
-      initialEventId: _event!.liveKitEventId,
-      initialCameraName: cameraName,
-      isHost: _isOwnEvent,
+    context.push(
+      NileRoutes.stream(
+        _event!.liveKitEventId!,
+        audio: audio,
+        host: _isOwnEvent,
+      ),
     );
   }
 
@@ -501,17 +457,14 @@ class _EventDetailScreenState extends State<EventDetailScreen>
       Navigator.pop(context);
       return;
     }
-    Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => ProfileScreen(userId: _event!.hostId)),
-    );
+    context.push(NileRoutes.profile(_event!.hostId));
   }
 
   Future<void> _edit() async {
     if (_event == null || !_isOwnEvent) return;
-    final updated = await Navigator.push<Event>(
-      context,
-      MaterialPageRoute(builder: (_) => EditEventScreen(event: _event!)),
+    final updated = await context.push<Event>(
+      NileRoutes.eventEdit(_event!.id),
+      extra: _event!,
     );
     if (updated != null && mounted) {
       setState(() => _event = updated);
@@ -554,7 +507,7 @@ class _EventDetailScreenState extends State<EventDetailScreen>
         liveKitEventId: _event!.liveKitEventId,
       );
       if (!mounted) return;
-      Navigator.pop(context, true); // signal deletion to the previous screen
+      context.pop(true); // signal deletion to the previous screen
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(const SnackBar(content: Text('Event deleted')));
@@ -568,13 +521,7 @@ class _EventDetailScreenState extends State<EventDetailScreen>
 
   void _openAttendees() {
     if (_event == null || !_isOwnEvent) return;
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) =>
-            AttendeeListScreen(eventId: _event!.id, eventTitle: _event!.title),
-      ),
-    );
+    context.push(NileRoutes.eventAttendees(_event!.id), extra: _event!);
   }
 
   // ── UI ──────────────────────────────────────────────────────────────────────

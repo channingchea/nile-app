@@ -3,6 +3,7 @@ import 'dart:ui' show ImageFilter;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../services/app_lifecycle.dart';
 import '../services/event_service.dart';
@@ -10,14 +11,11 @@ import '../services/message_service.dart';
 import '../services/post_service.dart';
 import '../services/profile_service.dart';
 import '../services/realtime.dart';
+import '../router.dart';
 import '../theme.dart';
 import '../widgets/offline_banner.dart';
 import '../widgets/official_badge.dart';
-import 'event_detail_screen.dart';
 import 'messages_screen.dart' show NileAvatar;
-import 'post_detail_screen.dart';
-import 'profile_screen.dart';
-import 'viewer_screen.dart';
 
 class ConversationScreen extends StatefulWidget {
   final Conversation conversation;
@@ -735,18 +733,13 @@ class _AppBar extends StatelessWidget {
               size: 18,
               color: NileColors.txtPrimary,
             ),
-            onPressed: () => Navigator.pop(context),
+            onPressed: () => context.pop(),
           ),
           // Avatar and name are one tap target — both open the profile.
           Expanded(
             child: GestureDetector(
               behavior: HitTestBehavior.opaque,
-              onTap: () => Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (_) => ProfileScreen(userId: conv.otherUserId),
-                ),
-              ),
+              onTap: () => context.push(NileRoutes.profile(conv.otherUserId)),
               child: Row(
                 children: [
                   NileAvatar(
@@ -1597,10 +1590,7 @@ class _SharedPostBubble extends StatelessWidget {
       );
     }
     return GestureDetector(
-      onTap: () => Navigator.push(
-        context,
-        MaterialPageRoute(builder: (_) => PostDetailScreen(post: p)),
-      ),
+      onTap: () => context.push(NileRoutes.post(p.id), extra: p),
       child: Container(
         decoration: BoxDecoration(
           color: NileColors.bgSurface,
@@ -1683,13 +1673,13 @@ class _SharedEventBubble extends StatelessWidget {
       );
     }
     return GestureDetector(
-      onTap: () => Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (_) => e.isLive
-              ? ViewerScreen(initialEventId: e.liveKitEventId)
-              : EventDetailScreen(event: e),
+      onTap: () => context.push(
+        NileRoutes.eventOrWatch(
+          isLive: e.isLive,
+          eventId: e.id,
+          liveKitEventId: e.liveKitEventId,
         ),
+        extra: e,
       ),
       child: Container(
         decoration: BoxDecoration(

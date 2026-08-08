@@ -1,10 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 import 'package:url_launcher/url_launcher.dart';
+import '../router.dart';
 import '../services/mfa_service.dart';
 import '../services/payout_service.dart';
 import '../services/tip_service.dart';
 import '../theme.dart';
-import 'auth/mfa_connect_gate_screen.dart';
 
 /// Host Stripe Connect payouts hub: shows onboarding status and links out to
 /// the hosted onboarding flow / Stripe Express dashboard.
@@ -71,10 +72,7 @@ class _PayoutsScreenState extends State<PayoutsScreen> {
     // enforces it too); if they aren't enrolled, route through setup first.
     if (!await MfaService.hasVerifiedFactor()) {
       if (!mounted) return;
-      final enrolled = await Navigator.push<bool>(
-        context,
-        MaterialPageRoute(builder: (_) => const MfaConnectGateScreen()),
-      );
+      final enrolled = await context.push<bool>(NileRoutes.mfaConnectGate);
       if (enrolled != true) return;
     }
     setState(() => _busy = true);

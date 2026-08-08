@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+import '../router.dart';
 import '../services/block_service.dart';
 import '../theme.dart';
-import 'profile_screen.dart';
 
 /// Lists the accounts the current user has blocked, with an unblock action.
 class BlockedAccountsScreen extends StatefulWidget {
@@ -135,12 +136,7 @@ class _BlockedTile extends StatelessWidget {
       child: Row(
         children: [
           GestureDetector(
-            onTap: () => Navigator.push(
-              context,
-              MaterialPageRoute(
-                builder: (_) => ProfileScreen(userId: profile.id),
-              ),
-            ),
+            onTap: () => context.push(NileRoutes.profile(profile.id)),
             child: CircleAvatar(
               radius: 20,
               backgroundColor: NileColors.bgRaised,

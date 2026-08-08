@@ -1,13 +1,13 @@
 import 'package:croppy/croppy.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:go_router/go_router.dart';
 
 import '../services/event_service.dart';
 import '../services/livekit_service.dart';
 import '../services/profile_service.dart';
+import '../router.dart';
 import '../theme.dart';
-import 'camera_screen.dart';
-import 'viewer_screen.dart';
 
 class CreateEventScreen extends StatefulWidget {
   const CreateEventScreen({super.key});
@@ -456,13 +456,9 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
         ),
         const SizedBox(height: 32),
         FilledButton.icon(
-          onPressed: () => Navigator.pushReplacement(
-            context,
-            MaterialPageRoute(
-              // The creator of the event is its host.
-              builder: (_) =>
-                  CameraScreen(initialEventId: _eventId, isHost: true),
-            ),
+          onPressed: () => context.pushReplacement(
+            // The creator of the event is its host.
+            NileRoutes.stream(_eventId!, audio: false, host: true),
           ),
           icon: const Icon(Icons.videocam),
           label: const Text('Start Camera'),
@@ -474,12 +470,7 @@ class _CreateEventScreenState extends State<CreateEventScreen> {
         ),
         const SizedBox(height: 12),
         OutlinedButton.icon(
-          onPressed: () => Navigator.pushReplacement(
-            context,
-            MaterialPageRoute(
-              builder: (_) => ViewerScreen(initialEventId: _eventId),
-            ),
-          ),
+          onPressed: () => context.pushReplacement(NileRoutes.watch(_eventId!)),
           icon: const Icon(Icons.tv),
           label: const Text('Watch as Viewer'),
           style: OutlinedButton.styleFrom(

@@ -1,14 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import '../../router.dart';
 import '../../services/human_check.dart';
 import '../../services/supabase_client.dart';
 import '../../theme.dart';
 import '../../widgets/nile_logo.dart';
 import '../../widgets/social_auth_buttons.dart';
-import 'forgot_password_screen.dart';
-import 'signup_screen.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -175,16 +175,15 @@ class _LoginScreenState extends State<LoginScreen> {
                       Align(
                         alignment: Alignment.centerRight,
                         child: TextButton(
-                          onPressed: () => Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                              builder: (_) => ForgotPasswordScreen(
-                                initialEmail: _emailCtrl.text.trim().isEmpty
-                                    ? null
-                                    : _emailCtrl.text.trim(),
-                              ),
-                            ),
-                          ),
+                          onPressed: () {
+                            final email = _emailCtrl.text.trim();
+                            context.push(
+                              email.isEmpty
+                                  ? NileRoutes.forgotPassword
+                                  : '${NileRoutes.forgotPassword}?email='
+                                      '${Uri.encodeComponent(email)}',
+                            );
+                          },
                           child: Text(
                             'Forgot password?',
                             style: NileTextStyles.bodyMd().copyWith(
@@ -233,12 +232,7 @@ class _LoginScreenState extends State<LoginScreen> {
                             ),
                           ),
                           TextButton(
-                            onPressed: () => Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                builder: (_) => const SignupScreen(),
-                              ),
-                            ),
+                            onPressed: () => context.push(NileRoutes.signup),
                             child: Text(
                               'Sign Up',
                               style: NileTextStyles.bodyMd().copyWith(

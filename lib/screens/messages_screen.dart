@@ -1,15 +1,16 @@
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../services/app_error.dart';
 import '../services/app_lifecycle.dart';
 import '../services/message_service.dart';
 import '../services/realtime.dart';
+import '../router.dart';
 import '../theme.dart';
 import '../widgets/empty_state.dart';
 import '../widgets/nile_glass_nav_bar.dart';
 import '../widgets/offline_banner.dart';
 import '../widgets/official_badge.dart';
-import 'conversation_screen.dart';
 
 class MessagesScreen extends StatefulWidget {
   const MessagesScreen({super.key});
@@ -178,12 +179,10 @@ class _MessagesScreenState extends State<MessagesScreen> {
                       itemBuilder: (_, i) => _ConversationTile(
                         conv: _filtered[i],
                         onTap: () async {
-                          await Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                              builder: (_) =>
-                                  ConversationScreen(conversation: _filtered[i]),
-                            ),
+                          final conv = _filtered[i];
+                          await context.push(
+                            NileRoutes.dm(conv.otherUserId),
+                            extra: conv,
                           );
                           _load(); // Refresh unread counts on return.
                         },

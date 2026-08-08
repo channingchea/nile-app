@@ -1,23 +1,14 @@
 import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../services/account_service.dart';
 import '../services/profile_service.dart';
+import '../router.dart';
 import '../theme.dart';
 import '../widgets/nile_glass_app_bar.dart';
 import '../widgets/pressable.dart';
-import 'appearance_screen.dart';
 import 'auth/feature_intro_screen.dart';
-import 'auth/interest_picker_screen.dart';
-import 'auth/mfa_settings_screen.dart';
-import 'blocked_accounts_screen.dart';
-import 'change_password_screen.dart';
-import 'edit_profile_screen.dart';
-import 'my_currents_screen.dart';
-import 'my_tickets_screen.dart';
-import 'notification_preferences_screen.dart';
-import 'payouts_screen.dart';
-import 'report_issue_screen.dart';
 
 /// Own-profile settings hub: edit profile, my tickets, payouts, sign out.
 class SettingsScreen extends StatelessWidget {
@@ -26,82 +17,52 @@ class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key, required this.profile});
 
   Future<void> _editProfile(BuildContext context) async {
-    final updated = await Navigator.push<UserProfile>(
-      context,
-      MaterialPageRoute(builder: (_) => EditProfileScreen(profile: profile)),
+    final updated = await context.push<UserProfile>(
+      NileRoutes.settingsEditProfile,
+      extra: profile,
     );
     // Bubble the updated profile back to ProfileScreen.
-    if (updated != null && context.mounted) Navigator.pop(context, updated);
+    if (updated != null && context.mounted) context.pop(updated);
   }
 
   void _appearance(BuildContext context) {
-    Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => const AppearanceScreen()),
-    );
+    context.push(NileRoutes.settingsAppearance);
   }
 
   void _myCurrents(BuildContext context) {
-    Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => const MyCurrentsScreen()),
-    );
+    context.push(NileRoutes.settingsCurrents);
   }
 
   void _reportIssue(BuildContext context) {
-    Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => const ReportIssueScreen()),
-    );
+    context.push(NileRoutes.settingsReport);
   }
 
   void _myTickets(BuildContext context) {
-    Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => const MyTicketsScreen()),
-    );
+    context.push(NileRoutes.settingsTickets);
   }
 
   void _payouts(BuildContext context) {
-    Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => const PayoutsScreen()),
-    );
+    context.push(NileRoutes.settingsPayouts);
   }
 
   void _interests(BuildContext context) {
-    Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => const InterestPickerScreen()),
-    );
+    context.push(NileRoutes.settingsInterests);
   }
 
   void _notifications(BuildContext context) {
-    Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => const NotificationPreferencesScreen()),
-    );
+    context.push(NileRoutes.settingsNotifications);
   }
 
   void _changePassword(BuildContext context) {
-    Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => const ChangePasswordScreen()),
-    );
+    context.push(NileRoutes.settingsPassword);
   }
 
   void _twoFactor(BuildContext context) {
-    Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => const MfaSettingsScreen()),
-    );
+    context.push(NileRoutes.settingsMfa);
   }
 
   void _blockedAccounts(BuildContext context) {
-    Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => const BlockedAccountsScreen()),
-    );
+    context.push(NileRoutes.settingsBlocked);
   }
 
   Future<void> _signOut(BuildContext context) async {
@@ -148,8 +109,10 @@ class SettingsScreen extends StatelessWidget {
     );
     try {
       await AccountService.deleteAccount();
-      // Sign-out triggers _AuthGate to route back to login; just pop dialogs.
-      if (context.mounted) Navigator.popUntil(context, (r) => r.isFirst);
+      // Deleting signs out, and the gate redirect reacts to that on its own.
+      // Going to the root just unwinds this stack (and the spinner) so the
+      // redirect lands them on login from a clean slate.
+      if (context.mounted) context.go(NileRoutes.feed);
     } catch (e) {
       if (!context.mounted) return;
       Navigator.pop(context); // dismiss the spinner

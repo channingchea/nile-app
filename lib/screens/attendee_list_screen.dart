@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 import '../services/ticket_service.dart';
+import '../router.dart';
 import '../theme.dart';
-import 'profile_screen.dart';
 import 'widgets/load_more_footer.dart';
 
 /// Host-only list of paid attendees for an event.
@@ -91,10 +92,7 @@ class _AttendeeListScreenState extends State<AttendeeListScreen> {
 
   void _openProfile(String userId) {
     if (userId.isEmpty) return;
-    Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => ProfileScreen(userId: userId)),
-    );
+    context.push(NileRoutes.profile(userId));
   }
 
   Future<void> _onTapAttendee(Attendee a) async {

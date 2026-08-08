@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../services/event_service.dart';
 import '../services/featured_service.dart';
@@ -9,6 +10,7 @@ import '../services/pagination.dart' show Paged;
 import '../services/post_service.dart';
 import '../services/profile_service.dart';
 import '../services/search_service.dart';
+import '../router.dart';
 import '../theme.dart';
 import '../widgets/event_cover_pill.dart';
 import '../widgets/event_link_card.dart';
@@ -18,13 +20,7 @@ import '../widgets/nile_glass_nav_bar.dart';
 import '../widgets/nile_skeleton.dart';
 import '../widgets/official_badge.dart';
 import '../widgets/pressable.dart';
-import 'create_event_flow.dart';
-import 'create_post_screen.dart';
-import 'event_detail_screen.dart';
 import 'like_list_screen.dart';
-import 'post_detail_screen.dart';
-import 'profile_screen.dart';
-import 'viewer_screen.dart';
 import 'widgets/load_more_footer.dart';
 
 enum _Tab { posts, events, people }
@@ -389,19 +385,19 @@ class _DiscoverScreenState extends State<DiscoverScreen>
     }
   }
 
-  void _openEvent(Event ev) => Navigator.push(
-    context,
-    MaterialPageRoute(
-      builder: (_) => ev.isLive
-          ? ViewerScreen(initialEventId: ev.liveKitEventId)
-          : EventDetailScreen(event: ev),
+  void _openEvent(Event ev) => context.push(
+    NileRoutes.eventOrWatch(
+      isLive: ev.isLive,
+      eventId: ev.id,
+      liveKitEventId: ev.liveKitEventId,
     ),
+    extra: ev,
   );
 
   Future<void> _openRecPost(int j) async {
-    final updated = await Navigator.push<Post>(
-      context,
-      MaterialPageRoute(builder: (_) => PostDetailScreen(post: _recPosts[j])),
+    final updated = await context.push<Post>(
+      NileRoutes.post(_recPosts[j].id),
+      extra: _recPosts[j],
     );
     if (updated != null && mounted) setState(() => _recPosts[j] = updated);
   }
@@ -414,18 +410,12 @@ class _DiscoverScreenState extends State<DiscoverScreen>
   /// Empty-state CTAs: create content, then reload the active tab so the new
   /// item shows without a manual refresh.
   Future<void> _createEvent() async {
-    await Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => const CreateEventFlow()),
-    );
+    await context.push(NileRoutes.createEvent);
     if (mounted) _loadActive();
   }
 
   Future<void> _createPost() async {
-    await Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => const CreatePostScreen()),
-    );
+    await context.push(NileRoutes.createPost);
     if (mounted) _loadActive();
   }
 
@@ -549,11 +539,9 @@ class _DiscoverScreenState extends State<DiscoverScreen>
             post: posts[idx],
             onLikeToggle: () => _togglePostLike(idx),
             onTap: () async {
-              final updated = await Navigator.push<Post>(
-                context,
-                MaterialPageRoute(
-                  builder: (_) => PostDetailScreen(post: posts[idx]),
-                ),
+              final updated = await context.push<Post>(
+                NileRoutes.post(posts[idx].id),
+                extra: posts[idx],
               );
               if (updated != null && mounted) {
                 setState(() => _posts![idx] = updated);
@@ -700,12 +688,7 @@ class _DiscoverScreenState extends State<DiscoverScreen>
                       isFollowing: _followState[u.id] ?? false,
                       isLoading: _followLoading.contains(u.id),
                       onFollowTap: () => _toggleFollow(u),
-                      onTap: () => Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (_) => ProfileScreen(userId: u.id),
-                        ),
-                      ),
+                      onTap: () => context.push(NileRoutes.profile(u.id)),
                     ),
                 ],
               ),
@@ -719,12 +702,7 @@ class _DiscoverScreenState extends State<DiscoverScreen>
             isLoading: _followLoading.contains(users[idx].id),
             onFollowTap: () => _toggleFollow(users[idx]),
             onTap: () =>
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (_) => ProfileScreen(userId: users[idx].id),
-                  ),
-                ).then((_) {
+                context.push(NileRoutes.profile(users[idx].id)).then((_) {
                   if (!mounted) return;
                   _followState.remove(users[idx].id);
                   setState(() {});

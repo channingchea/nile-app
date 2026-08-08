@@ -1,11 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../../router.dart';
 import '../../services/mfa_service.dart';
 import '../../theme.dart';
-import 'mfa_backup_codes_screen.dart';
-import 'mfa_enroll_screen.dart';
 
 /// Two-factor authentication hub (Settings → Security). Shows current status and
 /// offers enable / regenerate-codes / turn-off. Turning off requires a fresh
@@ -46,10 +46,7 @@ class _MfaSettingsScreenState extends State<MfaSettingsScreen> {
   }
 
   Future<void> _enable() async {
-    final done = await Navigator.push<bool>(
-      context,
-      MaterialPageRoute(builder: (_) => const MfaEnrollScreen()),
-    );
+    final done = await context.push<bool>(NileRoutes.mfaEnroll);
     if (done == true) _load();
   }
 
@@ -65,11 +62,9 @@ class _MfaSettingsScreenState extends State<MfaSettingsScreen> {
     try {
       final codes = await MfaService.generateRecoveryCodes();
       if (!mounted) return;
-      await Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (_) => MfaBackupCodesScreen(codes: codes, afterEnroll: false),
-        ),
+      await context.push(
+        NileRoutes.mfaBackupCodes,
+        extra: BackupCodesArgs(codes: codes, afterEnroll: false),
       );
       await _load();
     } catch (_) {

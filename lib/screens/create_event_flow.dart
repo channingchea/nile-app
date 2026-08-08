@@ -1,6 +1,7 @@
 import 'package:croppy/croppy.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:go_router/go_router.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../services/crew_service.dart';
@@ -9,14 +10,13 @@ import '../services/event_service.dart';
 import '../services/livekit_service.dart';
 import '../services/pricing_service.dart';
 import '../services/profile_service.dart';
+import '../router.dart';
 import '../theme.dart';
 import '../widgets/crew_editor.dart';
 import '../widgets/duration_field.dart';
 import '../widgets/payout_gate.dart';
 import '../widgets/payout_preview_card.dart';
 import '../widgets/topic_chips.dart';
-import 'create_post_screen.dart';
-import 'event_detail_screen.dart';
 
 /// Mutable draft carried across the create-event flow pages. Page 1 fills the
 /// event fields and creates the row; later pages attach crew + show the summary.
@@ -931,12 +931,11 @@ class EventCreatedPage extends StatelessWidget {
 
   void _postAbout(BuildContext context) {
     final ev = _event;
-    Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => CreatePostScreen(
-          initialText: ev == null ? null : 'Going live: ${ev.title} 🎥',
-          eventId: ev?.id,
-        ),
+    context.push(
+      NileRoutes.createPost,
+      extra: CreatePostArgs(
+        initialText: ev == null ? null : 'Going live: ${ev.title} 🎥',
+        eventId: ev?.id,
       ),
     );
   }
@@ -1031,11 +1030,7 @@ class EventCreatedPage extends StatelessWidget {
               InkWell(
                 onTap: ev == null
                     ? null
-                    : () => Navigator.of(context).push(
-                        MaterialPageRoute(
-                          builder: (_) => EventDetailScreen(event: ev),
-                        ),
-                      ),
+                    : () => context.push(NileRoutes.event(ev.id), extra: ev),
                 borderRadius: BorderRadius.circular(NileRadius.sm),
                 child: Container(
                   padding: const EdgeInsets.symmetric(

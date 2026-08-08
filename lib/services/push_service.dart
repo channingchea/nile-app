@@ -5,16 +5,9 @@ import 'package:flutter/material.dart';
 
 import 'app_lifecycle.dart';
 
-import '../screens/conversation_screen.dart';
-import '../screens/event_detail_screen.dart';
-import '../screens/post_detail_screen.dart';
-import '../screens/profile_screen.dart';
-import '../screens/replay_pricing_screen.dart';
-import '../screens/viewer_screen.dart';
+import '../router.dart';
+import 'destinations.dart';
 import 'device_token_service.dart';
-import 'event_service.dart';
-import 'message_service.dart';
-import 'post_service.dart';
 import 'profile_service.dart';
 import 'supabase_client.dart';
 
@@ -25,19 +18,18 @@ import 'supabase_client.dart';
 Future<void> _onBackgroundMessage(RemoteMessage _) async {}
 
 /// Owns FCM lifecycle: permission, token registration/refresh, and routing a
-/// notification tap to the right screen. Deep-link routing mirrors
-/// NotificationsScreen._tap so in-app and push taps land identically.
+/// notification tap to the right screen. Tap routing goes through
+/// [Destinations], the same mapping NotificationsScreen uses, so in-app and
+/// push taps land identically.
 class PushService {
-  static GlobalKey<NavigatorState>? _navKey;
   static String? _token;
   static bool _started = false;
 
-  /// Call once after Firebase.initializeApp, passing the app's navigatorKey.
-  static Future<void> init(GlobalKey<NavigatorState> navKey) async {
+  /// Call once after Firebase.initializeApp.
+  static Future<void> init() async {
     if (kIsWeb) return;
     if (_started) return;
     _started = true;
-    _navKey = navKey;
 
     FirebaseMessaging.onBackgroundMessage(_onBackgroundMessage);
 
@@ -144,74 +136,26 @@ class PushService {
   // ── Deep-link routing ──────────────────────────────────────────────────────
 
   static Future<void> _handleTap(Map<String, dynamic> data) async {
-    final nav = _navKey?.currentState;
-    if (nav == null) return;
     // FCM delivers all data values as strings; entity_id is "" when null.
-    final type = data['type'] as String?;
+    final type = Destinations.typeFromPush(data['type'] as String?);
+    if (type == null) return;
     final rawEntity = data['entity_id'] as String?;
     final entityId = (rawEntity == null || rawEntity.isEmpty)
         ? null
         : rawEntity;
-    final actorId = data['actor_id'] as String?;
 
-    // A notification tap is an external entry point — land on a fresh stack.
+    final destination = await Destinations.forNotification(
+      type,
+      entityId: entityId,
+      actorId: data['actor_id'] as String?,
+    );
+    if (destination == null) return;
+
+    // A notification tap is an external entry point — land on a fresh stack:
+    // `go` replaces what's there, where in-app navigation pushes onto it.
     // Tapping several notifications in a row would otherwise pile duplicate
     // screens on top of each other (worst case: a second live ViewerScreen,
     // i.e. two simultaneous LiveKit connections).
-    void pushFresh(Route<void> route) {
-      nav.popUntil((r) => r.isFirst);
-      nav.push(route);
-    }
-
-    switch (type) {
-      case 'post_like':
-      case 'post_comment':
-        if (entityId == null) return;
-        final post = await PostService.fetchById(entityId);
-        if (post == null) return;
-        pushFresh(
-          MaterialPageRoute(builder: (_) => PostDetailScreen(post: post)),
-        );
-      case 'follow':
-        if (actorId == null) return;
-        pushFresh(
-          MaterialPageRoute(builder: (_) => ProfileScreen(userId: actorId)),
-        );
-      case 'event_starting':
-      case 'event_live':
-      case 'event_ended':
-      case 'operator_assigned':
-      case 'replay_ready':
-      case 'soundcheck_open':
-        if (entityId == null) return;
-        final event = await EventService.fetchById(entityId);
-        if (event == null) return;
-        pushFresh(
-          MaterialPageRoute(
-            builder: (_) => event.isLive
-                ? ViewerScreen(initialEventId: event.liveKitEventId)
-                : EventDetailScreen(event: event),
-          ),
-        );
-      case 'replay_price_prompt':
-        // Host tap → straight to the pricing screen for this event.
-        if (entityId == null) return;
-        final ev = await EventService.fetchById(entityId);
-        if (ev == null) return;
-        pushFresh(
-          MaterialPageRoute(builder: (_) => ReplayPricingScreen(event: ev)),
-        );
-      case 'new_message':
-      case 'message_reaction':
-        // actor_id is the sender/reactor; resolve (or reuse) the conversation
-        // by it.
-        if (actorId == null) return;
-        final conv = await MessageService.getOrCreate(actorId);
-        pushFresh(
-          MaterialPageRoute(
-            builder: (_) => ConversationScreen(conversation: conv),
-          ),
-        );
-    }
+    nileRouter.go(destination.location, extra: destination.extra);
   }
 }

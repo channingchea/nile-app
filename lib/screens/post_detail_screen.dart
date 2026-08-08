@@ -1,17 +1,18 @@
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../services/comment_service.dart';
 import '../services/like_service.dart';
 import '../services/post_service.dart';
 import '../services/report_service.dart';
+import '../router.dart';
 import '../theme.dart';
 import '../widgets/event_link_card.dart';
 import '../widgets/like_button.dart';
 import '../widgets/official_badge.dart';
 import '../widgets/post_image_carousel.dart';
 import 'like_list_screen.dart';
-import 'profile_screen.dart';
 import 'widgets/load_more_footer.dart';
 import 'widgets/moderation_menu.dart';
 
@@ -346,13 +347,8 @@ class _PostBody extends StatelessWidget {
               // Came here from this author's profile? Pop back to it rather
               // than stacking a duplicate.
               onTap: () => fromProfileId == post.authorId
-                  ? Navigator.pop(context)
-                  : Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) => ProfileScreen(userId: post.authorId),
-                      ),
-                    ),
+                  ? context.pop()
+                  : context.push(NileRoutes.profile(post.authorId)),
               child: Row(
                 children: [
                   Hero(
@@ -522,13 +518,8 @@ class _CommentTile extends StatelessWidget {
         children: [
           GestureDetector(
             onTap: () => fromProfileId == comment.authorId
-                ? Navigator.pop(context)
-                : Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (_) => ProfileScreen(userId: comment.authorId),
-                    ),
-                  ),
+                ? context.pop()
+                : context.push(NileRoutes.profile(comment.authorId)),
             child: Hero(
               tag: 'avatar-${comment.authorId}',
               child: CircleAvatar(

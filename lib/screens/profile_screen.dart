@@ -1,5 +1,6 @@
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../services/block_service.dart';
 import '../services/share_urls.dart';
@@ -11,6 +12,7 @@ import '../services/post_service.dart';
 import '../services/profile_service.dart';
 import '../services/report_service.dart';
 import '../services/repost_service.dart';
+import '../router.dart';
 import '../theme.dart';
 import '../widgets/event_cover_pill.dart';
 import '../widgets/event_link_card.dart';
@@ -22,15 +24,7 @@ import '../widgets/photo_viewer.dart';
 import '../widgets/post_image_carousel.dart';
 import '../widgets/share_to_sheet.dart';
 import 'widgets/moderation_menu.dart';
-import 'post_detail_screen.dart';
-import 'settings_screen.dart';
-import 'edit_event_screen.dart';
-import 'edit_post_screen.dart';
-import 'edit_profile_screen.dart';
-import 'event_detail_screen.dart';
-import 'conversation_screen.dart';
 import 'follow_list_screen.dart';
-import 'viewer_screen.dart';
 import 'widgets/load_more_footer.dart';
 import '../services/pagination.dart' show Paged;
 
@@ -288,9 +282,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
   /// Open a draft in the editor. Saving there publishes it, so on return we
   /// drop it from the drafts list and refresh the public events list.
   Future<void> _openDraft(Event draft) async {
-    final published = await Navigator.push<Event>(
-      context,
-      MaterialPageRoute(builder: (_) => EditEventScreen(event: draft)),
+    final published = await context.push<Event>(
+      NileRoutes.eventEdit(draft.id),
+      extra: draft,
     );
     if (published != null && !published.isDraft) {
       setState(() => _drafts?.removeWhere((d) => d.id == draft.id));
@@ -460,17 +454,18 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
   Future<void> _openEdit() async {
     if (_profile == null) return;
-    final updated = await Navigator.of(context).push<UserProfile>(
-      MaterialPageRoute(builder: (_) => EditProfileScreen(profile: _profile!)),
+    final updated = await context.push<UserProfile>(
+      NileRoutes.settingsEditProfile,
+      extra: _profile!,
     );
     if (updated != null) setState(() => _profile = updated);
   }
 
   Future<void> _openSettings() async {
     if (_profile == null) return;
-    final updated = await Navigator.push<UserProfile>(
-      context,
-      MaterialPageRoute(builder: (_) => SettingsScreen(profile: _profile!)),
+    final updated = await context.push<UserProfile>(
+      NileRoutes.settings,
+      extra: _profile!,
     );
     if (updated != null) setState(() => _profile = updated);
   }
@@ -519,12 +514,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
     try {
       final conv = await MessageService.getOrCreate(p.id);
       if (!mounted) return;
-      await Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (_) => ConversationScreen(conversation: conv),
-        ),
-      );
+      await context.push(NileRoutes.dm(p.id), extra: conv);
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -543,7 +533,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
     );
     if (ok && mounted) {
       // Blocking severs the relationship — leave the now-hidden profile.
-      Navigator.of(context).pop();
+      context.pop();
     }
   }
 
@@ -930,17 +920,12 @@ class _ProfileScreenState extends State<ProfileScreen> {
   /// Inline "X following · Y followers", each segment tappable.
   Widget _followCounts(UserProfile p) {
     Widget seg(String value, String label, FollowListMode mode) {
+      final location = mode == FollowListMode.followers
+          ? NileRoutes.followers(p.id)
+          : NileRoutes.following(p.id);
       return GestureDetector(
-        onTap: () => Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (_) => FollowListScreen(
-              userId: p.id,
-              displayName: p.username,
-              mode: mode,
-            ),
-          ),
-        ),
+        onTap: () =>
+            context.push('$location?name=${Uri.encodeComponent(p.username)}'),
         child: RichText(
           text: TextSpan(
             children: [
@@ -1250,12 +1235,13 @@ class _ProfileScreenState extends State<ProfileScreen> {
       );
       return;
     }
-    final route = MaterialPageRoute(
-      builder: (_) => e.isLive
-          ? ViewerScreen(initialEventId: e.liveKitEventId)
-          : EventDetailScreen(event: e, fromProfileId: _profile?.id),
+    final location = NileRoutes.eventOrWatch(
+      isLive: e.isLive,
+      eventId: e.id,
+      liveKitEventId: e.liveKitEventId,
+      fromProfileId: _profile?.id,
     );
-    Navigator.push(context, route).then((_) {
+    context.push(location, extra: e).then((_) {
       // Refresh on return in case the host edited or ended the event.
       if (_profile != null) _loadEvents(_profile!.id);
     });
@@ -1433,11 +1419,9 @@ class _ProfilePostCard extends StatelessWidget {
       ShareUrls.postCaption(id: post.id, authorUsername: post.authorUsername);
 
   Future<void> _openDetail(BuildContext context) async {
-    final updated = await Navigator.push<Post>(
-      context,
-      MaterialPageRoute(
-        builder: (_) => PostDetailScreen(post: post, fromProfileId: profileId),
-      ),
+    final updated = await context.push<Post>(
+      NileRoutes.post(post.id, fromProfileId: profileId),
+      extra: post,
     );
     if (updated != null) onUpdated?.call(updated);
   }
@@ -1512,11 +1496,9 @@ class _ProfilePostCard extends StatelessWidget {
                       onEdit: onEdited == null
                           ? null
                           : () async {
-                              final updated = await Navigator.push<Post>(
-                                context,
-                                MaterialPageRoute(
-                                  builder: (_) => EditPostScreen(post: post),
-                                ),
+                              final updated = await context.push<Post>(
+                                NileRoutes.postEdit(post.id),
+                                extra: post,
                               );
                               if (updated != null) onEdited!(updated);
                             },

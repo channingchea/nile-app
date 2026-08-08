@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:visibility_detector/visibility_detector.dart';
@@ -19,6 +20,8 @@ import '../services/current_service.dart';
 import '../services/report_service.dart';
 import '../services/repost_service.dart';
 import '../services/search_service.dart';
+import '../router.dart';
+import '../services/tab_refresh.dart';
 import '../theme.dart';
 import '../widgets/event_cover_pill.dart';
 import '../widgets/event_link_card.dart';
@@ -34,20 +37,7 @@ import '../widgets/currents_rail.dart';
 import '../widgets/share_to_sheet.dart';
 import '../widgets/empty_state.dart';
 import '../widgets/staggered_fade_in.dart';
-import 'create_event_flow.dart';
-import 'create_post_screen.dart';
-import 'create_current_screen.dart';
-import 'discover_screen.dart';
-import 'edit_event_screen.dart';
-import 'edit_post_screen.dart';
-import 'event_detail_screen.dart';
 import 'like_list_screen.dart';
-import 'messages_screen.dart';
-import 'notifications_screen.dart';
-import 'post_detail_screen.dart';
-import 'profile_screen.dart';
-import 'currents_player_screen.dart';
-import 'viewer_screen.dart';
 import 'widgets/load_more_footer.dart';
 import 'widgets/moderation_menu.dart';
 
@@ -58,59 +48,20 @@ const int kThinFeedThreshold = 5;
 
 // ── Shell ─────────────────────────────────────────────────────────────────────
 
-class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key});
+/// The tab shell. Owns the glass nav bar and the four branch Navigators; the
+/// branches themselves are declared in `lib/router.dart`.
+///
+/// Detail screens are routed *above* this shell, so a pushed screen still
+/// covers the nav bar the way it did under the old IndexedStack. Tab state and
+/// scroll position survive switching, and an unvisited branch isn't built until
+/// it's first selected — both handled by StatefulShellRoute rather than the
+/// `_visited` set this used to keep by hand.
+class HomeScreen extends StatelessWidget {
+  const HomeScreen({super.key, required this.shell});
 
-  @override
-  State<HomeScreen> createState() => _HomeScreenState();
-}
+  final StatefulNavigationShell shell;
 
-class _HomeScreenState extends State<HomeScreen> {
-  int _selectedIndex = 0;
-  int _feedKey = 0;
-  int _profileKey = 0;
-  int _discoverKey = 0;
-  int _discoverInitialTab = 0;
-
-  // Tabs are built on first visit, not eagerly. An unvisited tab renders as an
-  // empty placeholder in the IndexedStack; once shown it stays built (state
-  // preserved) so re-selecting it never re-fetches. Feed (0) is visited at start.
-  final Set<int> _visited = {0};
-
-  List<Widget> get _pages => [
-    _FeedTab(
-      key: ValueKey(_feedKey),
-      onContentChanged: _onContentChanged,
-      onFindPeople: () => _goToDiscover(2),
-    ),
-    DiscoverScreen(key: ValueKey(_discoverKey), initialTab: _discoverInitialTab),
-    const MessagesScreen(),
-    ProfileScreen(key: ValueKey(_profileKey)),
-  ];
-
-  // Jump to Discover, remounting it on [tab] (0 posts, 1 events, 2 people) so
-  // Home's empty-state CTAs land the user somewhere useful instead of a dead end.
-  void _goToDiscover(int tab) => setState(() {
-    _discoverInitialTab = tab;
-    _discoverKey++;
-    _selectedIndex = 1;
-    _visited.add(1);
-  });
-
-  // A repost happened inside the feed. The feed already updated its own card
-  // optimistically, so leave it (and its scroll position) untouched — only
-  // remount the profile tab so it re-fetches and shows the new reposted item.
-  void _onContentChanged() => setState(() => _profileKey++);
-
-  // New post/event created via the FAB. Remount both tabs so each reloads from
-  // scratch, and snap to the feed so the user sees their content land.
-  void _onContentCreated() => setState(() {
-    _feedKey++;
-    _profileKey++;
-    _selectedIndex = 0;
-  });
-
-  void _showActionSheet() {
+  void _showActionSheet(BuildContext context) {
     showModalBottomSheet(
       context: context,
       backgroundColor: NileColors.bgSurface,
@@ -119,7 +70,7 @@ class _HomeScreenState extends State<HomeScreen> {
           top: Radius.circular(NileRadius.lg),
         ),
       ),
-      builder: (_) => _ActionSheet(onCreated: _onContentCreated),
+      builder: (_) => const _ActionSheet(),
     );
   }
 
@@ -129,41 +80,28 @@ class _HomeScreenState extends State<HomeScreen> {
     // of exiting the app (standard bottom-nav behavior); back from Home exits
     // as usual. No effect on iOS/desktop, where there's no system back.
     return PopScope(
-      canPop: _selectedIndex == 0,
+      canPop: shell.currentIndex == 0,
       onPopInvokedWithResult: (didPop, _) {
-        if (!didPop) setState(() => _selectedIndex = 0);
+        if (!didPop) shell.goBranch(0);
       },
       child: Scaffold(
         backgroundColor: NileColors.bgPage,
         // Content flows behind the floating glass nav bar.
         extendBody: true,
-        body: NileMaxWidth(
-          // IndexedStack keeps every tab built, so the same event can hold a
-          // live Hero on two tabs at once — duplicate tags abort ALL hero
-          // flights. HeroMode keeps only the visible tab's heroes active.
-          child: IndexedStack(
-            index: _selectedIndex,
-            children: [
-              for (final (i, page) in _pages.indexed)
-                if (_visited.contains(i))
-                  HeroMode(enabled: i == _selectedIndex, child: page)
-                else
-                  const SizedBox.shrink(),
-            ],
-          ),
-        ),
+        body: NileMaxWidth(child: shell),
         // Liquid Glass nav. To revert: swap NileGlassNavBar → NileMaterialNavBar
         // (lib/widgets/nile_material_nav_bar.dart), set extendBody: false above,
         // restore the FloatingActionButton, and drop the reservedHeight bottom
         // padding from the tab scroll views.
         bottomNavigationBar: NileGlassNavBar(
-          selectedIndex: _selectedIndex,
-          onDestinationSelected: (i) => setState(() {
-            _selectedIndex = i;
-            _visited.add(i);
-          }),
+          selectedIndex: shell.currentIndex,
+          // initialLocation: true on a re-tap of the active tab pops that
+          // branch back to its root, which is what a bottom nav is expected to
+          // do and what the old single-stack shell got for free.
+          onDestinationSelected: (i) =>
+              shell.goBranch(i, initialLocation: i == shell.currentIndex),
           // Create "+" sits on the same row as the nav pill, on every tab.
-          trailing: _CreateButton(onTap: _showActionSheet),
+          trailing: _CreateButton(onTap: () => _showActionSheet(context)),
           destinations: const [
             NileGlassDestination(
               icon: Icons.home_outlined,
@@ -217,8 +155,15 @@ class _CreateButton extends StatelessWidget {
 // ── Action sheet (FAB → bottom sheet) ────────────────────────────────────────
 
 class _ActionSheet extends StatelessWidget {
-  const _ActionSheet({required this.onCreated});
-  final VoidCallback onCreated;
+  const _ActionSheet();
+
+  /// Close the sheet, open the create screen, and when it returns mark the feed
+  /// and profile tabs stale. `pop` then `push` has to stay in that order — the
+  /// sheet is a route too.
+  void _open(BuildContext context, String location) {
+    Navigator.pop(context);
+    context.push(location).then((_) => TabRefresh.contentCreated());
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -243,13 +188,7 @@ class _ActionSheet extends StatelessWidget {
             Text('Create', style: NileTextStyles.headingMd()),
             const SizedBox(height: 16),
             FilledButton.icon(
-              onPressed: () {
-                Navigator.pop(context);
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(builder: (_) => const CreatePostScreen()),
-                ).then((_) => onCreated());
-              },
+              onPressed: () => _open(context, NileRoutes.createPost),
               icon: const Icon(Icons.edit_outlined),
               label: const Text('Create Post'),
             ),
@@ -257,27 +196,14 @@ class _ActionSheet extends StatelessWidget {
             if (NilePlatform.canCreateCurrents) ...[
               const SizedBox(height: 12),
               OutlinedButton.icon(
-                onPressed: () {
-                  Navigator.pop(context);
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                        builder: (_) => const CreateCurrentScreen()),
-                  ).then((_) => onCreated());
-                },
+                onPressed: () => _open(context, NileRoutes.createCurrent),
                 icon: const Icon(Icons.bolt_outlined),
                 label: const Text('Create Current'),
               ),
             ],
             const SizedBox(height: 12),
             OutlinedButton.icon(
-              onPressed: () {
-                Navigator.pop(context);
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(builder: (_) => const CreateEventFlow()),
-                ).then((_) => onCreated());
-              },
+              onPressed: () => _open(context, NileRoutes.createEvent),
               icon: const Icon(Icons.add_circle_outline),
               label: const Text('Create Event'),
             ),
@@ -293,19 +219,11 @@ class _ActionSheet extends StatelessWidget {
 
 // ── Feed tab ──────────────────────────────────────────────────────────────────
 
-class _FeedTab extends StatefulWidget {
-  const _FeedTab({super.key, this.onContentChanged, this.onFindPeople});
-
-  /// Called after a repost/unrepost succeeds so the host can refresh the
-  /// profile tab (where the reposted item appears).
-  final VoidCallback? onContentChanged;
-
-  /// Sends the user to Discover → People. Powers the empty-state CTAs so a
-  /// follow-less or quiet feed offers a real next step.
-  final VoidCallback? onFindPeople;
+class FeedTab extends StatefulWidget {
+  const FeedTab({super.key});
 
   @override
-  State<_FeedTab> createState() => _FeedTabState();
+  State<FeedTab> createState() => FeedTabState();
 }
 
 /// Unified feed entry — either an [Event] or a [Post].
@@ -374,7 +292,7 @@ class _AdFeedItem extends _FeedItem {
   DateTime get sortKey => DateTime.now();
 }
 
-class _FeedTabState extends State<_FeedTab> {
+class FeedTabState extends State<FeedTab> {
   List<_FeedItem>? _items;
   // Platform-wide "Live now" rail, shown to every user above the feed (Phase 3).
   // Live events live here, not in the list below, so nothing shows twice.
@@ -509,7 +427,7 @@ class _FeedTabState extends State<_FeedTab> {
       } else {
         await RepostService.repost(post.id);
       }
-      widget.onContentChanged?.call();
+      TabRefresh.contentChanged();
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -541,7 +459,7 @@ class _FeedTabState extends State<_FeedTab> {
       } else {
         await EventRepostService.repost(event.id);
       }
-      widget.onContentChanged?.call();
+      TabRefresh.contentChanged();
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -622,10 +540,8 @@ class _FeedTabState extends State<_FeedTab> {
 
   // Live Now rail taps go to the event's landing page, not straight into the
   // stream — the detail screen has the join CTA.
-  void _openLive(Event event) => Navigator.push(
-    context,
-    MaterialPageRoute(builder: (_) => EventDetailScreen(event: event)),
-  );
+  void _openLive(Event event) =>
+      context.push(NileRoutes.event(event.id), extra: event);
 
   void _onScroll() {
     if (!_scroll.hasClients) return;
@@ -742,10 +658,7 @@ class _FeedTabState extends State<_FeedTab> {
   }
 
   Future<void> _openNotifications() async {
-    await Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => const NotificationsScreen()),
-    );
+    await context.push(NileRoutes.notifications);
     // Refresh badge after returning (all were marked read in the screen).
     _loadUnread();
   }
@@ -996,23 +909,14 @@ class _FeedTabState extends State<_FeedTab> {
   /// Opens the Current creation flow; refreshes the rail on return so the
   /// creator sees their new Current land (without a full feed reload).
   Future<void> _createCurrent() async {
-    final created = await Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => const CreateCurrentScreen()),
-    );
+    final created = await context.push(NileRoutes.createCurrent);
     if (created != null) _reloadCurrentsRail();
   }
 
   /// Opens the vertical player at [e]'s first unwatched Current; refreshes the
   /// rail on return so watched rings update.
   Future<void> _openCurrents(CurrentRailEntry e) async {
-    await Navigator.push(
-      context,
-      MaterialPageRoute(
-        fullscreenDialog: true,
-        builder: (_) => CurrentsPlayerScreen(startUserId: e.userId),
-      ),
-    );
+    await context.push(NileRoutes.currentsFrom(e.userId));
     _reloadCurrentsRail();
   }
 
@@ -1184,8 +1088,8 @@ class _FeedTabState extends State<_FeedTab> {
                 SliverFillRemaining(
                   hasScrollBody: false,
                   child: _followingIds.isEmpty
-                      ? _EmptyFollows(onFindPeople: widget.onFindPeople)
-                      : _EmptyFeed(onFindPeople: widget.onFindPeople),
+                      ? _EmptyFollows(onFindPeople: () => context.go(NileRoutes.discover(tab: 2)))
+                      : _EmptyFeed(onFindPeople: () => context.go(NileRoutes.discover(tab: 2))),
                 ),
             ],
           ],
@@ -1241,13 +1145,13 @@ class _EventCard extends StatelessWidget {
         child: InkWell(
           onTap: () async {
             onTapAd?.call();
-            final result = await Navigator.push(
-              context,
-              MaterialPageRoute(
-                builder: (_) => event.isLive
-                    ? ViewerScreen(initialEventId: event.liveKitEventId)
-                    : EventDetailScreen(event: event),
+            final result = await context.push(
+              NileRoutes.eventOrWatch(
+                isLive: event.isLive,
+                eventId: event.id,
+                liveKitEventId: event.liveKitEventId,
               ),
+              extra: event,
             );
             if (result == true) onDeleted?.call();
           },
@@ -1322,11 +1226,9 @@ class _EventCard extends StatelessWidget {
                         if (onEdited != null)
                           _ContentMenu(
                             onEdit: () async {
-                              final updated = await Navigator.push<Event>(
-                                context,
-                                MaterialPageRoute(
-                                  builder: (_) => EditEventScreen(event: event),
-                                ),
+                              final updated = await context.push<Event>(
+                                NileRoutes.eventEdit(event.id),
+                                extra: event,
                               );
                               if (updated != null) onEdited!(updated);
                             },
@@ -1641,9 +1543,9 @@ class _PostCard extends StatelessWidget {
 
   Future<void> _openDetail(BuildContext context) async {
     onTapAd?.call();
-    final updated = await Navigator.push<Post>(
-      context,
-      MaterialPageRoute(builder: (_) => PostDetailScreen(post: post)),
+    final updated = await context.push<Post>(
+      NileRoutes.post(post.id),
+      extra: post,
     );
     if (updated != null) onUpdated?.call(updated);
   }
@@ -1726,11 +1628,9 @@ class _PostCard extends StatelessWidget {
                         onEdit: onEdited == null
                             ? null
                             : () async {
-                                final updated = await Navigator.push<Post>(
-                                  context,
-                                  MaterialPageRoute(
-                                    builder: (_) => EditPostScreen(post: post),
-                                  ),
+                                final updated = await context.push<Post>(
+                                  NileRoutes.postEdit(post.id),
+                                  extra: post,
                                 );
                                 if (updated != null) onEdited!(updated);
                               },

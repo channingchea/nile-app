@@ -1,17 +1,10 @@
 import 'package:flutter/material.dart';
-import '../services/event_service.dart';
-import '../services/message_service.dart';
+import 'package:go_router/go_router.dart';
+import '../services/destinations.dart';
 import '../services/notification_service.dart';
-import '../services/post_service.dart';
 import '../theme.dart';
 import '../widgets/empty_state.dart';
-import 'conversation_screen.dart';
-import 'event_detail_screen.dart';
-import 'my_report_screen.dart';
-import 'post_detail_screen.dart';
 import 'profile_screen.dart';
-import 'replay_pricing_screen.dart';
-import 'viewer_screen.dart';
 import 'widgets/load_more_footer.dart';
 
 class NotificationsScreen extends StatefulWidget {
@@ -89,67 +82,14 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
   }
 
   Future<void> _tap(AppNotification n) async {
-    switch (n.type) {
-      case NotificationType.postLike:
-      case NotificationType.postComment:
-        if (n.entityId == null) return;
-        final post = await PostService.fetchById(n.entityId!);
-        if (!mounted || post == null) return;
-        Navigator.push(
-          context,
-          MaterialPageRoute(builder: (_) => PostDetailScreen(post: post)),
-        );
-      case NotificationType.follow:
-        Navigator.push(
-          context,
-          MaterialPageRoute(builder: (_) => ProfileScreen(userId: n.actorId)),
-        );
-      case NotificationType.newMessage:
-      case NotificationType.messageReaction:
-        // actor_id is the sender/reactor (the other participant); resolve (or
-        // reuse) the conversation by it.
-        final conv = await MessageService.getOrCreate(n.actorId);
-        if (!mounted) return;
-        Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (_) => ConversationScreen(conversation: conv),
-          ),
-        );
-      case NotificationType.eventStarting:
-      case NotificationType.eventLive:
-      case NotificationType.eventEnded:
-      case NotificationType.operatorAssigned:
-      case NotificationType.replayReady:
-      case NotificationType.soundcheckOpen:
-        if (n.entityId == null) return;
-        final event = await EventService.fetchById(n.entityId!);
-        if (!mounted || event == null) return;
-        Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (_) => event.isLive
-                ? ViewerScreen(initialEventId: event.liveKitEventId)
-                : EventDetailScreen(event: event),
-          ),
-        );
-      case NotificationType.replayPricePrompt:
-        if (n.entityId == null) return;
-        final ev = await EventService.fetchById(n.entityId!);
-        if (!mounted || ev == null) return;
-        Navigator.push(
-          context,
-          MaterialPageRoute(builder: (_) => ReplayPricingScreen(event: ev)),
-        );
-      case NotificationType.feedbackResolved:
-        if (n.entityId == null) return;
-        Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (_) => MyReportScreen(reportId: n.entityId!),
-          ),
-        );
-    }
+    final destination = await Destinations.forNotification(
+      n.type,
+      entityId: n.entityId,
+      actorId: n.actorId,
+    );
+    if (!mounted || destination == null) return;
+    // Already inside the app, so this pushes: back returns to this list.
+    context.push(destination.location, extra: destination.extra);
   }
 
   @override

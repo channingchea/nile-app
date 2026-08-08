@@ -1,10 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 import '../services/calendar_ics.dart';
 import '../services/event_service.dart';
 import '../services/ticket_service.dart';
+import '../router.dart';
 import '../theme.dart';
 import '../widgets/empty_state.dart';
-import 'event_detail_screen.dart';
 import 'widgets/load_more_footer.dart';
 
 /// The current user's purchased tickets.
@@ -83,10 +84,7 @@ class _MyTicketsScreenState extends State<MyTicketsScreen> {
   }
 
   Future<void> _openEvent(Event event) async {
-    final deleted = await Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => EventDetailScreen(event: event)),
-    );
+    final deleted = await context.push(NileRoutes.event(event.id), extra: event);
     if (deleted == true) _load();
   }
 

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:go_router/go_router.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../../theme.dart';
@@ -132,8 +133,7 @@ class _MfaBackupCodesScreenState extends State<MfaBackupCodesScreen> {
                   ),
                   const SizedBox(height: NileSpacing.s16),
                   FilledButton(
-                    onPressed:
-                        _saved ? () => Navigator.pop(context, true) : null,
+                    onPressed: _saved ? () => context.pop(true) : null,
                     style: FilledButton.styleFrom(
                       padding: const EdgeInsets.symmetric(
                         vertical: NileSpacing.s16,

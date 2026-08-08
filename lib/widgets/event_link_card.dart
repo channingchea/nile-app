@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 
-import '../screens/event_detail_screen.dart';
+import '../router.dart';
 import '../services/event_service.dart';
 import '../theme.dart';
 
@@ -62,9 +63,7 @@ class _EventLinkCardState extends State<EventLinkCard> {
 
     final thumb = ev.thumbnailUrl;
     return InkWell(
-      onTap: () => Navigator.of(
-        context,
-      ).push(MaterialPageRoute(builder: (_) => EventDetailScreen(event: ev))),
+      onTap: () => context.push(NileRoutes.event(ev.id), extra: ev),
       borderRadius: BorderRadius.circular(NileRadius.sm),
       child: Container(
         clipBehavior: Clip.antiAlias,

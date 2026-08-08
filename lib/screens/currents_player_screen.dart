@@ -1,9 +1,11 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:video_player/video_player.dart';
 
+import '../router.dart';
 import '../services/ad_service.dart';
 import '../services/current_service.dart';
 import '../services/report_service.dart';
@@ -13,7 +15,6 @@ import '../services/share_urls.dart';
 import '../services/supabase_client.dart';
 import '../theme.dart';
 import '../widgets/official_badge.dart';
-import 'profile_screen.dart';
 import 'widgets/moderation_menu.dart';
 
 /// Full-screen vertical Currents player: swipe between ≤60s videos, autoplay,
@@ -814,12 +815,7 @@ class _CurrentsPlayerScreenState extends State<CurrentsPlayerScreen>
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   GestureDetector(
-                    onTap: () => Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) => ProfileScreen(userId: r.authorId),
-                      ),
-                    ),
+                    onTap: () => context.push(NileRoutes.profile(r.authorId)),
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
