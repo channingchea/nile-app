@@ -747,7 +747,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				PROVISIONING_PROFILE_SPECIFIER = "";
+				PROVISIONING_PROFILE_SPECIFIER = "Nile macOS Developer ID";
 				SWIFT_VERSION = 5.0;
 			};
 			name = Release;

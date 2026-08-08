@@ -16,5 +16,8 @@
 	<true/>
 	<key>com.apple.security.files.user-selected.read-only</key>
 	<true/>
+	<!-- No com.apple.developer.applesignin here either: Debug could carry it,
+	     but Release cannot (see Release.entitlements), so having it in Debug
+	     would only let Sign in with Apple pass locally and fail once shipped. -->
 </dict>
 </plist>

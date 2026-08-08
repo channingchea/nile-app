@@ -14,6 +14,29 @@
 	<string>6.0</string>
 	<key>CFBundleName</key>
 	<string>$(PRODUCT_NAME)</string>
+	<!-- Mirrors ios/Runner/Info.plist. Without these macOS registers no scheme,
+	     so nile://login-callback, nile://reset-callback and the Google OAuth
+	     callback never reach the app. Google's client ID is bound to the bundle
+	     ID, which macOS shares with iOS, so the same one serves both. -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>app.nile</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>nile</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>google-oauth</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>com.googleusercontent.apps.907048556625-1cl82rkemt4g164mtuj6448r3aujnasc</string>
+			</array>
+		</dict>
+	</array>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>

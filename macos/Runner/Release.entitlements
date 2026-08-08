@@ -10,5 +10,28 @@
 	<true/>
 	<key>com.apple.security.files.user-selected.read-only</key>
 	<true/>
+	<!-- Keychain identity. Without these the app has no keychain access group at
+	     all and every SecItem call fails with -34018 "Client has neither
+	     com.apple.application-identifier nor com.apple.security.application-groups
+	     nor keychain-access-groups entitlements" — which is what broke Google
+	     sign-in on macOS: the OAuth round trip succeeded and only the token
+	     write failed. Both keys are authorised by the embedded "Nile macOS
+	     Developer ID" profile, so Release must keep PROVISIONING_PROFILE_SPECIFIER
+	     set; clearing it takes the keychain down with it. -->
+	<key>com.apple.application-identifier</key>
+	<string>9LTD86C5X7.com.nilestreaming.app</string>
+	<key>keychain-access-groups</key>
+	<array>
+		<string>9LTD86C5X7.com.nilestreaming.app</string>
+	</array>
+	<!-- Deliberately NO com.apple.developer.applesignin. Apple does not support
+	     Sign in with Apple for Developer ID distribution — the capability is
+	     absent from the Developer ID column of "Supported capabilities (macOS)",
+	     and a freshly minted MAC_APP_DIRECT profile carries no such entitlement
+	     even with Sign in with Apple enabled on the App ID (verified against the
+	     App Store Connect API, 2026-08-08). Adding the key fails the build with
+	     "requires a provisioning profile with the Sign In with Apple feature".
+	     iOS keeps native Sign in with Apple; macOS would need the web OAuth
+	     flow through a Services ID instead. -->
 </dict>
 </plist>

@@ -32,8 +32,13 @@ class SocialAuthService {
       final signIn = GoogleSignIn.instance;
       if (!_googleInitialized) {
         // 7.x API: initialize() once, then authenticate() per attempt.
+        // Apple platforms need the client ID explicitly: the plugin otherwise
+        // reads it from GoogleService-Info.plist, which only the iOS bundle
+        // ships. The client ID is bound to the bundle ID, shared with macOS.
         await signIn.initialize(
-          clientId: (!kIsWeb && Platform.isIOS) ? googleIosClientId : null,
+          clientId: (!kIsWeb && (Platform.isIOS || Platform.isMacOS))
+              ? googleIosClientId
+              : null,
           serverClientId: googleWebClientId,
         );
         _googleInitialized = true;
