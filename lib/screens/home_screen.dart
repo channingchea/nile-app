@@ -13,6 +13,7 @@ import '../services/follow_service.dart';
 import '../services/like_service.dart';
 import '../services/notification_service.dart';
 import '../services/pagination.dart' show Paged;
+import '../services/platform_support.dart';
 import '../services/post_service.dart';
 import '../services/current_service.dart';
 import '../services/report_service.dart';
@@ -252,18 +253,22 @@ class _ActionSheet extends StatelessWidget {
               icon: const Icon(Icons.edit_outlined),
               label: const Text('Create Post'),
             ),
-            const SizedBox(height: 12),
-            OutlinedButton.icon(
-              onPressed: () {
-                Navigator.pop(context);
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(builder: (_) => const CreateCurrentScreen()),
-                ).then((_) => onCreated());
-              },
-              icon: const Icon(Icons.bolt_outlined),
-              label: const Text('Create Current'),
-            ),
+            // The trim strip needs video_thumbnail — mobile only.
+            if (NilePlatform.canCreateCurrents) ...[
+              const SizedBox(height: 12),
+              OutlinedButton.icon(
+                onPressed: () {
+                  Navigator.pop(context);
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                        builder: (_) => const CreateCurrentScreen()),
+                  ).then((_) => onCreated());
+                },
+                icon: const Icon(Icons.bolt_outlined),
+                label: const Text('Create Current'),
+              ),
+            ],
             const SizedBox(height: 12),
             OutlinedButton.icon(
               onPressed: () {
@@ -1094,13 +1099,17 @@ class _FeedTabState extends State<_FeedTab> {
             else ...[
               // Currents rail — always first; its leading slot is the "Your
               // Current" create entry, so it renders even with no content.
-              SliverToBoxAdapter(
-                child: CurrentsRail(
-                  entries: _currentsRail,
-                  onCreate: _createCurrent,
-                  onTapCreator: _openCurrents,
+              // macOS can't create Currents, so there the rail is dropped
+              // entirely rather than left as an empty strip.
+              if (NilePlatform.canCreateCurrents || _currentsRail.isNotEmpty)
+                SliverToBoxAdapter(
+                  child: CurrentsRail(
+                    entries: _currentsRail,
+                    onCreate:
+                        NilePlatform.canCreateCurrents ? _createCurrent : null,
+                    onTapCreator: _openCurrents,
+                  ),
                 ),
-              ),
               // Platform-wide Live Now rail — pinned first for every user,
               // hidden entirely when nothing is live (no empty shell).
               if (_liveNow.isNotEmpty)

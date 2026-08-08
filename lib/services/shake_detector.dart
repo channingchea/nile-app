@@ -9,6 +9,8 @@ import 'package:flutter/widgets.dart';
 import 'package:sensors_plus/sensors_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'platform_support.dart';
+
 /// Shake-to-report, armed in beta builds only.
 ///
 /// Store builds ship with this off: a phone in a pocket on a bumpy bus clears
@@ -21,9 +23,11 @@ class ShakeDetector {
   static final ShakeDetector instance = ShakeDetector._();
 
   /// Beta gate. `kDebugMode` keeps it available while developing without
-  /// needing the define.
-  static const bool enabled =
-      bool.fromEnvironment('NILE_BETA') || kDebugMode;
+  /// needing the define. Also requires an accelerometer — `sensors_plus` has
+  /// no macOS implementation, so listening there throws instead of no-oping.
+  static bool get enabled =>
+      (bool.fromEnvironment('NILE_BETA') || kDebugMode) &&
+      NilePlatform.hasAccelerometer;
 
   /// Acceleration past this (m/s², gravity excluded) counts as a shake.
   static const double _threshold = 22;

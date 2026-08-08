@@ -18,7 +18,10 @@ class CurrentsRail extends StatelessWidget {
   });
 
   final List<CurrentRailEntry> entries;
-  final VoidCallback onCreate;
+
+  /// Null where Currents can't be created (macOS — see `NilePlatform`); the
+  /// rail then shows only creators worth watching.
+  final VoidCallback? onCreate;
   final void Function(CurrentRailEntry entry) onTapCreator;
   final String? myAvatarUrl;
 
@@ -41,6 +44,10 @@ class CurrentsRail extends StatelessWidget {
       }
     }
 
+    // Without a create action and without Currents of their own, the caller's
+    // slot would do nothing — drop it rather than render a dead circle.
+    final showMine = mine != null || onCreate != null;
+
     // Height follows the label's real line box. A hard-coded 116 was 1px short
     // on Android, and any system font scale above 1.0 would overflow it.
     final labelBox =
@@ -57,11 +64,11 @@ class CurrentsRail extends StatelessWidget {
         scrollDirection: Axis.horizontal,
         padding: const EdgeInsets.fromLTRB(
             NileSpacing.s16, NileSpacing.s16, NileSpacing.s16, NileSpacing.s8),
-        itemCount: others.length + 1,
+        itemCount: others.length + (showMine ? 1 : 0),
         separatorBuilder: (_, _) => const SizedBox(width: NileSpacing.s12),
-        itemBuilder: (_, i) => i == 0
+        itemBuilder: (_, i) => showMine && i == 0
             ? _mySlot(context, mine)
-            : _creatorSlot(context, others[i - 1]),
+            : _creatorSlot(context, others[i - (showMine ? 1 : 0)]),
       ),
     );
   }
@@ -106,7 +113,7 @@ class CurrentsRail extends StatelessWidget {
   Widget _mySlot(BuildContext context, CurrentRailEntry? mine) {
     return _Slot(
       label: 'Your Current',
-      onTap: mine == null ? onCreate : () => onTapCreator(mine),
+      onTap: mine != null ? () => onTapCreator(mine) : onCreate!,
       child: Stack(
         clipBehavior: Clip.none,
         children: [
@@ -115,25 +122,26 @@ class CurrentsRail extends StatelessWidget {
             ring: mine != null,
             border: NileColors.border,
           ),
-          Positioned(
-            right: -2,
-            bottom: -2,
-            child: GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onTap: onCreate,
-              child: Container(
-                width: 24,
-                height: 24,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: NileColors.volt,
-                  border: Border.all(color: NileColors.bgPage, width: 2),
+          if (onCreate != null)
+            Positioned(
+              right: -2,
+              bottom: -2,
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: onCreate,
+                child: Container(
+                  width: 24,
+                  height: 24,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: NileColors.volt,
+                    border: Border.all(color: NileColors.bgPage, width: 2),
+                  ),
+                  child:
+                      const Icon(Icons.add, size: 15, color: NileColors.onVolt),
                 ),
-                child:
-                    const Icon(Icons.add, size: 15, color: NileColors.onVolt),
               ),
             ),
-          ),
         ],
       ),
     );
