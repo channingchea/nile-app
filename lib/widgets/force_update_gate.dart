@@ -1,4 +1,7 @@
+import 'package:flutter/foundation.dart'
+    show defaultTargetPlatform, kIsWeb, TargetPlatform;
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../services/app_config_service.dart';
@@ -7,8 +10,10 @@ import '../theme.dart';
 /// Wraps the app so a too-old build is caught at startup.
 ///
 /// - Build below `min_build` → replaces the app with a blocking update screen.
-/// - Build below `latest_build` → shows a one-time "update available" snackbar
-///   over the normal app.
+/// - Build below `latest_build` → a non-blocking nudge: a snackbar on mobile,
+///   where the store updates the app anyway, and a dialog on macOS, where the
+///   user has to go and download a DMG themselves and a snackbar is too easy to
+///   miss. The macOS dialog asks once per published build, not once per launch.
 ///
 /// The check fails open (see [AppConfigService.check]), so a config/network
 /// error just renders [child] unchanged.
@@ -21,7 +26,12 @@ class ForceUpdateGate extends StatefulWidget {
 }
 
 class _ForceUpdateGateState extends State<ForceUpdateGate> {
+  static const _dismissedKey = 'macos_update_prompt_dismissed_build';
+
   AppUpdateStatus _status = const AppUpdateStatus.ok();
+
+  bool get _isMacOS =>
+      !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS;
 
   @override
   void initState() {
@@ -33,22 +43,66 @@ class _ForceUpdateGateState extends State<ForceUpdateGate> {
     final status = await AppConfigService.check();
     if (!mounted) return;
     setState(() => _status = status);
-    if (status.updateAvailable && !status.blocked) {
-      // Non-blocking nudge, once per launch.
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: const Text('A new version of Nile is available.'),
-            action: status.updateUrl == null
-                ? null
-                : SnackBarAction(
-                    label: 'Update',
-                    onPressed: () => _openUpdate(status.updateUrl!),
-                  ),
+    if (!status.updateAvailable || status.blocked) return;
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (_isMacOS) {
+        _promptDesktopUpdate(status);
+      } else {
+        _promptMobileUpdate(status);
+      }
+    });
+  }
+
+  void _promptMobileUpdate(AppUpdateStatus status) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: const Text('A new version of Nile is available.'),
+        action: status.updateUrl == null
+            ? null
+            : SnackBarAction(
+                label: 'Update',
+                onPressed: () => _openUpdate(status.updateUrl!),
+              ),
+      ),
+    );
+  }
+
+  Future<void> _promptDesktopUpdate(AppUpdateStatus status) async {
+    final prefs = await SharedPreferences.getInstance();
+    // Asked about this build already and told "not now" — respect that.
+    if (prefs.getInt(_dismissedKey) == status.latestBuild) return;
+    if (!mounted) return;
+
+    final download = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: NileColors.bgSurface,
+        title: Text('Update available', style: NileTextStyles.headingSm()),
+        content: Text(
+          status.message ??
+              'A newer version of Nile for Mac is ready to download. '
+                  'Your current version keeps working.',
+          style: NileTextStyles.bodySm(),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Not now'),
           ),
-        );
-      });
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: TextButton.styleFrom(foregroundColor: NileColors.volt),
+            child: const Text('Download'),
+          ),
+        ],
+      ),
+    );
+
+    await prefs.setInt(_dismissedKey, status.latestBuild);
+    if (download == true && status.updateUrl != null) {
+      await _openUpdate(status.updateUrl!);
     }
   }
 
