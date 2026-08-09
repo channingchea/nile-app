@@ -16,12 +16,14 @@ import 'services/app_lifecycle.dart';
 import 'services/connectivity_service.dart';
 import 'services/deep_link_service.dart';
 import 'services/error_log.dart';
+import 'services/nile_shortcuts.dart';
 import 'services/push_service.dart';
 import 'services/shake_detector.dart';
 import 'services/theme_service.dart';
 import 'theme.dart';
 import 'services/feedback_service.dart';
 import 'widgets/force_update_gate.dart';
+import 'widgets/nile_mini_player.dart';
 
 /// True only on platforms where a Firebase app is configured: web, iOS, Android.
 /// macOS and other desktop targets have no registered Firebase app.
@@ -133,6 +135,10 @@ class _NileAppState extends State<NileApp> with WidgetsBindingObserver {
     // One app-level lifecycle observer feeds AppLifecycle; screens listen there
     // to refresh/re-subscribe on resume rather than each registering their own.
     WidgetsBinding.instance.addObserver(this);
+    // ⌘K, Esc and the feed's J/K bindings. Installed here rather than in the
+    // desktop shell so they survive route changes and keep working while a
+    // detail screen covers the shell.
+    if (NileShortcuts.supported) NileShortcuts.install();
     // Initialize FCM after first frame so the navigator is mounted for routing.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_firebaseSupported) PushService.init();
@@ -144,6 +150,7 @@ class _NileAppState extends State<NileApp> with WidgetsBindingObserver {
   @override
   void dispose() {
     ShakeDetector.instance.stop();
+    NileShortcuts.uninstall();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -237,11 +244,17 @@ class _NileAppState extends State<NileApp> with WidgetsBindingObserver {
         // arena and are unaffected. Covered by test/keyboard_dismiss_test.dart.
         // The version gate moved in here from `home:` — under a router there is
         // no single home widget to wrap, and this covers every route.
+        // NileMiniPlayerHost is outside the router on purpose: detail screens
+        // are siblings of the tab shell and cover it completely, so a dock
+        // rendered inside the shell would disappear the moment you opened an
+        // event — which is exactly the navigation it has to survive.
         builder: (_, child) => GestureDetector(
           onTap: () => FocusManager.instance.primaryFocus?.unfocus(),
           child: RepaintBoundary(
             key: ShakeDetector.captureKey,
-            child: ForceUpdateGate(child: child ?? const SizedBox.shrink()),
+            child: NileMiniPlayerHost(
+              child: ForceUpdateGate(child: child ?? const SizedBox.shrink()),
+            ),
           ),
         ),
       ),

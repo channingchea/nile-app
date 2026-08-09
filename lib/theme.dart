@@ -3,17 +3,111 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show SystemUiOverlayStyle;
 import 'package:google_fonts/google_fonts.dart';
 
-/// Constrains [child] to 600 px and centers it horizontally.
-/// On screens narrower than 600 px the constraint has no effect.
+// ── Breakpoints ───────────────────────────────────────────────────────────────
+// Four window classes, pinned to real device widths rather than round numbers:
+//
+//   compact   < 740, or under 600 tall   phone, iPad Split View, phone landscape
+//   medium    740–1023                   iPad mini / 11" portrait — icon rail
+//   expanded  1024–1179                  iPad 13" portrait — labelled rail
+//   wide      >= 1180                    iPad 11" landscape and up — all three zones
+//
+// `compact` is the phone layout and is deliberately untouched by the desktop
+// work; everything wider gets the three-zone shell (nav rail | content column |
+// context rail) assembled in HomeScreen.
+
+enum NileWindowClass { compact, medium, expanded, wide }
+
+class NileBreakpoints {
+  NileBreakpoints._();
+
+  /// The desktop shell starts at the narrowest iPad — the mini, 744 pt in
+  /// portrait. Anything below is a phone or an iPad Split View pane.
+  static const double medium = 740;
+
+  /// Room for the 214 pt labelled rail: the 13" iPad in portrait (1024) and up.
+  static const double expanded = 1024;
+
+  /// All three zones. 214 rail + a 640 pt minimum content column + 322 context
+  /// rail = 1176, so the 11" iPad in landscape (1194) is the first device that
+  /// earns the full layout.
+  static const double wide = 1180;
+
+  /// A phone in landscape is wider than an iPad is tall, but only ~430 pt high.
+  /// Height is what separates "small screen turned sideways" from "tablet" —
+  /// without it, rotating an iPhone would swap in a nav rail that eats most of
+  /// the vertical room there is.
+  static const double minHeightForRail = 600;
+
+  static NileWindowClass classify(Size size) {
+    if (size.height < minHeightForRail) return NileWindowClass.compact;
+    final width = size.width;
+    return width >= wide
+        ? NileWindowClass.wide
+        : width >= expanded
+        ? NileWindowClass.expanded
+        : width >= medium
+        ? NileWindowClass.medium
+        : NileWindowClass.compact;
+  }
+
+  static NileWindowClass of(BuildContext context) =>
+      classify(MediaQuery.sizeOf(context));
+}
+
+extension NileWindowClassX on NileWindowClass {
+  /// Phone layout: glass bottom nav, 600 px column, no rails.
+  bool get isCompact => this == NileWindowClass.compact;
+
+  /// A nav rail replaces the glass bottom nav from `medium` up.
+  bool get hasNavRail => this != NileWindowClass.compact;
+
+  /// Labels appear once there's room for the full 214 px rail; on an iPad in
+  /// portrait the rail is icon-only.
+  bool get navRailLabelled => index >= NileWindowClass.expanded.index;
+
+  /// The context rail is the last zone in and the first out — it needs 322 px
+  /// of its own on top of the rail and a readable content column.
+  bool get hasContextRail => index >= NileWindowClass.wide.index;
+}
+
+/// Centers [child] in a readable content column — 600 px on phones, up to
+/// [desktop] once the desktop shell is in play. Narrower windows are
+/// unaffected.
+///
+/// Grids, players and full-bleed media pass an explicit [maxWidth] (or skip
+/// this widget entirely) so they can break out wider.
 class NileMaxWidth extends StatelessWidget {
-  const NileMaxWidth({super.key, required this.child});
+  const NileMaxWidth({super.key, required this.child, this.maxWidth});
+
   final Widget child;
+
+  /// Overrides the breakpoint-derived column width.
+  /// Pass [double.infinity] to bypass the constraint entirely.
+  final double? maxWidth;
+
+  /// Phone content column.
+  static const double compact = 600;
+
+  /// Desktop content column ceiling.
+  ///
+  /// The wireframes drew 760 at a 1280 reference width. Both rails are pinned
+  /// to the window edges, so on a wider display something has to absorb the
+  /// surplus: the column grows to this ceiling first, and the context rail
+  /// takes whatever is left over. Capping at 760 instead left 216 pt of dead
+  /// gutter either side of the feed on a 1728 pt MacBook.
+  ///
+  /// Lower this to 760 to go back to the wireframe measure — the shell reads it
+  /// straight from here, so nothing else has to change.
+  static const double desktop = 900;
+
+  static double columnFor(BuildContext context) =>
+      NileBreakpoints.of(context).isCompact ? compact : desktop;
 
   @override
   Widget build(BuildContext context) => Align(
     alignment: Alignment.topCenter,
     child: ConstrainedBox(
-      constraints: const BoxConstraints(maxWidth: 600),
+      constraints: BoxConstraints(maxWidth: maxWidth ?? columnFor(context)),
       child: child,
     ),
   );

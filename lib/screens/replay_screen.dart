@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 import 'package:video_player/video_player.dart';
 
 import '../services/event_service.dart';
 import '../services/livekit_service.dart';
+import '../services/mini_player.dart';
 import '../theme.dart';
 
 /// Plays the composited replay (VOD) for an ended event. The signed playback URL
@@ -22,10 +24,29 @@ class _ReplayScreenState extends State<ReplayScreen> {
   String? _error;
   bool _controlsVisible = true;
 
+  /// There is only a dock to shrink into at desktop widths, so on phones the
+  /// screen keeps its original behaviour: leaving stops playback.
+  bool _canDock = false;
+
   @override
   void initState() {
     super.initState();
-    _load();
+    // Arriving from the dock: the controller is already initialised and mid-
+    // playback. Reusing it skips a second signed-URL round-trip and picks up
+    // exactly where the mini player was.
+    final docked = MiniPlayer.instance.reclaim(widget.event.id);
+    if (docked != null) {
+      _controller = docked;
+    } else {
+      _load();
+    }
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Read here, not in dispose, where MediaQuery is no longer safe to touch.
+    _canDock = !NileBreakpoints.of(context).isCompact;
   }
 
   Future<void> _load() async {
@@ -54,8 +75,33 @@ class _ReplayScreenState extends State<ReplayScreen> {
 
   @override
   void dispose() {
-    _controller?.dispose();
+    final c = _controller;
+    // Already handed over by _minimise — the dock owns it and disposing here
+    // would kill the audio the mini player exists to preserve.
+    if (c != null && !identical(MiniPlayer.instance.controller, c)) {
+      if (_canDock && c.value.isPlaying) {
+        // Navigating away mid-playback shrinks into the dock instead of
+        // stopping. That behaviour is the whole point of the docked player.
+        _dock(c);
+      } else {
+        c.dispose();
+      }
+    }
     super.dispose();
+  }
+
+  void _dock(VideoPlayerController c) => MiniPlayer.instance.adopt(
+    c,
+    eventId: widget.event.id,
+    title: widget.event.title,
+    subtitle: '@${widget.event.hostUsername}',
+  );
+
+  void _minimise() {
+    final c = _controller;
+    if (c == null) return;
+    _dock(c);
+    context.pop();
   }
 
   void _togglePlay() {
@@ -76,8 +122,21 @@ class _ReplayScreenState extends State<ReplayScreen> {
       appBar: AppBar(
         backgroundColor: Colors.black,
         title: Text(widget.event.title, overflow: TextOverflow.ellipsis),
+        actions: [
+          if (_canDock && _controller != null)
+            IconButton(
+              tooltip: 'Minimise',
+              icon: const Icon(Icons.picture_in_picture_alt_outlined),
+              onPressed: _minimise,
+            ),
+        ],
       ),
-      body: NileMaxWidth(child: Center(child: _buildContent())),
+      // A player is one of the surfaces that breaks out of the text column —
+      // capped only so the video doesn't stretch absurdly on a 32" display.
+      body: NileMaxWidth(
+        maxWidth: 1100,
+        child: Center(child: _buildContent()),
+      ),
     );
   }
 

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
@@ -26,10 +27,15 @@ import '../theme.dart';
 import '../widgets/event_cover_pill.dart';
 import '../widgets/event_link_card.dart';
 import '../widgets/like_button.dart';
+import '../services/nile_shortcuts.dart';
+import '../widgets/nile_context_rail.dart';
 import '../widgets/nile_glass_app_bar.dart';
+import '../widgets/nile_keyboard_list.dart';
 import '../widgets/nile_logo.dart';
 import '../widgets/nile_glass_nav_bar.dart';
+import '../widgets/nile_nav_rail.dart';
 import '../widgets/nile_skeleton.dart';
+import '../widgets/nile_top_bar.dart';
 import '../widgets/official_badge.dart';
 import '../widgets/post_image_carousel.dart';
 import '../widgets/pressable.dart';
@@ -76,6 +82,7 @@ class HomeScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final window = NileBreakpoints.of(context);
     // Android system back from a non-Home tab returns to the Home tab instead
     // of exiting the app (standard bottom-nav behavior); back from Home exits
     // as usual. No effect on iOS/desktop, where there's no system back.
@@ -84,47 +91,172 @@ class HomeScreen extends StatelessWidget {
       onPopInvokedWithResult: (didPop, _) {
         if (!didPop) shell.goBranch(0);
       },
-      child: Scaffold(
-        backgroundColor: NileColors.bgPage,
-        // Content flows behind the floating glass nav bar.
-        extendBody: true,
-        body: NileMaxWidth(child: shell),
-        // Liquid Glass nav. To revert: swap NileGlassNavBar → NileMaterialNavBar
-        // (lib/widgets/nile_material_nav_bar.dart), set extendBody: false above,
-        // restore the FloatingActionButton, and drop the reservedHeight bottom
-        // padding from the tab scroll views.
-        bottomNavigationBar: NileGlassNavBar(
-          selectedIndex: shell.currentIndex,
-          // initialLocation: true on a re-tap of the active tab pops that
-          // branch back to its root, which is what a bottom nav is expected to
-          // do and what the old single-stack shell got for free.
-          onDestinationSelected: (i) =>
-              shell.goBranch(i, initialLocation: i == shell.currentIndex),
-          // Create "+" sits on the same row as the nav pill, on every tab.
-          trailing: _CreateButton(onTap: () => _showActionSheet(context)),
-          destinations: const [
-            NileGlassDestination(
-              icon: Icons.home_outlined,
-              selectedIcon: Icons.home,
-              label: 'Home',
+      // One shell per window class. Below 900 this is byte-for-byte the layout
+      // that shipped to beta; the desktop variant is additive, so a narrow
+      // window on macOS still gets the phone app rather than a squeezed
+      // three-column one.
+      child: window.hasNavRail
+          ? _DesktopShell(
+              shell: shell,
+              window: window,
+              onCreate: () => _showActionSheet(context),
+            )
+          : _CompactShell(
+              shell: shell,
+              onCreate: () => _showActionSheet(context),
             ),
-            NileGlassDestination(
-              icon: Icons.search_outlined,
-              selectedIcon: Icons.search,
-              label: 'Discover',
+    );
+  }
+}
+
+/// The four branch destinations, shared by the glass bar and the nav rail so
+/// the two navs can never drift out of order.
+const List<NileGlassDestination> kNileDestinations = [
+  NileGlassDestination(
+    icon: Icons.home_outlined,
+    selectedIcon: Icons.home,
+    label: 'Home',
+  ),
+  NileGlassDestination(
+    icon: Icons.search_outlined,
+    selectedIcon: Icons.search,
+    label: 'Discover',
+  ),
+  NileGlassDestination(
+    icon: Icons.send_outlined,
+    selectedIcon: Icons.send,
+    label: 'Messages',
+  ),
+  NileGlassDestination(
+    icon: Icons.person_outline,
+    selectedIcon: Icons.person,
+    label: 'Profile',
+  ),
+];
+
+/// Phone layout — unchanged from the pre-desktop shell.
+class _CompactShell extends StatelessWidget {
+  const _CompactShell({required this.shell, required this.onCreate});
+
+  final StatefulNavigationShell shell;
+  final VoidCallback onCreate;
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    backgroundColor: NileColors.bgPage,
+    // Content flows behind the floating glass nav bar.
+    extendBody: true,
+    body: NileMaxWidth(child: shell),
+    // Liquid Glass nav. To revert: swap NileGlassNavBar → NileMaterialNavBar
+    // (lib/widgets/nile_material_nav_bar.dart), set extendBody: false above,
+    // restore the FloatingActionButton, and drop the reservedHeight bottom
+    // padding from the tab scroll views.
+    bottomNavigationBar: NileGlassNavBar(
+      selectedIndex: shell.currentIndex,
+      // initialLocation: true on a re-tap of the active tab pops that branch
+      // back to its root, which is what a bottom nav is expected to do and what
+      // the old single-stack shell got for free.
+      onDestinationSelected: (i) =>
+          shell.goBranch(i, initialLocation: i == shell.currentIndex),
+      // Create "+" sits on the same row as the nav pill, on every tab.
+      trailing: _CreateButton(onTap: onCreate),
+      destinations: kNileDestinations,
+    ),
+  );
+}
+
+/// The three-zone desktop shell: nav rail, content column, context rail.
+///
+/// Stateful only so it can hand the branch switcher to [NileShortcuts] — ⌘1–⌘4
+/// and J/K both need to know which branch is showing, and this is the only
+/// widget that has that.
+class _DesktopShell extends StatefulWidget {
+  const _DesktopShell({
+    required this.shell,
+    required this.window,
+    required this.onCreate,
+  });
+
+  final StatefulNavigationShell shell;
+  final NileWindowClass window;
+  final VoidCallback onCreate;
+
+  @override
+  State<_DesktopShell> createState() => _DesktopShellState();
+}
+
+class _DesktopShellState extends State<_DesktopShell> {
+  @override
+  void initState() {
+    super.initState();
+    _syncShortcuts();
+  }
+
+  @override
+  void didUpdateWidget(_DesktopShell old) {
+    super.didUpdateWidget(old);
+    _syncShortcuts();
+  }
+
+  @override
+  void dispose() {
+    NileShortcuts.branchSwitcher = null;
+    NileShortcuts.listEnabled = true;
+    super.dispose();
+  }
+
+  /// The feed's keyboard list stays mounted inside the IndexedStack while other
+  /// tabs are showing, so J/K has to be told when it isn't the visible one.
+  void _syncShortcuts() {
+    NileShortcuts.branchSwitcher = widget.shell.goBranch;
+    NileShortcuts.listEnabled = widget.shell.currentIndex == 0;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final shell = widget.shell;
+
+    // Both rails are pinned to the window edges, so the three zones always add
+    // up to exactly the window width and nothing floats. The content column
+    // grows first, up to NileMaxWidth.desktop; past that the context rail takes
+    // whatever is left over. It is the flexible zone because it holds cards,
+    // not prose — a text column that kept growing would just get harder to read.
+    final railWidth = NileNavRail.widthFor(widget.window.navRailLabelled);
+    final available = MediaQuery.sizeOf(context).width - railWidth;
+    final showContextRail = widget.window.hasContextRail;
+    final contentWidth = showContextRail
+        ? math.min(available - NileContextRail.minWidth, NileMaxWidth.desktop)
+        : available;
+
+    return Scaffold(
+      backgroundColor: NileColors.bgPage,
+      body: Row(
+        children: [
+          NileNavRail(
+            selectedIndex: shell.currentIndex,
+            onDestinationSelected: (i) =>
+                shell.goBranch(i, initialLocation: i == shell.currentIndex),
+            destinations: kNileDestinations,
+            labelled: widget.window.navRailLabelled,
+            onCreate: widget.onCreate,
+            onNotifications: () => context.push(NileRoutes.notifications),
+            onSettings: () => context.push(NileRoutes.settings),
+          ),
+          SizedBox(
+            // The shell owns the column width now, so screens sit flush against
+            // the nav rail instead of being re-centred by their own
+            // NileMaxWidth inside a wider area.
+            width: contentWidth,
+            child: Column(
+              children: [
+                const NileTopBar(),
+                Expanded(child: shell),
+              ],
             ),
-            NileGlassDestination(
-              icon: Icons.send_outlined,
-              selectedIcon: Icons.send,
-              label: 'Messages',
-            ),
-            NileGlassDestination(
-              icon: Icons.person_outline,
-              selectedIcon: Icons.person,
-              label: 'Profile',
-            ),
-          ],
-        ),
+          ),
+          if (showContextRail)
+            NileContextRail(width: available - contentWidth),
+        ],
       ),
     );
   }
@@ -904,6 +1036,47 @@ class FeedTabState extends State<FeedTab> {
     };
   }
 
+  // ── Keyboard selection (desktop) ─────────────────────────────────────────────
+
+  /// Wraps a card so J/K can move a selection ring onto it and L / C / Enter
+  /// can act on it. A no-op on phones — [NileKeyboardItem] returns the card
+  /// untouched below the desktop breakpoint.
+  Widget _keyboardItem(int index, _FeedItem it, Widget card) => NileKeyboardItem(
+    index: index,
+    onOpen: () => _openFeedItem(it),
+    // Comments live on the detail screen, so C and Enter land in the same
+    // place — C just means "I'm going there to reply".
+    onComment: () => _openFeedItem(it),
+    onLike: _likeAction(it),
+    child: card,
+  );
+
+  /// Advertiser creatives have no like path, so L over one falls through
+  /// instead of being swallowed.
+  VoidCallback? _likeAction(_FeedItem it) => switch (it) {
+    _EventFeedItem(:final event) => () => _toggleEventLike(event),
+    _PostFeedItem(:final post) => () => _togglePostLike(post),
+    _AdFeedItem() => null,
+  };
+
+  void _openFeedItem(_FeedItem it) {
+    switch (it) {
+      case _EventFeedItem(:final event):
+        context.push(
+          NileRoutes.eventOrWatch(
+            isLive: event.isLive,
+            eventId: event.id,
+            liveKitEventId: event.liveKitEventId,
+          ),
+          extra: event,
+        );
+      case _PostFeedItem(:final post):
+        context.push(NileRoutes.post(post.id), extra: post);
+      case _AdFeedItem():
+        break;
+    }
+  }
+
   // ── Currents rail actions ────────────────────────────────────────────────────
 
   /// Opens the Current creation flow; refreshes the rail on return so the
@@ -967,10 +1140,26 @@ class FeedTabState extends State<FeedTab> {
 
   @override
   Widget build(BuildContext context) {
+    // The desktop shell moves the wordmark and the notification bell into the
+    // nav rail, so keeping the feed's own app bar would just repeat them 54 px
+    // apart.
+    final compact = NileBreakpoints.of(context).isCompact;
+    // Hoisted out of the sliver it used to be built in so the starter section
+    // below can continue the same keyboard index sequence instead of
+    // restarting at 0.
+    final display = (_items == null || _items!.isEmpty)
+        ? const <_FeedItem>[]
+        : _injectAds(_interleaveRecs(_items!));
+    // Only the phone layout has a floating bar for the last card to clear.
+    final navGap = compact
+        ? NileGlassNavBar.reservedHeight + NileSpacing.s16
+        : NileSpacing.s32;
+
     // bottom:false lets the feed scroll behind the translucent glass nav bar.
     return SafeArea(
       bottom: false,
-      child: RefreshIndicator(
+      child: NileKeyboardList(
+        child: RefreshIndicator(
         color: NileColors.volt,
         backgroundColor: NileColors.bgSurface,
         onRefresh: _load,
@@ -978,22 +1167,23 @@ class FeedTabState extends State<FeedTab> {
           controller: _scroll,
           physics: const AlwaysScrollableScrollPhysics(),
           slivers: [
-            NileGlassBar.sliverAppBar(
-              title: const NileLogo(size: 'small', height: 28),
-              actions: [
-                IconButton(
-                  onPressed: _openNotifications,
-                  icon: Badge(
-                    isLabelVisible: _unreadCount > 0,
-                    label: _unreadCount > 9
-                        ? const Text('9+')
-                        : Text('$_unreadCount'),
-                    backgroundColor: NileColors.coral,
-                    child: const Icon(Icons.notifications_outlined),
+            if (compact)
+              NileGlassBar.sliverAppBar(
+                title: const NileLogo(size: 'small', height: 28),
+                actions: [
+                  IconButton(
+                    onPressed: _openNotifications,
+                    icon: Badge(
+                      isLabelVisible: _unreadCount > 0,
+                      label: _unreadCount > 9
+                          ? const Text('9+')
+                          : Text('$_unreadCount'),
+                      backgroundColor: NileColors.coral,
+                      child: const Icon(Icons.notifications_outlined),
+                    ),
                   ),
-                ),
-              ],
-            ),
+                ],
+              ),
             if (_error != null)
               SliverFillRemaining(
                 child: _ErrorState(message: _error!, onRetry: _load),
@@ -1023,33 +1213,29 @@ class FeedTabState extends State<FeedTab> {
               // Followed feed (empty when the user follows no one). Reserves
               // the nav-bar gap at its foot only when no starter section
               // follows it.
-              if (_items!.isNotEmpty)
-                Builder(
-                  builder: (_) {
-                    final display = _injectAds(_interleaveRecs(_items!));
-                    final bottom = _starterItems.isEmpty
-                        ? NileGlassNavBar.reservedHeight + NileSpacing.s16
-                        : NileSpacing.s16;
-                    return SliverPadding(
-                      padding: EdgeInsets.fromLTRB(
-                        NileSpacing.s16,
-                        NileSpacing.s8,
-                        NileSpacing.s16,
-                        bottom,
-                      ),
-                      sliver: SliverList.separated(
-                        itemCount: display.length + (_hasMore ? 1 : 0),
-                        separatorBuilder: (_, _) => const SizedBox(height: 12),
-                        itemBuilder: (_, i) {
-                          if (i >= display.length) return const LoadMoreFooter();
-                          return NileStaggeredFadeIn(
-                            index: i,
-                            child: _wrapImpression(display[i]),
-                          );
-                        },
-                      ),
-                    );
-                  },
+              if (display.isNotEmpty)
+                SliverPadding(
+                  padding: EdgeInsets.fromLTRB(
+                    NileSpacing.s16,
+                    NileSpacing.s8,
+                    NileSpacing.s16,
+                    _starterItems.isEmpty ? navGap : NileSpacing.s16,
+                  ),
+                  sliver: SliverList.separated(
+                    itemCount: display.length + (_hasMore ? 1 : 0),
+                    separatorBuilder: (_, _) => const SizedBox(height: 12),
+                    itemBuilder: (_, i) {
+                      if (i >= display.length) return const LoadMoreFooter();
+                      return NileStaggeredFadeIn(
+                        index: i,
+                        child: _keyboardItem(
+                          i,
+                          display[i],
+                          _wrapImpression(display[i]),
+                        ),
+                      );
+                    },
+                  ),
                 ),
               // Cold-start starter fill, in priority order (not time-sorted),
               // under a header that explains why it's shown.
@@ -1071,14 +1257,20 @@ class FeedTabState extends State<FeedTab> {
                     NileSpacing.s16,
                     NileSpacing.s8,
                     NileSpacing.s16,
-                    NileGlassNavBar.reservedHeight + NileSpacing.s16,
+                    navGap,
                   ),
                   sliver: SliverList.separated(
                     itemCount: _starterItems.length,
                     separatorBuilder: (_, _) => const SizedBox(height: 12),
                     itemBuilder: (_, i) => NileStaggeredFadeIn(
                       index: i,
-                      child: _cardFor(_starterItems[i]),
+                      // Continues the followed feed's indices so J/K runs
+                      // straight through both sections as one list.
+                      child: _keyboardItem(
+                        display.length + i,
+                        _starterItems[i],
+                        _cardFor(_starterItems[i]),
+                      ),
                     ),
                   ),
                 ),
@@ -1093,6 +1285,7 @@ class FeedTabState extends State<FeedTab> {
                 ),
             ],
           ],
+        ),
         ),
       ),
     );
