@@ -1,10 +1,7 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
-import '../services/message_service.dart';
-import '../services/notification_service.dart';
+import '../services/nile_badges.dart';
 import '../theme.dart';
 import 'nile_destinations.dart';
 import 'nile_logo.dart';
@@ -55,58 +52,43 @@ class NileNavRail extends StatefulWidget {
 }
 
 class _NileNavRailState extends State<NileNavRail> {
-  int _notifications = 0;
-  int _messages = 0;
-  Timer? _poll;
-
   @override
   void initState() {
     super.initState();
-    _refresh();
-    // The rail is always on screen, so it owns the badges the feed's app bar
-    // used to show. Two cheap count queries; a minute is well inside how fresh
-    // an unread badge needs to be.
-    _poll = Timer.periodic(const Duration(seconds: 60), (_) => _refresh());
+    // The counts live in NileBadges rather than here: the Dock badge on macOS
+    // wants the same two numbers, and it wants them while this rail is not on
+    // screen at all. Joining that poll rather than running a second one is also
+    // what makes tapping Messages clear both badges at once.
+    NileBadges.listen();
+    NileBadges.notifications.addListener(_onBadges);
+    NileBadges.messages.addListener(_onBadges);
   }
 
   @override
   void dispose() {
-    _poll?.cancel();
+    NileBadges.notifications.removeListener(_onBadges);
+    NileBadges.messages.removeListener(_onBadges);
+    NileBadges.release();
     super.dispose();
   }
 
-  Future<void> _refresh() async {
-    // Deliberately independent: a failure fetching one count must not blank the
-    // other, and neither is worth surfacing to the user.
-    try {
-      final n = await NotificationService.unreadCount();
-      if (mounted && n != _notifications) setState(() => _notifications = n);
-    } catch (_) {
-      // A failed badge count is not worth surfacing.
-    }
-    try {
-      final n = await MessageService.unreadTotal();
-      if (mounted && n != _messages) setState(() => _messages = n);
-    } catch (_) {
-      // As above.
-    }
+  void _onBadges() {
+    if (mounted) setState(() {});
   }
 
   int _badgeFor(NileRailBadge kind) => switch (kind) {
     NileRailBadge.none => 0,
-    NileRailBadge.notifications => _notifications,
-    NileRailBadge.messages => _messages,
+    NileRailBadge.notifications => NileBadges.notifications.value,
+    NileRailBadge.messages => NileBadges.messages.value,
   };
 
   void _tap(int slot, NileRailEntry entry) {
     widget.onDestinationSelected(slot);
-    // Opening either list clears it; reflect that now rather than waiting up to
-    // a minute for the poll to catch up.
     switch (entry.badge) {
       case NileRailBadge.notifications:
-        if (_notifications != 0) setState(() => _notifications = 0);
+        NileBadges.clearNotifications();
       case NileRailBadge.messages:
-        if (_messages != 0) setState(() => _messages = 0);
+        NileBadges.clearMessages();
       case NileRailBadge.none:
         break;
     }

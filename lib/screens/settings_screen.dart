@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../services/account_service.dart';
+import '../services/mac_host.dart';
 import '../services/profile_service.dart';
 import '../router.dart';
 import '../theme.dart';
@@ -201,6 +202,7 @@ class SettingsScreen extends StatelessWidget {
                 ),
               ],
             ),
+            const _DesktopSection(),
             _SettingsSection(
               header: 'SUPPORT',
               rows: [
@@ -246,6 +248,75 @@ class SettingsScreen extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// Mac-only preferences. Absent entirely everywhere else — and also on macOS 12,
+/// where `SMAppService` does not exist and the OS cannot answer whether Nile is
+/// a login item. A switch that cannot move is worse than no switch.
+class _DesktopSection extends StatefulWidget {
+  const _DesktopSection();
+
+  @override
+  State<_DesktopSection> createState() => _DesktopSectionState();
+}
+
+class _DesktopSectionState extends State<_DesktopSection> {
+  bool? _launchAtLogin;
+  bool _busy = false;
+
+  @override
+  void initState() {
+    super.initState();
+    if (MacHost.supported) _load();
+  }
+
+  Future<void> _load() async {
+    final state = await MacHost.launchAtLoginEnabled();
+    if (mounted) setState(() => _launchAtLogin = state);
+  }
+
+  Future<void> _set(bool value) async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    // The reply is the state actually in force, not what was asked for: the
+    // user can have revoked the login item in System Settings, and registering
+    // can fail outright on an unsigned build.
+    final applied = await MacHost.setLaunchAtLogin(value);
+    if (!mounted) return;
+    setState(() {
+      _busy = false;
+      _launchAtLogin = applied ?? _launchAtLogin;
+    });
+    if (applied == value) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: const Text(
+          "macOS wouldn't change that. Check Login Items in System Settings.",
+        ),
+        backgroundColor: NileColors.error,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final on = _launchAtLogin;
+    if (on == null) return const SizedBox.shrink();
+    return _SettingsSection(
+      header: 'DESKTOP',
+      rows: [
+        _SettingsRow(
+          icon: Icons.rocket_launch_outlined,
+          label: 'Open Nile at login',
+          onTap: () => _set(!on),
+          trailing: Switch(
+            value: on,
+            onChanged: _busy ? null : _set,
+          ),
+        ),
+      ],
     );
   }
 }
@@ -313,7 +384,10 @@ class _DeleteAccountDialogState extends State<_DeleteAccountDialog> {
 /// rows stacked inside with no dividers. Header is optional (Sign out has none).
 class _SettingsSection extends StatelessWidget {
   final String? header;
-  final List<_SettingsRow> rows;
+
+  /// Widgets rather than `_SettingsRow` so a row can carry its own state — the
+  /// launch-at-login switch has to remember whether it is on.
+  final List<Widget> rows;
   const _SettingsSection({required this.rows, this.header});
 
   @override
@@ -352,11 +426,16 @@ class _SettingsRow extends StatelessWidget {
   final String label;
   final Color? color;
   final VoidCallback onTap;
+
+  /// Replaces the chevron. A row with a control on it is a setting you change
+  /// here, not a door to somewhere else, so the two are mutually exclusive.
+  final Widget? trailing;
   const _SettingsRow({
     required this.icon,
     required this.label,
     required this.onTap,
     this.color,
+    this.trailing,
   });
 
   @override
@@ -379,7 +458,9 @@ class _SettingsRow extends StatelessWidget {
                 style: NileTextStyles.labelLg().copyWith(color: c),
               ),
             ),
-            if (color == null)
+            if (trailing != null)
+              trailing!
+            else if (color == null)
               Icon(
                 Icons.chevron_right,
                 color: NileColors.txtTertiary,

@@ -1,5 +1,6 @@
 import Cocoa
 import FlutterMacOS
+import ServiceManagement
 
 class MainFlutterWindow: NSWindow {
   /// Below this the Dart side swaps in the phone shell (NileBreakpoints), which
@@ -9,6 +10,10 @@ class MainFlutterWindow: NSWindow {
   /// Cocoa persists the window frame under this key, so the size the user
   /// settles on is what they get next launch.
   private static let frameAutosaveName = "NileMainWindow"
+
+  /// Retained for the window's lifetime. A FlutterMethodChannel stops
+  /// delivering the moment nothing holds a reference to it.
+  private var hostChannel: FlutterMethodChannel?
 
   override func awakeFromNib() {
     let flutterViewController = FlutterViewController()
@@ -31,7 +36,106 @@ class MainFlutterWindow: NSWindow {
     _ = self.setFrameAutosaveName(MainFlutterWindow.frameAutosaveName)
 
     RegisterGeneratedPlugins(registry: flutterViewController)
+    installHostChannel(flutterViewController)
 
     super.awakeFromNib()
+  }
+
+  /// Closing the window hides it instead of destroying it.
+  ///
+  /// Nile deliberately outlives its window (see AppDelegate) so that a replay
+  /// keeps playing and the menu-bar item keeps reporting who is live. A real
+  /// close would take the FlutterViewController — and with it the engine's
+  /// view — down as well, so the red button, ⌘W and Window ▸ Close all order
+  /// out instead. ⌘Q still quits, and clicking the Dock icon brings this
+  /// window back.
+  override func performClose(_ sender: Any?) {
+    self.orderOut(sender)
+  }
+
+  // MARK: - nile/macos
+
+  /// The AppKit surface Dart needs and no plugin owns: the window title, the
+  /// Dock badge, showing and hiding this window, and the login item.
+  private func installHostChannel(_ controller: FlutterViewController) {
+    let channel = FlutterMethodChannel(
+      name: "nile/macos",
+      binaryMessenger: controller.engine.binaryMessenger
+    )
+
+    channel.setMethodCallHandler { [weak self] call, result in
+      switch call.method {
+      case "setWindowTitle":
+        self?.title = call.arguments as? String ?? "Nile"
+        result(nil)
+
+      case "setDockBadge":
+        // Empty string clears it — nil badgeLabel is "no badge", "" is a badge
+        // with nothing in it.
+        let label = call.arguments as? String ?? ""
+        NSApp.dockTile.badgeLabel = label.isEmpty ? nil : label
+        result(nil)
+
+      case "showWindow":
+        NSApp.activate(ignoringOtherApps: true)
+        self?.makeKeyAndOrderFront(nil)
+        result(nil)
+
+      case "hideWindow":
+        self?.orderOut(nil)
+        result(nil)
+
+      case "quit":
+        NSApp.terminate(nil)
+        result(nil)
+
+      // SMAppService rather than the launch_at_startup plugin: that plugin has
+      // no macOS implementation of its own and expects the LaunchAtLogin Swift
+      // Package to be added to this Xcode project. SMAppService is one system
+      // API, needs no new dependency, and is what Apple points at now that the
+      // old login-item helper is deprecated. It arrived in macOS 13 and the
+      // deployment target is 12.0, so on Monterey both calls report unsupported
+      // by returning nil and Settings hides the row rather than showing a
+      // switch that cannot move.
+      case "launchAtLoginState":
+        if #available(macOS 13.0, *) {
+          result(SMAppService.mainApp.status == .enabled)
+        } else {
+          result(nil)
+        }
+
+      case "setLaunchAtLogin":
+        guard #available(macOS 13.0, *) else {
+          result(nil)
+          return
+        }
+        do {
+          // register() throws when it is already registered, and the two can
+          // drift out of step if the user removed the item in System Settings,
+          // so both directions check the live status first.
+          if call.arguments as? Bool ?? false {
+            if SMAppService.mainApp.status != .enabled {
+              try SMAppService.mainApp.register()
+            }
+          } else if SMAppService.mainApp.status == .enabled {
+            try SMAppService.mainApp.unregister()
+          }
+          result(SMAppService.mainApp.status == .enabled)
+        } catch {
+          result(
+            FlutterError(
+              code: "launch_at_login",
+              message: error.localizedDescription,
+              details: nil
+            )
+          )
+        }
+
+      default:
+        result(FlutterMethodNotImplemented)
+      }
+    }
+
+    hostChannel = channel
   }
 }

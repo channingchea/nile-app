@@ -8,6 +8,7 @@ list(APPEND FLUTTER_PLUGIN_LIST
   gtk
   livekit_client
   sentry_flutter
+  tray_manager
   url_launcher_linux
 )
 

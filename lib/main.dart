@@ -16,21 +16,44 @@ import 'services/app_lifecycle.dart';
 import 'services/connectivity_service.dart';
 import 'services/deep_link_service.dart';
 import 'services/error_log.dart';
+import 'services/mac_tray.dart';
+import 'services/nile_badges.dart';
 import 'services/nile_shortcuts.dart';
+import 'services/nile_window_title.dart';
 import 'services/push_service.dart';
 import 'services/shake_detector.dart';
 import 'services/theme_service.dart';
 import 'theme.dart';
 import 'services/feedback_service.dart';
 import 'widgets/force_update_gate.dart';
+import 'widgets/nile_menu_bar.dart';
 import 'widgets/nile_mini_player.dart';
 
-/// True only on platforms where a Firebase app is configured: web, iOS, Android.
-/// macOS and other desktop targets have no registered Firebase app.
+/// True only on platforms where a Firebase app is configured: web, iOS,
+/// Android and — since Phase 6 — macOS.
 bool get _firebaseSupported =>
     kIsWeb ||
     defaultTargetPlatform == TargetPlatform.iOS ||
-    defaultTargetPlatform == TargetPlatform.android;
+    defaultTargetPlatform == TargetPlatform.android ||
+    defaultTargetPlatform == TargetPlatform.macOS;
+
+/// macOS reuses the **iOS** Firebase app rather than registering one of its own.
+///
+/// Firebase keys an Apple app on its bundle ID and refuses two apps with the
+/// same one, and macOS deliberately shares `com.nilestreaming.app` with iOS. So
+/// there is nothing to create in the console, and the APNs key already uploaded
+/// for iOS serves both. The options are passed here rather than by dropping a
+/// second `GoogleService-Info.plist` into the macOS target, which would mean
+/// editing the Xcode project to carry a byte-identical copy of a file that is
+/// already in the repo.
+const _macosFirebaseOptions = FirebaseOptions(
+  apiKey: 'AIzaSyDWXxxdm1uWYpAV2tpnKmKmtRyVHG6DvJM',
+  appId: '1:907048556625:ios:136df524536d2790664070',
+  messagingSenderId: '907048556625',
+  projectId: 'nile-35c48',
+  storageBucket: 'nile-35c48.firebasestorage.app',
+  iosBundleId: 'com.nilestreaming.app',
+);
 
 void main() async {
   // Crash/error reporting (roadmap #4 observability). Inert without a DSN.
@@ -57,9 +80,9 @@ Future<void> _bootstrap() async {
   // handlers rather than displacing them.
   ErrorLog.install();
 
-  // Firebase (FCM) is only configured for web, iOS, and Android. Desktop
-  // targets (macOS) have no Firebase app registered, so initializing there
-  // throws and blocks startup — skip it. Push is gated the same way.
+  // Firebase (FCM). iOS and Android read their bundled config file; web and
+  // macOS pass options explicitly (macOS has no plist in its target — see
+  // _macosFirebaseOptions). Push is gated on the same flag.
   if (_firebaseSupported) {
     await Firebase.initializeApp(
       options: kIsWeb
@@ -71,6 +94,8 @@ Future<void> _bootstrap() async {
               messagingSenderId: '907048556625',
               appId: '1:907048556625:web:dd1819916110d6d5664070',
             )
+          : defaultTargetPlatform == TargetPlatform.macOS
+          ? _macosFirebaseOptions
           : null,
     );
 
@@ -78,7 +103,12 @@ Future<void> _bootstrap() async {
     // Debug builds use the debug provider; register its printed token under
     // Firebase console → App Check → Apps → Manage debug tokens. Web is
     // skipped until a reCAPTCHA v3 key is configured there.
-    if (!kIsWeb) {
+    //
+    // macOS is skipped too, and separately from the rest: App Attest's fallback
+    // is DeviceCheck, which does not exist on the Mac, so the attestation that
+    // works everywhere else has nothing to fall back to here. Signup is the only
+    // thing App Check gates, and a Mac user can sign up on the web or a phone.
+    if (!kIsWeb && defaultTargetPlatform != TargetPlatform.macOS) {
       await FirebaseAppCheck.instance.activate(
         androidProvider:
             kDebugMode ? AndroidProvider.debug : AndroidProvider.playIntegrity,
@@ -141,9 +171,19 @@ class _NileAppState extends State<NileApp> with WidgetsBindingObserver {
     if (NileShortcuts.supported) NileShortcuts.install();
     // Initialize FCM after first frame so the navigator is mounted for routing.
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_firebaseSupported) PushService.init();
+      // The precondition is an initialized Firebase app, not a platform that
+      // could have one: a widget test builds NileApp directly and never runs
+      // _bootstrap, and FirebaseMessaging.instance throws outright without it.
+      if (Firebase.apps.isNotEmpty) PushService.init();
       DeepLinkService.init();
       ShakeDetector.instance.start(_onShake);
+      // The Mac-native layer. Each of these is a no-op off macOS, and each one
+      // has to come after the first frame: the window title reads the router,
+      // and the tray and Dock badge both talk to AppKit through the channel the
+      // window installs.
+      NileWindowTitle.start();
+      NileDockBadge.start();
+      MacTray.start();
     });
   }
 
@@ -248,12 +288,18 @@ class _NileAppState extends State<NileApp> with WidgetsBindingObserver {
         // are siblings of the tab shell and cover it completely, so a dock
         // rendered inside the shell would disappear the moment you opened an
         // event — which is exactly the navigation it has to survive.
-        builder: (_, child) => GestureDetector(
-          onTap: () => FocusManager.instance.primaryFocus?.unfocus(),
-          child: RepaintBoundary(
-            key: ShakeDetector.captureKey,
-            child: NileMiniPlayerHost(
-              child: ForceUpdateGate(child: child ?? const SizedBox.shrink()),
+        // NileMenuBar is outermost and renders `child` untouched off macOS, so
+        // it costs the phone tree one widget and nothing else. It sits above
+        // the router rather than inside a screen because the Mac menu bar
+        // belongs to the app, not to whatever is currently on screen.
+        builder: (_, child) => NileMenuBar(
+          child: GestureDetector(
+            onTap: () => FocusManager.instance.primaryFocus?.unfocus(),
+            child: RepaintBoundary(
+              key: ShakeDetector.captureKey,
+              child: NileMiniPlayerHost(
+                child: ForceUpdateGate(child: child ?? const SizedBox.shrink()),
+              ),
             ),
           ),
         ),
