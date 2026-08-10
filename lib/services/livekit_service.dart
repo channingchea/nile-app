@@ -35,16 +35,25 @@ class LivekitService {
   });
 
   /// Host: publisher token for a camera. → (token, wsUrl, isMasterAudio)
+  ///
+  /// [monitor] asks for subscribe rights so the Studio can show crew feeds.
+  /// The server grants it to the host only, and only when asked — a client that
+  /// doesn't send it gets a publish-only token, which is what every build
+  /// before the Studio relies on (they connect with LiveKit's default
+  /// autoSubscribe and would otherwise start pulling feeds they cannot render).
+  /// Send it only if you also connect with `autoSubscribe: false`.
   static Future<LivekitToken> cameraToken({
     required String eventId,
     required String cameraId,
     required String cameraName,
+    bool monitor = false,
   }) async {
     final d = await _invoke<Map>({
       'action': 'camera-token',
       'eventId': eventId,
       'cameraId': cameraId,
       'cameraName': cameraName,
+      if (monitor) 'monitor': true,
     });
     return LivekitToken(
       token: d['token'] as String,

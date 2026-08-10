@@ -301,7 +301,7 @@ async function createRoom(body: any, _userId: string, _admin: any, json: Json): 
 
 // camera-token (was POST /api/camera-token)
 async function cameraToken(body: any, userId: string, admin: any, json: Json): Promise<Response> {
-  const { eventId, cameraId, cameraName } = body;
+  const { eventId, cameraId, cameraName, monitor } = body;
   if (!eventId || !cameraId || !cameraName) {
     return json({ error: "eventId, cameraId, and cameraName are required" }, 400);
   }
@@ -311,13 +311,20 @@ async function cameraToken(body: any, userId: string, admin: any, json: Json): P
 
   const roomName = roomNameFor(eventId);
 
-  // The HOST's camera may also subscribe; an operator's may not. This is what
-  // feeds the macOS Studio's monitor wall — the host has to see every crew feed
-  // to run the show. Operators stay publish-only: they point one camera and
-  // have no UI for the others, so subscribe rights would only cost them
-  // bandwidth. The client still connects with autoSubscribe off and subscribes
-  // explicitly, so a host on a phone (no Studio) pulls nothing either.
+  // The HOST's camera may also subscribe, and only when it asks to. This feeds
+  // the macOS Studio's monitor wall — a host has to see every crew feed to run
+  // the show. Operators stay publish-only: they point one camera and have no UI
+  // for the others, so subscribe rights would only cost them bandwidth.
+  //
+  // ⚠️ `monitor` is NOT redundant with the host check, and removing it breaks
+  // shipped clients. LiveKit's ConnectOptions default to autoSubscribe: true,
+  // so any build that predates the Studio would silently start pulling every
+  // crew feed it has no way to render the moment this grant appeared — on a
+  // host's phone, mid-show. Clients that manage their own subscriptions
+  // (autoSubscribe: false + an explicit subscribe pass) send this flag; older
+  // ones never do and keep exactly the behaviour they shipped with.
   const isHost = gate.event.host_id === userId;
+  const canMonitor = isHost && monitor === true;
 
   // First camera to join becomes master audio by default.
   let isMasterAudio = false;
@@ -335,7 +342,7 @@ async function cameraToken(body: any, userId: string, admin: any, json: Json): P
     name: cameraName,
     roomName,
     canPublish: true,
-    canSubscribe: isHost,
+    canSubscribe: canMonitor,
     // joinedAt is server-stamped (no device clock skew) so the viewer can align
     // this camera against the master-audio timeline. A fresh token on rejoin =
     // a fresh joinedAt automatically.

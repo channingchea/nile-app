@@ -859,6 +859,10 @@ class _CameraScreenState extends State<CameraScreen> {
         eventId: eventId,
         cameraId: DateTime.now().millisecondsSinceEpoch.toString(),
         cameraName: cameraName,
+        // Ask for the Studio's monitor grant. Safe to ask unconditionally: we
+        // connect with autoSubscribe off and subscribe only while the Studio
+        // is on screen, and the server ignores the request from non-hosts.
+        monitor: widget.isHost,
       );
       final token = conn.token;
       final wsUrl = conn.wsUrl;
