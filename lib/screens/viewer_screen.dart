@@ -4,6 +4,7 @@ import 'dart:math';
 import 'package:flutter/foundation.dart'
     show kIsWeb, defaultTargetPlatform, TargetPlatform;
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 import 'package:livekit_client/livekit_client.dart' hide ChatMessage;
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -17,7 +18,9 @@ import '../services/realtime.dart';
 import '../services/share_urls.dart';
 import '../services/supabase_client.dart';
 import '../services/tip_service.dart';
+import '../router.dart';
 import '../theme.dart';
+import '../widgets/nile_desktop.dart';
 import '../widgets/rolling_number.dart';
 import '../widgets/share_to_sheet.dart';
 
@@ -126,6 +129,12 @@ class _ViewerScreenState extends State<ViewerScreen>
   String? _myUsername;
   String? _myAvatarUrl;
   bool _chatOpen = false;
+  // Desktop gives chat a column of its own, so there is nothing to open or
+  // close there. This stands in for "the panel is up" everywhere the open flag
+  // drives behaviour (auto-follow, the unread dot) rather than position, and is
+  // set from build() — the only place that knows which layout was chosen.
+  // Always false on compact, so the phone reads exactly _chatOpen as before.
+  bool _chatPinned = false;
   bool _hasUnreadChat = false;
   // Pin-to-bottom: while the user has scrolled up, don't yank them down on a new
   // message — count them and surface a "new messages" pill instead.
@@ -295,6 +304,11 @@ class _ViewerScreenState extends State<ViewerScreen>
 
   // ── Chat ──────────────────────────────────────────────────────────────────
 
+  /// Whether the chat list is on screen — collapsed panel on a phone, pinned
+  /// column on a desktop. Everything that reacts to chat being *visible* asks
+  /// this; only the phone's slide animation still asks [_chatOpen].
+  bool get _chatShowing => _chatOpen || _chatPinned;
+
   void _onChatMessage(ChatMessage msg) {
     if (!mounted) return;
     // Auto-follow only when the user is already pinned to the bottom (or it's
@@ -306,10 +320,10 @@ class _ViewerScreenState extends State<ViewerScreen>
       if (_chatMessages.length > _maxChatMessages) {
         _chatMessages.removeRange(0, _chatMessages.length - _maxChatMessages);
       }
-      if (!_chatOpen && !msg.isMine) _hasUnreadChat = true;
-      if (_chatOpen && !follow && !msg.isSystem) _pendingChatCount++;
+      if (!_chatShowing && !msg.isMine) _hasUnreadChat = true;
+      if (_chatShowing && !follow && !msg.isSystem) _pendingChatCount++;
     });
-    if (_chatOpen && follow) _scrollChatToBottom();
+    if (_chatShowing && follow) _scrollChatToBottom();
   }
 
   void _onChatScroll() {
@@ -1124,6 +1138,7 @@ class _ViewerScreenState extends State<ViewerScreen>
       _chatMessages.clear();
       _chatController.clear();
       _chatOpen = false;
+      _chatPinned = false;
       _hasUnreadChat = false;
       _chatAtBottom = true;
       _pendingChatCount = 0;
@@ -1137,6 +1152,12 @@ class _ViewerScreenState extends State<ViewerScreen>
 
   @override
   Widget build(BuildContext context) {
+    // Desktop gets a body of its own rather than conditionals threaded through
+    // the phone one — same split as EventDetailScreen, and for the same reason:
+    // this screen shipped to beta and the phone tree has to stay exactly as it
+    // is. Everything below this line is the compact layout, untouched.
+    if (!NileBreakpoints.of(context).isCompact) return _buildDesktopScaffold();
+    _chatPinned = false;
     return Scaffold(
       backgroundColor: NileColors.bgPage,
       appBar: _state == ViewerState.watching
@@ -1214,62 +1235,10 @@ class _ViewerScreenState extends State<ViewerScreen>
   /// chat available before the show. The realtime flip to 'live' tears this
   /// down and drops everyone into the stream.
   Widget _buildLobby() {
-    final spons = _sponsorship;
-    final controller = _sponsorController;
-    final videoReady = controller != null && controller.value.isInitialized;
-    // Background priority: sponsor video → sponsor image → video thumb while
-    // buffering → event cover → plain surface.
-    final bgImageUrl = spons == null
-        ? _coverImageUrl
-        : (spons.kind == 'image' ? spons.imageUrl : (spons.thumbUrl ?? _coverImageUrl));
-
     return Stack(
       children: [
-        // Full-bleed creative/cover. Tapping a sponsored lobby opens the
-        // sponsor's link (and logs the click).
-        Positioned.fill(
-          child: GestureDetector(
-            onTap: spons != null ? _openSponsorLink : null,
-            child: videoReady
-                ? FittedBox(
-                    fit: BoxFit.cover,
-                    clipBehavior: Clip.hardEdge,
-                    child: SizedBox(
-                      width: controller.value.size.width,
-                      height: controller.value.size.height,
-                      child: VideoPlayer(controller),
-                    ),
-                  )
-                : bgImageUrl != null
-                    ? Image.network(
-                        bgImageUrl,
-                        fit: BoxFit.cover,
-                        errorBuilder: (_, _, _) =>
-                            ColoredBox(color: NileColors.bgSurface),
-                      )
-                    : ColoredBox(color: NileColors.bgSurface),
-          ),
-        ),
-        // Scrims so the top bar and overlay text stay readable on any creative.
-        Positioned.fill(
-          child: IgnorePointer(
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.topCenter,
-                  end: Alignment.bottomCenter,
-                  colors: [
-                    Colors.black.withValues(alpha: 0.55),
-                    Colors.transparent,
-                    Colors.transparent,
-                    Colors.black.withValues(alpha: 0.75),
-                  ],
-                  stops: const [0, 0.25, 0.55, 1],
-                ),
-              ),
-            ),
-          ),
-        ),
+        Positioned.fill(child: _buildLobbyBackground()),
+        Positioned.fill(child: _buildLobbyScrim()),
         Column(
           children: [
             _buildTopBar(),
@@ -1284,87 +1253,7 @@ class _ViewerScreenState extends State<ViewerScreen>
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     mainAxisSize: MainAxisSize.min,
-                    children: [
-                      // Persistent sponsorship disclosure.
-                      if (spons != null) ...[
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: NileSpacing.s8,
-                              vertical: NileSpacing.s4),
-                          decoration: BoxDecoration(
-                            color: Colors.black.withValues(alpha: 0.55),
-                            borderRadius:
-                                BorderRadius.circular(NileRadius.xs),
-                          ),
-                          child: Text(
-                            'Sponsored · ${spons.advertiserName}',
-                            style: NileTextStyles.caption().copyWith(
-                              color: Colors.white,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ),
-                        const SizedBox(height: NileSpacing.s8),
-                      ],
-                      Text(
-                        _countdownLabel,
-                        style: NileTextStyles.headingLg()
-                            .copyWith(color: Colors.white),
-                      ),
-                      if (_eventTitle != null) ...[
-                        const SizedBox(height: NileSpacing.s4),
-                        Text(
-                          _eventTitle!,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                          style: NileTextStyles.bodyLg()
-                              .copyWith(color: Colors.white),
-                        ),
-                      ],
-                      if (_hostUsername != null) ...[
-                        const SizedBox(height: NileSpacing.s8),
-                        Row(
-                          children: [
-                            CircleAvatar(
-                              radius: 12,
-                              backgroundColor: NileColors.bgSurface,
-                              backgroundImage: _hostAvatarUrl != null
-                                  ? NetworkImage(_hostAvatarUrl!)
-                                  : null,
-                              child: _hostAvatarUrl == null
-                                  ? const Icon(Icons.person,
-                                      size: 14, color: Colors.white70)
-                                  : null,
-                            ),
-                            const SizedBox(width: NileSpacing.s8),
-                            Expanded(
-                              child: Text(
-                                _hostUsername!,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: NileTextStyles.bodySm().copyWith(
-                                  color: Colors.white.withValues(alpha: 0.85),
-                                ),
-                              ),
-                            ),
-                            // Tap-to-unmute for video creatives.
-                            if (videoReady)
-                              IconButton(
-                                icon: Icon(
-                                  _sponsorMuted
-                                      ? Icons.volume_off
-                                      : Icons.volume_up,
-                                ),
-                                color: Colors.white,
-                                iconSize: 20,
-                                tooltip:
-                                    _sponsorMuted ? 'Unmute' : 'Mute',
-                                onPressed: _toggleSponsorMute,
-                              ),
-                          ],
-                        ),
-                      ],
-                    ],
+                    children: _lobbyBlocks(),
                   ),
                 ),
               ),
@@ -1376,6 +1265,158 @@ class _ViewerScreenState extends State<ViewerScreen>
         if (!_streamEnded) _buildChatOverlay(),
       ],
     );
+  }
+
+  /// The lobby's full-bleed creative, in priority order: sponsor video →
+  /// sponsor image → the video's thumb while it buffers → the event cover →
+  /// a plain surface. Tapping a sponsored lobby opens the sponsor's link (and
+  /// logs the click).
+  ///
+  /// Extracted so the desktop lobby can use the same creative behind its hero.
+  /// The sponsor impression logged in [_initLobby] assumes the creative is the
+  /// whole screen, which is why the desktop layout keeps it full-bleed behind
+  /// the countdown rather than shrinking it into a card.
+  Widget _buildLobbyBackground() {
+    final spons = _sponsorship;
+    final controller = _sponsorController;
+    final videoReady = controller != null && controller.value.isInitialized;
+    final bgImageUrl = spons == null
+        ? _coverImageUrl
+        : (spons.kind == 'image' ? spons.imageUrl : (spons.thumbUrl ?? _coverImageUrl));
+
+    return GestureDetector(
+      onTap: spons != null ? _openSponsorLink : null,
+      child: videoReady
+          ? FittedBox(
+              fit: BoxFit.cover,
+              clipBehavior: Clip.hardEdge,
+              child: SizedBox(
+                width: controller.value.size.width,
+                height: controller.value.size.height,
+                child: VideoPlayer(controller),
+              ),
+            )
+          : bgImageUrl != null
+              ? Image.network(
+                  bgImageUrl,
+                  fit: BoxFit.cover,
+                  errorBuilder: (_, _, _) =>
+                      ColoredBox(color: NileColors.bgSurface),
+                )
+              : ColoredBox(color: NileColors.bgSurface),
+    );
+  }
+
+  /// Scrims so the top bar and overlay text stay readable on any creative.
+  Widget _buildLobbyScrim() {
+    return IgnorePointer(
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [
+              Colors.black.withValues(alpha: 0.55),
+              Colors.transparent,
+              Colors.transparent,
+              Colors.black.withValues(alpha: 0.75),
+            ],
+            stops: const [0, 0.25, 0.55, 1],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Countdown, title and host — the lobby's text, in the order it reads.
+  ///
+  /// [large] is the desktop hero treatment: same blocks, two steps up in type
+  /// and a host avatar that survives being looked at from a metre away. The
+  /// default is the phone measure, so compact renders exactly what it did.
+  List<Widget> _lobbyBlocks({bool large = false}) {
+    final spons = _sponsorship;
+    final controller = _sponsorController;
+    final videoReady = controller != null && controller.value.isInitialized;
+    final avatarRadius = large ? 18.0 : 12.0;
+
+    return [
+      // Persistent sponsorship disclosure.
+      if (spons != null) ...[
+        Container(
+          padding: const EdgeInsets.symmetric(
+              horizontal: NileSpacing.s8, vertical: NileSpacing.s4),
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: 0.55),
+            borderRadius: BorderRadius.circular(NileRadius.xs),
+          ),
+          child: Text(
+            'Sponsored · ${spons.advertiserName}',
+            style: NileTextStyles.caption().copyWith(
+              color: Colors.white,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+        const SizedBox(height: NileSpacing.s8),
+      ],
+      Text(
+        _countdownLabel,
+        style: (large ? NileTextStyles.displayMd() : NileTextStyles.headingLg())
+            .copyWith(color: Colors.white),
+      ),
+      if (_eventTitle != null) ...[
+        const SizedBox(height: NileSpacing.s4),
+        Text(
+          _eventTitle!,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          style: (large ? NileTextStyles.headingMd() : NileTextStyles.bodyLg())
+              .copyWith(color: Colors.white),
+        ),
+      ],
+      if (_hostUsername != null) ...[
+        const SizedBox(height: NileSpacing.s8),
+        Row(
+          children: [
+            CircleAvatar(
+              radius: avatarRadius,
+              backgroundColor: NileColors.bgSurface,
+              backgroundImage: _hostAvatarUrl != null
+                  ? NetworkImage(_hostAvatarUrl!)
+                  : null,
+              child: _hostAvatarUrl == null
+                  ? Icon(Icons.person,
+                      size: avatarRadius + 2, color: Colors.white70)
+                  : null,
+            ),
+            const SizedBox(width: NileSpacing.s8),
+            Expanded(
+              child: Text(
+                _hostUsername!,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style:
+                    (large ? NileTextStyles.bodyLg() : NileTextStyles.bodySm())
+                        .copyWith(
+                  color: Colors.white.withValues(alpha: 0.85),
+                ),
+              ),
+            ),
+            // Tap-to-unmute for video creatives.
+            if (videoReady)
+              IconButton(
+                icon: Icon(
+                  _sponsorMuted ? Icons.volume_off : Icons.volume_up,
+                ),
+                color: Colors.white,
+                iconSize: 20,
+                tooltip: _sponsorMuted ? 'Unmute' : 'Mute',
+                onPressed: _toggleSponsorMute,
+              ),
+          ],
+        ),
+      ],
+    ];
   }
 
   Widget _buildCameraOffPlaceholder({required bool large}) {
@@ -1405,6 +1446,26 @@ class _ViewerScreenState extends State<ViewerScreen>
     );
   }
 
+  /// Connected, but no camera has published yet. Shared by both bodies so the
+  /// wait reads the same whichever one you are looking at.
+  Widget _buildWaitingForCameras() {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          CircularProgressIndicator(color: NileColors.volt),
+          const SizedBox(height: 16),
+          Text(
+            'Waiting for cameras to connect...',
+            style: NileTextStyles.bodyMd().copyWith(
+              color: NileColors.txtSecondary,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildWatching() {
     // Lobby: the host is in Sound Check — hold viewers here until Start Show
     // flips status to 'live' (handled by realtime in _onRealtimeUpdate).
@@ -1417,23 +1478,7 @@ class _ViewerScreenState extends State<ViewerScreen>
           children: [
             _buildTopBar(),
             if (_cameras.isEmpty)
-              Expanded(
-                child: Center(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      CircularProgressIndicator(color: NileColors.volt),
-                      const SizedBox(height: 16),
-                      Text(
-                        'Waiting for cameras to connect...',
-                        style: NileTextStyles.bodyMd().copyWith(
-                          color: NileColors.txtSecondary,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              )
+              Expanded(child: _buildWaitingForCameras())
             else
               Expanded(
                 child: OrientationBuilder(
@@ -1500,7 +1545,10 @@ class _ViewerScreenState extends State<ViewerScreen>
 
   // ── Top bar (viewer count + leave) ────────────────────────────────────────
 
-  Widget _buildTopBar() {
+  /// [showChatToggle] is false on desktop, where chat is a column that is
+  /// always up — a button that opens what is already open is a button that
+  /// does nothing.
+  Widget _buildTopBar({bool showChatToggle = true}) {
     // In the Lobby the bar floats over the full-bleed creative (the scrim
     // keeps it readable); everywhere else it keeps its solid background.
     final inLobbyBar = _eventStatus == 'soundcheck' && !_streamEnded;
@@ -1565,7 +1613,7 @@ class _ViewerScreenState extends State<ViewerScreen>
               onPressed: _shareStream,
             ),
           // Chat toggle — available in the Lobby too (pre-show chat, 0079)
-          if (!_streamEnded)
+          if (!_streamEnded && showChatToggle)
             Stack(
               clipBehavior: Clip.none,
               children: [
@@ -2164,6 +2212,475 @@ class _ViewerScreenState extends State<ViewerScreen>
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  // ── Desktop ───────────────────────────────────────────────────────────────
+  //
+  // One route, three states: the countdown before the show, the show itself,
+  // and what is left of it afterwards. The chrome — nav rail, top bar, back —
+  // is already drawn above this route and hands it the full width left of the
+  // rail (NileAppShell.wantsFullWidth), so nothing below draws navigation of
+  // its own. It only decides what to do with ~1470 pt.
+
+  /// Chat, beside the video instead of over it. Wide enough for a name and a
+  /// line of text without every message wrapping twice.
+  static const double _chatColumnWidth = 340;
+
+  /// Narrower than this and the video becomes the thing being squeezed, which
+  /// is the one outcome this layout exists to prevent.
+  static const double _minVideoWidth = 560;
+
+  /// Below this, the phone body is the better use of the space: chat over the
+  /// video beats two columns that are both too small. Measured rather than
+  /// derived from the window class — a nav rail starts at the iPad mini, and
+  /// that window has nothing like the width for a second column.
+  static const double _chatSplitsAt = _minVideoWidth + 1 + _chatColumnWidth;
+
+  /// Square, and large enough to read as artwork rather than a favicon.
+  static const double _lobbyCoverSize = 220;
+
+  Widget _buildDesktopScaffold() {
+    return Scaffold(
+      backgroundColor: NileColors.bgPage,
+      // No AppBar — the chrome's top bar is directly above this, and two
+      // stacked title bars is one too many.
+      body: switch (_state) {
+        ViewerState.idle => NileMaxWidth(child: _buildForm()),
+        ViewerState.connecting => _buildConnecting(),
+        ViewerState.watching => LayoutBuilder(
+          builder: (context, constraints) {
+            final split = constraints.maxWidth >= _chatSplitsAt;
+            // Recorded here because this is the only place that knows whether
+            // the chat list ended up on screen; _onChatMessage reads it to
+            // decide whether to auto-follow or raise the unread dot.
+            _chatPinned = split;
+            return split ? _buildDesktopWatching() : _buildWatching();
+          },
+        ),
+      },
+    );
+  }
+
+  /// The three states, each with a chat column pinned beside it.
+  Widget _buildDesktopWatching() {
+    final Widget main;
+    if (_streamEnded) {
+      main = _buildDesktopEnded();
+    } else if (_eventStatus == 'soundcheck') {
+      main = _buildDesktopLobby();
+    } else {
+      main = _buildDesktopLive();
+    }
+    // The chrome's top bar already sits above this, so the status-bar inset has
+    // been dealt with — but nothing has *removed* it from the MediaQuery, and
+    // _buildTopBar adds padding.top to itself. Dropping it here stops the
+    // status bar being paid for twice on an iPad; on a Mac it is zero either
+    // way. SafeArea still handles the bottom and the sides.
+    return MediaQuery.removePadding(
+      context: context,
+      removeTop: true,
+      child: SafeArea(
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Expanded(child: main),
+            const VerticalDivider(width: 1),
+            SizedBox(
+              width: _chatColumnWidth,
+              child: _streamEnded
+                  ? _buildEndedChatColumn()
+                  : _buildChatColumn(),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// A — before the show.
+  ///
+  /// The creative stays full-bleed: the impression logged in [_initLobby]
+  /// assumes it is the whole screen, so shrinking it into a card would quietly
+  /// change what we told the advertiser they bought. What changes is the text
+  /// at its foot, which becomes a hero — countdown two type steps up, title,
+  /// host. The event's own cover art joins it only when the background is a
+  /// sponsor's creative; when the background *is* the cover, a second copy of
+  /// it is noise.
+  ///
+  /// There is no ticket gate here to lay out. Access to a stream is decided
+  /// server-side by the viewer token, and the buy/you're-in UI lives on the
+  /// event page — by the time you are on this route you are already in.
+  Widget _buildDesktopLobby() {
+    final showCoverArt = _sponsorship != null && _coverImageUrl != null;
+    return Stack(
+      children: [
+        Positioned.fill(child: _buildLobbyBackground()),
+        Positioned.fill(child: _buildLobbyScrim()),
+        Column(
+          children: [
+            _buildTopBar(showChatToggle: false),
+            const Spacer(),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(
+                NileSpacing.s40,
+                0,
+                NileSpacing.s40,
+                NileSpacing.s40,
+              ),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  if (showCoverArt) ...[
+                    SizedBox(
+                      width: _lobbyCoverSize,
+                      height: _lobbyCoverSize,
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(NileRadius.lg),
+                        child: Image.network(
+                          _coverImageUrl!,
+                          fit: BoxFit.cover,
+                          cacheWidth: nileDecodeWidth(_lobbyCoverSize),
+                          errorBuilder: (_, _, _) =>
+                              ColoredBox(color: NileColors.bgSurface),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: NileSpacing.s32),
+                  ],
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: _lobbyBlocks(large: true),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  /// B — the show.
+  ///
+  /// The video fills the main area. The angle strip runs along its bottom edge
+  /// rather than its side: the right edge belongs to chat now, and a contained
+  /// 16:9 frame in an area this wide has its slack top and bottom anyway — the
+  /// strip lands in space the video was never going to use, so putting it there
+  /// costs the picture nothing. Reactions and the tip button stay where they
+  /// are, over the video and in the status bar respectively.
+  Widget _buildDesktopLive() {
+    return Stack(
+      children: [
+        Positioned.fill(
+          child: Column(
+            children: [
+              _buildTopBar(showChatToggle: false),
+              if (_cameras.isEmpty)
+                Expanded(child: _buildWaitingForCameras())
+              else ...[
+                _buildAudioBar(),
+                Expanded(
+                  child: Column(
+                    children: [
+                      Expanded(
+                        child: Stack(
+                          children: [
+                            Positioned.fill(child: _buildMainCamera()),
+                            // Bursts and the react rail sit over the video
+                            // only, so they never drift across chat.
+                            _buildReactionOverlay(),
+                            if (_canReact) _buildReactionRail(),
+                          ],
+                        ),
+                      ),
+                      if (_cameras.length > 1 && _isDesktop)
+                        _buildThumbResizeHandle(horizontal: true),
+                      if (_cameras.length > 1) _buildHorizontalThumbnails(),
+                    ],
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+        if (_reconnecting) _buildReconnectingOverlay(),
+      ],
+    );
+  }
+
+  /// C — after the show.
+  ///
+  /// This screen has no replay pipeline and no "up next" of its own, and it is
+  /// not the place to grow one: a published replay, its price, the calendar
+  /// link and the host's next date all already exist on the event page. So the
+  /// end of a stream keeps the show's identity — cover, title, host — and hands
+  /// off there, rather than ending on a black rectangle.
+  Widget _buildDesktopEnded() {
+    return Stack(
+      children: [
+        if (_coverImageUrl != null)
+          Positioned.fill(
+            child: Image.network(
+              _coverImageUrl!,
+              fit: BoxFit.cover,
+              errorBuilder: (_, _, _) => ColoredBox(color: NileColors.bgPage),
+            ),
+          ),
+        // The cover is atmosphere at this point, not content.
+        Positioned.fill(
+          child: ColoredBox(
+            color: NileColors.bgPage.withValues(alpha: 0.92),
+          ),
+        ),
+        Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 460),
+            child: Padding(
+              padding: const EdgeInsets.all(NileSpacing.s32),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    Icons.stop_circle_outlined,
+                    size: 72,
+                    color: NileColors.txtTertiary,
+                  ),
+                  const SizedBox(height: NileSpacing.s24),
+                  Text('Stream ended', style: NileTextStyles.headingLg()),
+                  if (_eventTitle != null) ...[
+                    const SizedBox(height: NileSpacing.s8),
+                    Text(
+                      _eventTitle!,
+                      textAlign: TextAlign.center,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: NileTextStyles.bodyLg(),
+                    ),
+                  ],
+                  if (_hostUsername != null) ...[
+                    const SizedBox(height: NileSpacing.s12),
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        CircleAvatar(
+                          radius: 12,
+                          backgroundColor: NileColors.bgRaised,
+                          backgroundImage: _hostAvatarUrl != null
+                              ? nileAvatarImage(_hostAvatarUrl!, 12)
+                              : null,
+                          child: _hostAvatarUrl == null
+                              ? Icon(
+                                  Icons.person,
+                                  size: 14,
+                                  color: NileColors.txtSecondary,
+                                )
+                              : null,
+                        ),
+                        const SizedBox(width: NileSpacing.s8),
+                        Text(_hostUsername!, style: NileTextStyles.bodySm()),
+                      ],
+                    ),
+                  ],
+                  const SizedBox(height: NileSpacing.s32),
+                  if (_eventDbId != null)
+                    SizedBox(
+                      width: double.infinity,
+                      child: FilledButton.icon(
+                        onPressed: _openEventPage,
+                        icon: const Icon(Icons.event_outlined),
+                        label: const Text('Go to the event page'),
+                        style: FilledButton.styleFrom(
+                          backgroundColor: NileColors.volt,
+                          foregroundColor: NileColors.onVolt,
+                          padding: const EdgeInsets.symmetric(
+                            vertical: NileSpacing.s16,
+                          ),
+                          textStyle: NileTextStyles.labelLg(),
+                          shape: const StadiumBorder(),
+                        ),
+                      ),
+                    ),
+                  const SizedBox(height: NileSpacing.s12),
+                  Text(
+                    'A replay shows up there if the host publishes one, along '
+                    'with their next date.',
+                    textAlign: TextAlign.center,
+                    style: NileTextStyles.caption(),
+                  ),
+                  const SizedBox(height: NileSpacing.s16),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      if (_eventDbId != null)
+                        TextButton.icon(
+                          onPressed: _shareStream,
+                          icon: const Icon(Icons.ios_share, size: 18),
+                          label: const Text('Share'),
+                        ),
+                      TextButton(
+                        onPressed: _leave,
+                        child: const Text('Close'),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// Replaces this route rather than pushing over it, so the viewer tears down
+  /// — the realtime channels, the chat channel and the reconcile timer go with
+  /// it — instead of staying connected to a show that is over behind a page
+  /// about that same show.
+  void _openEventPage() {
+    final id = _eventDbId;
+    if (id == null) return;
+    context.go(NileRoutes.event(id));
+  }
+
+  /// Chat as a column beside the video instead of a panel over it.
+  ///
+  /// On a phone chat floats over the picture because there is nowhere else for
+  /// it to go; here there is, and covering the show to read it is exactly what
+  /// this layout exists to stop. Same list, same input, same controllers — only
+  /// the frame differs, so a message takes one path on both platforms.
+  Widget _buildChatColumn() {
+    return ColoredBox(
+      color: NileColors.bgPage,
+      child: Column(
+        children: [
+          NileSectionHeader(
+            'Live chat',
+            dense: true,
+            accent: _eventStatus == 'soundcheck'
+                ? NileColors.volt
+                : NileColors.coral,
+            padding: const EdgeInsets.fromLTRB(
+              NileSpacing.s16,
+              NileSpacing.s16,
+              NileSpacing.s16,
+              NileSpacing.s12,
+            ),
+          ),
+          const Divider(height: 1),
+          Expanded(
+            child: Stack(
+              children: [
+                _buildChatList(),
+                if (_pendingChatCount > 0)
+                  Positioned(
+                    bottom: NileSpacing.s8,
+                    left: 0,
+                    right: 0,
+                    child: Center(child: _buildNewMessagesPill()),
+                  ),
+              ],
+            ),
+          ),
+          const Divider(height: 1),
+          // The SafeArea above already ate the bottom inset.
+          _buildChatInput(0),
+        ],
+      ),
+    );
+  }
+
+  /// C — the chat that was.
+  ///
+  /// There is nothing to re-sync. Live chat is a Supabase *broadcast* channel
+  /// with no table behind it (see ChatService): no history, no fetch, no
+  /// timestamps to reconcile against a recording. What can honestly be shown is
+  /// the buffer this client accumulated while it was connected — so that is
+  /// what this shows, labelled as exactly that, rather than a "comments" list
+  /// implying a record that does not exist.
+  Widget _buildEndedChatColumn() {
+    return ColoredBox(
+      color: NileColors.bgPage,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          NileSectionHeader(
+            'Chat from this session',
+            dense: true,
+            padding: const EdgeInsets.fromLTRB(
+              NileSpacing.s16,
+              NileSpacing.s16,
+              NileSpacing.s16,
+              NileSpacing.s4,
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(
+              NileSpacing.s16,
+              0,
+              NileSpacing.s16,
+              NileSpacing.s12,
+            ),
+            child: Text(
+              'Chat is broadcast live and never stored, so this is only what '
+              'arrived while you were watching.',
+              style: NileTextStyles.caption(),
+            ),
+          ),
+          const Divider(height: 1),
+          Expanded(
+            child: _chatMessages.isEmpty
+                ? Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(NileSpacing.s24),
+                      child: Text(
+                        'Nothing was said while you were here.',
+                        textAlign: TextAlign.center,
+                        style: NileTextStyles.bodySm().copyWith(
+                          color: NileColors.txtTertiary,
+                        ),
+                      ),
+                    ),
+                  )
+                : ListView.builder(
+                    // Deliberately not _chatScrollController: that one belongs
+                    // to the live list, and two views can't share one.
+                    padding: const EdgeInsets.fromLTRB(
+                      NileSpacing.s16,
+                      NileSpacing.s8,
+                      NileSpacing.s16,
+                      NileSpacing.s16,
+                    ),
+                    itemCount: _chatMessages.length,
+                    itemBuilder: (context, i) {
+                      final m = _chatMessages[i];
+                      return Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Padding(
+                            padding: const EdgeInsets.only(
+                              top: NileSpacing.s4,
+                              right: NileSpacing.s8,
+                            ),
+                            child: SizedBox(
+                              width: 52,
+                              child: Text(
+                                nileClock(m.sentAt.toLocal()),
+                                style: NileTextStyles.caption().tabular,
+                              ),
+                            ),
+                          ),
+                          Expanded(child: _buildChatRow(m)),
+                        ],
+                      );
+                    },
+                  ),
+          ),
+        ],
       ),
     );
   }

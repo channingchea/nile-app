@@ -16,11 +16,16 @@ import 'nile_command_palette.dart';
 /// discoverable to advertise itself — the shortcut is the fast path, the pill
 /// is how people learn the shortcut exists.
 class NileTopBar extends StatelessWidget {
-  const NileTopBar({super.key, this.actions = const []});
+  const NileTopBar({super.key, this.actions = const [], this.leading});
 
   /// Page-specific controls (filter chips, date scrubbers) rendered to the
   /// right of the search field. Phase 7 fills these in per screen.
   final List<Widget> actions;
+
+  /// Back, when something is pushed above the tab shell. Null at a branch root.
+  /// Lives here rather than on each screen because the chrome now persists
+  /// across a push, so there is one bar to put it in instead of one per screen.
+  final Widget? leading;
 
   static const double height = 54;
 
@@ -35,6 +40,10 @@ class NileTopBar extends StatelessWidget {
       ),
       child: Row(
         children: [
+          if (leading != null) ...[
+            leading!,
+            const SizedBox(width: NileSpacing.s8),
+          ],
           const _SearchPill(),
           const SizedBox(width: NileSpacing.s16),
           ...actions,

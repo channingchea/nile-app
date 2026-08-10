@@ -224,6 +224,38 @@ class EventService {
         .toList();
   });
 
+  /// Everything scheduled between [from] and [to], for the Schedule grid.
+  ///
+  /// Differs from [getUpcoming] in three ways, all of them because this powers a
+  /// calendar rather than a recommendation: it is bounded at both ends, it
+  /// **includes the caller's own events** (your own shows are the ones you most
+  /// need to see on a schedule), and it reaches into the past far enough to show
+  /// the current week from its start.
+  ///
+  /// [from] and [to] are converted to UTC here; callers pass local wall-clock
+  /// bounds. Doing the conversion in one place is deliberate — the July bug came
+  /// from a naive timestamp crossing this boundary unconverted.
+  static Future<List<Event>> getScheduledBetween({
+    required DateTime from,
+    required DateTime to,
+    int limit = 300,
+  }) => guard(() async {
+    var b = supabase
+        .from('events')
+        .select(
+          '*, profiles!events_host_id_fkey(username, avatar_url, is_official)',
+        )
+        .neq('status', 'draft')
+        .gte('scheduled_at', from.toUtc().toIso8601String())
+        .lt('scheduled_at', to.toUtc().toIso8601String());
+    final blocked = _notInList(await BlockService.blockedIds());
+    if (blocked != null) b = b.not('host_id', 'in', blocked);
+    final rows = await b.order('scheduled_at', ascending: true).limit(limit);
+    return (rows as List)
+        .map((r) => Event.fromJson(r as Map<String, dynamic>))
+        .toList();
+  });
+
   /// Feed: every event from [followingIds] that hasn't passed yet, live-first.
   ///
   /// "Passed" = status is `ended`, OR it was scheduled and the scheduled time

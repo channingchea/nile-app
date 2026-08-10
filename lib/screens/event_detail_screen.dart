@@ -20,6 +20,7 @@ import '../services/ticket_service.dart';
 import '../router.dart';
 import '../theme.dart';
 import '../widgets/live_badge.dart';
+import '../widgets/nile_desktop.dart';
 import '../widgets/official_badge.dart';
 import '../widgets/photo_viewer.dart';
 import '../widgets/rolling_number.dart';
@@ -528,11 +529,281 @@ class _EventDetailScreenState extends State<EventDetailScreen>
 
   @override
   Widget build(BuildContext context) {
+    // A pushed detail screen covers the shell, so on desktop this widget owns
+    // the whole window — far more width than the phone layout was drawn for.
+    // The desktop variant is a separate body rather than conditionals inside
+    // the phone one, for the same reason HomeScreen splits into two shells.
+    if (!NileBreakpoints.of(context).isCompact && _event != null) {
+      return Scaffold(
+        backgroundColor: NileColors.bgPage,
+        body: _buildDesktopBody(),
+      );
+    }
     return Scaffold(
       backgroundColor: NileColors.bgPage,
       body: NileMaxWidth(child: SafeArea(child: _buildBody())),
     );
   }
+
+  /// The action icons carried by the phone's SliverAppBar and, on desktop, by
+  /// the hero overlay. One list so the two can't drift.
+  List<Widget> _appBarActions() => [
+    if (_isOwnEvent) ...[
+      IconButton(
+        tooltip: 'Attendees',
+        icon: Icon(Icons.people_outline, color: NileColors.txtPrimary),
+        onPressed: _openAttendees,
+      ),
+      IconButton(
+        tooltip: 'Edit',
+        icon: Icon(Icons.edit_outlined, color: NileColors.txtPrimary),
+        onPressed: _edit,
+      ),
+      IconButton(
+        tooltip: 'Delete',
+        icon: const Icon(Icons.delete_outline, color: NileColors.coral),
+        onPressed: _delete,
+      ),
+    ],
+    IconButton(
+      tooltip: 'Share',
+      icon: Icon(Icons.ios_share, color: NileColors.txtPrimary),
+      onPressed: _share,
+    ),
+    IconButton(
+      tooltip: 'Copy ID',
+      icon: Icon(Icons.link, color: NileColors.txtPrimary),
+      onPressed: _copyId,
+    ),
+    if (!_isOwnEvent)
+      IconButton(
+        tooltip: 'Report event',
+        icon: Icon(Icons.flag_outlined, color: NileColors.txtPrimary),
+        onPressed: () => Moderation.showReportSheet(
+          context,
+          targetType: ReportTargetType.event,
+          targetId: _event!.id,
+        ),
+      ),
+    const SizedBox(width: 4),
+  ];
+
+  /// Everything about the event that isn't an action: status, title, host,
+  /// sponsor, countdown, description.
+  ///
+  /// [showPrice] is false on desktop, where the price belongs in the ticket
+  /// panel next to the button you'd press after reading it.
+  List<Widget> _detailBlocks({bool showPrice = true}) => [
+    Row(
+      children: [
+        _StatusChip(event: _event!),
+        if (showPrice && _event!.price != null && _event!.price! > 0) ...[
+          const SizedBox(width: 8),
+          _PriceChip(
+            priceCents: _event!.price!,
+            ticketsRemaining: _ticketsRemaining,
+            hasTicket: _hasTicket,
+            isOperator: _isOperator,
+          ),
+        ],
+      ],
+    ),
+    const SizedBox(height: 12),
+    Text(_event!.title, style: NileTextStyles.headingLg()),
+    const SizedBox(height: 16),
+    _HostRow(
+      event: _event!,
+      isOwn: _isOwnEvent,
+      isFollowing: _isFollowing,
+      busy: _followBusy,
+      onTapHost: _openHost,
+      onToggleFollow: _toggleFollow,
+    ),
+    const SizedBox(height: 20),
+    // Active sponsorship disclosure (0079) — mirrors the lobby's "Sponsored"
+    // tag so viewers aren't surprised at showtime.
+    if (_sponsorName != null) ...[
+      Row(
+        children: [
+          Icon(Icons.workspace_premium, size: 16, color: NileColors.volt),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              'Sponsored by $_sponsorName',
+              style: NileTextStyles.bodySm().copyWith(
+                color: NileColors.txtSecondary,
+              ),
+            ),
+          ),
+        ],
+      ),
+      const SizedBox(height: 16),
+    ],
+    if (_event!.isScheduled) ...[
+      _CountdownBlock(
+        scheduledAt: _event!.scheduledAt,
+        remaining: _remaining,
+        expired: _countdownExpired,
+      ),
+      const SizedBox(height: 20),
+    ],
+    if (_event!.description != null &&
+        _event!.description!.trim().isNotEmpty) ...[
+      Text('About', style: NileTextStyles.labelSm()),
+      const SizedBox(height: 6),
+      Text(_event!.description!, style: NileTextStyles.bodyMd()),
+      const SizedBox(height: 24),
+    ],
+    // FUTURE (agreed 2026-08-08, unscoped): a `Sponsored by` block listing
+    // vendor logos off ad_campaigns, and a `Collaborating with` block for
+    // co-hosts and guest artists with follow buttons. Crew is deliberately
+    // NOT here — it is host-only, and reaches the host through the crew setup
+    // route rather than the public page.
+  ];
+
+  /// The ticket panel: price, the one primary action, and the host's promotion
+  /// tools. On desktop this is pinned beside the content; on a phone it is the
+  /// tail of the same column.
+  List<Widget> _actionBlocks({bool showPrice = false}) => [
+    if (showPrice && _event!.price != null && _event!.price! > 0) ...[
+      _PriceChip(
+        priceCents: _event!.price!,
+        ticketsRemaining: _ticketsRemaining,
+        hasTicket: _hasTicket,
+        isOperator: _isOperator,
+      ),
+      const SizedBox(height: 16),
+    ],
+    _PrimaryCta(
+      event: _event!,
+      countdownExpired: _countdownExpired,
+      isOwn: _isOwnEvent,
+      hasTicket: _hasTicket,
+      isOperator: _isOperator,
+      isAudioOperator: _assignment?.isAudioOperator ?? false,
+      ticketBusy: _ticketBusy,
+      ticketsRemaining: _ticketsRemaining,
+      replayWatchable: _replayWatchable,
+      replayLockedByTicket: _replayLockedByTicket,
+      replayExistsForEvent: _replayHasReplay,
+      replayPublished: _replayPublished,
+      replayPriceCents: _replayPrice,
+      onWatch: _watch,
+      onBuyTicket: _buyTicket,
+      onBuyReplay: () => _buyTicket(kind: 'replay'),
+      onEnterAsCamera: _enterAsCamera,
+      onWatchReplay: _watchReplay,
+      onPriceReplay: _priceReplay,
+    ),
+    // Host-only: promote this event via the web ad portal. Opens in the
+    // external browser — a link out, not an in-app purchase.
+    if (_isOwnEvent && !_event!.isEnded) ...[
+      const SizedBox(height: 12),
+      SizedBox(
+        width: double.infinity,
+        child: OutlinedButton.icon(
+          onPressed: _boost,
+          icon: const Icon(Icons.campaign_outlined),
+          label: const Text('Boost this event'),
+          style: OutlinedButton.styleFrom(
+            foregroundColor: NileColors.txtPrimary,
+            side: BorderSide(color: NileColors.border),
+            padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
+            shape: const StadiumBorder(),
+          ),
+        ),
+      ),
+      TextButton.icon(
+        onPressed: _openBoostPerformance,
+        icon: const Icon(Icons.insights_outlined, size: 18),
+        label: const Text('View boost performance'),
+        style: TextButton.styleFrom(foregroundColor: NileColors.txtSecondary),
+      ),
+    ],
+  ];
+
+  /// Desktop: a full-bleed hero holding the window edges, then a content column
+  /// with the ticket panel pinned beside it.
+  ///
+  /// The hero is what makes the centred body below it read as deliberate rather
+  /// than as a column floating in a gutter — the mistake the shell's first two
+  /// zone attempts made.
+  Widget _buildDesktopBody() => Column(
+    children: [
+      SizedBox(
+        height: _heroHeight,
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            _CoverImage(event: _event!),
+            // No back button here — the chrome's top bar carries it now, and
+            // two would be two.
+            SafeArea(
+              bottom: false,
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: _appBarActions(),
+              ),
+            ),
+          ],
+        ),
+      ),
+      Expanded(
+        child: NileDesktopSplit(
+          content: ListView(
+            padding: const EdgeInsets.fromLTRB(
+              0,
+              NileSpacing.s24,
+              0,
+              NileSpacing.s48,
+            ),
+            children: _detailBlocks(showPrice: false),
+          ),
+          side: ListView(
+            padding: const EdgeInsets.fromLTRB(
+              0,
+              NileSpacing.s24,
+              0,
+              NileSpacing.s48,
+            ),
+            children: [
+              Container(
+                padding: const EdgeInsets.all(NileSpacing.s24),
+                decoration: BoxDecoration(
+                  color: NileColors.bgSurface,
+                  borderRadius: BorderRadius.circular(NileRadius.lg),
+                  border: Border.all(color: NileColors.border),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: _actionBlocks(showPrice: true),
+                ),
+              ),
+            ],
+          ),
+          // Between the desktop threshold and the split threshold there is a
+          // rail but not room for two columns: one column, panel at the foot.
+          narrow: ListView(
+            padding: const EdgeInsets.fromLTRB(
+              NileSpacing.s16,
+              NileSpacing.s24,
+              NileSpacing.s16,
+              NileSpacing.s48,
+            ),
+            children: [
+              ..._detailBlocks(),
+              const SizedBox(height: NileSpacing.s8),
+              ..._actionBlocks(),
+            ],
+          ),
+        ),
+      ),
+    ],
+  );
+
+  /// Tall enough to be a hero, short enough to leave the fold above the ticket
+  /// button on a 900 pt-high window.
+  static const double _heroHeight = 300;
 
   Widget _buildBody() {
     // Render immediately when an event was passed in so the Hero flight from
@@ -557,55 +828,7 @@ class _EventDetailScreenState extends State<EventDetailScreen>
           pinned: true,
           backgroundColor: NileColors.bgPage,
           expandedHeight: 240,
-          actions: [
-            if (_isOwnEvent) ...[
-              IconButton(
-                tooltip: 'Attendees',
-                icon: Icon(
-                  Icons.people_outline,
-                  color: NileColors.txtPrimary,
-                ),
-                onPressed: _openAttendees,
-              ),
-              IconButton(
-                tooltip: 'Edit',
-                icon: Icon(
-                  Icons.edit_outlined,
-                  color: NileColors.txtPrimary,
-                ),
-                onPressed: _edit,
-              ),
-              IconButton(
-                tooltip: 'Delete',
-                icon: const Icon(Icons.delete_outline, color: NileColors.coral),
-                onPressed: _delete,
-              ),
-            ],
-            IconButton(
-              tooltip: 'Share',
-              icon: Icon(Icons.ios_share, color: NileColors.txtPrimary),
-              onPressed: _share,
-            ),
-            IconButton(
-              tooltip: 'Copy ID',
-              icon: Icon(Icons.link, color: NileColors.txtPrimary),
-              onPressed: _copyId,
-            ),
-            if (!_isOwnEvent)
-              IconButton(
-                tooltip: 'Report event',
-                icon: Icon(
-                  Icons.flag_outlined,
-                  color: NileColors.txtPrimary,
-                ),
-                onPressed: () => Moderation.showReportSheet(
-                  context,
-                  targetType: ReportTargetType.event,
-                  targetId: _event!.id,
-                ),
-              ),
-            const SizedBox(width: 4),
-          ],
+          actions: _appBarActions(),
           flexibleSpace: FlexibleSpaceBar(
             background: _CoverImage(event: _event!),
           ),
@@ -613,117 +836,7 @@ class _EventDetailScreenState extends State<EventDetailScreen>
         SliverPadding(
           padding: const EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s16, NileSpacing.s16, NileSpacing.s32),
           sliver: SliverList.list(
-            children: [
-              Row(
-                children: [
-                  _StatusChip(event: _event!),
-                  if (_event!.price != null && _event!.price! > 0) ...[
-                    const SizedBox(width: 8),
-                    _PriceChip(
-                      priceCents: _event!.price!,
-                      ticketsRemaining: _ticketsRemaining,
-                      hasTicket: _hasTicket,
-                      isOperator: _isOperator,
-                    ),
-                  ],
-                ],
-              ),
-              const SizedBox(height: 12),
-              Text(_event!.title, style: NileTextStyles.headingLg()),
-              const SizedBox(height: 16),
-              _HostRow(
-                event: _event!,
-                isOwn: _isOwnEvent,
-                isFollowing: _isFollowing,
-                busy: _followBusy,
-                onTapHost: _openHost,
-                onToggleFollow: _toggleFollow,
-              ),
-              const SizedBox(height: 20),
-              // Active sponsorship disclosure (0079) — mirrors the lobby's
-              // "Sponsored" tag so viewers aren't surprised at showtime.
-              if (_sponsorName != null) ...[
-                Row(
-                  children: [
-                    Icon(Icons.workspace_premium,
-                        size: 16, color: NileColors.volt),
-                    const SizedBox(width: 6),
-                    Expanded(
-                      child: Text(
-                        'Sponsored by $_sponsorName',
-                        style: NileTextStyles.bodySm().copyWith(
-                          color: NileColors.txtSecondary,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 16),
-              ],
-              if (_event!.isScheduled) ...[
-                _CountdownBlock(
-                  scheduledAt: _event!.scheduledAt,
-                  remaining: _remaining,
-                  expired: _countdownExpired,
-                ),
-                const SizedBox(height: 20),
-              ],
-              if (_event!.description != null &&
-                  _event!.description!.trim().isNotEmpty) ...[
-                Text('About', style: NileTextStyles.labelSm()),
-                const SizedBox(height: 6),
-                Text(_event!.description!, style: NileTextStyles.bodyMd()),
-                const SizedBox(height: 24),
-              ],
-              _PrimaryCta(
-                event: _event!,
-                countdownExpired: _countdownExpired,
-                isOwn: _isOwnEvent,
-                hasTicket: _hasTicket,
-                isOperator: _isOperator,
-                isAudioOperator: _assignment?.isAudioOperator ?? false,
-                ticketBusy: _ticketBusy,
-                ticketsRemaining: _ticketsRemaining,
-                replayWatchable: _replayWatchable,
-                replayLockedByTicket: _replayLockedByTicket,
-                replayExistsForEvent: _replayHasReplay,
-                replayPublished: _replayPublished,
-                replayPriceCents: _replayPrice,
-                onWatch: _watch,
-                onBuyTicket: _buyTicket,
-                onBuyReplay: () => _buyTicket(kind: 'replay'),
-                onEnterAsCamera: _enterAsCamera,
-                onWatchReplay: _watchReplay,
-                onPriceReplay: _priceReplay,
-              ),
-              // Host-only: promote this event via the web ad portal. Opens in
-              // the external browser — a link out, not an in-app purchase.
-              if (_isOwnEvent && !_event!.isEnded) ...[
-                const SizedBox(height: 12),
-                SizedBox(
-                  width: double.infinity,
-                  child: OutlinedButton.icon(
-                    onPressed: _boost,
-                    icon: const Icon(Icons.campaign_outlined),
-                    label: const Text('Boost this event'),
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: NileColors.txtPrimary,
-                      side: BorderSide(color: NileColors.border),
-                      padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
-                      shape: const StadiumBorder(),
-                    ),
-                  ),
-                ),
-                TextButton.icon(
-                  onPressed: _openBoostPerformance,
-                  icon: const Icon(Icons.insights_outlined, size: 18),
-                  label: const Text('View boost performance'),
-                  style: TextButton.styleFrom(
-                    foregroundColor: NileColors.txtSecondary,
-                  ),
-                ),
-              ],
-            ],
+            children: [..._detailBlocks(), ..._actionBlocks()],
           ),
         ),
       ],

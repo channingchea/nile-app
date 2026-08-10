@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:video_player/video_player.dart';
@@ -8,12 +9,15 @@ import 'package:video_player/video_player.dart';
 import '../router.dart';
 import '../services/ad_service.dart';
 import '../services/current_service.dart';
+import '../services/follow_service.dart';
+import '../services/nile_shortcuts.dart';
 import '../services/report_service.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../services/share_urls.dart';
 import '../services/supabase_client.dart';
 import '../theme.dart';
+import '../widgets/empty_state.dart';
 import '../widgets/official_badge.dart';
 import 'widgets/moderation_menu.dart';
 
@@ -75,15 +79,41 @@ class _CurrentsPlayerScreenState extends State<CurrentsPlayerScreen>
   /// instant swipe-aways never bill).
   static const _dwell = Duration(seconds: 2);
 
+  // ── Desktop state ──────────────────────────────────────────────────────────
+
+  /// True only while a windowed layout is on screen and nothing is stacked
+  /// above this route. Written from [build] rather than worked out inside the
+  /// key handler, because the answer depends on MediaQuery and on the route —
+  /// both of which are only safe to read while building.
+  bool _keysLive = false;
+
+  /// Follow state the desktop column has changed this session, keyed by author.
+  /// Kept here rather than on the model: [Current.copyWith] deliberately
+  /// doesn't carry `isFollowed`, and widening it for one button on one layout
+  /// would change what every other screen's copy means.
+  final Map<String, bool> _following = {};
+
+  /// Authors with a follow request in flight, so a double-click can't send two.
+  final Set<String> _followBusy = {};
+
   @override
   void initState() {
     super.initState();
     _pager = PageController();
+    // Arrow paging is a desktop affordance — on a phone there is no keyboard to
+    // press it with and the handler is pure overhead. Installed here and torn
+    // down in dispose so it can never outlive the pager it drives.
+    if (NileShortcuts.supported) {
+      HardwareKeyboard.instance.addHandler(_onKey);
+    }
     _load();
   }
 
   @override
   void dispose() {
+    if (NileShortcuts.supported) {
+      HardwareKeyboard.instance.removeHandler(_onKey);
+    }
     _dwellTimer?.cancel();
     _slideCtrl?.dispose();
     for (final c in _controllers.values) {
@@ -279,8 +309,10 @@ class _CurrentsPlayerScreenState extends State<CurrentsPlayerScreen>
   /// Inside a multi-image Current the side zones step frames first, and only
   /// move to the next/previous Current once its frames run out. Forward past
   /// the last item closes the player, like auto-advance does.
-  void _onTapZone(TapUpDetails d) {
-    final w = MediaQuery.sizeOf(context).width;
+  void _onTapZone(TapUpDetails d, [double? zoneWidth]) {
+    // The zones are thirds of the box that was tapped, not of the window: on
+    // desktop the player is a ~450 pt column in the middle of a 1400 pt screen.
+    final w = zoneWidth ?? MediaQuery.sizeOf(context).width;
     final dx = d.localPosition.dx;
     if (dx < w / 3) {
       if (_stepFrame(-1)) return;
@@ -317,6 +349,55 @@ class _CurrentsPlayerScreenState extends State<CurrentsPlayerScreen>
     ctrl.value = start / total;
     ctrl.forward();
     return true;
+  }
+
+  /// Up / Down (and J / K) page the feed on desktop.
+  ///
+  /// Handled here rather than as a [NileShortcuts] binding: those drive the
+  /// list that currently has focus, and this screen is a pager, not a list.
+  /// The one rule that carries over is the important one — every binding is a
+  /// bare key, and the comment composer is a click away, so a focused text
+  /// field takes the keystroke and this handler never sees it.
+  bool _onKey(KeyEvent event) {
+    if (!_keysLive) return false;
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) return false;
+    // Same check, and the same reason, as NileShortcuts._typing: typing "jk"
+    // into a comment must type j and k.
+    final focused = FocusManager.instance.primaryFocus?.context;
+    if (focused != null && focused.widget is EditableText) return false;
+    final keyboard = HardwareKeyboard.instance;
+    if (keyboard.isMetaPressed ||
+        keyboard.isControlPressed ||
+        keyboard.isAltPressed) {
+      return false; // ⌘1–⌘5 and friends belong to NileShortcuts.
+    }
+
+    final key = event.logicalKey;
+    switch (key) {
+      case LogicalKeyboardKey.arrowDown:
+      case LogicalKeyboardKey.keyJ:
+        _pageBy(1);
+        return true;
+      case LogicalKeyboardKey.arrowUp:
+      case LogicalKeyboardKey.keyK:
+        _pageBy(-1);
+        return true;
+    }
+    return false;
+  }
+
+  /// Keyboard paging, routed through the same helpers as the tap zones so the
+  /// two can't disagree about what "next" means — including stepping a
+  /// slideshow's frames before leaving the Current it belongs to.
+  void _pageBy(int delta) {
+    final items = _items;
+    if (items == null || items.isEmpty) return;
+    if (_stepFrame(delta)) return;
+    if (delta > 0) {
+      _advanceFrom(_index);
+    } else if (_index > 0) {
+      _pager.previousPage(duration: NileMotion.base, curve: NileMotion.curve);
+    }
   }
 
   void _togglePause() {
@@ -372,6 +453,24 @@ class _CurrentsPlayerScreenState extends State<CurrentsPlayerScreen>
           : await CurrentService.like(r.id);
     } catch (_) {
       if (mounted) setState(() => it.current = r); // revert
+    }
+  }
+
+  bool _isFollowing(Current c) => _following[c.authorId] ?? c.isFollowed;
+
+  /// Optimistic, like [_toggleLike]: the button flips now and reverts if the
+  /// write fails. Desktop only — the phone overlay has no room for it.
+  Future<void> _toggleFollow(Current c) async {
+    final id = c.authorId;
+    if (!_followBusy.add(id)) return;
+    final next = !_isFollowing(c);
+    setState(() => _following[id] = next);
+    try {
+      next ? await FollowService.follow(id) : await FollowService.unfollow(id);
+    } catch (_) {
+      if (mounted) setState(() => _following[id] = !next); // revert
+    } finally {
+      _followBusy.remove(id);
     }
   }
 
@@ -523,6 +622,28 @@ class _CurrentsPlayerScreenState extends State<CurrentsPlayerScreen>
 
   @override
   Widget build(BuildContext context) {
+    // The chrome hands this route the whole width left of the nav rail
+    // (NileAppShell.wantsFullWidth), which is what the columns below are for.
+    // A window with no rail is a phone or a Split View pane, and there gets the
+    // full-bleed pager that shipped to beta, untouched.
+    if (!NileBreakpoints.of(context).hasNavRail) {
+      _keysLive = false;
+      return _buildCompactBody();
+    }
+    // Nothing stacked above us: a sheet or a dialog holds the keyboard while it
+    // is open, and paging the feed behind it would be paging something nobody
+    // is looking at.
+    _keysLive = ModalRoute.of(context)?.isCurrent ?? true;
+    // Decided on measured width, not window class: a nav rail starts at the
+    // iPad mini, and that window has nothing like the room for three columns.
+    return LayoutBuilder(
+      builder: (context, constraints) => constraints.maxWidth >= _contextAt
+          ? _buildDesktopBody(constraints.maxWidth)
+          : _buildCompactBody(),
+    );
+  }
+
+  Widget _buildCompactBody() {
     return Scaffold(
       backgroundColor: Colors.black,
       body: _error != null
@@ -627,13 +748,19 @@ class _CurrentsPlayerScreenState extends State<CurrentsPlayerScreen>
     );
   }
 
-  Widget _page(_PlayerItem item, int i) {
-    if (item is _CurrentItem && item.current.isImage) return _imagePage(item, i);
+  /// [overlays] false strips the creator/ad chrome and its scrim: on desktop
+  /// those live in the left column, and the video is left unobstructed.
+  /// [tapWidth] is the player's own width where that isn't the window's.
+  Widget _page(_PlayerItem item, int i,
+      {bool overlays = true, double? tapWidth}) {
+    if (item is _CurrentItem && item.current.isImage) {
+      return _imagePage(item, i, overlays: overlays, tapWidth: tapWidth);
+    }
     final c = _controllers[i];
     final ready = c != null && c.value.isInitialized;
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
-      onTapUp: _onTapZone,
+      onTapUp: (d) => _onTapZone(d, tapWidth),
       child: Stack(
         fit: StackFit.expand,
         children: [
@@ -655,7 +782,7 @@ class _CurrentsPlayerScreenState extends State<CurrentsPlayerScreen>
                   size: 72, color: Colors.white70),
             ),
           // Bottom scrim for overlay legibility.
-          const DecoratedBox(decoration: NileEffects.coverScrim),
+          if (overlays) const DecoratedBox(decoration: NileEffects.coverScrim),
           // Progress.
           if (ready)
             Positioned(
@@ -673,21 +800,23 @@ class _CurrentsPlayerScreenState extends State<CurrentsPlayerScreen>
                 ),
               ),
             ),
-          switch (item) {
-            _CurrentItem() => _currentOverlay(item),
-            _AdItem() => _adOverlay(item),
-          },
+          if (overlays)
+            switch (item) {
+              _CurrentItem() => _currentOverlay(item),
+              _AdItem() => _adOverlay(item),
+            },
         ],
       ),
     );
   }
 
-  Widget _imagePage(_CurrentItem it, int i) {
+  Widget _imagePage(_CurrentItem it, int i,
+      {bool overlays = true, double? tapWidth}) {
     final imgs = it.current.images;
     final active = i == _index && _slideCtrl != null;
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
-      onTapUp: _onTapZone,
+      onTapUp: (d) => _onTapZone(d, tapWidth),
       child: Stack(
         fit: StackFit.expand,
         children: [
@@ -712,7 +841,7 @@ class _CurrentsPlayerScreenState extends State<CurrentsPlayerScreen>
                           size: 72, color: Colors.white70),
                     ),
             ),
-          const DecoratedBox(decoration: NileEffects.coverScrim),
+          if (overlays) const DecoratedBox(decoration: NileEffects.coverScrim),
           // Segmented slideshow progress (bottom, like the video bar).
           if (active)
             Positioned(
@@ -724,7 +853,7 @@ class _CurrentsPlayerScreenState extends State<CurrentsPlayerScreen>
                 builder: (_, _) => _segments(imgs, _slideCtrl!.value),
               ),
             ),
-          _currentOverlay(it),
+          if (overlays) _currentOverlay(it),
         ],
       ),
     );
@@ -1018,6 +1147,364 @@ class _CurrentsPlayerScreenState extends State<CurrentsPlayerScreen>
       ),
     );
   }
+
+  // ── Desktop ────────────────────────────────────────────────────────────────
+  //
+  // A Current is authored at 9:16. Stretched across the width the chrome hands
+  // this route it would be a wall of video, so the player keeps its own shape
+  // in the middle, and the two things the phone stacks *on top of* it — who
+  // made this, and what people are saying about it — become columns either
+  // side, where they obstruct nothing.
+
+  /// Creator context. The same measure as Messages' list pane: an avatar, a
+  /// name and a caption all read at this width.
+  static const double _contextWidth = 320;
+
+  /// Comments. The shared side-panel measure (NileDesktopSplit.defaultSideWidth).
+  static const double _commentsWidth = 340;
+
+  /// Below this a 9:16 player stops being a player and starts being a strip.
+  static const double _minPlayerWidth = 300;
+
+  /// Context column + player. Under it the phone's full-bleed pager is a better
+  /// use of an iPad-mini-sized window than two squeezed columns.
+  static const double _contextAt = _contextWidth + 1 + _minPlayerWidth;
+
+  /// …plus the comment column. Below it, comments stay behind the sheet they
+  /// open on a phone.
+  static const double _commentsAt = _contextAt + 1 + _commentsWidth;
+
+  Widget _buildDesktopBody(double width) {
+    if (_error != null) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(NileSpacing.s24),
+          child: Text(
+            _error!,
+            textAlign: TextAlign.center,
+            style: NileTextStyles.bodyLg()
+                .copyWith(color: NileColors.txtSecondary),
+          ),
+        ),
+      );
+    }
+    final items = _items;
+    if (items == null) {
+      return Center(child: CircularProgressIndicator(color: NileColors.volt));
+    }
+    if (items.isEmpty) return const SizedBox.shrink();
+    // A delete can leave _index one ahead of the list for the frame before
+    // _onPageChanged re-clamps it.
+    final item = items[_index.clamp(0, items.length - 1)];
+    final pinned = width >= _commentsAt;
+
+    // No close button and no swipe-to-dismiss here: the chrome's top bar owns
+    // back, and a click-drag across a video shouldn't throw the screen away.
+    return SafeArea(
+      top: false,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          SizedBox(
+            width: _contextWidth,
+            child: switch (item) {
+              _CurrentItem() =>
+                _desktopCurrentContext(item, commentsPinned: pinned),
+              _AdItem() => _desktopAdContext(item),
+            },
+          ),
+          const VerticalDivider(width: 1),
+          Expanded(child: _desktopPlayer(items)),
+          if (pinned) ...[
+            const VerticalDivider(width: 1),
+            SizedBox(width: _commentsWidth, child: _desktopComments(item)),
+          ],
+        ],
+      ),
+    );
+  }
+
+  /// The pager at the shape it was shot in, centred, page background either
+  /// side. [AspectRatio] takes the height when the window is short and the
+  /// width when the column is narrow — "natural size, bounded by what's
+  /// available", with no stretching in either direction.
+  Widget _desktopPlayer(List<_PlayerItem> items) {
+    return Padding(
+      padding: const EdgeInsets.all(NileSpacing.s24),
+      child: Center(
+        child: AspectRatio(
+          aspectRatio: 9 / 16,
+          child: LayoutBuilder(
+            builder: (_, constraints) => ClipRRect(
+              borderRadius: BorderRadius.circular(NileRadius.lg),
+              child: ColoredBox(
+                // Letterboxing a clip that isn't 9:16 is part of the picture
+                // rather than chrome, so it stays the black the compact
+                // scaffold already uses behind one.
+                color: Colors.black,
+                child: PageView.builder(
+                  controller: _pager,
+                  scrollDirection: Axis.horizontal,
+                  onPageChanged: _onPageChanged,
+                  itemCount: items.length,
+                  itemBuilder: (_, i) => _page(
+                    items[i],
+                    i,
+                    overlays: false,
+                    tapWidth: constraints.maxWidth,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _desktopCurrentContext(
+    _CurrentItem it, {
+    required bool commentsPinned,
+  }) {
+    final r = it.current;
+    final own = r.authorId == supabase.auth.currentUser?.id;
+    final comments =
+        '${r.commentCount} ${r.commentCount == 1 ? 'comment' : 'comments'}';
+    return ListView(
+      padding: const EdgeInsets.all(NileSpacing.s16),
+      children: [
+        InkWell(
+          onTap: () => context.push(NileRoutes.profile(r.authorId)),
+          borderRadius: BorderRadius.circular(NileRadius.sm),
+          child: Padding(
+            padding: const EdgeInsets.all(NileSpacing.s4),
+            child: Row(
+              children: [
+                CircleAvatar(
+                  radius: 24,
+                  backgroundColor: NileColors.bgRaised,
+                  backgroundImage: r.authorAvatarUrl != null
+                      ? nileAvatarImage(r.authorAvatarUrl!, 24)
+                      : null,
+                  child: r.authorAvatarUrl == null
+                      ? Icon(Icons.person,
+                          size: 24, color: NileColors.txtTertiary)
+                      : null,
+                ),
+                const SizedBox(width: NileSpacing.s12),
+                Flexible(
+                  child: Text(
+                    '@${r.authorUsername}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: NileTextStyles.labelLg(),
+                  ),
+                ),
+                if (r.authorIsOfficial) ...[
+                  const SizedBox(width: NileSpacing.s4),
+                  const OfficialBadge(size: 16),
+                ],
+              ],
+            ),
+          ),
+        ),
+        if (!own) ...[
+          const SizedBox(height: NileSpacing.s12),
+          SizedBox(
+            width: double.infinity,
+            child: _isFollowing(r)
+                ? OutlinedButton(
+                    onPressed: () => _toggleFollow(r),
+                    child: const Text('Following'),
+                  )
+                : FilledButton(
+                    onPressed: () => _toggleFollow(r),
+                    child: const Text('Follow'),
+                  ),
+          ),
+        ],
+        if (r.caption != null && r.caption!.isNotEmpty) ...[
+          const SizedBox(height: NileSpacing.s16),
+          // The whole caption, not the overlay's three lines — this column
+          // scrolls, and nothing is sitting on top of a video here.
+          Text(r.caption!, style: NileTextStyles.bodyMd()),
+        ],
+        const SizedBox(height: NileSpacing.s12),
+        Text(
+          '${r.viewCount} ${r.viewCount == 1 ? 'view' : 'views'}',
+          style: NileTextStyles.caption().tabular,
+        ),
+        const Divider(height: NileSpacing.s24),
+        _desktopAction(
+          icon: r.likedByMe ? Icons.favorite : Icons.favorite_border,
+          label: '${r.likeCount} ${r.likeCount == 1 ? 'like' : 'likes'}',
+          color: r.likedByMe ? NileColors.coral : null,
+          onTap: () => _toggleLike(it),
+        ),
+        // With the column pinned the comments are already on screen, so this
+        // row is the count and nothing more.
+        if (commentsPinned)
+          _desktopStat(icon: Icons.mode_comment_outlined, label: comments)
+        else
+          _desktopAction(
+            icon: Icons.mode_comment_outlined,
+            label: comments,
+            onTap: () => _openComments(it),
+          ),
+        _desktopAction(
+          icon: Icons.share_outlined,
+          label: 'Share',
+          onTap: () => _share(it),
+        ),
+        _desktopAction(
+          icon: muted ? Icons.volume_off : Icons.volume_up,
+          label: muted ? 'Unmute' : 'Mute',
+          onTap: _toggleMute,
+        ),
+        _desktopAction(
+          icon: Icons.more_horiz,
+          label: 'More',
+          onTap: () => _moreMenu(it),
+        ),
+      ],
+    );
+  }
+
+  Widget _desktopAdContext(_AdItem it) {
+    final ad = it.ad;
+    return ListView(
+      padding: const EdgeInsets.all(NileSpacing.s16),
+      children: [
+        Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.symmetric(
+                  horizontal: NileSpacing.s6, vertical: NileSpacing.s2),
+              decoration: BoxDecoration(
+                color: NileColors.bgRaised,
+                borderRadius: BorderRadius.circular(NileRadius.xs),
+              ),
+              child: Text('Sponsored', style: NileTextStyles.caption()),
+            ),
+          ],
+        ),
+        const SizedBox(height: NileSpacing.s12),
+        Text(
+          ad.advertiserName,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: NileTextStyles.labelLg(),
+        ),
+        const SizedBox(height: NileSpacing.s8),
+        Text(ad.headline, style: NileTextStyles.headingSm()),
+        if (ad.body != null && ad.body!.isNotEmpty) ...[
+          const SizedBox(height: NileSpacing.s8),
+          Text(ad.body!, style: NileTextStyles.bodySm()),
+        ],
+        const SizedBox(height: NileSpacing.s16),
+        SizedBox(
+          width: double.infinity,
+          child: FilledButton(
+            onPressed: () => _openAd(ad),
+            child: const Text('Learn more'),
+          ),
+        ),
+        const Divider(height: NileSpacing.s24),
+        _desktopAction(
+          icon: muted ? Icons.volume_off : Icons.volume_up,
+          label: muted ? 'Unmute' : 'Mute',
+          onTap: _toggleMute,
+        ),
+        _desktopAction(
+          icon: Icons.more_horiz,
+          label: 'More',
+          onTap: () => _moreMenu(it),
+        ),
+      ],
+    );
+  }
+
+  /// The phone's sheet, pinned open as a column. Same widget, same fetching and
+  /// paging — it is told it is embedded and drops the sheet furniture.
+  Widget _desktopComments(_PlayerItem item) {
+    if (item is! _CurrentItem) {
+      return const NileEmptyState(
+        icon: Icons.mode_comment_outlined,
+        title: 'No comments',
+        body: "Sponsored posts don't take comments.",
+      );
+    }
+    return _CurrentCommentsSheet(
+      // Keyed on the Current: paging has to mount a clean sheet rather than
+      // hand a State still fetching the last one's comments a new model.
+      key: ValueKey(item.current.id),
+      current: item.current,
+      embedded: true,
+      onCountChanged: (delta) => setState(() {
+        item.current =
+            item.current.copyWith(commentCount: item.current.commentCount + delta);
+      }),
+    );
+  }
+
+  /// One row of the desktop action list. Labelled, unlike the phone's glyph
+  /// column: there is room for words here, and a pointer has none of the
+  /// muscle memory a thumb has for a stack of icons.
+  Widget _desktopAction({
+    required IconData icon,
+    required String label,
+    required VoidCallback onTap,
+    Color? color,
+  }) {
+    final tint = color ?? NileColors.txtPrimary;
+    return Material(
+      color: Colors.transparent,
+      borderRadius: BorderRadius.circular(NileRadius.sm),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(NileRadius.sm),
+        child: Padding(
+          padding: const EdgeInsets.all(NileSpacing.s8),
+          child: Row(
+            children: [
+              Icon(icon, size: 22, color: tint),
+              const SizedBox(width: NileSpacing.s12),
+              Expanded(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: NileTextStyles.bodyMd().copyWith(color: tint),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Same shape as [_desktopAction], but nothing happens when you click it.
+  Widget _desktopStat({required IconData icon, required String label}) {
+    return Padding(
+      padding: const EdgeInsets.all(NileSpacing.s8),
+      child: Row(
+        children: [
+          Icon(icon, size: 22, color: NileColors.txtSecondary),
+          const SizedBox(width: NileSpacing.s12),
+          Expanded(
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: NileTextStyles.bodyMd()
+                  .copyWith(color: NileColors.txtSecondary),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 // ── Comments sheet ────────────────────────────────────────────────────────────
@@ -1025,8 +1512,18 @@ class _CurrentsPlayerScreenState extends State<CurrentsPlayerScreen>
 class _CurrentCommentsSheet extends StatefulWidget {
   final Current current;
   final void Function(int delta) onCountChanged;
-  const _CurrentCommentsSheet(
-      {required this.current, required this.onCountChanged});
+
+  /// Pinned open as the desktop comment column instead of presented as a modal
+  /// sheet: it fills the space it is given, and drops the grab handle for a
+  /// sheet that isn't there to drag.
+  final bool embedded;
+
+  const _CurrentCommentsSheet({
+    super.key,
+    required this.current,
+    required this.onCountChanged,
+    this.embedded = false,
+  });
 
   @override
   State<_CurrentCommentsSheet> createState() => _CurrentCommentsSheetState();
@@ -1151,21 +1648,26 @@ class _CurrentCommentsSheetState extends State<_CurrentCommentsSheet> {
   @override
   Widget build(BuildContext context) {
     final bottomInset = MediaQuery.of(context).viewInsets.bottom;
+    // Embedded, the column it was handed is the height it gets; as a sheet it
+    // keeps the seven-tenths of the screen it has always taken.
     return SizedBox(
-      height: MediaQuery.of(context).size.height * 0.7,
+      height:
+          widget.embedded ? null : MediaQuery.of(context).size.height * 0.7,
       child: Padding(
         padding: EdgeInsets.only(bottom: bottomInset),
         child: Column(
           children: [
-            const SizedBox(height: NileSpacing.s12),
-            Container(
-              width: 36,
-              height: 4,
-              decoration: BoxDecoration(
-                color: NileColors.border,
-                borderRadius: BorderRadius.circular(NileRadius.pill),
+            if (!widget.embedded) ...[
+              const SizedBox(height: NileSpacing.s12),
+              Container(
+                width: 36,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: NileColors.border,
+                  borderRadius: BorderRadius.circular(NileRadius.pill),
+                ),
               ),
-            ),
+            ],
             const SizedBox(height: NileSpacing.s12),
             Text('Comments', style: NileTextStyles.headingSm()),
             const SizedBox(height: NileSpacing.s8),

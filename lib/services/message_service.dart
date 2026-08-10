@@ -225,6 +225,23 @@ class MessageService {
         .toList();
   });
 
+  /// Total unread messages across every conversation, for the rail's badge.
+  ///
+  /// Reuses `get_conversations_for_user` rather than adding a count endpoint:
+  /// the RPC already computes `unread_count` per row server-side, so this is
+  /// one round trip either way and there is no second definition of "unread"
+  /// to drift from the one Messages itself shows.
+  static Future<int> unreadTotal() => guard(() async {
+    _requireUid();
+    final rows = await supabase.rpc('get_conversations_for_user');
+    var total = 0;
+    for (final r in rows as List) {
+      final n = (r as Map<String, dynamic>)['unread_count'] as num?;
+      total += n?.toInt() ?? 0;
+    }
+    return total;
+  });
+
   static Conversation _conversationFromRpc(Map<String, dynamic> r) {
     final last = r['last_message_at'];
     return Conversation(

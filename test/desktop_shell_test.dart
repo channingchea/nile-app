@@ -19,9 +19,17 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'package:nile_app/theme.dart';
 import 'package:nile_app/widgets/nile_context_rail.dart';
+import 'package:nile_app/widgets/nile_destinations.dart';
 import 'package:nile_app/widgets/nile_glass_nav_bar.dart';
 import 'package:nile_app/widgets/nile_keyboard_list.dart';
 import 'package:nile_app/widgets/nile_nav_rail.dart';
+
+/// The rail takes entries, not bare destinations, since three of its real rows
+/// are routes rather than branches. These fixtures stay branch-only: what the
+/// widget tests below measure is width and labelling, which is the same either
+/// way, and the real composition is asserted in desktop_layouts_test.dart.
+List<NileRailEntry> get _entries =>
+    [for (final (i, d) in _destinations.indexed) NileRailEntry.branch(d, i)];
 
 const _destinations = [
   NileGlassDestination(
@@ -231,10 +239,9 @@ void main() {
           NileNavRail(
             selectedIndex: 0,
             onDestinationSelected: (_) {},
-            destinations: _destinations,
+            entries: _entries,
             labelled: labelled,
             onCreate: () {},
-            onNotifications: () {},
             onSettings: () {},
           ),
           const Expanded(child: SizedBox()),

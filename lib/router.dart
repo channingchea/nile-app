@@ -49,6 +49,7 @@ import 'screens/profile_screen.dart';
 import 'screens/replay_pricing_screen.dart';
 import 'screens/replay_screen.dart';
 import 'screens/report_issue_screen.dart';
+import 'screens/schedule_screen.dart';
 import 'screens/settings_screen.dart';
 import 'screens/splash_screen.dart';
 import 'screens/user_list_screen.dart';
@@ -61,6 +62,7 @@ import 'services/post_service.dart';
 import 'services/profile_service.dart';
 import 'services/tab_refresh.dart';
 import 'theme.dart';
+import 'widgets/nile_app_shell.dart';
 
 /// Every location in the app, as functions rather than raw strings so a typo is
 /// a compile error and the path shapes live in one place.
@@ -102,6 +104,11 @@ class NileRoutes {
   // Shell branches.
   static const feed = '/';
   static const messages = '/messages';
+
+  /// Desktop's fifth destination. Declared last among the branches so adding it
+  /// renumbered none of the existing ones; the phone bar has no slot for it, so
+  /// on a phone this is reachable only from a link.
+  static const schedule = '/schedule';
   static String discover({int tab = 0}) => tab == 0 ? '/discover' : '/discover?tab=$tab';
   static String profile([String? userId]) => userId == null ? '/profile' : '/u/$userId';
 
@@ -180,11 +187,21 @@ class NileRoutes {
       : event(eventId, fromProfileId: fromProfileId);
 }
 
+/// Holds exactly two things: the auth gate's routes, and the shell below. Once
+/// signed in it has a single page, so `canPop` on it is always false — anything
+/// asking "is something pushed?" wants [shellNavigatorKey] instead.
 final rootNavigatorKey = GlobalKey<NavigatorState>();
+
+/// Where every signed-in page lives, including the detail screens that used to
+/// push onto the root navigator. The desktop chrome is drawn around this
+/// navigator, which is what lets the nav rail survive a push.
+final shellNavigatorKey = GlobalKey<NavigatorState>();
+
 final _feedNavigatorKey = GlobalKey<NavigatorState>();
 final _discoverNavigatorKey = GlobalKey<NavigatorState>();
 final _messagesNavigatorKey = GlobalKey<NavigatorState>();
 final _profileNavigatorKey = GlobalKey<NavigatorState>();
+final _scheduleNavigatorKey = GlobalKey<NavigatorState>();
 
 /// Navigate from outside a widget (push notifications, deep links, services).
 GoRouter get nileRouter => _router;
@@ -224,310 +241,341 @@ final GoRouter _router = GoRouter(
       builder: (_, _) => OnboardingScreen(onDone: AuthGate.instance.onboarded),
     ),
 
-    // ── The tab shell ───────────────────────────────────────────────────────
-    // Detail screens are declared *below* this, as siblings, so they push onto
-    // the root navigator and cover the nav bar exactly as they do today.
-    StatefulShellRoute(
-      builder: (_, _, shell) => HomeScreen(shell: shell),
-      // The stock .indexedStack container has no HeroMode wrapping. Every
-      // visited tab stays mounted, so the same event can hold a live Hero on
-      // two tabs at once — duplicate tags abort ALL hero flights.
-      navigatorContainerBuilder: (_, shell, children) => IndexedStack(
-        index: shell.currentIndex,
-        children: [
-          for (final (i, child) in children.indexed)
-            HeroMode(enabled: i == shell.currentIndex, child: child),
+    // ── The signed-in tree, under the desktop chrome ────────────────────────
+    // Everything reachable once you are in lives inside this ShellRoute. On a
+    // phone `NileAppShell` is a pass-through, so this renders exactly as it did
+    // when these were root-level siblings. On a desktop it draws the nav rail,
+    // top bar and context rail ONCE, above both the tab shell and the detail
+    // screens — so pushing an event page changes the content and nothing else.
+    // That is the whole reason it exists: the agreed layout for the live viewer
+    // has a right-hand column that is part of the screen, which is impossible
+    // if opening the screen covers the chrome.
+    //
+    // Detail screens stay siblings of the tab shell rather than becoming
+    // children of a branch. Nesting them under one branch would make opening an
+    // event from Discover jump you to Home; duplicating them under all five
+    // would make `/event/:id` ambiguous for a deep link.
+    ShellRoute(
+      navigatorKey: shellNavigatorKey,
+      builder: (_, state, child) =>
+          NileAppShell(location: state.uri.path, child: child),
+      routes: [
+      StatefulShellRoute(
+        builder: (_, _, shell) => HomeScreen(shell: shell),
+        // The stock .indexedStack container has no HeroMode wrapping. Every
+        // visited tab stays mounted, so the same event can hold a live Hero on
+        // two tabs at once — duplicate tags abort ALL hero flights.
+        navigatorContainerBuilder: (_, shell, children) => IndexedStack(
+          index: shell.currentIndex,
+          children: [
+            for (final (i, child) in children.indexed)
+              HeroMode(enabled: i == shell.currentIndex, child: child),
+          ],
+        ),
+        branches: [
+          StatefulShellBranch(
+            navigatorKey: _feedNavigatorKey,
+            routes: [
+              GoRoute(
+                path: NileRoutes.feed,
+                builder: (_, _) => ValueListenableBuilder<int>(
+                  valueListenable: TabRefresh.feed,
+                  builder: (_, k, _) => FeedTab(key: ValueKey(k)),
+                ),
+              ),
+            ],
+          ),
+          StatefulShellBranch(
+            navigatorKey: _discoverNavigatorKey,
+            routes: [
+              GoRoute(
+                path: '/discover',
+                builder: (_, s) {
+                  final tab = int.tryParse(s.uri.queryParameters['tab'] ?? '') ?? 0;
+                  return ValueListenableBuilder<int>(
+                    valueListenable: TabRefresh.discover,
+                    // The tab index is part of the key: arriving at /discover?tab=2
+                    // from elsewhere has to remount, the way bumping _discoverKey
+                    // used to.
+                    builder: (_, k, _) =>
+                        DiscoverScreen(key: ValueKey('$k-$tab'), initialTab: tab),
+                  );
+                },
+              ),
+            ],
+          ),
+          StatefulShellBranch(
+            navigatorKey: _messagesNavigatorKey,
+            routes: [
+              GoRoute(path: NileRoutes.messages, builder: (_, _) => const MessagesScreen()),
+            ],
+          ),
+          StatefulShellBranch(
+            navigatorKey: _profileNavigatorKey,
+            routes: [
+              GoRoute(
+                path: '/profile',
+                builder: (_, _) => ValueListenableBuilder<int>(
+                  valueListenable: TabRefresh.profile,
+                  builder: (_, k, _) => ProfileScreen(key: ValueKey(k)),
+                ),
+              ),
+            ],
+          ),
+          // Branch 4 — Schedule. Appended rather than slotted in beside Home so
+          // no existing branch index changed: `shell.goBranch(3)` still means
+          // Profile everywhere it appears. The desktop rail reorders it for
+          // display (see kNileRailBranches).
+          StatefulShellBranch(
+            navigatorKey: _scheduleNavigatorKey,
+            routes: [
+              GoRoute(
+                path: NileRoutes.schedule,
+                builder: (_, _) => const ScheduleScreen(),
+              ),
+            ],
+          ),
         ],
       ),
-      branches: [
-        StatefulShellBranch(
-          navigatorKey: _feedNavigatorKey,
-          routes: [
-            GoRoute(
-              path: NileRoutes.feed,
-              builder: (_, _) => ValueListenableBuilder<int>(
-                valueListenable: TabRefresh.feed,
-                builder: (_, k, _) => FeedTab(key: ValueKey(k)),
-              ),
-            ),
-          ],
-        ),
-        StatefulShellBranch(
-          navigatorKey: _discoverNavigatorKey,
-          routes: [
-            GoRoute(
-              path: '/discover',
-              builder: (_, s) {
-                final tab = int.tryParse(s.uri.queryParameters['tab'] ?? '') ?? 0;
-                return ValueListenableBuilder<int>(
-                  valueListenable: TabRefresh.discover,
-                  // The tab index is part of the key: arriving at /discover?tab=2
-                  // from elsewhere has to remount, the way bumping _discoverKey
-                  // used to.
-                  builder: (_, k, _) =>
-                      DiscoverScreen(key: ValueKey('$k-$tab'), initialTab: tab),
-                );
-              },
-            ),
-          ],
-        ),
-        StatefulShellBranch(
-          navigatorKey: _messagesNavigatorKey,
-          routes: [
-            GoRoute(path: NileRoutes.messages, builder: (_, _) => const MessagesScreen()),
-          ],
-        ),
-        StatefulShellBranch(
-          navigatorKey: _profileNavigatorKey,
-          routes: [
-            GoRoute(
-              path: '/profile',
-              builder: (_, _) => ValueListenableBuilder<int>(
-                valueListenable: TabRefresh.profile,
-                builder: (_, k, _) => ProfileScreen(key: ValueKey(k)),
-              ),
-            ),
-          ],
-        ),
-      ],
-    ),
 
-    // ── Events ──────────────────────────────────────────────────────────────
-    GoRoute(
-      path: '/event/:id',
-      builder: (_, s) {
-        final id = s.pathParameters['id']!;
-        final from = s.uri.queryParameters['from'];
-        final event = s.extra;
-        if (event is Event) {
-          return EventDetailScreen(event: event, fromProfileId: from);
-        }
-        return EventDetailScreen(eventId: id, fromProfileId: from);
-      },
-      routes: [
-        GoRoute(
-          path: 'edit',
-          builder: (_, s) => _Resolve<Event>(
-            value: s.extra,
-            fetch: () => EventService.fetchById(s.pathParameters['id']!),
-            builder: (event) => EditEventScreen(event: event),
+      // ── Events ──────────────────────────────────────────────────────────────
+      GoRoute(
+        path: '/event/:id',
+        builder: (_, s) {
+          final id = s.pathParameters['id']!;
+          final from = s.uri.queryParameters['from'];
+          final event = s.extra;
+          if (event is Event) {
+            return EventDetailScreen(event: event, fromProfileId: from);
+          }
+          return EventDetailScreen(eventId: id, fromProfileId: from);
+        },
+        routes: [
+          GoRoute(
+            path: 'edit',
+            builder: (_, s) => _Resolve<Event>(
+              value: s.extra,
+              fetch: () => EventService.fetchById(s.pathParameters['id']!),
+              builder: (event) => EditEventScreen(event: event),
+            ),
           ),
-        ),
-        GoRoute(
-          path: 'replay',
-          builder: (_, s) => _Resolve<Event>(
-            value: s.extra,
-            fetch: () => EventService.fetchById(s.pathParameters['id']!),
-            builder: (event) => ReplayScreen(event: event),
+          GoRoute(
+            path: 'replay',
+            builder: (_, s) => _Resolve<Event>(
+              value: s.extra,
+              fetch: () => EventService.fetchById(s.pathParameters['id']!),
+              builder: (event) => ReplayScreen(event: event),
+            ),
           ),
-        ),
-        GoRoute(
-          path: 'replay-pricing',
-          builder: (_, s) => _Resolve<Event>(
-            value: s.extra,
-            fetch: () => EventService.fetchById(s.pathParameters['id']!),
-            builder: (event) => ReplayPricingScreen(event: event),
+          GoRoute(
+            path: 'replay-pricing',
+            builder: (_, s) => _Resolve<Event>(
+              value: s.extra,
+              fetch: () => EventService.fetchById(s.pathParameters['id']!),
+              builder: (event) => ReplayPricingScreen(event: event),
+            ),
           ),
-        ),
-        GoRoute(
-          path: 'attendees',
-          builder: (_, s) => _Resolve<Event>(
-            value: s.extra,
-            fetch: () => EventService.fetchById(s.pathParameters['id']!),
-            builder: (event) =>
-                AttendeeListScreen(eventId: event.id, eventTitle: event.title),
+          GoRoute(
+            path: 'attendees',
+            builder: (_, s) => _Resolve<Event>(
+              value: s.extra,
+              fetch: () => EventService.fetchById(s.pathParameters['id']!),
+              builder: (event) =>
+                  AttendeeListScreen(eventId: event.id, eventTitle: event.title),
+            ),
           ),
-        ),
-        GoRoute(
-          path: 'crew',
-          builder: (context, s) {
-            final id = s.pathParameters['id']!;
-            final audio = s.uri.queryParameters['audio'] == 'true';
-            return CrewSetupScreen(
-              eventId: id,
-              // Crew setup hands straight off to the stream it was set up for,
-              // replacing itself so back doesn't land on the setup form.
-              onContinue: () => context.pushReplacement(
-                NileRoutes.stream(id, audio: audio),
-              ),
-            );
-          },
-        ),
-        GoRoute(
-          path: 'likes',
-          builder: (_, s) => LikeListScreen.event(s.pathParameters['id']!),
-        ),
-      ],
-    ),
-    GoRoute(
-      path: '/watch/:id',
-      builder: (_, s) => ViewerScreen(initialEventId: s.pathParameters['id']!),
-    ),
-    GoRoute(
-      path: '/stream/:id',
-      builder: (_, s) {
-        final id = s.pathParameters['id']!;
-        final host = s.uri.queryParameters['host'] != 'false';
-        return s.uri.queryParameters['audio'] == 'true'
-            ? AudioScreen(initialEventId: id, isHost: host)
-            : CameraScreen(
-                initialEventId: id,
-                isHost: host,
-                initialCameraName: s.uri.queryParameters['name'],
+          GoRoute(
+            path: 'crew',
+            builder: (context, s) {
+              final id = s.pathParameters['id']!;
+              final audio = s.uri.queryParameters['audio'] == 'true';
+              return CrewSetupScreen(
+                eventId: id,
+                // Crew setup hands straight off to the stream it was set up for,
+                // replacing itself so back doesn't land on the setup form.
+                onContinue: () => context.pushReplacement(
+                  NileRoutes.stream(id, audio: audio),
+                ),
               );
-      },
-    ),
+            },
+          ),
+          GoRoute(
+            path: 'likes',
+            builder: (_, s) => LikeListScreen.event(s.pathParameters['id']!),
+          ),
+        ],
+      ),
+      GoRoute(
+        path: '/watch/:id',
+        builder: (_, s) => ViewerScreen(initialEventId: s.pathParameters['id']!),
+      ),
+      GoRoute(
+        path: '/stream/:id',
+        builder: (_, s) {
+          final id = s.pathParameters['id']!;
+          final host = s.uri.queryParameters['host'] != 'false';
+          return s.uri.queryParameters['audio'] == 'true'
+              ? AudioScreen(initialEventId: id, isHost: host)
+              : CameraScreen(
+                  initialEventId: id,
+                  isHost: host,
+                  initialCameraName: s.uri.queryParameters['name'],
+                );
+        },
+      ),
 
-    // ── Posts ───────────────────────────────────────────────────────────────
-    GoRoute(
-      path: '/post/:id',
-      builder: (_, s) => _Resolve<Post>(
-        value: s.extra,
-        fetch: () => PostService.fetchById(s.pathParameters['id']!),
-        builder: (post) => PostDetailScreen(
-          post: post,
-          fromProfileId: s.uri.queryParameters['from'],
+      // ── Posts ───────────────────────────────────────────────────────────────
+      GoRoute(
+        path: '/post/:id',
+        builder: (_, s) => _Resolve<Post>(
+          value: s.extra,
+          fetch: () => PostService.fetchById(s.pathParameters['id']!),
+          builder: (post) => PostDetailScreen(
+            post: post,
+            fromProfileId: s.uri.queryParameters['from'],
+          ),
+        ),
+        routes: [
+          GoRoute(
+            path: 'edit',
+            builder: (_, s) => _Resolve<Post>(
+              value: s.extra,
+              fetch: () => PostService.fetchById(s.pathParameters['id']!),
+              builder: (post) => EditPostScreen(post: post),
+            ),
+          ),
+          GoRoute(
+            path: 'likes',
+            builder: (_, s) => LikeListScreen.post(s.pathParameters['id']!),
+          ),
+        ],
+      ),
+
+      // ── People ──────────────────────────────────────────────────────────────
+      GoRoute(
+        path: '/u/:id',
+        builder: (_, s) => ProfileScreen(userId: s.pathParameters['id']),
+        routes: [
+          GoRoute(
+            path: 'followers',
+            builder: (_, s) => FollowListScreen(
+              userId: s.pathParameters['id']!,
+              displayName: s.uri.queryParameters['name'] ?? '',
+              mode: FollowListMode.followers,
+            ),
+          ),
+          GoRoute(
+            path: 'following',
+            builder: (_, s) => FollowListScreen(
+              userId: s.pathParameters['id']!,
+              displayName: s.uri.queryParameters['name'] ?? '',
+              mode: FollowListMode.following,
+            ),
+          ),
+        ],
+      ),
+      GoRoute(
+        path: '/dm/:userId',
+        builder: (_, s) => _Resolve<Conversation>(
+          value: s.extra,
+          fetch: () => MessageService.getOrCreate(s.pathParameters['userId']!),
+          builder: (conv) => ConversationScreen(conversation: conv),
         ),
       ),
-      routes: [
-        GoRoute(
-          path: 'edit',
-          builder: (_, s) => _Resolve<Post>(
-            value: s.extra,
-            fetch: () => PostService.fetchById(s.pathParameters['id']!),
-            builder: (post) => EditPostScreen(post: post),
-          ),
-        ),
-        GoRoute(
-          path: 'likes',
-          builder: (_, s) => LikeListScreen.post(s.pathParameters['id']!),
-        ),
-      ],
-    ),
-
-    // ── People ──────────────────────────────────────────────────────────────
-    GoRoute(
-      path: '/u/:id',
-      builder: (_, s) => ProfileScreen(userId: s.pathParameters['id']),
-      routes: [
-        GoRoute(
-          path: 'followers',
-          builder: (_, s) => FollowListScreen(
-            userId: s.pathParameters['id']!,
-            displayName: s.uri.queryParameters['name'] ?? '',
-            mode: FollowListMode.followers,
-          ),
-        ),
-        GoRoute(
-          path: 'following',
-          builder: (_, s) => FollowListScreen(
-            userId: s.pathParameters['id']!,
-            displayName: s.uri.queryParameters['name'] ?? '',
-            mode: FollowListMode.following,
-          ),
-        ),
-      ],
-    ),
-    GoRoute(
-      path: '/dm/:userId',
-      builder: (_, s) => _Resolve<Conversation>(
-        value: s.extra,
-        fetch: () => MessageService.getOrCreate(s.pathParameters['userId']!),
-        builder: (conv) => ConversationScreen(conversation: conv),
+      GoRoute(
+        path: NileRoutes.userList,
+        // Driven by a fetcher closure, so it only exists as a pushed destination —
+        // there is nothing to put in a URL. Falls back to the profile tab if a
+        // cold link ever reaches it.
+        builder: (_, s) => s.extra is UserListArgs
+            ? (s.extra as UserListArgs).build()
+            : const ProfileScreen(),
       ),
-    ),
-    GoRoute(
-      path: NileRoutes.userList,
-      // Driven by a fetcher closure, so it only exists as a pushed destination —
-      // there is nothing to put in a URL. Falls back to the profile tab if a
-      // cold link ever reaches it.
-      builder: (_, s) => s.extra is UserListArgs
-          ? (s.extra as UserListArgs).build()
-          : const ProfileScreen(),
-    ),
 
-    // ── Everything else above the shell ─────────────────────────────────────
-    GoRoute(path: NileRoutes.notifications, builder: (_, _) => const NotificationsScreen()),
-    GoRoute(
-      path: NileRoutes.currents,
-      builder: (_, s) =>
-          CurrentsPlayerScreen(startUserId: s.uri.queryParameters['user']),
-    ),
-    GoRoute(path: NileRoutes.boost, builder: (_, _) => const BoostPerformanceScreen()),
-    GoRoute(
-      path: '/report/:id',
-      builder: (_, s) => MyReportScreen(reportId: s.pathParameters['id']!),
-    ),
-
-    GoRoute(path: NileRoutes.createPost, builder: (_, s) {
-      final args = s.extra;
-      return args is CreatePostArgs
-          ? CreatePostScreen(initialText: args.initialText, eventId: args.eventId)
-          : const CreatePostScreen();
-    }),
-    GoRoute(path: NileRoutes.createCurrent, builder: (_, _) => const CreateCurrentScreen()),
-    GoRoute(path: NileRoutes.createEvent, builder: (_, _) => const CreateEventFlow()),
-
-    GoRoute(
-      path: NileRoutes.settings,
-      builder: (_, s) => _Resolve<UserProfile>(
-        value: s.extra,
-        fetch: ProfileService.fetchCurrentProfile,
-        builder: (profile) => SettingsScreen(profile: profile),
+      // ── Everything else above the shell ─────────────────────────────────────
+      GoRoute(path: NileRoutes.notifications, builder: (_, _) => const NotificationsScreen()),
+      GoRoute(
+        path: NileRoutes.currents,
+        builder: (_, s) =>
+            CurrentsPlayerScreen(startUserId: s.uri.queryParameters['user']),
       ),
-      routes: [
-        GoRoute(path: 'appearance', builder: (_, _) => const AppearanceScreen()),
-        GoRoute(
-          path: 'profile',
-          builder: (_, s) => _Resolve<UserProfile>(
-            value: s.extra,
-            fetch: ProfileService.fetchCurrentProfile,
-            builder: (profile) => EditProfileScreen(profile: profile),
-          ),
-        ),
-        GoRoute(path: 'currents', builder: (_, _) => const MyCurrentsScreen()),
-        GoRoute(
-          path: 'report',
-          builder: (_, s) {
-            final args = s.extra;
-            return args is ReportIssueArgs
-                ? ReportIssueScreen(
-                    initialKind: args.kind,
-                    initialImage: args.image,
-                    source: args.source,
-                  )
-                : const ReportIssueScreen();
-          },
-        ),
-        GoRoute(path: 'tickets', builder: (_, _) => const MyTicketsScreen()),
-        GoRoute(path: 'payouts', builder: (_, _) => const PayoutsScreen()),
-        GoRoute(path: 'interests', builder: (_, _) => const InterestPickerScreen()),
-        GoRoute(
-          path: 'notifications',
-          builder: (_, _) => const NotificationPreferencesScreen(),
-        ),
-        GoRoute(path: 'password', builder: (_, _) => const ChangePasswordScreen()),
-        GoRoute(path: 'mfa', builder: (_, _) => const MfaSettingsScreen()),
-        GoRoute(path: 'blocked', builder: (_, _) => const BlockedAccountsScreen()),
-      ],
-    ),
+      GoRoute(path: NileRoutes.boost, builder: (_, _) => const BoostPerformanceScreen()),
+      GoRoute(
+        path: '/report/:id',
+        builder: (_, s) => MyReportScreen(reportId: s.pathParameters['id']!),
+      ),
 
-    GoRoute(path: NileRoutes.mfaEnroll, builder: (_, _) => const MfaEnrollScreen()),
-    GoRoute(
-      path: NileRoutes.mfaBackupCodes,
-      // One-shot secrets: they exist only in memory, so this route is reachable
-      // only with them in hand.
-      builder: (_, s) {
+      GoRoute(path: NileRoutes.createPost, builder: (_, s) {
         final args = s.extra;
-        return args is BackupCodesArgs
-            ? MfaBackupCodesScreen(codes: args.codes, afterEnroll: args.afterEnroll)
-            : const MfaSettingsScreen();
-      },
-    ),
-    GoRoute(path: NileRoutes.mfaRecovery, builder: (_, _) => const MfaRecoveryScreen()),
-    GoRoute(
-      path: NileRoutes.mfaConnectGate,
-      builder: (_, _) => const MfaConnectGateScreen(),
+        return args is CreatePostArgs
+            ? CreatePostScreen(initialText: args.initialText, eventId: args.eventId)
+            : const CreatePostScreen();
+      }),
+      GoRoute(path: NileRoutes.createCurrent, builder: (_, _) => const CreateCurrentScreen()),
+      GoRoute(path: NileRoutes.createEvent, builder: (_, _) => const CreateEventFlow()),
+
+      GoRoute(
+        path: NileRoutes.settings,
+        builder: (_, s) => _Resolve<UserProfile>(
+          value: s.extra,
+          fetch: ProfileService.fetchCurrentProfile,
+          builder: (profile) => SettingsScreen(profile: profile),
+        ),
+        routes: [
+          GoRoute(path: 'appearance', builder: (_, _) => const AppearanceScreen()),
+          GoRoute(
+            path: 'profile',
+            builder: (_, s) => _Resolve<UserProfile>(
+              value: s.extra,
+              fetch: ProfileService.fetchCurrentProfile,
+              builder: (profile) => EditProfileScreen(profile: profile),
+            ),
+          ),
+          GoRoute(path: 'currents', builder: (_, _) => const MyCurrentsScreen()),
+          GoRoute(
+            path: 'report',
+            builder: (_, s) {
+              final args = s.extra;
+              return args is ReportIssueArgs
+                  ? ReportIssueScreen(
+                      initialKind: args.kind,
+                      initialImage: args.image,
+                      source: args.source,
+                    )
+                  : const ReportIssueScreen();
+            },
+          ),
+          GoRoute(path: 'tickets', builder: (_, _) => const MyTicketsScreen()),
+          GoRoute(path: 'payouts', builder: (_, _) => const PayoutsScreen()),
+          GoRoute(path: 'interests', builder: (_, _) => const InterestPickerScreen()),
+          GoRoute(
+            path: 'notifications',
+            builder: (_, _) => const NotificationPreferencesScreen(),
+          ),
+          GoRoute(path: 'password', builder: (_, _) => const ChangePasswordScreen()),
+          GoRoute(path: 'mfa', builder: (_, _) => const MfaSettingsScreen()),
+          GoRoute(path: 'blocked', builder: (_, _) => const BlockedAccountsScreen()),
+        ],
+      ),
+
+      GoRoute(path: NileRoutes.mfaEnroll, builder: (_, _) => const MfaEnrollScreen()),
+      GoRoute(
+        path: NileRoutes.mfaBackupCodes,
+        // One-shot secrets: they exist only in memory, so this route is reachable
+        // only with them in hand.
+        builder: (_, s) {
+          final args = s.extra;
+          return args is BackupCodesArgs
+              ? MfaBackupCodesScreen(codes: args.codes, afterEnroll: args.afterEnroll)
+              : const MfaSettingsScreen();
+        },
+      ),
+      GoRoute(path: NileRoutes.mfaRecovery, builder: (_, _) => const MfaRecoveryScreen()),
+      GoRoute(
+        path: NileRoutes.mfaConnectGate,
+        builder: (_, _) => const MfaConnectGateScreen(),
+      ),
+      ],
     ),
   ],
 );

@@ -16,6 +16,7 @@ import '../widgets/event_cover_pill.dart';
 import '../widgets/event_link_card.dart';
 import '../widgets/like_button.dart';
 import '../widgets/post_image_carousel.dart';
+import '../widgets/nile_desktop.dart';
 import '../widgets/nile_glass_nav_bar.dart';
 import '../widgets/nile_skeleton.dart';
 import '../widgets/official_badge.dart';
@@ -394,12 +395,35 @@ class _DiscoverScreenState extends State<DiscoverScreen>
     extra: ev,
   );
 
+  /// Opens a result post and writes back whatever the detail screen returns,
+  /// so a like or an edit made there survives the pop.
+  Future<void> _openPost(int index) async {
+    final updated = await context.push<Post>(
+      NileRoutes.post(_posts![index].id),
+      extra: _posts![index],
+    );
+    if (updated != null && mounted) setState(() => _posts![index] = updated);
+  }
+
   Future<void> _openRecPost(int j) async {
     final updated = await context.push<Post>(
       NileRoutes.post(_recPosts[j].id),
       extra: _recPosts[j],
     );
     if (updated != null && mounted) setState(() => _recPosts[j] = updated);
+  }
+
+  /// Opens a profile and re-reads that user's follow state on the way back, so
+  /// following someone from their page is reflected in the list behind it.
+  Future<void> _openProfile(UserProfile user) async {
+    await context.push(NileRoutes.profile(user.id));
+    if (!mounted) return;
+    // Dropped first so the button falls back to "Follow" rather than showing a
+    // stale state for the round-trip.
+    _followState.remove(user.id);
+    setState(() {});
+    final following = await FollowService.isFollowing(user.id);
+    if (mounted) setState(() => _followState[user.id] = following);
   }
 
   void _clearSearch() {
@@ -424,24 +448,28 @@ class _DiscoverScreenState extends State<DiscoverScreen>
     // bottom:false lets content scroll behind the translucent glass nav bar.
     return SafeArea(
       bottom: false,
-      child: Column(
-        children: [
-          _buildSearchBar(),
-          _buildTabBar(),
-          Expanded(
-            child: TabBarView(
-              controller: _tabs,
-              children: [
-                _fade(_buildPostsTab()),
-                _fade(_buildEventsTab()),
-                _fade(_buildPeopleTab()),
-              ],
-            ),
-          ),
-        ],
-      ),
+      child: NileBreakpoints.of(context).isCompact
+          ? _buildCompactBody()
+          : _buildDesktopBody(),
     );
   }
+
+  Widget _buildCompactBody() => Column(
+    children: [
+      _buildSearchBar(),
+      _buildTabBar(),
+      Expanded(
+        child: TabBarView(
+          controller: _tabs,
+          children: [
+            _fade(_buildPostsTab()),
+            _fade(_buildEventsTab()),
+            _fade(_buildPeopleTab()),
+          ],
+        ),
+      ),
+    ],
+  );
 
   Widget _buildSearchBar() {
     return Padding(
@@ -483,6 +511,281 @@ class _DiscoverScreenState extends State<DiscoverScreen>
     );
   }
 
+  // ── Desktop ───────────────────────────────────────────────────────────────
+
+  /// Desktop: the tab bar becomes a row of type facets and results flow into
+  /// columns.
+  ///
+  /// The [TabController] stays underneath. Every load, cursor, error and scroll
+  /// position is keyed on the tab index, and `/discover?tab=2` still has to land
+  /// on People, so the chips drive the controller rather than replacing it.
+  Widget _buildDesktopBody() => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      _buildSearchBar(),
+      _buildFacetRow(),
+      // Deliberately not wrapped in [_fade], unlike the phone's TabBarView:
+      // each facet body drives that tab's ScrollController, and a switcher
+      // keeps the outgoing body mounted long enough for a fast switch back to
+      // attach the same controller to two live viewports.
+      Expanded(child: _buildFacetBody()),
+    ],
+  );
+
+  Widget _buildFacetRow() => Padding(
+    padding: const EdgeInsets.fromLTRB(
+      NileSpacing.s16,
+      NileSpacing.s4,
+      NileSpacing.s16,
+      NileSpacing.s8,
+    ),
+    child: Row(
+      children: [
+        for (final t in _Tab.values) ...[
+          if (t != _Tab.values.first) const SizedBox(width: NileSpacing.s8),
+          _FacetChip(
+            label: _facetLabel(t),
+            icon: _facetIcon(t),
+            selected: _active == t,
+            // Assigning index, not animateTo: with no TabBarView here there is
+            // nothing to slide, and animateTo withholds the notification —
+            // and so the rebuild that repaints this chip — for the whole
+            // 300 ms of an animation nothing is watching.
+            onTap: () {
+              _tabs.index = t.index;
+            },
+          ),
+        ],
+      ],
+    ),
+  );
+
+  String _facetLabel(_Tab t) => switch (t) {
+    _Tab.posts => 'Posts',
+    _Tab.events => 'Events',
+    _Tab.people => 'People',
+  };
+
+  IconData _facetIcon(_Tab t) => switch (t) {
+    _Tab.posts => Icons.article_outlined,
+    _Tab.events => Icons.event_outlined,
+    _Tab.people => Icons.people_outline,
+  };
+
+  Widget _buildFacetBody() => switch (_active) {
+    _Tab.posts => _buildPostsGrid(),
+    _Tab.events => _buildEventsGrid(),
+    _Tab.people => _buildPeopleGrid(),
+  };
+
+  /// Horizontal page padding for the result grids. [NileSectionHeader] brings
+  /// its own, so the two line up without repeating the measure.
+  static const _gridPadding = EdgeInsets.symmetric(
+    horizontal: NileSpacing.s16,
+  );
+
+  /// Foot of every desktop grid: the pagination spinner, then room to breathe.
+  /// No nav-bar reservation — that bar is a phone thing.
+  List<Widget> _gridFooter(_Tab tab) => [
+    if (_hasMore[tab]!) const LoadMoreFooter(),
+    const SizedBox(height: NileSpacing.s32),
+  ];
+
+  Widget _buildPostsGrid() {
+    if (_error[_Tab.posts] != null) {
+      return _ErrorState(message: _error[_Tab.posts]!, onRetry: _loadPosts);
+    }
+    if (_posts == null && _loading[_Tab.posts]!) return const _Loading();
+    final posts = _posts ?? [];
+    if (posts.isEmpty) return _postsEmpty();
+    return RefreshIndicator(
+      color: NileColors.volt,
+      backgroundColor: NileColors.bgSurface,
+      onRefresh: _loadPosts,
+      child: SingleChildScrollView(
+        controller: _scroll[_Tab.posts],
+        physics: const AlwaysScrollableScrollPhysics(),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (!_isSearching && _recPosts.isNotEmpty)
+              _DesktopShelf(
+                title: 'From your network',
+                subtitle: 'Liked by people you follow',
+                children: [
+                  for (var j = 0; j < _recPosts.length; j++)
+                    _RecPostCard(
+                      post: _recPosts[j],
+                      onTap: () => _openRecPost(j),
+                    ),
+                ],
+              ),
+            NileSectionHeader(_isSearching ? 'Results' : 'Latest posts'),
+            Padding(
+              padding: _gridPadding,
+              child: NileCardGrid(
+                // Wider cells than the event grid: a post is a block of text,
+                // and two comfortable columns beat three cramped ones.
+                minItemWidth: 300,
+                maxColumns: 3,
+                children: [
+                  for (var i = 0; i < posts.length; i++)
+                    NileHoverCard(
+                      builder: (_, _) => _DiscoverPostCard(
+                        post: posts[i],
+                        onLikeToggle: () => _togglePostLike(i),
+                        onTap: () => _openPost(i),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            ..._gridFooter(_Tab.posts),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildEventsGrid() {
+    if (_error[_Tab.events] != null) {
+      return _ErrorState(message: _error[_Tab.events]!, onRetry: _loadEvents);
+    }
+    if (_events == null && _loading[_Tab.events]!) return const _Loading();
+    final events = _events ?? [];
+    if (events.isEmpty) return _eventsEmpty();
+    final searching = _isSearching;
+    // Marks grid cards for events that are also curated, same as the phone list.
+    final featuredIds = {for (final e in _featuredEvents) e.id};
+    return RefreshIndicator(
+      color: NileColors.volt,
+      backgroundColor: NileColors.bgSurface,
+      onRefresh: _loadEvents,
+      child: SingleChildScrollView(
+        controller: _scroll[_Tab.events],
+        physics: const AlwaysScrollableScrollPhysics(),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            // Shelves in the phone's order. Their cards pass hero: false, so a
+            // featured or upcoming event that also lands in the grid below
+            // leaves the Hero tag to the grid card — two live widgets sharing a
+            // tag abort the flight.
+            if (!searching && _featuredEvents.isNotEmpty)
+              _DesktopShelf(
+                title: 'Featured',
+                subtitle: 'Picked by the Nile team',
+                accent: NileColors.amber,
+                children: [
+                  for (final ev in _featuredEvents)
+                    _RecEventCard(event: ev, onTap: () => _openEvent(ev)),
+                ],
+              ),
+            if (!searching && _upcoming.isNotEmpty)
+              _DesktopShelf(
+                title: 'Coming up on Nile',
+                subtitle: 'Scheduled shows, soonest first',
+                children: [
+                  for (final ev in _upcoming)
+                    _UpcomingEventCard(event: ev, onTap: () => _openEvent(ev)),
+                ],
+              ),
+            if (!searching && _recEvents.isNotEmpty)
+              _DesktopShelf(
+                title: 'From your network',
+                subtitle: 'Liked by people you follow',
+                children: [
+                  for (final ev in _recEvents)
+                    _RecEventCard(event: ev, onTap: () => _openEvent(ev)),
+                ],
+              ),
+            NileSectionHeader(searching ? 'Results' : 'All events'),
+            Padding(
+              padding: _gridPadding,
+              child: NileCardGrid(
+                minItemWidth: 260,
+                maxColumns: 3,
+                children: [
+                  for (var i = 0; i < events.length; i++)
+                    NileHoverCard(
+                      builder: (_, _) => _DiscoverEventCard(
+                        event: events[i],
+                        featured: featuredIds.contains(events[i].id),
+                        onLikeToggle: () => _toggleEventLike(i),
+                        onTap: () => _openEvent(events[i]),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            ..._gridFooter(_Tab.events),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildPeopleGrid() {
+    if (_error[_Tab.people] != null) {
+      return _ErrorState(message: _error[_Tab.people]!, onRetry: _loadPeople);
+    }
+    if (_people == null && _loading[_Tab.people]!) return const _Loading();
+    final users = _people ?? [];
+    if (users.isEmpty) return _peopleEmpty();
+    return RefreshIndicator(
+      color: NileColors.volt,
+      backgroundColor: NileColors.bgSurface,
+      onRefresh: _loadPeople,
+      child: SingleChildScrollView(
+        controller: _scroll[_Tab.people],
+        physics: const AlwaysScrollableScrollPhysics(),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (!_isSearching && _featuredCreators.isNotEmpty)
+              _DesktopShelf(
+                title: 'Featured creators',
+                subtitle: 'Picked by the Nile team',
+                accent: NileColors.amber,
+                children: [
+                  for (final u in _featuredCreators)
+                    _CreatorCard(
+                      user: u,
+                      isFollowing: _followState[u.id] ?? false,
+                      isLoading: _followLoading.contains(u.id),
+                      onFollowTap: () => _toggleFollow(u),
+                      onTap: () => context.push(NileRoutes.profile(u.id)),
+                    ),
+                ],
+              ),
+            NileSectionHeader(_isSearching ? 'Results' : 'Suggested for you'),
+            Padding(
+              padding: _gridPadding,
+              child: NileCardGrid(
+                // People cards are a portrait avatar block, so they tile
+                // tighter than a 16:9 event card.
+                minItemWidth: 200,
+                children: [
+                  for (final u in users)
+                    NileHoverCard(
+                      builder: (_, _) => _CreatorCard(
+                        user: u,
+                        isFollowing: _followState[u.id] ?? false,
+                        isLoading: _followLoading.contains(u.id),
+                        onFollowTap: () => _toggleFollow(u),
+                        onTap: () => _openProfile(u),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            ..._gridFooter(_Tab.people),
+          ],
+        ),
+      ),
+    );
+  }
+
   // ── Tabs ──────────────────────────────────────────────────────────────────
 
   /// Cross-fades tab body state changes (skeleton → content → empty/error).
@@ -491,23 +794,46 @@ class _DiscoverScreenState extends State<DiscoverScreen>
     child: child,
   );
 
+  // Empty states are shared by the phone list and the desktop grid — the copy
+  // and its CTA belong to the tab, not to either layout.
+
+  Widget _postsEmpty() => _EmptyState(
+    icon: _isSearching ? Icons.search_off : Icons.article_outlined,
+    title: _isSearching ? 'No posts found' : 'No posts yet',
+    subtitle: _isSearching
+        ? 'Try a different search.'
+        : 'Be the first to share something.',
+    actionLabel: _isSearching ? null : 'Create a post',
+    onAction: _isSearching ? null : _createPost,
+  );
+
+  Widget _eventsEmpty() => _EmptyState(
+    icon: _isSearching ? Icons.search_off : Icons.event_outlined,
+    title: _isSearching ? 'No events found' : 'No events yet',
+    subtitle: _isSearching
+        ? 'Try a different search.'
+        : 'Be the first to go live.',
+    actionLabel: _isSearching ? null : 'Host a show',
+    onAction: _isSearching ? null : _createEvent,
+  );
+
+  Widget _peopleEmpty() => _EmptyState(
+    icon: _isSearching ? Icons.search_off : Icons.people_outline,
+    title: _isSearching ? 'No people found' : 'No creators yet',
+    subtitle: _isSearching
+        ? 'Try a different name.'
+        : 'Be the first to go live.',
+    actionLabel: _isSearching ? null : 'Host a show',
+    onAction: _isSearching ? null : _createEvent,
+  );
+
   Widget _buildPostsTab() {
     if (_error[_Tab.posts] != null) {
       return _ErrorState(message: _error[_Tab.posts]!, onRetry: _loadPosts);
     }
     if (_posts == null && _loading[_Tab.posts]!) return const _Loading();
     final posts = _posts ?? [];
-    if (posts.isEmpty) {
-      return _EmptyState(
-        icon: _isSearching ? Icons.search_off : Icons.article_outlined,
-        title: _isSearching ? 'No posts found' : 'No posts yet',
-        subtitle: _isSearching
-            ? 'Try a different search.'
-            : 'Be the first to share something.',
-        actionLabel: _isSearching ? null : 'Create a post',
-        onAction: _isSearching ? null : _createPost,
-      );
-    }
+    if (posts.isEmpty) return _postsEmpty();
     final showRail = !_isSearching && _recPosts.isNotEmpty;
     final header = showRail ? 1 : 0;
     return RefreshIndicator(
@@ -538,15 +864,7 @@ class _DiscoverScreenState extends State<DiscoverScreen>
           return _DiscoverPostCard(
             post: posts[idx],
             onLikeToggle: () => _togglePostLike(idx),
-            onTap: () async {
-              final updated = await context.push<Post>(
-                NileRoutes.post(posts[idx].id),
-                extra: posts[idx],
-              );
-              if (updated != null && mounted) {
-                setState(() => _posts![idx] = updated);
-              }
-            },
+            onTap: () => _openPost(idx),
           );
         },
       ),
@@ -559,17 +877,7 @@ class _DiscoverScreenState extends State<DiscoverScreen>
     }
     if (_events == null && _loading[_Tab.events]!) return const _Loading();
     final events = _events ?? [];
-    if (events.isEmpty) {
-      return _EmptyState(
-        icon: _isSearching ? Icons.search_off : Icons.event_outlined,
-        title: _isSearching ? 'No events found' : 'No events yet',
-        subtitle: _isSearching
-            ? 'Try a different search.'
-            : 'Be the first to go live.',
-        actionLabel: _isSearching ? null : 'Host a show',
-        onAction: _isSearching ? null : _createEvent,
-      );
-    }
+    if (events.isEmpty) return _eventsEmpty();
     final searching = _isSearching;
     // Stacked rails above the list: Featured → Coming up → From your network.
     // Rail event cards never own the Hero, so the vertical list's cards below
@@ -640,17 +948,7 @@ class _DiscoverScreenState extends State<DiscoverScreen>
     }
     if (_people == null && _loading[_Tab.people]!) return const _Loading();
     final users = _people ?? [];
-    if (users.isEmpty) {
-      return _EmptyState(
-        icon: _isSearching ? Icons.search_off : Icons.people_outline,
-        title: _isSearching ? 'No people found' : 'No creators yet',
-        subtitle: _isSearching
-            ? 'Try a different name.'
-            : 'Be the first to go live.',
-        actionLabel: _isSearching ? null : 'Host a show',
-        onAction: _isSearching ? null : _createEvent,
-      );
-    }
+    if (users.isEmpty) return _peopleEmpty();
     // Featured creators rail pinned above the suggested list (index 0).
     final showFeatured = !_isSearching && _featuredCreators.isNotEmpty;
     final header = showFeatured ? 1 : 0;
@@ -683,7 +981,7 @@ class _DiscoverScreenState extends State<DiscoverScreen>
                 subtitle: 'Picked by the Nile team',
                 children: [
                   for (final u in _featuredCreators)
-                    _FeaturedCreatorCard(
+                    _CreatorCard(
                       user: u,
                       isFollowing: _followState[u.id] ?? false,
                       isLoading: _followLoading.contains(u.id),
@@ -701,15 +999,7 @@ class _DiscoverScreenState extends State<DiscoverScreen>
             isFollowing: _followState[users[idx].id] ?? false,
             isLoading: _followLoading.contains(users[idx].id),
             onFollowTap: () => _toggleFollow(users[idx]),
-            onTap: () =>
-                context.push(NileRoutes.profile(users[idx].id)).then((_) {
-                  if (!mounted) return;
-                  _followState.remove(users[idx].id);
-                  setState(() {});
-                  FollowService.isFollowing(users[idx].id).then((v) {
-                    if (mounted) setState(() => _followState[users[idx].id] = v);
-                  });
-                }),
+            onTap: () => _openProfile(users[idx]),
           );
         },
       ),
@@ -1389,6 +1679,114 @@ class _RailShelf extends StatelessWidget {
   }
 }
 
+/// The desktop counterpart of [_RailShelf]: the same 220-wide horizontal strip
+/// under a [NileSectionHeader], so the shelves above Discover's results read as
+/// the same band as Home's "Live now" and "Coming up" rather than as a second
+/// header style two screens apart.
+class _DesktopShelf extends StatelessWidget {
+  final String title;
+  final String subtitle;
+
+  /// Tints the header and precedes it with a dot. Amber marks curated shelves;
+  /// the follow-graph ones stay neutral so gold means "picked by us".
+  final Color? accent;
+  final List<Widget> children;
+  const _DesktopShelf({
+    required this.title,
+    required this.subtitle,
+    required this.children,
+    this.accent,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        NileSectionHeader(
+          title,
+          accent: accent,
+          trailing: Text(
+            subtitle,
+            style: NileTextStyles.bodySm().copyWith(
+              color: NileColors.txtTertiary,
+            ),
+          ),
+        ),
+        SizedBox(
+          height: 184,
+          child: ListView.separated(
+            scrollDirection: Axis.horizontal,
+            clipBehavior: Clip.none,
+            padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s16),
+            itemCount: children.length,
+            separatorBuilder: (_, _) => const SizedBox(width: NileSpacing.s12),
+            itemBuilder: (_, i) => SizedBox(width: 220, child: children[i]),
+          ),
+        ),
+        const SizedBox(height: NileSpacing.s24),
+      ],
+    );
+  }
+}
+
+/// A content-type facet, replacing the phone's tab on desktop.
+///
+/// Deliberately the same treatment as the day chips in the shared desktop
+/// vocabulary — volt fill when selected, hairline otherwise — but that chip is
+/// private to nile_desktop.dart and carries a date, so the look is matched here
+/// rather than exported.
+class _FacetChip extends StatelessWidget {
+  final String label;
+  final IconData icon;
+  final bool selected;
+  final VoidCallback onTap;
+  const _FacetChip({
+    required this.label,
+    required this.icon,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final fg = selected ? NileColors.onVolt : NileColors.txtSecondary;
+    return Material(
+      color: selected ? NileColors.volt : NileColors.bgSurface,
+      borderRadius: BorderRadius.circular(NileRadius.pill),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(NileRadius.pill),
+        child: Container(
+          height: 36,
+          padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s16),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(NileRadius.pill),
+            border: Border.all(
+              color: selected ? Colors.transparent : NileColors.border,
+            ),
+          ),
+          alignment: Alignment.center,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 16, color: fg),
+              const SizedBox(width: NileSpacing.s6),
+              Text(
+                label,
+                style: NileTextStyles.labelMd().copyWith(
+                  color: fg,
+                  fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// Small "Featured" chip on a main-list event card that's also curated (same
 /// visual weight as the feed's Sponsored / network tags).
 class _FeaturedTag extends StatelessWidget {
@@ -1497,14 +1895,17 @@ class _UpcomingEventCard extends StatelessWidget {
   }
 }
 
-/// Rail card for a featured creator: avatar, name, follower count, follow button.
-class _FeaturedCreatorCard extends StatelessWidget {
+/// Creator card: avatar, name, follower count, follow button. Used by the
+/// featured rail on both layouts and, on desktop, as the People results card —
+/// a phone's full-width [_UserTile] row leaves no room for the follow button
+/// once it's a third of a column wide.
+class _CreatorCard extends StatelessWidget {
   final UserProfile user;
   final bool isFollowing;
   final bool isLoading;
   final VoidCallback onFollowTap;
   final VoidCallback onTap;
-  const _FeaturedCreatorCard({
+  const _CreatorCard({
     required this.user,
     required this.isFollowing,
     required this.isLoading,

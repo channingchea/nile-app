@@ -14,6 +14,7 @@ import '../router.dart';
 import '../theme.dart';
 import '../widgets/crew_editor.dart';
 import '../widgets/duration_field.dart';
+import '../widgets/nile_desktop.dart';
 import '../widgets/payout_gate.dart';
 import '../widgets/payout_preview_card.dart';
 import '../widgets/topic_chips.dart';
@@ -93,6 +94,12 @@ class _CreateEventFlowState extends State<CreateEventFlow> {
 
 // ── Page 1: Event Details ─────────────────────────────────────────────────────
 
+/// Desktop split geometry. The panel is wide enough for a legible 16:9 card,
+/// and the pair is capped so a maximised window doesn't stretch the form into
+/// 1600 pt input fields — a form reads as a document, centred, not as a band.
+const double _kPreviewWidth = 360;
+const double _kSplitMaxWidth = 1100;
+
 class EventDetailsPage extends StatefulWidget {
   final EventDraft draft;
   final VoidCallback onCancel;
@@ -128,6 +135,11 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
   // real config as soon as it loads.
   PricingConfig _pricing = PricingService.current;
 
+  /// Signed-in host, for the preview card's byline. Null until it loads — and
+  /// always, on a phone, where there is no preview to put it in.
+  UserProfile? _host;
+  bool _previewWired = false;
+
   EventDraft get _draft => widget.draft;
 
   @override
@@ -156,6 +168,23 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
     _priceController.addListener(() => setState(() {}));
   }
 
+  /// Wiring the desktop preview needs and the phone doesn't: the title has to
+  /// echo per keystroke, and the byline needs a host. Done here rather than in
+  /// [initState] because the window class isn't known until the first
+  /// dependency pass, and re-checked after that so a window dragged wide picks
+  /// the preview up. A phone never gets here, so it neither rebuilds on every
+  /// character nor pays for the profile fetch.
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_previewWired || !NileBreakpoints.of(context).hasNavRail) return;
+    _previewWired = true;
+    _nameController.addListener(() => setState(() {}));
+    ProfileService.fetchCurrentProfile().then((p) {
+      if (mounted) setState(() => _host = p);
+    });
+  }
+
   // ── Pricing ─────────────────────────────────────────────────────────────────
 
   int get _cameraCount => _draft.crew.cameraCount;
@@ -175,6 +204,21 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
   }
 
   static String _money(int cents) => '\$${(cents / 100).toStringAsFixed(2)}';
+
+  /// The payout card is a pricing coach, not a receipt — it only has something
+  /// to say once the event is priced or multi-camera. Same rule on both
+  /// layouts; only where the card sits changes.
+  bool get _showPayout => _cameraCount > 1 || _typedPriceCents > 0;
+
+  /// Every number in here comes from [PricingConfig] — the floor from
+  /// `minTicketCentsFor`, the host's cut from `creatorEarningsCents`. Nothing
+  /// on this screen does pricing arithmetic of its own.
+  Widget _payoutCard() => PayoutPreviewCard(
+    priceCents: _typedPriceCents,
+    minCents: _minPriceCents,
+    cameraCount: _cameraCount,
+    config: _pricing,
+  );
 
   /// Free is single-camera only; anything priced must clear the floor.
   String? _validatePrice(String? v) {
@@ -466,6 +510,10 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
 
   @override
   Widget build(BuildContext context) {
+    // Desktop sets the form beside a live preview of the card it produces;
+    // the phone keeps the single scrolling column it shipped with.
+    final split = NileBreakpoints.of(context).hasNavRail;
+
     return Scaffold(
       backgroundColor: NileColors.bgPage,
       appBar: AppBar(
@@ -478,226 +526,280 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
         title: Text('Create Event', style: NileTextStyles.headingMd()),
       ),
       body: NileMaxWidth(
+        // The split caps and centres its own pair, so the 900 pt column
+        // ceiling would squeeze it back to one column before it ever got to
+        // measure itself.
+        maxWidth: split ? double.infinity : null,
         child: AbsorbPointer(
           absorbing: _submitting,
           child: Form(
             key: _formKey,
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.fromLTRB(NileSpacing.s24, NileSpacing.s8, NileSpacing.s24, NileSpacing.s40),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  _CoverPicker(
-                    bytes: _draft.coverBytes,
-                    busy: _uploadingCover,
-                    onPick: _pickCover,
-                    onClear: () => setState(() => _draft.coverBytes = null),
-                  ),
-                  const SizedBox(height: 24),
-                  _SectionLabel('Event Name'),
-                  const SizedBox(height: 6),
-                  TextFormField(
-                    controller: _nameController,
-                    textCapitalization: TextCapitalization.words,
-                    maxLength: 80,
-                    decoration: const InputDecoration(
-                      hintText: 'e.g. Friday Night Live',
+            child: split
+                ? NileDesktopSplit(
+                    sideWidth: _kPreviewWidth,
+                    maxTotalWidth: _kSplitMaxWidth,
+                    // The split centres its pair on both axes. On a display
+                    // tall enough to hold the whole form, a column that only
+                    // claimed its content height would float off the app bar,
+                    // so it claims the window instead and scrolls inside it.
+                    content: SizedBox(
+                      height: double.infinity,
+                      child: _formColumn(inlinePayout: false),
                     ),
-                    validator: (v) =>
-                        (v == null || v.trim().isEmpty) ? 'Required' : null,
-                  ),
-                  const SizedBox(height: 20),
-                  _SectionLabel('Description'),
-                  const SizedBox(height: 6),
-                  TextFormField(
-                    controller: _descriptionController,
-                    maxLines: 4,
-                    maxLength: 500,
-                    decoration: const InputDecoration(
-                      hintText: 'Tell viewers what to expect…',
+                    side: _previewPanel(),
+                    // Between the rail breakpoint and the split's own minimum
+                    // there is room for one column only.
+                    narrow: NileMaxWidth(
+                      child: _formColumn(inlinePayout: true),
                     ),
-                  ),
-                  const SizedBox(height: 20),
-                  _SectionLabel('Topics'),
-                  const SizedBox(height: 6),
-                  Text(
-                    'Tag your event so it reaches people into these topics.',
-                    style: NileTextStyles.bodySm().copyWith(
-                      color: NileColors.txtTertiary,
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  TopicChips(selected: _draft.topicIds),
-                  const SizedBox(height: 20),
-                  _SectionLabel('Scheduled For'),
-                  const SizedBox(height: 6),
-                  _DateField(
-                    value: _draft.scheduledAt,
-                    onTap: _pickDateTime,
-                    onClear: () => setState(() => _draft.scheduledAt = null),
-                    formatter: _formatScheduled,
-                    errorText: _dateError,
-                  ),
-                  const SizedBox(height: 20),
-                  _SectionLabel('Duration'),
-                  const SizedBox(height: 6),
-                  DurationField(
-                    controller: _durationController,
-                    inHours: _durationInHours,
-                    onUnitChanged: _changeUnit,
-                    preview: _durationPreview(),
-                    maxMinutes: _pricing.maxStreamMinutes,
-                  ),
-                  const SizedBox(height: 20),
-                  _SectionLabel('Cameras'),
-                  const SizedBox(height: 6),
-                  CameraStepper(
-                    count: _cameraCount,
-                    max: CrewState.maxCameras,
-                    onAdd: () => _changeCameraCount(1),
-                    onRemove: () => _changeCameraCount(-1),
-                  ),
-                  const SizedBox(height: 6),
-                  Text(
-                    _cameraCount > 1
-                        ? 'Multi-camera streams need a ticket — minimum '
-                              '${_money(_minPriceCents)} for this event.'
-                        : 'Single-camera streams can be free.',
-                    style: NileTextStyles.caption().copyWith(
-                      color: NileColors.txtTertiary,
-                    ),
-                  ),
-                  const SizedBox(height: 20),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            _SectionLabel('Price (USD)'),
-                            const SizedBox(height: 6),
-                            TextFormField(
-                              controller: _priceController,
-                              keyboardType:
-                                  const TextInputType.numberWithOptions(
-                                    decimal: true,
-                                  ),
-                              inputFormatters: [
-                                FilteringTextInputFormatter.allow(
-                                  RegExp(r'^\d*\.?\d{0,2}'),
-                                ),
-                              ],
-                              decoration: InputDecoration(
-                                prefixText: '\$ ',
-                                hintText: _cameraCount > 1
-                                    ? (_minPriceCents / 100).toStringAsFixed(2)
-                                    : 'Free',
-                              ),
-                              validator: _validatePrice,
-                            ),
-                          ],
-                        ),
-                      ),
-                      const SizedBox(width: 16),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            _SectionLabel('Ticket Limit'),
-                            const SizedBox(height: 6),
-                            TextFormField(
-                              controller: _ticketLimitController,
-                              keyboardType: TextInputType.number,
-                              inputFormatters: [
-                                FilteringTextInputFormatter.digitsOnly,
-                              ],
-                              decoration: const InputDecoration(
-                                hintText: 'Unlimited',
-                              ),
-                              validator: (v) {
-                                if (v == null || v.isEmpty) return null;
-                                final n = int.tryParse(v);
-                                if (n == null || n <= 0) return 'Invalid';
-                                return null;
-                              },
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                  if (_cameraCount > 1 || _typedPriceCents > 0) ...[
-                    const SizedBox(height: 16),
-                    PayoutPreviewCard(
-                      priceCents: _typedPriceCents,
-                      minCents: _minPriceCents,
-                      cameraCount: _cameraCount,
-                      config: _pricing,
-                    ),
-                  ],
-                  const SizedBox(height: 20),
-                  _SectionLabel('Sponsorship'),
-                  SwitchListTile.adaptive(
-                    contentPadding: EdgeInsets.zero,
-                    value: _draft.sponsorshipOpen,
-                    onChanged: _toggleSponsorship,
-                    title: Text(
-                      'Open to sponsorship',
-                      style: NileTextStyles.bodyMd(),
-                    ),
-                    subtitle: Text(
-                      'Let a brand sponsor your pre-show lobby. You keep 70% '
-                      'of the sponsorship price; every ad is reviewed by Nile '
-                      'before it can appear.',
-                      style: NileTextStyles.caption().copyWith(
-                        color: NileColors.txtTertiary,
-                      ),
-                    ),
-                    activeTrackColor: NileColors.volt,
-                  ),
-                  if (_errorMessage != null) ...[
-                    const SizedBox(height: 20),
-                    Container(
-                      padding: const EdgeInsets.all(NileSpacing.s12),
-                      decoration: BoxDecoration(
-                        color: NileColors.error.withValues(alpha: 0.1),
-                        borderRadius: BorderRadius.circular(NileRadius.sm),
-                        border: Border.all(
-                          color: NileColors.error.withValues(alpha: 0.4),
-                        ),
-                      ),
-                      child: Text(
-                        _errorMessage!,
-                        style: NileTextStyles.bodySm().copyWith(
-                          color: NileColors.error,
-                        ),
-                      ),
-                    ),
-                  ],
-                  const SizedBox(height: 32),
-                  FilledButton.icon(
-                    onPressed: _submitting ? null : _next,
-                    icon: _submitting
-                        ? SizedBox(
-                            width: 18,
-                            height: 18,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              color: NileColors.onVolt,
-                            ),
-                          )
-                        : const Icon(Icons.arrow_forward),
-                    label: Text(_submitting ? 'Creating…' : 'Next'),
-                    style: FilledButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
-                      textStyle: NileTextStyles.labelLg().copyWith(color: null),
-                    ),
-                  ),
-                ],
-              ),
-            ),
+                  )
+                : _formColumn(inlinePayout: true),
           ),
         ),
+      ),
+    );
+  }
+
+  /// The sticky desktop panel: the card this draft will become, and — once
+  /// there's a price to talk about — the same payout estimate the phone shows
+  /// inline. Scrolls itself, so a short window can still reach the bottom.
+  Widget _previewPanel() {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(0, NileSpacing.s8, NileSpacing.s24, NileSpacing.s40),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const NileSectionHeader('Preview', dense: true),
+          _EventPreviewCard(
+            coverBytes: _draft.coverBytes,
+            title: _nameController.text.trim(),
+            host: _host,
+            scheduledAt: _draft.scheduledAt,
+            durationMinutes: _parsedDurationMinutes(),
+            priceCents: _typedPriceCents,
+            cameraCount: _cameraCount,
+          ),
+          if (_showPayout) ...[
+            const SizedBox(height: NileSpacing.s24),
+            const NileSectionHeader('Payout', dense: true),
+            _payoutCard(),
+          ],
+        ],
+      ),
+    );
+  }
+
+  /// The form itself. [inlinePayout] keeps the payout card in the flow of the
+  /// column — where it belongs on a phone; the desktop split hands it to the
+  /// sticky panel instead, so the estimate stays put while the host scrolls.
+  Widget _formColumn({required bool inlinePayout}) {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(NileSpacing.s24, NileSpacing.s8, NileSpacing.s24, NileSpacing.s40),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _CoverPicker(
+            bytes: _draft.coverBytes,
+            busy: _uploadingCover,
+            onPick: _pickCover,
+            onClear: () => setState(() => _draft.coverBytes = null),
+          ),
+          const SizedBox(height: 24),
+          _SectionLabel('Event Name'),
+          const SizedBox(height: 6),
+          TextFormField(
+            controller: _nameController,
+            textCapitalization: TextCapitalization.words,
+            maxLength: 80,
+            decoration: const InputDecoration(
+              hintText: 'e.g. Friday Night Live',
+            ),
+            validator: (v) =>
+                (v == null || v.trim().isEmpty) ? 'Required' : null,
+          ),
+          const SizedBox(height: 20),
+          _SectionLabel('Description'),
+          const SizedBox(height: 6),
+          TextFormField(
+            controller: _descriptionController,
+            maxLines: 4,
+            maxLength: 500,
+            decoration: const InputDecoration(
+              hintText: 'Tell viewers what to expect…',
+            ),
+          ),
+          const SizedBox(height: 20),
+          _SectionLabel('Topics'),
+          const SizedBox(height: 6),
+          Text(
+            'Tag your event so it reaches people into these topics.',
+            style: NileTextStyles.bodySm().copyWith(
+              color: NileColors.txtTertiary,
+            ),
+          ),
+          const SizedBox(height: 10),
+          TopicChips(selected: _draft.topicIds),
+          const SizedBox(height: 20),
+          _SectionLabel('Scheduled For'),
+          const SizedBox(height: 6),
+          _DateField(
+            value: _draft.scheduledAt,
+            onTap: _pickDateTime,
+            onClear: () => setState(() => _draft.scheduledAt = null),
+            formatter: _formatScheduled,
+            errorText: _dateError,
+          ),
+          const SizedBox(height: 20),
+          _SectionLabel('Duration'),
+          const SizedBox(height: 6),
+          DurationField(
+            controller: _durationController,
+            inHours: _durationInHours,
+            onUnitChanged: _changeUnit,
+            preview: _durationPreview(),
+            maxMinutes: _pricing.maxStreamMinutes,
+          ),
+          const SizedBox(height: 20),
+          _SectionLabel('Cameras'),
+          const SizedBox(height: 6),
+          CameraStepper(
+            count: _cameraCount,
+            max: CrewState.maxCameras,
+            onAdd: () => _changeCameraCount(1),
+            onRemove: () => _changeCameraCount(-1),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            _cameraCount > 1
+                ? 'Multi-camera streams need a ticket — minimum '
+                      '${_money(_minPriceCents)} for this event.'
+                : 'Single-camera streams can be free.',
+            style: NileTextStyles.caption().copyWith(
+              color: NileColors.txtTertiary,
+            ),
+          ),
+          const SizedBox(height: 20),
+          Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _SectionLabel('Price (USD)'),
+                    const SizedBox(height: 6),
+                    TextFormField(
+                      controller: _priceController,
+                      keyboardType:
+                          const TextInputType.numberWithOptions(
+                            decimal: true,
+                          ),
+                      inputFormatters: [
+                        FilteringTextInputFormatter.allow(
+                          RegExp(r'^\d*\.?\d{0,2}'),
+                        ),
+                      ],
+                      decoration: InputDecoration(
+                        prefixText: '\$ ',
+                        hintText: _cameraCount > 1
+                            ? (_minPriceCents / 100).toStringAsFixed(2)
+                            : 'Free',
+                      ),
+                      validator: _validatePrice,
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 16),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _SectionLabel('Ticket Limit'),
+                    const SizedBox(height: 6),
+                    TextFormField(
+                      controller: _ticketLimitController,
+                      keyboardType: TextInputType.number,
+                      inputFormatters: [
+                        FilteringTextInputFormatter.digitsOnly,
+                      ],
+                      decoration: const InputDecoration(
+                        hintText: 'Unlimited',
+                      ),
+                      validator: (v) {
+                        if (v == null || v.isEmpty) return null;
+                        final n = int.tryParse(v);
+                        if (n == null || n <= 0) return 'Invalid';
+                        return null;
+                      },
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          if (inlinePayout && _showPayout) ...[
+            const SizedBox(height: 16),
+            _payoutCard(),
+          ],
+          const SizedBox(height: 20),
+          _SectionLabel('Sponsorship'),
+          SwitchListTile.adaptive(
+            contentPadding: EdgeInsets.zero,
+            value: _draft.sponsorshipOpen,
+            onChanged: _toggleSponsorship,
+            title: Text(
+              'Open to sponsorship',
+              style: NileTextStyles.bodyMd(),
+            ),
+            subtitle: Text(
+              'Let a brand sponsor your pre-show lobby. You keep 70% '
+              'of the sponsorship price; every ad is reviewed by Nile '
+              'before it can appear.',
+              style: NileTextStyles.caption().copyWith(
+                color: NileColors.txtTertiary,
+              ),
+            ),
+            activeTrackColor: NileColors.volt,
+          ),
+          if (_errorMessage != null) ...[
+            const SizedBox(height: 20),
+            Container(
+              padding: const EdgeInsets.all(NileSpacing.s12),
+              decoration: BoxDecoration(
+                color: NileColors.error.withValues(alpha: 0.1),
+                borderRadius: BorderRadius.circular(NileRadius.sm),
+                border: Border.all(
+                  color: NileColors.error.withValues(alpha: 0.4),
+                ),
+              ),
+              child: Text(
+                _errorMessage!,
+                style: NileTextStyles.bodySm().copyWith(
+                  color: NileColors.error,
+                ),
+              ),
+            ),
+          ],
+          const SizedBox(height: 32),
+          FilledButton.icon(
+            onPressed: _submitting ? null : _next,
+            icon: _submitting
+                ? SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: NileColors.onVolt,
+                    ),
+                  )
+                : const Icon(Icons.arrow_forward),
+            label: Text(_submitting ? 'Creating…' : 'Next'),
+            style: FilledButton.styleFrom(
+              padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
+              textStyle: NileTextStyles.labelLg().copyWith(color: null),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -1301,6 +1403,179 @@ class _DateField extends StatelessWidget {
             ),
           ),
       ],
+    );
+  }
+}
+
+/// Desktop-only mirror of the card this draft will become — cover, byline,
+/// title, when it runs and what it costs. Display-only: it reads the form's
+/// current values and never writes back, so nothing here can change what gets
+/// published. Built rather than borrowed because the feed's own event card
+/// takes a persisted [Event], and this draft doesn't have one yet.
+class _EventPreviewCard extends StatelessWidget {
+  final Uint8List? coverBytes;
+  final String title;
+  final UserProfile? host;
+  final DateTime? scheduledAt;
+  final int? durationMinutes;
+  final int priceCents;
+  final int cameraCount;
+
+  const _EventPreviewCard({
+    required this.coverBytes,
+    required this.title,
+    required this.host,
+    required this.scheduledAt,
+    required this.durationMinutes,
+    required this.priceCents,
+    required this.cameraCount,
+  });
+
+  String get _when {
+    final start = scheduledAt;
+    final mins = durationMinutes;
+    final runs = mins == null ? null : _fmtDuration(mins);
+    if (start == null) {
+      return runs == null ? 'Not scheduled' : 'Not scheduled · $runs';
+    }
+    return runs == null
+        ? _fmtDateTime(start)
+        : '${_fmtDateTime(start)} · $runs';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final handle = host?.username ?? 'you';
+    final initial = handle.isEmpty ? '?' : handle[0].toUpperCase();
+    final avatarUrl = host?.avatarUrl;
+
+    return Material(
+      color: NileColors.bgSurface,
+      borderRadius: BorderRadius.circular(NileRadius.lg),
+      clipBehavior: Clip.antiAlias,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          AspectRatio(
+            aspectRatio: 16 / 9,
+            child: coverBytes == null
+                ? ColoredBox(
+                    color: NileColors.bgRaised,
+                    child: Center(
+                      child: Icon(
+                        Icons.image_outlined,
+                        size: 28,
+                        color: NileColors.txtTertiary,
+                      ),
+                    ),
+                  )
+                : Image.memory(coverBytes!, fit: BoxFit.cover),
+          ),
+          Padding(
+            padding: const EdgeInsets.all(NileSpacing.s12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    CircleAvatar(
+                      radius: 14,
+                      backgroundColor: NileColors.bgRaised,
+                      backgroundImage: avatarUrl == null
+                          ? null
+                          : nileAvatarImage(avatarUrl, 14),
+                      child: avatarUrl != null
+                          ? null
+                          : Text(
+                              initial,
+                              style: NileTextStyles.labelSm().copyWith(
+                                color: NileColors.txtPrimary,
+                                letterSpacing: 0,
+                              ),
+                            ),
+                    ),
+                    const SizedBox(width: NileSpacing.s8),
+                    Expanded(
+                      child: Text(
+                        '@$handle',
+                        style: NileTextStyles.bodySm(),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    _PricePill(priceCents: priceCents),
+                  ],
+                ),
+                const SizedBox(height: NileSpacing.s6),
+                Text(
+                  title.isEmpty ? 'Untitled event' : title,
+                  style: NileTextStyles.headingSm(),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                const SizedBox(height: NileSpacing.s8),
+                Row(
+                  children: [
+                    Icon(
+                      Icons.schedule,
+                      size: 14,
+                      color: NileColors.txtTertiary,
+                    ),
+                    const SizedBox(width: NileSpacing.s6),
+                    Expanded(
+                      child: Text(
+                        _when,
+                        style: NileTextStyles.caption().copyWith(
+                          color: NileColors.txtSecondary,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    Icon(
+                      Icons.videocam,
+                      size: 14,
+                      color: NileColors.txtTertiary,
+                    ),
+                    const SizedBox(width: NileSpacing.s4),
+                    Text(
+                      '$cameraCount',
+                      style: NileTextStyles.caption().tabular,
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// The ticket price as it reads on a card. Free is a neutral chip; a price is
+/// volt — the same emphasis the payout card gives the host's cut.
+class _PricePill extends StatelessWidget {
+  final int priceCents;
+
+  const _PricePill({required this.priceCents});
+
+  @override
+  Widget build(BuildContext context) {
+    final paid = priceCents > 0;
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: NileSpacing.s8,
+        vertical: NileSpacing.s2,
+      ),
+      decoration: BoxDecoration(
+        color: paid ? NileColors.volt : NileColors.bgRaised,
+        borderRadius: BorderRadius.circular(NileRadius.pill),
+      ),
+      child: Text(
+        paid ? '\$${(priceCents / 100).toStringAsFixed(2)}' : 'Free',
+        style: NileTextStyles.caption()
+            .copyWith(color: paid ? NileColors.onVolt : NileColors.txtSecondary)
+            .tabular,
+      ),
     );
   }
 }

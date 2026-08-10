@@ -17,6 +17,7 @@ import '../theme.dart';
 import '../widgets/event_cover_pill.dart';
 import '../widgets/event_link_card.dart';
 import '../widgets/nile_cover_action.dart';
+import '../widgets/nile_desktop.dart';
 import '../widgets/nile_glass_nav_bar.dart';
 import '../widgets/official_badge.dart';
 import '../widgets/nile_skeleton.dart';
@@ -119,7 +120,11 @@ class _ProfileScreenState extends State<ProfileScreen> {
   }
 
   void _onScroll() {
-    if (!_scroll.hasClients) return;
+    // Not `hasClients`: resizing across the desktop breakpoint swaps the body,
+    // and for one frame the old and new scroll views are both attached to this
+    // controller — `position` asserts on that. Identical to `hasClients` on a
+    // phone, which only ever has the one.
+    if (_scroll.positions.length != 1) return;
     if (_scroll.position.pixels < _scroll.position.maxScrollExtent - 400) {
       return;
     }
@@ -445,6 +450,20 @@ class _ProfileScreenState extends State<ProfileScreen> {
     return all.length > _visibleCount ? all.sublist(0, _visibleCount) : all;
   }
 
+  /// The event this profile has on air right now, if any.
+  ///
+  /// Read off the events already loaded for the grid rather than asking the
+  /// server again: [EventService.getLiveNow] excludes the caller, so it can't
+  /// answer this for your own profile at all, and a second query would race the
+  /// first for no gain. The miss case is a host who has created a full page of
+  /// events since the one they are currently streaming — rare enough to accept.
+  Event? get _liveEvent {
+    for (final e in _events ?? const <Event>[]) {
+      if (e.isLive) return e;
+    }
+    return null;
+  }
+
   /// Helper used during load — before _profile is set, we can't use the
   /// `_isOwnProfile` getter, so we pass the freshly-fetched profile directly.
   bool _isOwnProfileFor(UserProfile p) {
@@ -562,6 +581,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // Compact is the phone layout that shipped; everything wider renders inside
+    // the desktop chrome, which already draws the rail, the top bar and back.
+    final compact = NileBreakpoints.of(context).isCompact;
+
     if (_loading) {
       final heroTag = 'avatar-${widget.userId ?? Supabase.instance.client.auth.currentUser?.id}';
       return Scaffold(
@@ -598,7 +621,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   ),
                 ),
               ),
-              _buildCoverBack(),
+              if (compact) _buildCoverBack(),
             ],
           ),
         ),
@@ -626,7 +649,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   ],
                 ),
               ),
-              _buildCoverBack(),
+              if (compact) _buildCoverBack(),
             ],
           ),
         ),
@@ -634,6 +657,13 @@ class _ProfileScreenState extends State<ProfileScreen> {
     }
 
     final p = _profile!;
+
+    if (!compact) {
+      return Scaffold(
+        backgroundColor: NileColors.bgPage,
+        body: _buildDesktopBody(p),
+      );
+    }
 
     return Scaffold(
       backgroundColor: NileColors.bgPage,
@@ -964,9 +994,346 @@ class _ProfileScreenState extends State<ProfileScreen> {
     );
   }
 
+  // ─── Desktop layout ───────────────────────────────────────────────────────
+  // The profile fills the chrome's content column — up to 900 pt, against the
+  // 600 the phone header was drawn for. A separate body rather than
+  // conditionals through the phone one, for the reason EventDetailScreen gives.
+
+  /// A 160 pt strip across a 900 pt column reads as a mistake rather than a
+  /// cover, so the desktop banner is deeper and the avatar larger to match.
+  static const double _kDesktopCoverHeight = 240;
+  static const double _kDesktopAvatarRadius = 56;
+  static const double _kDesktopAvatarDiameter =
+      (_kDesktopAvatarRadius + NileSpacing.s4) * 2;
+
+  /// Two columns at column width. Wider than the phone's tiles because the
+  /// same title is set at a larger measure here.
+  static const double _kDesktopTileWidth = 380;
+
+  Widget _buildDesktopBody(UserProfile p) {
+    final live = _liveEvent;
+    return CustomScrollView(
+      // Same controller as the phone body, so _onScroll still drives pagination.
+      controller: _scroll,
+      slivers: [
+        SliverToBoxAdapter(child: _buildDesktopHeader(p)),
+        if (live != null) SliverToBoxAdapter(child: _buildLiveBanner(live)),
+        SliverToBoxAdapter(
+          child: Padding(
+            padding: const EdgeInsets.only(top: NileSpacing.s24),
+            child: _buildTabToggle(horizontalPadding: NileSpacing.s24),
+          ),
+        ),
+        if (_isOwnProfile && _tab == _ProfileTab.drafts)
+          _buildDraftsFeed(desktop: true)
+        else
+          _buildEventsFeed(desktop: true),
+      ],
+    );
+  }
+
+  /// Cover across the column, identity running horizontally beneath it: the
+  /// avatar straddles the cover's bottom edge on the left, name / handle /
+  /// counts sit beside it, the one action is on the right.
+  ///
+  /// Built as a Stack over a Column that reserves the cover's height, rather
+  /// than the phone header's stack of negative Transforms. Everything stays
+  /// inside the Stack's bounds that way, so the overhanging avatar is still
+  /// tappable — a `Clip.none` overhang paints but does not hit-test.
+  Widget _buildDesktopHeader(UserProfile p) {
+    return Stack(
+      children: [
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const SizedBox(height: _kDesktopCoverHeight),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(
+                NileSpacing.s24,
+                NileSpacing.s16,
+                NileSpacing.s24,
+                0,
+              ),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // Holds the avatar's column; the avatar itself is painted by
+                  // the Stack so it can overlap without any height arithmetic.
+                  const SizedBox(
+                    width: _kDesktopAvatarDiameter + NileSpacing.s24,
+                  ),
+                  Expanded(child: _desktopIdentity(p)),
+                  const SizedBox(width: NileSpacing.s24),
+                  _headerAction(p),
+                ],
+              ),
+            ),
+            if (p.bio != null && p.bio!.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(
+                  NileSpacing.s24,
+                  NileSpacing.s16,
+                  NileSpacing.s24,
+                  0,
+                ),
+                child: Text(p.bio!, style: NileTextStyles.bodyMd()),
+              ),
+          ],
+        ),
+        Positioned(
+          top: 0,
+          left: 0,
+          right: 0,
+          child: CoverPhoto(
+            url: p.coverUrl,
+            height: _kDesktopCoverHeight,
+            showEditChip: false,
+            onTap: p.coverUrl == null
+                ? null
+                : () => PhotoViewerScreen.open(
+                    context,
+                    image: NetworkImage(p.coverUrl!),
+                  ),
+          ),
+        ),
+        // Settings / report-block menu stays: it acts on this profile and the
+        // chrome has no equivalent. Back does not — the top bar carries it, and
+        // two back buttons would be two.
+        Positioned(
+          top: NileSpacing.s12,
+          right: NileSpacing.s12,
+          child: _buildCoverActions(),
+        ),
+        Positioned(
+          left: NileSpacing.s24,
+          top: _kDesktopCoverHeight - _kDesktopAvatarDiameter / 2,
+          child: _desktopAvatar(p),
+        ),
+      ],
+    );
+  }
+
+  Widget _desktopAvatar(UserProfile p) {
+    return GestureDetector(
+      onTap: p.avatarUrl == null
+          ? null
+          : () => PhotoViewerScreen.open(
+              context,
+              image: NetworkImage(p.avatarUrl!),
+              heroTag: 'avatar-${p.id}',
+            ),
+      child: Container(
+        padding: const EdgeInsets.all(NileSpacing.s4),
+        decoration: BoxDecoration(
+          color: NileColors.bgPage,
+          shape: BoxShape.circle,
+        ),
+        child: Hero(
+          tag: 'avatar-${p.id}',
+          child: CircleAvatar(
+            radius: _kDesktopAvatarRadius,
+            backgroundColor: NileColors.bgRaised,
+            backgroundImage: p.avatarUrl != null
+                ? nileAvatarImage(p.avatarUrl!, _kDesktopAvatarRadius)
+                : null,
+            child: p.avatarUrl == null
+                ? Icon(
+                    Icons.person,
+                    size: _kDesktopAvatarRadius,
+                    color: NileColors.txtTertiary,
+                  )
+                : null,
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Name, official badge, handle and follow counts as one block beside the
+  /// avatar. The counts move up here from under the bio: at column width there
+  /// is room for them on the identity line, which is where they are looked for.
+  Widget _desktopIdentity(UserProfile p) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Flexible(
+              child: Text(
+                p.displayName,
+                style: NileTextStyles.displayMd(),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            if (p.isOfficial)
+              const Padding(
+                padding: EdgeInsets.only(left: NileSpacing.s6, top: 6),
+                child: OfficialBadge(size: 22),
+              ),
+          ],
+        ),
+        const SizedBox(height: NileSpacing.s2),
+        Text(
+          '@${p.username}',
+          style: NileTextStyles.bodyMd().copyWith(
+            color: NileColors.txtSecondary,
+          ),
+        ),
+        const SizedBox(height: NileSpacing.s12),
+        _followCounts(p),
+      ],
+    );
+  }
+
+  /// Coral band linking straight into the show this profile is running right
+  /// now. Desktop only: on a phone the live event already pins to the top of
+  /// the Events grid, and a banner as well would be the same link twice in a
+  /// column that has no room to spare.
+  Widget _buildLiveBanner(Event e) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        NileSpacing.s24,
+        NileSpacing.s24,
+        NileSpacing.s24,
+        0,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const NileSectionHeader(
+            'On air now',
+            accent: NileColors.coral,
+            padding: EdgeInsets.only(bottom: NileSpacing.s12),
+          ),
+          NileHoverCard(
+            builder: (_, hovered) => Material(
+              // Coral is the ColorScheme's secondary, whose onSecondary is
+              // white in both themes — so white is the token here, not a guess.
+              color: NileColors.coral,
+              child: InkWell(
+                onTap: () => _openEvent(e),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: NileSpacing.s24,
+                    vertical: NileSpacing.s16,
+                  ),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              e.title,
+                              style: NileTextStyles.headingSm().copyWith(
+                                color: Colors.white,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            const SizedBox(height: NileSpacing.s2),
+                            Text(
+                              '${e.viewerCount} watching',
+                              style: NileTextStyles.bodySm()
+                                  .copyWith(
+                                    color: Colors.white.withValues(
+                                      alpha: 0.85,
+                                    ),
+                                  )
+                                  .tabular,
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: NileSpacing.s16),
+                      Text(
+                        'Watch',
+                        style: NileTextStyles.labelMd().copyWith(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      const SizedBox(width: NileSpacing.s8),
+                      AnimatedSlide(
+                        offset: hovered ? const Offset(0.3, 0) : Offset.zero,
+                        duration: NileMotion.fast,
+                        curve: NileMotion.curve,
+                        child: const Icon(
+                          Icons.arrow_forward,
+                          size: 18,
+                          color: Colors.white,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// The desktop grid for either tab, plus the paging footer the sliver list
+  /// carries on the phone.
+  Widget _desktopGrid(List<Widget> children, {bool showFooter = false}) {
+    return SliverPadding(
+      padding: const EdgeInsets.fromLTRB(
+        NileSpacing.s24,
+        NileSpacing.s24,
+        NileSpacing.s24,
+        NileSpacing.s48,
+      ),
+      sliver: SliverToBoxAdapter(
+        // stretch, or a run that doesn't fill its columns gets centred and the
+        // grid stops lining up with the header above it.
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            NileCardGrid(minItemWidth: _kDesktopTileWidth, children: children),
+            if (showFooter) const LoadMoreFooter(),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// A cover tile at desktop proportions. The tile paints into a Stack sized by
+  /// its parent, so the aspect ratio has to come from outside it.
+  Widget _desktopEventTile(Event event, VoidCallback onTap) {
+    return AspectRatio(
+      aspectRatio: 3 / 2,
+      child: NileHoverCard(
+        builder: (_, _) => _ProfileEventTile(event: event, onTap: onTap),
+      ),
+    );
+  }
+
+  /// The phone's post card, unchanged, inside a grid cell. Every callback is
+  /// the same one the sliver list passes — the card is the single source of
+  /// truth for what a post does.
+  Widget _desktopPostCard(Post post) {
+    return NileHoverCard(
+      builder: (_, _) => _ProfilePostCard(
+        post: post,
+        onEdited: _isOwnProfile ? (p) => _replacePost(p) : null,
+        onDeleted: _isOwnProfile ? () => _removePost(post.id) : null,
+        onLikeToggle: () => _togglePostLike(post),
+        onRepostToggle: () => _togglePostRepost(post),
+        onUpdated: _replacePost,
+        profileId: _profile?.id,
+      ),
+    );
+  }
+
   // ─── Tab toggle (Posts / Events for all; Drafts owner-only) ───────────────
 
-  Widget _buildTabToggle() {
+  Widget _buildTabToggle({double horizontalPadding = NileSpacing.s16}) {
     // Underline tab: volt label + volt underline when active, muted otherwise.
     Widget seg(String label, bool selected, VoidCallback onTap) {
       return InkWell(
@@ -1004,7 +1371,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
     final draftCount = _drafts?.length;
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s16),
+      padding: EdgeInsets.symmetric(horizontal: horizontalPadding),
       decoration: BoxDecoration(
         border: Border(bottom: BorderSide(color: NileColors.border)),
       ),
@@ -1035,7 +1402,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
   // ─── Drafts feed (owner-only) ─────────────────────────────────────────────
 
-  Widget _buildDraftsFeed() {
+  Widget _buildDraftsFeed({bool desktop = false}) {
     if (_draftsError != null) {
       return SliverToBoxAdapter(
         child: Padding(
@@ -1086,6 +1453,15 @@ class _ProfileScreenState extends State<ProfileScreen> {
         ),
       );
     }
+    if (desktop) {
+      return _desktopGrid(
+        [
+          for (final draft in drafts)
+            _desktopEventTile(draft, () => _openDraft(draft)),
+        ],
+        showFooter: _draftsHasMore,
+      );
+    }
     return SliverPadding(
       padding: EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s16, NileSpacing.s16, NileGlassNavBar.reservedHeight + NileSpacing.s16),
       sliver: SliverGrid(
@@ -1108,7 +1484,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
   // ─── Events feed ──────────────────────────────────────────────────────────
 
-  Widget _buildEventsFeed() {
+  Widget _buildEventsFeed({bool desktop = false}) {
     if (_eventsError != null) {
       return SliverToBoxAdapter(
         child: Padding(
@@ -1166,6 +1542,20 @@ class _ProfileScreenState extends State<ProfileScreen> {
           ),
         ),
       );
+    }
+    // Desktop → both tabs become a multi-column grid. Item type rather than
+    // tab drives the tile, so a repost lands on the right card either way.
+    if (desktop) {
+      final children = <Widget>[];
+      for (final it in items) {
+        switch (it) {
+          case _ProfileEventItem(:final event):
+            children.add(_desktopEventTile(event, () => _openEvent(event)));
+          case _ProfilePostItem(:final post):
+            children.add(_desktopPostCard(post));
+        }
+      }
+      return _desktopGrid(children, showFooter: _hasMore);
     }
     // Events tab → 2-column grid of cover tiles. Posts tab → full-width cards.
     if (_tab == _ProfileTab.events) {

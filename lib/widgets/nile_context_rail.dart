@@ -8,6 +8,7 @@ import '../services/app_lifecycle.dart';
 import '../services/event_service.dart';
 import '../theme.dart';
 import 'live_badge.dart';
+import 'nile_desktop.dart';
 
 /// The persistent right-hand rail: what's on air now, and what's on next.
 ///
@@ -136,19 +137,37 @@ class _WhatsOnState extends State<_WhatsOn> {
         else if (nothing)
           const _Empty()
         else ...[
+          // The rail is the shell's flexible zone, so on a wide display it is
+          // handed far more than its 322 pt design width — 568 on a maximised
+          // 16" MacBook. Past roughly 500 a single column of cards reads as
+          // sparse rather than generous, so both sections lay out into as many
+          // columns as fit and collapse back to one at the design width.
           if (live.isNotEmpty) ...[
-            const _SectionHeader('Live now', accent: NileColors.coral),
-            for (final e in live)
-              Padding(
-                padding: const EdgeInsets.only(bottom: NileSpacing.s12),
-                child: _LiveCard(event: e, onTap: () => _open(e)),
-              ),
-            const SizedBox(height: NileSpacing.s12),
+            const NileSectionHeader(
+              'Live now',
+              accent: NileColors.coral,
+              dense: true,
+            ),
+            NileCardGrid(
+              minItemWidth: _minCardWidth,
+              maxColumns: 2,
+              children: [
+                for (final e in live) _LiveCard(event: e, onTap: () => _open(e)),
+              ],
+            ),
+            const SizedBox(height: NileSpacing.s24),
           ],
           if (upcoming.isNotEmpty) ...[
-            const _SectionHeader('Up next'),
-            for (final e in upcoming)
-              _UpNextRow(event: e, onTap: () => _open(e)),
+            const NileSectionHeader('Up next', dense: true),
+            NileCardGrid(
+              minItemWidth: _minCardWidth,
+              maxColumns: 2,
+              spacing: NileSpacing.s8,
+              children: [
+                for (final e in upcoming)
+                  _UpNextRow(event: e, onTap: () => _open(e)),
+              ],
+            ),
           ],
         ],
       ],
@@ -156,35 +175,9 @@ class _WhatsOnState extends State<_WhatsOn> {
   }
 }
 
-class _SectionHeader extends StatelessWidget {
-  const _SectionHeader(this.label, {this.accent});
-  final String label;
-  final Color? accent;
-
-  @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.only(bottom: NileSpacing.s12),
-    child: Row(
-      children: [
-        if (accent != null) ...[
-          Container(
-            width: 6,
-            height: 6,
-            decoration: BoxDecoration(color: accent, shape: BoxShape.circle),
-          ),
-          const SizedBox(width: NileSpacing.s8),
-        ],
-        Text(
-          label.toUpperCase(),
-          style: NileTextStyles.labelSm().copyWith(
-            color: accent ?? NileColors.txtSecondary,
-            fontWeight: FontWeight.w700,
-          ),
-        ),
-      ],
-    ),
-  );
-}
+/// Below this the rail is at (or near) its design width and everything sits in
+/// one column; two of these plus the grid gap is what a second column costs.
+const double _minCardWidth = 240;
 
 /// A live show, given the space a live show deserves: 16:9 cover, LIVE badge,
 /// viewer count.
@@ -369,26 +362,10 @@ String nileWhen(DateTime? at) {
   if (delta.inMinutes < 60) return 'in ${delta.inMinutes}m';
   if (delta.inHours < 12) return 'in ${delta.inHours}h';
 
-  final today = DateTime(now.year, now.month, now.day);
-  final day = DateTime(local.year, local.month, local.day);
-  final days = day.difference(today).inDays;
-  final time = _clock(local);
+  final days = nileDayKey(local).difference(nileDayKey(now)).inDays;
+  final time = nileClock(local);
   if (days == 0) return 'Today $time';
   if (days == 1) return 'Tomorrow $time';
-  if (days < 7) return '${_weekday(local.weekday)} $time';
-  return '${_month(local.month)} ${local.day}, $time';
+  if (days < 7) return '${nileWeekdayAbbr(local.weekday)} $time';
+  return '${nileMonthAbbr(local.month)} ${local.day}, $time';
 }
-
-String _clock(DateTime d) {
-  final hour = d.hour % 12 == 0 ? 12 : d.hour % 12;
-  final minute = d.minute.toString().padLeft(2, '0');
-  return '$hour:$minute ${d.hour < 12 ? 'AM' : 'PM'}';
-}
-
-String _weekday(int w) =>
-    const ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][w - 1];
-
-String _month(int m) => const [
-  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
-][m - 1];

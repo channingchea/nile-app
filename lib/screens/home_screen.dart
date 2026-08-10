@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
@@ -28,14 +27,16 @@ import '../widgets/event_cover_pill.dart';
 import '../widgets/event_link_card.dart';
 import '../widgets/like_button.dart';
 import '../services/nile_shortcuts.dart';
+import '../services/shell_state.dart';
 import '../widgets/nile_context_rail.dart';
+import '../widgets/nile_create_sheet.dart';
+import '../widgets/nile_desktop.dart';
+import '../widgets/nile_destinations.dart';
 import '../widgets/nile_glass_app_bar.dart';
 import '../widgets/nile_keyboard_list.dart';
 import '../widgets/nile_logo.dart';
 import '../widgets/nile_glass_nav_bar.dart';
-import '../widgets/nile_nav_rail.dart';
 import '../widgets/nile_skeleton.dart';
-import '../widgets/nile_top_bar.dart';
 import '../widgets/official_badge.dart';
 import '../widgets/post_image_carousel.dart';
 import '../widgets/pressable.dart';
@@ -57,28 +58,17 @@ const int kThinFeedThreshold = 5;
 /// The tab shell. Owns the glass nav bar and the four branch Navigators; the
 /// branches themselves are declared in `lib/router.dart`.
 ///
-/// Detail screens are routed *above* this shell, so a pushed screen still
-/// covers the nav bar the way it did under the old IndexedStack. Tab state and
-/// scroll position survive switching, and an unvisited branch isn't built until
-/// it's first selected — both handled by StatefulShellRoute rather than the
-/// `_visited` set this used to keep by hand.
+/// Detail screens are routed *above* this shell. On a phone that means a pushed
+/// screen covers the nav bar exactly as it did under the old IndexedStack; on a
+/// desktop the chrome that draws the nav rail sits above both (see
+/// [NileAppShell]), so a push changes only what is inside this widget. Tab state
+/// and scroll position survive switching, and an unvisited branch isn't built
+/// until it's first selected — both handled by StatefulShellRoute rather than
+/// the `_visited` set this used to keep by hand.
 class HomeScreen extends StatelessWidget {
   const HomeScreen({super.key, required this.shell});
 
   final StatefulNavigationShell shell;
-
-  void _showActionSheet(BuildContext context) {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: NileColors.bgSurface,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(
-          top: Radius.circular(NileRadius.lg),
-        ),
-      ),
-      builder: (_) => const _ActionSheet(),
-    );
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -91,48 +81,69 @@ class HomeScreen extends StatelessWidget {
       onPopInvokedWithResult: (didPop, _) {
         if (!didPop) shell.goBranch(0);
       },
-      // One shell per window class. Below 900 this is byte-for-byte the layout
-      // that shipped to beta; the desktop variant is additive, so a narrow
-      // window on macOS still gets the phone app rather than a squeezed
-      // three-column one.
+      // One shell per window class. Below the iPad threshold this is
+      // byte-for-byte the layout that shipped to beta; above it the branch
+      // content is handed up bare, because the rail, top bar and context rail
+      // are drawn once by the chrome instead of once per screen.
       child: window.hasNavRail
-          ? _DesktopShell(
-              shell: shell,
-              window: window,
-              onCreate: () => _showActionSheet(context),
-            )
+          ? _DesktopBranchHost(shell: shell)
           : _CompactShell(
               shell: shell,
-              onCreate: () => _showActionSheet(context),
+              onCreate: () => showNileCreateSheet(context),
             ),
     );
   }
 }
 
-/// The four branch destinations, shared by the glass bar and the nav rail so
-/// the two navs can never drift out of order.
-const List<NileGlassDestination> kNileDestinations = [
-  NileGlassDestination(
-    icon: Icons.home_outlined,
-    selectedIcon: Icons.home,
-    label: 'Home',
-  ),
-  NileGlassDestination(
-    icon: Icons.search_outlined,
-    selectedIcon: Icons.search,
-    label: 'Discover',
-  ),
-  NileGlassDestination(
-    icon: Icons.send_outlined,
-    selectedIcon: Icons.send,
-    label: 'Messages',
-  ),
-  NileGlassDestination(
-    icon: Icons.person_outline,
-    selectedIcon: Icons.person,
-    label: 'Profile',
-  ),
-];
+/// Renders the branch content bare and tells the two things that live above it
+/// — the chrome and the keyboard shortcuts — which branch is showing.
+///
+/// Stateful only for that publishing: both consumers are outside this subtree,
+/// so neither can read `StatefulNavigationShell` from its own context.
+class _DesktopBranchHost extends StatefulWidget {
+  const _DesktopBranchHost({required this.shell});
+
+  final StatefulNavigationShell shell;
+
+  @override
+  State<_DesktopBranchHost> createState() => _DesktopBranchHostState();
+}
+
+class _DesktopBranchHostState extends State<_DesktopBranchHost> {
+  @override
+  void initState() {
+    super.initState();
+    _publish();
+  }
+
+  @override
+  void didUpdateWidget(_DesktopBranchHost old) {
+    super.didUpdateWidget(old);
+    _publish();
+  }
+
+  @override
+  void dispose() {
+    NileShortcuts.branchSwitcher = null;
+    NileShortcuts.listEnabled = true;
+    super.dispose();
+  }
+
+  /// Safe to do from initState because nothing *listens* to
+  /// [NileShellState.branch] — the chrome reads its value during build and only
+  /// for pushed routes, where it has long since settled. A listener here would
+  /// mean mutating an ancestor mid-build.
+  void _publish() {
+    NileShellState.publish(widget.shell.currentIndex);
+    NileShortcuts.branchSwitcher = widget.shell.goBranch;
+    // The feed's keyboard list stays mounted inside the IndexedStack while
+    // other tabs show, so J/K has to be told when it isn't the visible one.
+    NileShortcuts.listEnabled = widget.shell.currentIndex == 0;
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.shell;
+}
 
 /// Phone layout — unchanged from the pre-desktop shell.
 class _CompactShell extends StatelessWidget {
@@ -152,7 +163,11 @@ class _CompactShell extends StatelessWidget {
     // restore the FloatingActionButton, and drop the reservedHeight bottom
     // padding from the tab scroll views.
     bottomNavigationBar: NileGlassNavBar(
-      selectedIndex: shell.currentIndex,
+      // Schedule (branch 4) is a desktop destination with no slot in this bar.
+      // A phone can still land on it from a link, so clamp rather than let an
+      // out-of-range index reach the bar. For branches 0–3 — everything a phone
+      // can actually navigate to — this is the identity.
+      selectedIndex: shell.currentIndex.clamp(0, kNileDestinations.length - 1),
       // initialLocation: true on a re-tap of the active tab pops that branch
       // back to its root, which is what a bottom nav is expected to do and what
       // the old single-stack shell got for free.
@@ -163,103 +178,6 @@ class _CompactShell extends StatelessWidget {
       destinations: kNileDestinations,
     ),
   );
-}
-
-/// The three-zone desktop shell: nav rail, content column, context rail.
-///
-/// Stateful only so it can hand the branch switcher to [NileShortcuts] — ⌘1–⌘4
-/// and J/K both need to know which branch is showing, and this is the only
-/// widget that has that.
-class _DesktopShell extends StatefulWidget {
-  const _DesktopShell({
-    required this.shell,
-    required this.window,
-    required this.onCreate,
-  });
-
-  final StatefulNavigationShell shell;
-  final NileWindowClass window;
-  final VoidCallback onCreate;
-
-  @override
-  State<_DesktopShell> createState() => _DesktopShellState();
-}
-
-class _DesktopShellState extends State<_DesktopShell> {
-  @override
-  void initState() {
-    super.initState();
-    _syncShortcuts();
-  }
-
-  @override
-  void didUpdateWidget(_DesktopShell old) {
-    super.didUpdateWidget(old);
-    _syncShortcuts();
-  }
-
-  @override
-  void dispose() {
-    NileShortcuts.branchSwitcher = null;
-    NileShortcuts.listEnabled = true;
-    super.dispose();
-  }
-
-  /// The feed's keyboard list stays mounted inside the IndexedStack while other
-  /// tabs are showing, so J/K has to be told when it isn't the visible one.
-  void _syncShortcuts() {
-    NileShortcuts.branchSwitcher = widget.shell.goBranch;
-    NileShortcuts.listEnabled = widget.shell.currentIndex == 0;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final shell = widget.shell;
-
-    // Both rails are pinned to the window edges, so the three zones always add
-    // up to exactly the window width and nothing floats. The content column
-    // grows first, up to NileMaxWidth.desktop; past that the context rail takes
-    // whatever is left over. It is the flexible zone because it holds cards,
-    // not prose — a text column that kept growing would just get harder to read.
-    final railWidth = NileNavRail.widthFor(widget.window.navRailLabelled);
-    final available = MediaQuery.sizeOf(context).width - railWidth;
-    final showContextRail = widget.window.hasContextRail;
-    final contentWidth = showContextRail
-        ? math.min(available - NileContextRail.minWidth, NileMaxWidth.desktop)
-        : available;
-
-    return Scaffold(
-      backgroundColor: NileColors.bgPage,
-      body: Row(
-        children: [
-          NileNavRail(
-            selectedIndex: shell.currentIndex,
-            onDestinationSelected: (i) =>
-                shell.goBranch(i, initialLocation: i == shell.currentIndex),
-            destinations: kNileDestinations,
-            labelled: widget.window.navRailLabelled,
-            onCreate: widget.onCreate,
-            onNotifications: () => context.push(NileRoutes.notifications),
-            onSettings: () => context.push(NileRoutes.settings),
-          ),
-          SizedBox(
-            // The shell owns the column width now, so screens sit flush against
-            // the nav rail instead of being re-centred by their own
-            // NileMaxWidth inside a wider area.
-            width: contentWidth,
-            child: Column(
-              children: [
-                const NileTopBar(),
-                Expanded(child: shell),
-              ],
-            ),
-          ),
-          if (showContextRail)
-            NileContextRail(width: available - contentWidth),
-        ],
-      ),
-    );
-  }
 }
 
 // ── Create button (trailing "+" beside the glass nav) ────────────────────────
@@ -278,71 +196,6 @@ class _CreateButton extends StatelessWidget {
         onTap: onTap,
         child: Center(
           child: Icon(Icons.add, color: NileColors.onVolt, size: 28),
-        ),
-      ),
-    );
-  }
-}
-
-// ── Action sheet (FAB → bottom sheet) ────────────────────────────────────────
-
-class _ActionSheet extends StatelessWidget {
-  const _ActionSheet();
-
-  /// Close the sheet, open the create screen, and when it returns mark the feed
-  /// and profile tabs stale. `pop` then `push` has to stay in that order — the
-  /// sheet is a route too.
-  void _open(BuildContext context, String location) {
-    Navigator.pop(context);
-    context.push(location).then((_) => TabRefresh.contentCreated());
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(NileSpacing.s24, NileSpacing.s16, NileSpacing.s24, NileSpacing.s24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Center(
-              child: Container(
-                width: 36,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: NileColors.border,
-                  borderRadius: BorderRadius.circular(NileRadius.pill),
-                ),
-              ),
-            ),
-            const SizedBox(height: 20),
-            Text('Create', style: NileTextStyles.headingMd()),
-            const SizedBox(height: 16),
-            FilledButton.icon(
-              onPressed: () => _open(context, NileRoutes.createPost),
-              icon: const Icon(Icons.edit_outlined),
-              label: const Text('Create Post'),
-            ),
-            // The trim strip needs video_thumbnail — mobile only.
-            if (NilePlatform.canCreateCurrents) ...[
-              const SizedBox(height: 12),
-              OutlinedButton.icon(
-                onPressed: () => _open(context, NileRoutes.createCurrent),
-                icon: const Icon(Icons.bolt_outlined),
-                label: const Text('Create Current'),
-              ),
-            ],
-            const SizedBox(height: 12),
-            OutlinedButton.icon(
-              onPressed: () => _open(context, NileRoutes.createEvent),
-              icon: const Icon(Icons.add_circle_outline),
-              label: const Text('Create Event'),
-            ),
-            // Viewing/streaming is entered from the event detail screen, which
-            // knows whether you're the host (and so whether you get Start Show
-            // / End Stream) — not from this create sheet.
-          ],
         ),
       ),
     );
@@ -865,7 +718,9 @@ class FeedTabState extends State<FeedTab> {
         items = <_FeedItem>[
           ...hEvents.map((e) => _EventFeedItem(e)),
           ...hPosts.map((p) => _PostFeedItem(p)),
-          ...hReposts.map((p) => _PostFeedItem(p, sortOverride: repostAt[p.id])),
+          ...hReposts.map(
+            (p) => _PostFeedItem(p, sortOverride: repostAt[p.id]),
+          ),
           ...hEventReposts.map(
             (e) => _EventFeedItem(e, sortOverride: eventRepostAt[e.id]),
           ),
@@ -1041,15 +896,16 @@ class FeedTabState extends State<FeedTab> {
   /// Wraps a card so J/K can move a selection ring onto it and L / C / Enter
   /// can act on it. A no-op on phones — [NileKeyboardItem] returns the card
   /// untouched below the desktop breakpoint.
-  Widget _keyboardItem(int index, _FeedItem it, Widget card) => NileKeyboardItem(
-    index: index,
-    onOpen: () => _openFeedItem(it),
-    // Comments live on the detail screen, so C and Enter land in the same
-    // place — C just means "I'm going there to reply".
-    onComment: () => _openFeedItem(it),
-    onLike: _likeAction(it),
-    child: card,
-  );
+  Widget _keyboardItem(int index, _FeedItem it, Widget card) =>
+      NileKeyboardItem(
+        index: index,
+        onOpen: () => _openFeedItem(it),
+        // Comments live on the detail screen, so C and Enter land in the same
+        // place — C just means "I'm going there to reply".
+        onComment: () => _openFeedItem(it),
+        onLike: _likeAction(it),
+        child: card,
+      );
 
   /// Advertiser creatives have no like path, so L over one falls through
   /// instead of being swallowed.
@@ -1160,132 +1016,151 @@ class FeedTabState extends State<FeedTab> {
       bottom: false,
       child: NileKeyboardList(
         child: RefreshIndicator(
-        color: NileColors.volt,
-        backgroundColor: NileColors.bgSurface,
-        onRefresh: _load,
-        child: CustomScrollView(
-          controller: _scroll,
-          physics: const AlwaysScrollableScrollPhysics(),
-          slivers: [
-            if (compact)
-              NileGlassBar.sliverAppBar(
-                title: const NileLogo(size: 'small', height: 28),
-                actions: [
-                  IconButton(
-                    onPressed: _openNotifications,
-                    icon: Badge(
-                      isLabelVisible: _unreadCount > 0,
-                      label: _unreadCount > 9
-                          ? const Text('9+')
-                          : Text('$_unreadCount'),
-                      backgroundColor: NileColors.coral,
-                      child: const Icon(Icons.notifications_outlined),
+          color: NileColors.volt,
+          backgroundColor: NileColors.bgSurface,
+          onRefresh: _load,
+          child: CustomScrollView(
+            controller: _scroll,
+            physics: const AlwaysScrollableScrollPhysics(),
+            slivers: [
+              if (compact)
+                NileGlassBar.sliverAppBar(
+                  title: const NileLogo(size: 'small', height: 28),
+                  actions: [
+                    IconButton(
+                      onPressed: _openNotifications,
+                      icon: Badge(
+                        isLabelVisible: _unreadCount > 0,
+                        label: _unreadCount > 9
+                            ? const Text('9+')
+                            : Text('$_unreadCount'),
+                        backgroundColor: NileColors.coral,
+                        child: const Icon(Icons.notifications_outlined),
+                      ),
                     ),
-                  ),
+                  ],
+                ),
+              if (_error != null)
+                SliverFillRemaining(
+                  child: _ErrorState(message: _error!, onRetry: _load),
+                )
+              else if (_items == null)
+                const SliverToBoxAdapter(child: NileSkeletonList())
+              else ...[
+                // Order differs by layout, on purpose. The phone leads with the
+                // Currents rail — a thumb-reach strip at the top of a feed. The
+                // desktop leads with what's on air and what's next, which is the
+                // agreed landing view: live and upcoming first, social below.
+                if (!compact) ...[
+                  if (_liveNow.isNotEmpty)
+                    SliverToBoxAdapter(
+                      child: _LiveBand(events: _liveNow, onTap: _openLive),
+                    ),
+                  SliverToBoxAdapter(child: _ComingUpBand(onTap: _openLive)),
                 ],
-              ),
-            if (_error != null)
-              SliverFillRemaining(
-                child: _ErrorState(message: _error!, onRetry: _load),
-              )
-            else if (_items == null)
-              const SliverToBoxAdapter(child: NileSkeletonList())
-            else ...[
-              // Currents rail — always first; its leading slot is the "Your
-              // Current" create entry, so it renders even with no content.
-              // macOS can't create Currents, so there the rail is dropped
-              // entirely rather than left as an empty strip.
-              if (NilePlatform.canCreateCurrents || _currentsRail.isNotEmpty)
-                SliverToBoxAdapter(
-                  child: CurrentsRail(
-                    entries: _currentsRail,
-                    onCreate:
-                        NilePlatform.canCreateCurrents ? _createCurrent : null,
-                    onTapCreator: _openCurrents,
-                  ),
-                ),
-              // Platform-wide Live Now rail — pinned first for every user,
-              // hidden entirely when nothing is live (no empty shell).
-              if (_liveNow.isNotEmpty)
-                SliverToBoxAdapter(
-                  child: _LiveNowRail(events: _liveNow, onTap: _openLive),
-                ),
-              // Followed feed (empty when the user follows no one). Reserves
-              // the nav-bar gap at its foot only when no starter section
-              // follows it.
-              if (display.isNotEmpty)
-                SliverPadding(
-                  padding: EdgeInsets.fromLTRB(
-                    NileSpacing.s16,
-                    NileSpacing.s8,
-                    NileSpacing.s16,
-                    _starterItems.isEmpty ? navGap : NileSpacing.s16,
-                  ),
-                  sliver: SliverList.separated(
-                    itemCount: display.length + (_hasMore ? 1 : 0),
-                    separatorBuilder: (_, _) => const SizedBox(height: 12),
-                    itemBuilder: (_, i) {
-                      if (i >= display.length) return const LoadMoreFooter();
-                      return NileStaggeredFadeIn(
-                        index: i,
-                        child: _keyboardItem(
-                          i,
-                          display[i],
-                          _wrapImpression(display[i]),
-                        ),
-                      );
-                    },
-                  ),
-                ),
-              // Cold-start starter fill, in priority order (not time-sorted),
-              // under a header that explains why it's shown.
-              if (_starterItems.isNotEmpty) ...[
-                if (!(_starterMode && _starterHeaderDismissed))
+                // Currents rail — its leading slot is the "Your Current" create
+                // entry, so it renders even with no content. macOS can't create
+                // Currents, so there the rail is dropped entirely rather than
+                // left as an empty strip.
+                if (NilePlatform.canCreateCurrents || _currentsRail.isNotEmpty)
                   SliverToBoxAdapter(
-                    child: _StarterHeader(
-                      label: _starterMode
-                          ? 'Follow creators to shape this feed'
-                          : 'Suggested for you',
-                      onDismiss: _starterMode
-                          ? () =>
-                                setState(() => _starterHeaderDismissed = true)
+                    child: CurrentsRail(
+                      entries: _currentsRail,
+                      onCreate: NilePlatform.canCreateCurrents
+                          ? _createCurrent
                           : null,
+                      onTapCreator: _openCurrents,
                     ),
                   ),
-                SliverPadding(
-                  padding: EdgeInsets.fromLTRB(
-                    NileSpacing.s16,
-                    NileSpacing.s8,
-                    NileSpacing.s16,
-                    navGap,
+                // Platform-wide Live Now rail — pinned first for every user,
+                // hidden entirely when nothing is live (no empty shell). The
+                // desktop shows the same events as a band above instead.
+                if (compact && _liveNow.isNotEmpty)
+                  SliverToBoxAdapter(
+                    child: _LiveNowRail(events: _liveNow, onTap: _openLive),
                   ),
-                  sliver: SliverList.separated(
-                    itemCount: _starterItems.length,
-                    separatorBuilder: (_, _) => const SizedBox(height: 12),
-                    itemBuilder: (_, i) => NileStaggeredFadeIn(
-                      index: i,
-                      // Continues the followed feed's indices so J/K runs
-                      // straight through both sections as one list.
-                      child: _keyboardItem(
-                        display.length + i,
-                        _starterItems[i],
-                        _cardFor(_starterItems[i]),
+                // Followed feed (empty when the user follows no one). Reserves
+                // the nav-bar gap at its foot only when no starter section
+                // follows it.
+                if (display.isNotEmpty)
+                  SliverPadding(
+                    padding: EdgeInsets.fromLTRB(
+                      NileSpacing.s16,
+                      NileSpacing.s8,
+                      NileSpacing.s16,
+                      _starterItems.isEmpty ? navGap : NileSpacing.s16,
+                    ),
+                    sliver: SliverList.separated(
+                      itemCount: display.length + (_hasMore ? 1 : 0),
+                      separatorBuilder: (_, _) => const SizedBox(height: 12),
+                      itemBuilder: (_, i) {
+                        if (i >= display.length) return const LoadMoreFooter();
+                        return NileStaggeredFadeIn(
+                          index: i,
+                          child: _keyboardItem(
+                            i,
+                            display[i],
+                            _wrapImpression(display[i]),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                // Cold-start starter fill, in priority order (not time-sorted),
+                // under a header that explains why it's shown.
+                if (_starterItems.isNotEmpty) ...[
+                  if (!(_starterMode && _starterHeaderDismissed))
+                    SliverToBoxAdapter(
+                      child: _StarterHeader(
+                        label: _starterMode
+                            ? 'Follow creators to shape this feed'
+                            : 'Suggested for you',
+                        onDismiss: _starterMode
+                            ? () =>
+                                  setState(() => _starterHeaderDismissed = true)
+                            : null,
+                      ),
+                    ),
+                  SliverPadding(
+                    padding: EdgeInsets.fromLTRB(
+                      NileSpacing.s16,
+                      NileSpacing.s8,
+                      NileSpacing.s16,
+                      navGap,
+                    ),
+                    sliver: SliverList.separated(
+                      itemCount: _starterItems.length,
+                      separatorBuilder: (_, _) => const SizedBox(height: 12),
+                      itemBuilder: (_, i) => NileStaggeredFadeIn(
+                        index: i,
+                        // Continues the followed feed's indices so J/K runs
+                        // straight through both sections as one list.
+                        child: _keyboardItem(
+                          display.length + i,
+                          _starterItems[i],
+                          _cardFor(_starterItems[i]),
+                        ),
                       ),
                     ),
                   ),
-                ),
+                ],
+                // Nothing to show at all: still offer a next step.
+                if (_items!.isEmpty && _starterItems.isEmpty)
+                  SliverFillRemaining(
+                    hasScrollBody: false,
+                    child: _followingIds.isEmpty
+                        ? _EmptyFollows(
+                            onFindPeople: () =>
+                                context.go(NileRoutes.discover(tab: 2)),
+                          )
+                        : _EmptyFeed(
+                            onFindPeople: () =>
+                                context.go(NileRoutes.discover(tab: 2)),
+                          ),
+                  ),
               ],
-              // Nothing to show at all: still offer a next step.
-              if (_items!.isEmpty && _starterItems.isEmpty)
-                SliverFillRemaining(
-                  hasScrollBody: false,
-                  child: _followingIds.isEmpty
-                      ? _EmptyFollows(onFindPeople: () => context.go(NileRoutes.discover(tab: 2)))
-                      : _EmptyFeed(onFindPeople: () => context.go(NileRoutes.discover(tab: 2))),
-                ),
             ],
-          ],
-        ),
+          ),
         ),
       ),
     );
@@ -1355,7 +1230,12 @@ class _EventCard extends StatelessWidget {
               if (fromNetwork && !isSponsored) const _NetworkTag(padded: true),
               if (event.repostedByUsername != null)
                 Padding(
-                  padding: const EdgeInsets.fromLTRB(NileSpacing.s12, NileSpacing.s8, NileSpacing.s12, 0),
+                  padding: const EdgeInsets.fromLTRB(
+                    NileSpacing.s12,
+                    NileSpacing.s8,
+                    NileSpacing.s12,
+                    0,
+                  ),
                   child: _RepostHeader(username: event.repostedByUsername!),
                 ),
               _Thumbnail(event: event, hero: event.repostedByUsername == null),
@@ -1512,7 +1392,15 @@ class _NetworkTag extends StatelessWidget {
       ],
     );
     return padded
-        ? Padding(padding: const EdgeInsets.fromLTRB(NileSpacing.s12, NileSpacing.s12, NileSpacing.s12, 0), child: row)
+        ? Padding(
+            padding: const EdgeInsets.fromLTRB(
+              NileSpacing.s12,
+              NileSpacing.s12,
+              NileSpacing.s12,
+              0,
+            ),
+            child: row,
+          )
         : row;
   }
 }
@@ -1531,11 +1419,7 @@ class _SponsoredTag extends StatelessWidget {
     final row = Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Icon(
-          Icons.campaign_outlined,
-          size: 14,
-          color: NileColors.txtTertiary,
-        ),
+        Icon(Icons.campaign_outlined, size: 14, color: NileColors.txtTertiary),
         const SizedBox(width: 4),
         Text(
           'Sponsored',
@@ -1546,7 +1430,15 @@ class _SponsoredTag extends StatelessWidget {
       ],
     );
     return padded
-        ? Padding(padding: const EdgeInsets.fromLTRB(NileSpacing.s12, NileSpacing.s12, NileSpacing.s12, 0), child: row)
+        ? Padding(
+            padding: const EdgeInsets.fromLTRB(
+              NileSpacing.s12,
+              NileSpacing.s12,
+              NileSpacing.s12,
+              0,
+            ),
+            child: row,
+          )
         : row;
   }
 }
@@ -1578,9 +1470,9 @@ class _AdCreativeCard extends StatelessWidget {
     if (uri == null) return;
     if (!await launchUrl(uri, mode: LaunchMode.externalApplication) &&
         context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Could not open link')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Could not open link')));
     }
   }
 
@@ -1625,7 +1517,10 @@ class _AdCreativeCard extends StatelessWidget {
               ),
               Padding(
                 padding: const EdgeInsets.fromLTRB(
-                  NileSpacing.s12, NileSpacing.s8, NileSpacing.s4, NileSpacing.s12,
+                  NileSpacing.s12,
+                  NileSpacing.s8,
+                  NileSpacing.s4,
+                  NileSpacing.s12,
                 ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -1665,8 +1560,9 @@ class _AdCreativeCard extends StatelessWidget {
                                 value: 'report',
                                 child: Text(
                                   'Report ad',
-                                  style: NileTextStyles.bodyMd()
-                                      .copyWith(color: NileColors.error),
+                                  style: NileTextStyles.bodyMd().copyWith(
+                                    color: NileColors.error,
+                                  ),
                                 ),
                               ),
                             ],
@@ -1679,19 +1575,23 @@ class _AdCreativeCard extends StatelessWidget {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text(creative.headline,
-                              style: NileTextStyles.headingSm()),
+                          Text(
+                            creative.headline,
+                            style: NileTextStyles.headingSm(),
+                          ),
                           const SizedBox(height: 4),
                           Text(
                             creative.body,
-                            style: NileTextStyles.bodyMd()
-                                .copyWith(color: NileColors.txtSecondary),
+                            style: NileTextStyles.bodyMd().copyWith(
+                              color: NileColors.txtSecondary,
+                            ),
                           ),
                           const SizedBox(height: 8),
                           Text(
                             creative.advertiserName,
-                            style: NileTextStyles.labelSm()
-                                .copyWith(color: NileColors.txtTertiary),
+                            style: NileTextStyles.labelSm().copyWith(
+                              color: NileColors.txtTertiary,
+                            ),
                           ),
                         ],
                       ),
@@ -1985,7 +1885,10 @@ class _RepostButton extends StatelessWidget {
       onTap: onTap,
       borderRadius: BorderRadius.circular(NileRadius.sm),
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s4, vertical: NileSpacing.s4),
+        padding: const EdgeInsets.symmetric(
+          horizontal: NileSpacing.s4,
+          vertical: NileSpacing.s4,
+        ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -2097,6 +2000,330 @@ class _LiveNowRail extends StatelessWidget {
         ),
         const SizedBox(height: NileSpacing.s8),
       ],
+    );
+  }
+}
+
+// ── Desktop bands ────────────────────────────────────────────────────────────
+// Home's landing view on a rail-sized window: what's on air, then what's next,
+// then the social feed. Same data as the phone's rails — a horizontal strip is
+// a thumb affordance, and with a pointer and a wide column there is no reason
+// to hide shows behind a sideways scroll.
+
+/// Live shows as a grid rather than a strip, with a hover treatment on each
+/// card.
+///
+/// The hover state currently reveals a watch affordance over the cover. A true
+/// video preview on hover is the wireframe's eventual intent, but a live show
+/// needs a LiveKit subscription to preview — one per hovered card — so that
+/// waits for the Phase 7 live-viewer work where the connection logic lands.
+class _LiveBand extends StatelessWidget {
+  const _LiveBand({required this.events, required this.onTap});
+
+  final List<Event> events;
+  final void Function(Event) onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        NileSectionHeader(
+          'Live now',
+          accent: NileColors.coral,
+          trailing: Text(
+            events.length == 1 ? '1 on air' : '${events.length} on air',
+            style: NileTextStyles.bodySm().copyWith(
+              color: NileColors.txtTertiary,
+            ),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s16),
+          child: NileCardGrid(
+            minItemWidth: 260,
+            maxColumns: 3,
+            children: [
+              for (final e in events)
+                _LiveBandCard(event: e, onTap: () => onTap(e)),
+            ],
+          ),
+        ),
+        const SizedBox(height: NileSpacing.s24),
+      ],
+    );
+  }
+}
+
+class _LiveBandCard extends StatelessWidget {
+  const _LiveBandCard({required this.event, required this.onTap});
+
+  final Event event;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => NileHoverCard(
+    builder: (context, hovered) => Material(
+      color: NileColors.bgSurface,
+      child: InkWell(
+        onTap: onTap,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            AspectRatio(
+              aspectRatio: 16 / 9,
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  _LiveThumbnail(event: event),
+                  IgnorePointer(
+                    child: AnimatedOpacity(
+                      opacity: hovered ? 1 : 0,
+                      duration: NileMotion.fast,
+                      curve: NileMotion.curve,
+                      child: ColoredBox(
+                        color: const Color(0x73000000),
+                        child: Center(
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(
+                                Icons.play_circle_fill,
+                                color: Colors.white,
+                                size: 28,
+                              ),
+                              const SizedBox(width: NileSpacing.s8),
+                              Text(
+                                'Watch now',
+                                style: NileTextStyles.labelMd().copyWith(
+                                  color: Colors.white,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.all(NileSpacing.s12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    event.title,
+                    style: NileTextStyles.labelMd(),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  const SizedBox(height: NileSpacing.s2),
+                  Row(
+                    children: [
+                      Flexible(
+                        child: Text(
+                          '@${event.hostUsername}',
+                          style: NileTextStyles.caption(),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      if (event.hostIsOfficial) ...[
+                        const SizedBox(width: NileSpacing.s4),
+                        const OfficialBadge(size: 12),
+                      ],
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
+/// The coming-up strip, with the day scrubber above it.
+///
+/// Owns its own fetch rather than taking a list from [FeedTabState]: it is
+/// built only on a rail-sized window, so a phone never pays for the query. That
+/// also keeps the feed's load path — which is already juggling four cursors —
+/// out of it.
+class _ComingUpBand extends StatefulWidget {
+  const _ComingUpBand({required this.onTap});
+
+  final void Function(Event) onTap;
+
+  @override
+  State<_ComingUpBand> createState() => _ComingUpBandState();
+}
+
+class _ComingUpBandState extends State<_ComingUpBand> {
+  List<Event>? _events;
+  DateTime? _day;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final events = await EventService.getUpcoming(limit: 24);
+      if (mounted) setState(() => _events = events);
+    } catch (_) {
+      // A secondary band: it disappears rather than showing an error over the
+      // feed, which has its own error handling directly below.
+      if (mounted) setState(() => _events = const []);
+    }
+  }
+
+  /// Scheduled times arrive in UTC, so the conversion to local has to happen
+  /// before bucketing or a late-evening show lands on the wrong day chip.
+  Map<DateTime, List<Event>> get _byDay {
+    final out = <DateTime, List<Event>>{};
+    for (final e in _events ?? const <Event>[]) {
+      final at = e.scheduledAt;
+      if (at == null) continue;
+      (out[nileDayKey(at.toLocal())] ??= []).add(e);
+    }
+    return out;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final events = _events;
+    // Nothing yet, or nothing at all: no header, no empty shell.
+    if (events == null || events.isEmpty) return const SizedBox.shrink();
+
+    final byDay = _byDay;
+    final days = byDay.keys.toList()..sort();
+    final selected = _day;
+    final shown = selected == null
+        ? events.where((e) => e.scheduledAt != null).toList()
+        : (byDay[selected] ?? const <Event>[]);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        NileSectionHeader(
+          'Coming up',
+          trailing: TextButton(
+            onPressed: () => context.go(NileRoutes.schedule),
+            child: const Text('Full schedule'),
+          ),
+        ),
+        NileDayStrip(
+          days: days,
+          selected: selected,
+          onSelected: (d) => setState(() => _day = d),
+          countFor: (d) => (byDay[d] ?? const []).length,
+        ),
+        const SizedBox(height: NileSpacing.s12),
+        SizedBox(
+          // 208-wide card = a 117 pt 16:9 cover, and the caption/title/host
+          // block under it needs ~98 with a two-line title. 196 was measured
+          // against an empty database, where this strip never rendered.
+          height: 226,
+          child: ListView.separated(
+            scrollDirection: Axis.horizontal,
+            clipBehavior: Clip.none,
+            padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s16),
+            itemCount: shown.length,
+            separatorBuilder: (_, _) => const SizedBox(width: NileSpacing.s12),
+            itemBuilder: (_, i) => SizedBox(
+              width: 208,
+              child: _ComingUpCard(
+                event: shown[i],
+                onTap: () => widget.onTap(shown[i]),
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(height: NileSpacing.s24),
+      ],
+    );
+  }
+}
+
+class _ComingUpCard extends StatelessWidget {
+  const _ComingUpCard({required this.event, required this.onTap});
+
+  final Event event;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final cover = event.coverImageUrl;
+    return NileHoverCard(
+      borderRadius: NileRadius.md,
+      // Inside a horizontally-clipped strip, a card that scaled up would be cut
+      // off at the viewport edge instead of lifting off the page.
+      lift: false,
+      builder: (context, hovered) => Material(
+        color: hovered ? NileColors.bgRaised : NileColors.bgSurface,
+        child: InkWell(
+          onTap: onTap,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              AspectRatio(
+                aspectRatio: 16 / 9,
+                child: cover == null
+                    ? EventCoverPlaceholder(seed: event.id)
+                    : Image.network(
+                        cover,
+                        fit: BoxFit.cover,
+                        cacheWidth: nileDecodeWidth(208),
+                        errorBuilder: (_, _, _) =>
+                            EventCoverPlaceholder(seed: event.id),
+                      ),
+              ),
+              // Expanded + Flexible rather than a taller box alone: the strip
+              // has a fixed height, so at a large text scale the title has to
+              // be able to give a line back instead of overflowing.
+              Expanded(
+                child: Padding(
+                  padding: const EdgeInsets.all(NileSpacing.s12),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        nileWhen(event.scheduledAt),
+                        style: NileTextStyles.caption().copyWith(
+                          color: NileColors.volt,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      const SizedBox(height: NileSpacing.s4),
+                      Flexible(
+                        child: Text(
+                          event.title,
+                          style: NileTextStyles.labelMd(),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      const SizedBox(height: NileSpacing.s2),
+                      Text(
+                        '@${event.hostUsername}',
+                        style: NileTextStyles.caption(),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
@@ -2331,11 +2558,7 @@ class _ContentMenu extends StatelessWidget {
   Widget build(BuildContext context) {
     return PopupMenuButton<String>(
       padding: EdgeInsets.zero,
-      icon: Icon(
-        Icons.more_horiz,
-        size: 18,
-        color: NileColors.txtTertiary,
-      ),
+      icon: Icon(Icons.more_horiz, size: 18, color: NileColors.txtTertiary),
       color: NileColors.bgRaised,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(NileRadius.sm),

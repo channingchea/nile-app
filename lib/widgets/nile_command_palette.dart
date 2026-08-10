@@ -79,6 +79,7 @@ class _Command {
 
 const _commands = <_Command>[
   _Command(Icons.home_outlined, 'Home', NileRoutes.feed, keywords: 'feed'),
+  _Command(Icons.calendar_month_outlined, 'Schedule', NileRoutes.schedule, keywords: 'calendar week upcoming coming up whats on'),
   _Command(Icons.search_outlined, 'Discover', '/discover', keywords: 'browse explore'),
   _Command(Icons.send_outlined, 'Messages', NileRoutes.messages, keywords: 'dm inbox chat'),
   _Command(Icons.person_outline, 'Profile', '/profile', keywords: 'me my account'),
