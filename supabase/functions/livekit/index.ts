@@ -311,6 +311,14 @@ async function cameraToken(body: any, userId: string, admin: any, json: Json): P
 
   const roomName = roomNameFor(eventId);
 
+  // The HOST's camera may also subscribe; an operator's may not. This is what
+  // feeds the macOS Studio's monitor wall — the host has to see every crew feed
+  // to run the show. Operators stay publish-only: they point one camera and
+  // have no UI for the others, so subscribe rights would only cost them
+  // bandwidth. The client still connects with autoSubscribe off and subscribes
+  // explicitly, so a host on a phone (no Studio) pulls nothing either.
+  const isHost = gate.event.host_id === userId;
+
   // First camera to join becomes master audio by default.
   let isMasterAudio = false;
   try {
@@ -327,7 +335,7 @@ async function cameraToken(body: any, userId: string, admin: any, json: Json): P
     name: cameraName,
     roomName,
     canPublish: true,
-    canSubscribe: false,
+    canSubscribe: isHost,
     // joinedAt is server-stamped (no device clock skew) so the viewer can align
     // this camera against the master-audio timeline. A fresh token on rejoin =
     // a fresh joinedAt automatically.

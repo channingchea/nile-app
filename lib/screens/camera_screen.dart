@@ -6,15 +6,20 @@ import 'package:flutter_webrtc/flutter_webrtc.dart' as rtc;
 import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart' show RealtimeChannel;
 import '../services/supabase_client.dart';
+import '../services/block_service.dart';
 import '../services/chat_service.dart';
 import '../services/crew_service.dart';
 import '../services/event_service.dart';
 import '../services/livekit_service.dart';
+import '../services/report_service.dart';
+import '../services/screen_capture_permission.dart';
 import '../services/shake_detector.dart';
 import '../widgets/audio_meter.dart';
+import '../widgets/nile_studio.dart';
 import '../widgets/screen_share_picker.dart';
 import '../widgets/viewer_preview_overlay.dart';
 import '../theme.dart';
+import 'widgets/moderation_menu.dart';
 
 class CameraScreen extends StatefulWidget {
   final String? initialEventId;
@@ -223,6 +228,10 @@ class _CameraScreenState extends State<CameraScreen> {
           );
         }
       } else {
+        // macOS grants Screen Recording per-launch: ask before opening a picker
+        // that would otherwise come back empty and read as a broken feature.
+        if (!await ScreenCapturePermission.ensure(context)) return;
+        if (!mounted) return;
         final source = await ScreenSharePicker.show(context);
         if (source == null) return; // cancelled
         final track = await LocalVideoTrack.createScreenShareTrack(
@@ -275,6 +284,242 @@ class _CameraScreenState extends State<CameraScreen> {
     if (defaultTargetPlatform == TargetPlatform.macOS) return true;
     return defaultTargetPlatform == TargetPlatform.iOS &&
         MediaQuery.sizeOf(context).shortestSide >= 600;
+  }
+
+  // ── Studio (desktop) ────────────────────────────────────────────────────────
+  // A desk-sized window gets the Studio instead of the phone's full-bleed
+  // preview. It is the same state machine either way — only `build` differs —
+  // so nothing below is allowed to change what the phone does.
+  //
+  // Monitoring crew feeds needs a subscribe grant, and the livekit function
+  // gives one only to the host's camera token. An operator therefore sees the
+  // Studio chrome with their own feed in it and an empty roster, which is
+  // correct: they run one camera, not the show.
+
+  /// Crew feeds and their screen shares, rebuilt on participant/track events
+  /// rather than in `build` — a live room can hold hundreds of viewers and
+  /// walking that list every frame would be pointless work.
+  List<NileStudioSource> _remoteSources = const [];
+
+  /// Which source the monitor is showing. Null falls back to the first.
+  String? _selectedSourceId;
+
+  /// True once the window is wide enough for the Studio. Read in
+  /// `didChangeDependencies` (the safe place for MediaQuery) so the
+  /// subscribe/unsubscribe pass can run off it without touching `build`.
+  bool _studioMode = false;
+
+  int _viewerCount = 0;
+  NileStudioQuality _quality = NileStudioQuality.unknown;
+
+  /// Senders muted for this session, and senders blocked outright. Kept apart
+  /// so "Show all" undoes only the reversible one.
+  final Set<String> _hiddenSenders = {};
+  final Set<String> _blockedSenders = {};
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final studio = !NileBreakpoints.of(context).isCompact;
+    if (studio == _studioMode) return;
+    _studioMode = studio;
+    _syncSubscriptions();
+  }
+
+  /// Subscribe to crew video while the Studio is on screen, and drop it when it
+  /// isn't. Without this a host on a phone would pull every crew feed for a UI
+  /// that never shows them — the room is joined with `autoSubscribe: false`
+  /// precisely so this decision is ours to make.
+  void _syncSubscriptions() {
+    final room = _room;
+    if (room == null || !widget.isHost) return;
+    for (final p in room.remoteParticipants.values) {
+      if (!_isPublisher(p)) continue;
+      for (final pub in p.videoTrackPublications) {
+        if (_studioMode && !pub.subscribed) {
+          pub.subscribe();
+        } else if (!_studioMode && pub.subscribed) {
+          pub.unsubscribe();
+        }
+      }
+    }
+  }
+
+  /// Cameras and the Stream Audio device publish; viewers just watch. Filtering
+  /// on the role in token metadata is what keeps a thousand-viewer room from
+  /// turning into a thousand-row source list.
+  bool _isPublisher(Participant p) {
+    final role = _metaOf(p)['role'];
+    return role == 'camera' || role == 'master-audio';
+  }
+
+  Map<String, dynamic> _metaOf(Participant p) {
+    try {
+      final decoded = jsonDecode(p.metadata ?? '{}');
+      return decoded is Map<String, dynamic> ? decoded : const {};
+    } catch (_) {
+      return const {};
+    }
+  }
+
+  /// Rebuild the crew half of the source list. Assigned crew who haven't
+  /// connected are listed too — "camera 3 isn't here yet" is exactly what a
+  /// host wants the roster to tell them.
+  void _rebuildRemoteSources() {
+    final room = _room;
+    if (room == null) {
+      if (_remoteSources.isNotEmpty) {
+        setState(() => _remoteSources = const []);
+      }
+      return;
+    }
+
+    final sources = <NileStudioSource>[];
+    final connectedUserIds = <String>{};
+
+    for (final p in room.remoteParticipants.values) {
+      if (!_isPublisher(p)) continue;
+      final meta = _metaOf(p);
+      final userId = meta['userId'] as String?;
+      if (userId != null) connectedUserIds.add(userId);
+      final isAudioOnly = meta['role'] == 'master-audio';
+      final ready = meta['ready'] == true;
+      final name = p.name.isNotEmpty ? p.name : p.identity;
+
+      final videoPubs = p.videoTrackPublications;
+      if (videoPubs.isEmpty) {
+        sources.add(
+          NileStudioSource(
+            identity: p.identity,
+            label: name,
+            sublabel: isAudioOnly ? 'Stream Audio · no video' : 'No video',
+            isMasterAudio: isAudioOnly || meta['isMasterAudio'] == true,
+            isReady: ready,
+          ),
+        );
+        continue;
+      }
+      for (final pub in videoPubs) {
+        final isShare = pub.source == TrackSource.screenShareVideo;
+        sources.add(
+          NileStudioSource(
+            identity: isShare ? '${p.identity}#share' : p.identity,
+            label: isShare ? '$name — screen' : name,
+            sublabel: isShare
+                ? 'Screen share'
+                : (ready ? 'Ready' : 'Standing by'),
+            track: pub.subscribed ? pub.track as VideoTrack? : null,
+            isScreenShare: isShare,
+            isMasterAudio: !isShare && meta['isMasterAudio'] == true,
+            isReady: !isShare && ready,
+          ),
+        );
+      }
+    }
+
+    for (final op in _crew) {
+      if (connectedUserIds.contains(op.profile.id)) continue;
+      sources.add(
+        NileStudioSource(
+          identity: 'crew:${op.profile.id}',
+          label: '@${op.profile.username}',
+          sublabel: op.isAudioOperator
+              ? 'Stream Audio · not connected'
+              : op.slotIndex != null
+              ? 'Camera ${op.slotIndex} · not connected'
+              : 'Not connected',
+        ),
+      );
+    }
+
+    if (!mounted) return;
+    setState(() => _remoteSources = sources);
+  }
+
+  /// Your own camera and screen share, prepended to the roster. Derived in
+  /// `build` because every field it reads already lives in `setState`.
+  List<NileStudioSource> get _localSources {
+    final local = _room?.localParticipant;
+    if (local == null) return const [];
+    final name = _cameraNameController.text.trim();
+    final out = <NileStudioSource>[
+      NileStudioSource(
+        identity: local.identity,
+        label: name.isEmpty ? 'Your camera' : 'You · $name',
+        sublabel: _isMainAudioSource ? 'Broadcast audio' : 'Mic muted',
+        track: _videoEnabled ? _localVideoTrack : null,
+        isLocal: true,
+        isMasterAudio: _isMasterAudio,
+        mirror: _selectedCameraId == null && _isFrontCamera,
+      ),
+    ];
+    final share = _screenShareTrack;
+    if (share != null) {
+      out.add(
+        NileStudioSource(
+          identity: '${local.identity}#share',
+          label: 'Your screen',
+          sublabel: 'Screen share',
+          track: share,
+          isLocal: true,
+          isScreenShare: true,
+        ),
+      );
+    }
+    return out;
+  }
+
+  NileStudioQuality _mapQuality(ConnectionQuality q) => switch (q) {
+    ConnectionQuality.excellent => NileStudioQuality.excellent,
+    ConnectionQuality.good => NileStudioQuality.good,
+    ConnectionQuality.poor => NileStudioQuality.poor,
+    ConnectionQuality.lost => NileStudioQuality.lost,
+    ConnectionQuality.unknown => NileStudioQuality.unknown,
+  };
+
+  /// Who viewers are hearing right now — a live Stream Audio feed always wins,
+  /// otherwise it is whichever camera holds master audio.
+  String? get _audioSourceLabel {
+    if (_streamAudioActive) return 'Stream Audio';
+    if (_isMainAudioSource) return 'Your mic';
+    for (final s in _remoteSources) {
+      if (s.isMasterAudio && !s.isScreenShare) return s.label;
+    }
+    return null;
+  }
+
+  // ── Chat moderation (Studio) ────────────────────────────────────────────────
+  // Chat is an ephemeral broadcast, so there is no server-side message to
+  // delete. Hiding is local and reversible; blocking is the real, persisted
+  // action and applies app-wide; reporting goes to the same review queue as
+  // every other report.
+
+  void _hideSender(ChatMessage m) {
+    if (m.senderId.isEmpty) return;
+    setState(() => _hiddenSenders.add(m.senderId));
+  }
+
+  void _showAllSenders() => setState(_hiddenSenders.clear);
+
+  Future<void> _blockSender(ChatMessage m) async {
+    if (m.senderId.isEmpty) return;
+    final blocked = await Moderation.confirmBlock(
+      context,
+      userId: m.senderId,
+      username: m.username,
+    );
+    if (blocked && mounted) {
+      setState(() => _blockedSenders.add(m.senderId));
+    }
+  }
+
+  Future<void> _reportSender(ChatMessage m) async {
+    if (m.senderId.isEmpty) return;
+    await Moderation.showReportSheet(
+      context,
+      targetType: ReportTargetType.user,
+      targetId: m.senderId,
+    );
   }
 
   /// This camera is the broadcast audio source only when it holds the
@@ -465,6 +710,7 @@ class _CameraScreenState extends State<CameraScreen> {
             ? DateTime.parse(end).difference(DateTime.parse(sched))
             : null;
         _captureStartedAt(state['started_at']);
+        _viewerCount = (state['viewer_count'] as num?)?.toInt() ?? _viewerCount;
       });
     } catch (_) {
       /* best-effort */
@@ -477,6 +723,15 @@ class _CameraScreenState extends State<CameraScreen> {
     if (raw is String) _startedAt = DateTime.tryParse(raw);
   }
 
+  /// Mirror the row's viewer count into the Studio stats row. The count is
+  /// server-authoritative — viewers reconcile it against LiveKit participants —
+  /// so this screen only ever reads it.
+  void _captureViewerCount(Map<String, dynamic> record) {
+    final n = (record['viewer_count'] as num?)?.toInt();
+    if (n == null || n == _viewerCount) return;
+    setState(() => _viewerCount = n);
+  }
+
   void _startCountdownTicker() {
     _countdownTimer?.cancel();
     _countdownTimer = Timer.periodic(
@@ -487,6 +742,12 @@ class _CameraScreenState extends State<CameraScreen> {
 
   void _tickCountdown() {
     if (!mounted || _autoEnding) return;
+    // The Studio's "time on air" is derived from _startedAt at build time, so
+    // it only advances if something rebuilds. This ticker is already running
+    // every second for the countdown — piggyback rather than add a second one.
+    if (_studioMode && _state == CameraState.live && _startedAt != null) {
+      setState(() {});
+    }
     final end = _effectiveEndAt;
     if (_state != CameraState.live || end == null) {
       if (_remaining != null) setState(() => _remaining = null);
@@ -608,7 +869,10 @@ class _CameraScreenState extends State<CameraScreen> {
       await _room?.disconnect();
       _room = null;
 
-      room = Room();
+      // adaptiveStream is subscriber-side only: it lets the Studio's thumbnail
+      // grid pull low layers while the monitor pulls full resolution. Nothing
+      // about publishing changes, on any platform.
+      room = Room(roomOptions: const RoomOptions(adaptiveStream: true));
       final listener = room.createListener();
 
       listener.on<ParticipantMetadataUpdatedEvent>((event) {
@@ -624,6 +888,8 @@ class _CameraScreenState extends State<CameraScreen> {
           // The master-audio flag may have moved to/from this camera.
           _syncMicEnabled();
         } catch (_) {}
+        // Ready ticks and the master-audio badge live on the source tiles.
+        _rebuildRemoteSources();
       });
 
       listener.on<ParticipantConnectedEvent>((event) {
@@ -636,6 +902,8 @@ class _CameraScreenState extends State<CameraScreen> {
           // A Stream Audio device joining makes it the source — mute cameras.
           if (meta['role'] == 'master-audio') _syncMicEnabled();
         } catch (_) {}
+        _syncSubscriptions();
+        _rebuildRemoteSources();
       });
 
       // The screen share can end outside our button — iPad's system broadcast
@@ -646,6 +914,36 @@ class _CameraScreenState extends State<CameraScreen> {
           setState(() => _screenShareTrack = null);
         }
       });
+
+      // ── Studio roster ──────────────────────────────────────────────────
+      // Everything that can change what the source list shows. A crew camera
+      // publishing is also the moment to subscribe to it, if the Studio is up.
+      listener
+        ..on<TrackPublishedEvent>((_) {
+          _syncSubscriptions();
+          _rebuildRemoteSources();
+        })
+        ..on<TrackUnpublishedEvent>((_) => _rebuildRemoteSources())
+        ..on<TrackSubscribedEvent>((_) => _rebuildRemoteSources())
+        ..on<TrackUnsubscribedEvent>((_) => _rebuildRemoteSources())
+        ..on<TrackMutedEvent>((_) => _rebuildRemoteSources())
+        ..on<TrackUnmutedEvent>((_) => _rebuildRemoteSources())
+        ..on<ParticipantConnectionQualityUpdatedEvent>((event) {
+          if (!mounted) return;
+          if (event.participant.identity !=
+              _room?.localParticipant?.identity) {
+            return;
+          }
+          setState(() => _quality = _mapQuality(event.connectionQuality));
+        })
+        ..on<RoomReconnectingEvent>((_) {
+          if (mounted) setState(() => _quality = NileStudioQuality.lost);
+        })
+        ..on<RoomReconnectedEvent>((_) {
+          if (mounted) setState(() => _quality = NileStudioQuality.unknown);
+          _syncSubscriptions();
+          _rebuildRemoteSources();
+        });
 
       listener.on<ParticipantDisconnectedEvent>((event) {
         try {
@@ -660,12 +958,20 @@ class _CameraScreenState extends State<CameraScreen> {
           // Stream Audio left — a master-audio camera may now be the source.
           if (meta['role'] == 'master-audio') _syncMicEnabled();
         } catch (_) {}
+        _rebuildRemoteSources();
       });
 
       // Fail loudly instead of hanging on "Connecting…" forever if the WebRTC
       // connection or camera/mic acquisition stalls.
       await room
-          .connect(wsUrl, token)
+          .connect(
+            wsUrl,
+            token,
+            // Never auto-subscribe. Only the host's token carries a subscribe
+            // grant at all, and even then the feeds are wanted only while the
+            // Studio is on screen — `_syncSubscriptions` decides, not the SDK.
+            connectOptions: const ConnectOptions(autoSubscribe: false),
+          )
           .timeout(
             const Duration(seconds: 15),
             onTimeout: () =>
@@ -710,6 +1016,16 @@ class _CameraScreenState extends State<CameraScreen> {
       // (the sync inside _applyMicProcessing ran before this setState).
       await _syncMicEnabled();
 
+      // Studio: pick up whoever was already in the room, and fold in the
+      // people this host has already blocked so their chat never appears.
+      _syncSubscriptions();
+      _rebuildRemoteSources();
+      BlockService.blockedIds()
+          .then((ids) {
+            if (mounted) setState(() => _blockedSenders.addAll(ids));
+          })
+          .catchError((_) {});
+
       // Enter Sound Check in Supabase — best-effort, no-op if not in DB.
       // The show only goes live when Start Show is pressed (_startShow).
       EventService.enterSoundCheck(eventId).catchError((_) {});
@@ -738,6 +1054,8 @@ class _CameraScreenState extends State<CameraScreen> {
                       .where((o) => o.profile.id != uid)
                       .toList(growable: false),
                 );
+                // Assigned-but-absent crew show as placeholder rows.
+                _rebuildRemoteSources();
               }
             })
             .catchError((_) {});
@@ -763,6 +1081,7 @@ class _CameraScreenState extends State<CameraScreen> {
           onUpdate: (record) {
             if (!mounted) return;
             _captureStartedAt(record['started_at']);
+            _captureViewerCount(record);
             if (record['status'] == 'live' &&
                 _state == CameraState.soundCheck) {
               setState(() => _state = CameraState.live);
@@ -787,6 +1106,7 @@ class _CameraScreenState extends State<CameraScreen> {
           onUpdate: (record) {
             if (!mounted) return;
             _captureStartedAt(record['started_at']);
+            _captureViewerCount(record);
             final status = record['status'];
             if (status == 'live' &&
                 _state == CameraState.soundCheck &&
@@ -1024,6 +1344,11 @@ class _CameraScreenState extends State<CameraScreen> {
       _crewReady.clear();
       _joinedLiveShow = false;
       _viewerPreviewOpen = false;
+      _remoteSources = const [];
+      _selectedSourceId = null;
+      _viewerCount = 0;
+      _quality = NileStudioQuality.unknown;
+      _hiddenSenders.clear();
       _state = CameraState.idle;
     });
   }
@@ -1161,37 +1486,54 @@ class _CameraScreenState extends State<CameraScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // The Studio replaces the full-bleed preview once there is desk-sized room
+    // for it, and only while a session is up — the entry form and the
+    // connecting spinner are the same at every width.
+    final connected =
+        _state == CameraState.soundCheck || _state == CameraState.live;
+    final studio = _studioMode && connected;
+
     return Scaffold(
       backgroundColor: NileColors.bgPage,
-      appBar: AppBar(
-        title: Text('Camera', style: NileTextStyles.headingMd()),
-        backgroundColor: Colors.transparent,
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.settings),
-            color: NileColors.txtPrimary,
-            tooltip: 'Audio settings',
-            onPressed: _openAudioSettings,
-          ),
-        ],
-      ),
+      appBar: studio
+          ? null
+          : AppBar(
+              title: Text('Camera', style: NileTextStyles.headingMd()),
+              backgroundColor: Colors.transparent,
+              actions: [
+                IconButton(
+                  icon: const Icon(Icons.settings),
+                  color: NileColors.txtPrimary,
+                  tooltip: 'Audio settings',
+                  onPressed: _openAudioSettings,
+                ),
+              ],
+            ),
       body: Stack(
         children: [
-          Column(
-            children: [
-              if (_externalMicConnected &&
-                  !_disableAgc &&
-                  !_externalMicPromptDismissed)
-                _buildExternalMicBanner(),
-              Expanded(
-                child: switch (_state) {
-                  CameraState.idle => _buildForm(),
-                  CameraState.connecting => _buildConnecting(),
-                  CameraState.soundCheck || CameraState.live => _buildLive(),
-                },
-              ),
-            ],
-          ),
+          if (studio)
+            _buildStudio(context)
+          else
+            Column(
+              children: [
+                if (_externalMicConnected &&
+                    !_disableAgc &&
+                    !_externalMicPromptDismissed)
+                  _buildExternalMicBanner(),
+                Expanded(
+                  child: switch (_state) {
+                    CameraState.idle => _buildForm(),
+                    CameraState.connecting => _buildConnecting(),
+                    CameraState.soundCheck || CameraState.live => _buildLive(),
+                  },
+                ),
+              ],
+            ),
+          // The phone layout floats chat over the video; the Studio gives it a
+          // column of its own, except when the window is too narrow for three,
+          // where it falls back to the same overlay.
+          if (studio && !_hasChatColumn(context) && _chatVisible)
+            _buildChatOverlay(),
           // Viewer-preview overlay — host camera keeps publishing underneath so
           // toggling back is instant. Only reachable in host Sound Check.
           if (_viewerPreviewOpen && _eventId != null)
@@ -1390,14 +1732,14 @@ class _CameraScreenState extends State<CameraScreen> {
 
   /// Compact audio meter shown on the live camera view. Fed by this camera's own
   /// mic; greyed and labelled "MUTED" when this feed isn't the broadcast source.
-  Widget _buildCameraMeter() {
+  Widget _buildCameraMeter({double height = 140}) {
     final source = _isMainAudioSource;
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
         AudioMeter(
           participant: _room!.localParticipant!,
-          height: 140,
+          height: height,
           active: source,
         ),
         const SizedBox(height: 8),
@@ -1952,6 +2294,255 @@ class _CameraScreenState extends State<CameraScreen> {
           ),
         ),
       ],
+    );
+  }
+
+  // ── Studio (desktop) ────────────────────────────────────────────────────────
+
+  /// Three columns or two. Same rule as the app shell's context rail: below
+  /// 1180 pt a third column costs the monitor more than the chat gains.
+  bool _hasChatColumn(BuildContext context) =>
+      NileBreakpoints.of(context).hasContextRail;
+
+  Widget _buildStudio(BuildContext context) {
+    final sources = [..._localSources, ..._remoteSources];
+    final hasChat = _hasChatColumn(context);
+    final live = _state == CameraState.live;
+    final started = _startedAt;
+
+    return NileStudio(
+      sources: sources,
+      selectedIdentity: _selectedSourceId,
+      onSelectSource: (id) => setState(() => _selectedSourceId = id),
+      selfIdentity: _room?.localParticipant?.identity,
+      stats: NileStudioStats(
+        isLive: live,
+        elapsed: live && started != null
+            ? DateTime.now().difference(started)
+            : null,
+        remaining: _remaining,
+        autoEnding: _autoEnding,
+        viewerCount: _viewerCount,
+        readyCount: _readyCount,
+        crewCount: _crew.length,
+        // Placeholder rows for absent crew are roster entries, not feeds.
+        cameraCount: sources
+            .where((s) => !s.isScreenShare && !s.identity.startsWith('crew:'))
+            .length,
+        quality: _quality,
+        audioSourceLabel: _audioSourceLabel,
+      ),
+      leading: IconButton(
+        onPressed: _leaveStream,
+        icon: const Icon(Icons.arrow_back),
+        color: NileColors.txtPrimary,
+        tooltip: 'Leave',
+      ),
+      trailing: IconButton(
+        onPressed: _openAudioSettings,
+        icon: const Icon(Icons.settings),
+        color: NileColors.txtPrimary,
+        tooltip: 'Audio settings',
+      ),
+      meter: _room?.localParticipant == null
+          ? null
+          : Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [_buildCameraMeter(height: 120)],
+            ),
+      controls: _buildStudioControls(context, hasChat),
+      showChatColumn: hasChat,
+      chat: hasChat
+          ? NileStudioChat(
+              messages: _chatMessages,
+              hiddenSenders: _hiddenSenders,
+              blockedSenders: _blockedSenders,
+              selfId: supabase.auth.currentUser?.id,
+              onHide: _hideSender,
+              onShowAll: _showAllSenders,
+              onBlock: _blockSender,
+              onReport: _reportSender,
+            )
+          : null,
+      banner:
+          _externalMicConnected && !_disableAgc && !_externalMicPromptDismissed
+          ? _buildExternalMicBanner()
+          : null,
+    );
+  }
+
+  /// The Studio's control bar. Same actions, same handlers, same confirms as
+  /// the phone layout — laid out as one bar instead of stacked pills, and in a
+  /// `Wrap` so a narrow window folds to two rows rather than overflowing.
+  Widget _buildStudioControls(BuildContext context, bool hasChatColumn) {
+    final soundCheck = _state == CameraState.soundCheck;
+    final live = _state == CameraState.live;
+
+    return Wrap(
+      alignment: WrapAlignment.spaceBetween,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      spacing: NileSpacing.s12,
+      runSpacing: NileSpacing.s8,
+      children: [
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (!hasChatColumn) ...[
+              _studioIcon(
+                onPressed: () => setState(() => _chatVisible = !_chatVisible),
+                tooltip: _chatVisible ? 'Hide chat' : 'Show chat',
+                icon: _chatVisible
+                    ? Icons.chat_bubble
+                    : Icons.chat_bubble_outline,
+                active: _chatVisible,
+              ),
+              const SizedBox(width: NileSpacing.s8),
+            ],
+            if (!kIsWeb && _videoEnabled) ...[
+              if (_showCameraPicker(context))
+                _buildCameraPickerButton()
+              else
+                _studioIcon(
+                  onPressed: _switchCamera,
+                  tooltip: 'Switch camera',
+                  icon: Icons.flip_camera_ios,
+                ),
+              const SizedBox(width: NileSpacing.s8),
+            ],
+            if (_showCameraPicker(context)) ...[
+              _studioIcon(
+                onPressed: _togglingShare ? null : _toggleScreenShare,
+                tooltip: _isSharingScreen
+                    ? 'Stop sharing screen'
+                    : 'Share screen',
+                icon: _isSharingScreen
+                    ? Icons.stop_screen_share
+                    : Icons.screen_share,
+                active: _isSharingScreen,
+              ),
+              const SizedBox(width: NileSpacing.s8),
+            ],
+            // Video off is master-audio only: a camera that isn't carrying the
+            // sound has nothing left to contribute with its lens covered.
+            if (_isMasterAudio)
+              OutlinedButton.icon(
+                onPressed: _toggleVideo,
+                icon: Icon(_videoEnabled ? Icons.videocam_off : Icons.videocam),
+                label: Text(_videoEnabled ? 'Video Off' : 'Video On'),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: NileColors.txtPrimary,
+                  side: BorderSide(color: NileColors.borderStrong),
+                  shape: const StadiumBorder(),
+                ),
+              ),
+            if (!_isMasterAudio && soundCheck)
+              OutlinedButton.icon(
+                onPressed: _claimMasterAudio,
+                icon: const Icon(Icons.album, size: 16),
+                label: const Text('Set as Master Audio'),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: NileColors.txtPrimary,
+                  side: BorderSide(color: NileColors.borderStrong),
+                  shape: const StadiumBorder(),
+                ),
+              ),
+          ],
+        ),
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (soundCheck && widget.isHost) ...[
+              OutlinedButton.icon(
+                onPressed: _openViewerPreview,
+                icon: const Icon(Icons.headphones),
+                label: const Text('View as Viewer'),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: NileColors.volt,
+                  side: BorderSide(color: NileColors.volt),
+                  shape: const StadiumBorder(),
+                ),
+              ),
+              const SizedBox(width: NileSpacing.s12),
+              FilledButton.icon(
+                onPressed: _confirmStartShow,
+                icon: const Icon(Icons.play_arrow),
+                label: const Text('Start Show'),
+                style: FilledButton.styleFrom(
+                  backgroundColor: NileColors.coral,
+                  foregroundColor: Colors.white,
+                  shape: const StadiumBorder(),
+                ),
+              ),
+              const SizedBox(width: NileSpacing.s12),
+            ],
+            if (soundCheck && !widget.isHost) ...[
+              if (_ready)
+                FilledButton.icon(
+                  onPressed: _toggleReady,
+                  icon: const Icon(Icons.check_circle),
+                  label: const Text('Ready'),
+                  style: FilledButton.styleFrom(
+                    backgroundColor: NileColors.volt,
+                    foregroundColor: NileColors.onVolt,
+                    shape: const StadiumBorder(),
+                  ),
+                )
+              else
+                OutlinedButton.icon(
+                  onPressed: _toggleReady,
+                  icon: const Icon(Icons.check_circle_outline),
+                  label: const Text('Ready to Stream'),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: NileColors.volt,
+                    side: BorderSide(color: NileColors.volt),
+                    shape: const StadiumBorder(),
+                  ),
+                ),
+              const SizedBox(width: NileSpacing.s12),
+            ],
+            if (live && widget.isHost) ...[
+              OutlinedButton.icon(
+                onPressed: _confirmEndStream,
+                icon: const Icon(Icons.stop_circle_outlined),
+                label: const Text('End Stream'),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: NileColors.error,
+                  side: const BorderSide(color: NileColors.error),
+                  shape: const StadiumBorder(),
+                ),
+              ),
+              const SizedBox(width: NileSpacing.s12),
+            ],
+            OutlinedButton.icon(
+              onPressed: _leaveStream,
+              icon: const Icon(Icons.logout),
+              label: const Text('Leave'),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: NileColors.txtPrimary,
+                side: BorderSide(color: NileColors.border),
+                shape: const StadiumBorder(),
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _studioIcon({
+    required VoidCallback? onPressed,
+    required String tooltip,
+    required IconData icon,
+    bool active = false,
+  }) {
+    return IconButton(
+      onPressed: onPressed,
+      tooltip: tooltip,
+      icon: Icon(icon),
+      color: active ? Colors.white : NileColors.txtPrimary,
+      style: IconButton.styleFrom(
+        backgroundColor: active ? NileColors.coral : NileColors.bgRaised,
+      ),
     );
   }
 }
