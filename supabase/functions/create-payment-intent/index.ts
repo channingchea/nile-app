@@ -7,7 +7,9 @@
 //   supabase functions deploy create-payment-intent
 //
 // Request (POST, Bearer = user JWT):
-//   { "event_id": "uuid", "kind": "live" | "replay" }   (kind defaults to "live")
+//   { "event_id": "uuid", "kind": "live" | "replay", "origin": "macos" }
+//   kind defaults to "live"; origin is optional and recorded in Stripe
+//   metadata (see _shared/checkout_origin.ts) — omitted ⇒ "unknown".
 //   Price and title are read server-side from events — the client cannot set
 //   them. kind "replay" prices from events.replay_price and requires the replay
 //   to be published (Phase 2 VOD pricing); kind "live" prices from events.price.
@@ -20,6 +22,7 @@ import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import Stripe from "https://esm.sh/stripe@14?target=deno";
 import { corsHeaders as corsHeadersFor } from "../_shared/cors.ts";
+import { checkoutOrigin } from "../_shared/checkout_origin.ts";
 
 const stripe = new Stripe(Deno.env.get("STRIPE_SECRET_KEY")!, {
   apiVersion: "2023-10-16",
@@ -56,8 +59,10 @@ serve(async (req) => {
       return json({ error: "Unauthorized" }, 401);
     }
 
-    const { event_id, kind: rawKind } = await req.json();
+    const { event_id, kind: rawKind, origin: rawOrigin } = await req.json();
     const kind = rawKind === "replay" ? "replay" : "live";
+    // Which app the sale came from. Older clients send nothing → "unknown".
+    const origin = checkoutOrigin(rawOrigin);
     if (!event_id) {
       return json({ error: "Invalid request body" }, 400);
     }
@@ -205,6 +210,7 @@ serve(async (req) => {
         event_id,
         buyer_id: user.id,
         kind,
+        origin,
       },
     });
 

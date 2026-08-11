@@ -70,6 +70,13 @@ class _EventDetailScreenState extends State<EventDetailScreen>
   bool _ticketBusy = false;
   int? _ticketsRemaining; // null = unlimited
 
+  /// True between opening Stripe checkout and seeing the ticket land, so a
+  /// return from the browser gets the full poll and an idle refocus doesn't.
+  bool _checkoutPending = false;
+
+  /// Re-entrancy guard on [_refreshTicketStatus] — see the lifecycle hook.
+  bool _pollingTicket = false;
+
   // Crew: assigned camera operators get free access to the event.
   bool _isOperator = false;
   MyOperatorAssignment? _assignment;
@@ -121,29 +128,47 @@ class _EventDetailScreenState extends State<EventDetailScreen>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed) return;
     // Returning from the Stripe browser flow — re-check ticket status.
-    if (state == AppLifecycleState.resumed) _refreshTicketStatus();
+    //
+    // On desktop `resumed` fires on every window refocus, not just on a return
+    // from another app, so the two cases are told apart: a checkout we started
+    // gets the full poll (the webhook lags a beat), any other refocus gets one
+    // cheap re-check (it catches a purchase made on another device). Without
+    // the split, clicking between windows during a show would stack overlapping
+    // five-request poll loops.
+    _refreshTicketStatus(attempts: _checkoutPending ? 5 : 1);
   }
 
   /// Poll ticket status a few times to absorb Stripe webhook latency.
-  Future<void> _refreshTicketStatus() async {
+  Future<void> _refreshTicketStatus({int attempts = 5}) async {
     final event = _event;
     if (event == null ||
+        _pollingTicket ||
         _hasTicket ||
         _isOwnEvent ||
         event.price == null ||
         event.price! <= 0) {
       return;
     }
-    for (var attempt = 0; attempt < 5; attempt++) {
-      final purchased = await TicketService.hasPurchased(event.id);
-      if (!mounted) return;
-      if (purchased) {
-        setState(() => _hasTicket = true);
-        _offerAddToCalendar(event);
-        return;
+    _pollingTicket = true;
+    try {
+      for (var attempt = 0; attempt < attempts; attempt++) {
+        final purchased = await TicketService.hasPurchased(event.id);
+        if (!mounted) return;
+        if (purchased) {
+          _checkoutPending = false;
+          setState(() => _hasTicket = true);
+          _offerAddToCalendar(event);
+          return;
+        }
+        // No sleep after the final attempt — it only delayed the caller.
+        if (attempt < attempts - 1) {
+          await Future.delayed(const Duration(seconds: 2));
+        }
       }
-      await Future.delayed(const Duration(seconds: 2));
+    } finally {
+      _pollingTicket = false;
     }
   }
 
@@ -371,7 +396,9 @@ class _EventDetailScreenState extends State<EventDetailScreen>
         kind: kind,
       );
       final uri = Uri.parse(url);
+      _checkoutPending = true;
       if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
+        _checkoutPending = false;
         throw Exception('Could not open checkout');
       }
       // Poll for ticket confirmation after returning from browser

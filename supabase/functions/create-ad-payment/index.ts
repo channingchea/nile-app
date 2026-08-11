@@ -51,6 +51,9 @@ import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import Stripe from "https://esm.sh/stripe@14?target=deno";
 import { corsHeaders as corsHeadersFor } from "../_shared/cors.ts";
+// Every caller today is the advertiser web portal, so the fallback is "web"
+// rather than "unknown" — the app links out to the portal, it never buys here.
+import { checkoutOrigin } from "../_shared/checkout_origin.ts";
 
 // CORS headers are per-request, so the JSON responder is built per-request too
 // and handed to the helpers below (they run outside the handler's scope).
@@ -186,7 +189,12 @@ async function createHostBoost(
     success_url: `${Deno.env.get("AD_SUCCESS_URL")}?campaign_id=${campaign.id}&session_id={CHECKOUT_SESSION_ID}`,
     cancel_url: `${Deno.env.get("AD_CANCEL_URL")}?event=${event_id}`,
     // standalone:"0" ⇒ webhook activates immediately.
-    metadata: { type: "ad_campaign", standalone: "0", campaign_id: campaign.id },
+    metadata: {
+      type: "ad_campaign",
+      standalone: "0",
+      campaign_id: campaign.id,
+      origin: checkoutOrigin(body.origin, "web"),
+    },
   });
 
   await admin.from("ad_campaigns")
@@ -372,7 +380,12 @@ async function createStandaloneAd(
     success_url: `${portalUrl()}?campaign_id=${campaign.id}&session_id={CHECKOUT_SESSION_ID}`,
     cancel_url: portalUrl(),
     // standalone:"1" ⇒ webhook flips to pending_review (human approval), not active.
-    metadata: { type: "ad_campaign", standalone: "1", campaign_id: campaign.id },
+    metadata: {
+      type: "ad_campaign",
+      standalone: "1",
+      campaign_id: campaign.id,
+      origin: checkoutOrigin(body.origin, "web"),
+    },
   });
 
   await admin.from("ad_campaigns")
@@ -503,7 +516,13 @@ async function createSponsorship(admin: any, userId: string, body: any, json: Js
     success_url: `${portalUrl()}?campaign_id=${campaign.id}&session_id={CHECKOUT_SESSION_ID}`,
     cancel_url: portalUrl(),
     // standalone:"1" ⇒ the webhook flips to pending_review (human approval).
-    metadata: { type: "ad_campaign", standalone: "1", placement: "lobby", campaign_id: campaign.id },
+    metadata: {
+      type: "ad_campaign",
+      standalone: "1",
+      placement: "lobby",
+      campaign_id: campaign.id,
+      origin: checkoutOrigin(body.origin, "web"),
+    },
   });
 
   await admin.from("ad_campaigns")

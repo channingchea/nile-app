@@ -1,3 +1,4 @@
+import 'checkout_origin.dart';
 import 'event_service.dart';
 import 'pagination.dart';
 import 'supabase_client.dart';
@@ -81,7 +82,11 @@ class TicketService {
   }) async {
     final response = await supabase.functions.invoke(
       'create-payment-intent',
-      body: {'event_id': eventId, 'kind': kind},
+      body: {
+        'event_id': eventId,
+        'kind': kind,
+        'origin': NileCheckoutOrigin.current,
+      },
     );
 
     if (response.status != 200) {
