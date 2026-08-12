@@ -420,7 +420,12 @@ final GoRouter _router = GoRouter(
         path: '/stream/:id',
         builder: (_, s) {
           final id = s.pathParameters['id']!;
-          final host = s.uri.queryParameters['host'] != 'false';
+          // Opt IN, not opt out. This used to default to true, so on web or
+          // desktop the host control set was one URL edit away — the DB writes
+          // no-op under RLS, but startShow / stopEgress succeed server-side.
+          // Every real caller passes host= explicitly (NileRoutes.stream always
+          // writes it), so nothing legitimate relies on the old default.
+          final host = s.uri.queryParameters['host'] == 'true';
           return s.uri.queryParameters['audio'] == 'true'
               ? AudioScreen(initialEventId: id, isHost: host)
               : CameraScreen(

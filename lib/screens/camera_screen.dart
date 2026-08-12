@@ -1030,9 +1030,18 @@ class _CameraScreenState extends State<CameraScreen> {
           })
           .catchError((_) {});
 
-      // Enter Sound Check in Supabase — best-effort, no-op if not in DB.
-      // The show only goes live when Start Show is pressed (_startShow).
-      EventService.enterSoundCheck(eventId).catchError((_) {});
+      // Enter Sound Check in Supabase. The show only goes live when Start Show
+      // is pressed (_startShow). Migration 0089 rejects this when the event's
+      // window has already closed — a host arriving hours late used to flip the
+      // row to 'soundcheck' while every viewer surface still said ENDED, so the
+      // Studio said SOUND CHECK and nobody could get in. Say so out loud rather
+      // than swallowing it.
+      EventService.enterSoundCheck(eventId).catchError((Object _) {
+        _toast(
+          'This event’s scheduled window has already closed, so viewers can’t '
+          'join. Edit the date on the event page to run it now.',
+        );
+      });
 
       // Join the live-chat broadcast so the host/operator can watch the room.
       _chatChannel = ChatService.subscribe(eventId, _onChatMessage);
@@ -1213,6 +1222,35 @@ class _CameraScreenState extends State<CameraScreen> {
     await _startShow();
   }
 
+  /// Runs [op], retrying a couple of times with a short backoff. Returns false
+  /// if every attempt failed.
+  ///
+  /// Start Show and End Stream used to be fire-and-forget `.catchError((_) {})`
+  /// with teardown proceeding regardless — a failed Start Show meant the host
+  /// streamed while every paying viewer sat in the Lobby for the whole show, and
+  /// a failed End Stream left the row `live` with a dead room until the cron
+  /// caught it. Both now retry, and both tell the host when they can't.
+  static Future<bool> _retry(Future<void> Function() op) async {
+    for (var attempt = 0; attempt < 3; attempt++) {
+      try {
+        await op();
+        return true;
+      } catch (_) {
+        if (attempt < 2) {
+          await Future.delayed(Duration(milliseconds: 400 * (attempt + 1)));
+        }
+      }
+    }
+    return false;
+  }
+
+  void _toast(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message), duration: const Duration(seconds: 6)),
+    );
+  }
+
   Future<void> _startShow() async {
     if (_eventId == null) return;
     setState(() {
@@ -1221,9 +1259,36 @@ class _CameraScreenState extends State<CameraScreen> {
       // instant, and the countdown shouldn't wait on a round-trip.
       _startedAt = DateTime.now();
     });
-    EventService.goLive(_eventId!).catchError((_) {});
+
+    final wentLive = await _retry(() => EventService.goLive(_eventId!));
+    if (!wentLive) {
+      // Nobody can see the show. Put the button back rather than leaving the
+      // host performing to an empty Lobby.
+      if (mounted) {
+        setState(() {
+          _state = CameraState.soundCheck;
+          _startedAt = null;
+        });
+      }
+      _toast(
+        'Couldn’t start the show — your viewers are still in the Lobby. '
+        'Check your connection and press Start Show again.',
+      );
+      return;
+    }
+
     // Stamp the camera-sync anchor (showStartedAt) into the room metadata.
-    LivekitService.startShow(eventId: _eventId!).catchError((_) {});
+    // Non-fatal: the show is live either way, but angles lose their alignment,
+    // and this is also what kicks off the replay recording.
+    final anchored = await _retry(
+      () => LivekitService.startShow(eventId: _eventId!),
+    );
+    if (!anchored) {
+      _toast(
+        'You’re live, but the recording didn’t start. There may be no replay '
+        'for this show.',
+      );
+    }
   }
 
   Future<void> _claimMasterAudio() async {
@@ -1316,9 +1381,21 @@ class _CameraScreenState extends State<CameraScreen> {
   /// ends a show; it lives at the bottom of the Settings sheet behind a confirm.
   Future<void> _endStream() async {
     if (_eventId != null) {
-      EventService.end(_eventId!).catchError((_) {});
-      // Stop the replay egress so the recording finalizes. Best-effort.
-      LivekitService.stopEgress(eventId: _eventId!).catchError((_) {});
+      // Stop the replay egress FIRST so the recording finalizes while the room
+      // is still up. Best-effort; the egress_ended webhook and the hourly sweep
+      // both cover a failure here.
+      await _retry(() => LivekitService.stopEgress(eventId: _eventId!));
+
+      final ended = await _retry(() => EventService.end(_eventId!));
+      if (!ended) {
+        // The row is still 'live' with a room nobody is publishing into. The
+        // auto-end sweep will close it, but the host should know the show is
+        // still showing as on-air until then.
+        _toast(
+          'Couldn’t mark the show as ended. It may still appear live for a few '
+          'minutes — we’ll close it automatically.',
+        );
+      }
     }
     await _teardownRoom();
   }

@@ -696,14 +696,24 @@ class EventService {
   }
 
   /// Transition an event to 'live'.
+  ///
+  /// Guarded like its siblings: without the `.neq` an `ended` show could be
+  /// flipped back to `live` with a fresh `started_at`, which re-fires the "is
+  /// live" push to every follower. Migration 0089 enforces the same rule
+  /// server-side — this is the client half, so the failure is a no-op update
+  /// rather than a thrown Postgres error.
+  ///
+  /// `started_at` is deliberately NOT sent: 0089 stamps it from the server
+  /// clock. The auto-end sweep computes the whole run length from that value,
+  /// and a device 20 minutes fast used to buy 20 extra minutes of billed egress.
   static Future<void> goLive(String liveKitEventId) async {
     await supabase
         .from('events')
-        .update({
-          'status': 'live',
-          'started_at': DateTime.now().toUtc().toIso8601String(),
-        })
-        .eq('livekit_room', liveKitEventId);
+        .update({'status': 'live'})
+        .eq('livekit_room', liveKitEventId)
+        .neq('status', 'ended')
+        .neq('status', 'cancelled')
+        .neq('status', 'draft');
   }
 
   /// Transition an event to 'ended'.
@@ -714,7 +724,9 @@ class EventService {
           'status': 'ended',
           'ended_at': DateTime.now().toUtc().toIso8601String(),
         })
-        .eq('livekit_room', liveKitEventId);
+        .eq('livekit_room', liveKitEventId)
+        .neq('status', 'ended')
+        .neq('status', 'cancelled');
   }
 
   /// Host: publish the replay at [priceCents] (0 = free). Server-side RPC

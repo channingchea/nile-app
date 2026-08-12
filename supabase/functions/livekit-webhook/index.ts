@@ -70,7 +70,7 @@ serve(async (req) => {
     const slug = roomName.replace(/^nile-event-/, "");
     const { data: ev } = await admin
       .from("events")
-      .select("id")
+      .select("id, status")
       .eq("livekit_room", slug)
       .maybeSingle();
 
@@ -88,6 +88,28 @@ serve(async (req) => {
           log("warn", { event: "room_finished", roomName, stop_error: String(err) }),
         );
         log("info", { event: "room_finished", roomName, action: "stopped-egress" });
+      }
+
+      // C6: close the event too. Nothing used to write events.status here, so a
+      // host whose battery died stayed pinned to Live Now for the rest of the
+      // scheduled duration, with every viewer who tapped in getting a valid
+      // token into an empty room. The room is gone — the show is over.
+      //
+      // Only from 'live' or 'soundcheck': a room can finish for a show that
+      // never started (empty timeout on an abandoned setup), and the auto-end
+      // sweep owns that case with the right ended_at. 0089 makes anything else
+      // a hard error anyway.
+      if (ev.status === "live" || ev.status === "soundcheck") {
+        const { error: endErr } = await admin
+          .from("events")
+          .update({ status: "ended", ended_at: new Date().toISOString() })
+          .eq("id", ev.id)
+          .in("status", ["live", "soundcheck"]);
+        if (endErr) {
+          log("warn", { event: "room_finished", roomName, end_error: endErr.message });
+        } else {
+          log("info", { event: "room_finished", roomName, action: "ended-event" });
+        }
       }
     }
     return new Response("ok", { status: 200 });

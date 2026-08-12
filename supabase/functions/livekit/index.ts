@@ -254,6 +254,28 @@ async function requireOperator(
   return { event };
 }
 
+/**
+ * Host-only gate, for the actions that are not merely "operate this event" but
+ * "decide the shape of the show" — starting it, and finalizing the recording.
+ *
+ * requireOperator() authorizes any assigned operator, which is right for
+ * publishing a camera and wrong for these two: an operator could stop the egress
+ * mid-show and truncate the replay the host later sells.
+ */
+async function requireHost(
+  eventId: string,
+  userId: string,
+  admin: ReturnType<typeof createClient>,
+  json: Json,
+): Promise<{ event: { id: string; host_id: string; livekit_room: string | null } } | Response> {
+  const gate = await requireOperator(eventId, userId, admin, json);
+  if (gate instanceof Response) return gate;
+  if (gate.event.host_id !== userId) {
+    return json({ error: "Forbidden — only the host can do this" }, 403);
+  }
+  return gate;
+}
+
 /** True if `userId` may operate the event: the host, or an assigned operator. */
 async function isAuthorizedOperator(
   event: { id: string; host_id: string },
@@ -310,6 +332,39 @@ async function cameraToken(body: any, userId: string, admin: any, json: Json): P
   if (gate instanceof Response) return gate;
 
   const roomName = roomNameFor(eventId);
+
+  // C9: camera_count is what the host is priced on — a "free, single-camera"
+  // event could run five publishers because nothing checked at mint time. Count
+  // the cameras already in the room and refuse the one that would exceed it.
+  // A publisher rejoining reuses its own cameraId, so a reconnect never counts
+  // twice.
+  const { data: cfg } = await admin
+    .from("events")
+    .select("camera_count")
+    .eq("id", gate.event.id)
+    .maybeSingle();
+  const cameraLimit = Math.max(1, (cfg?.camera_count as number | null) ?? 1);
+  try {
+    const participants = await roomService.listParticipants(roomName);
+    const live = new Set(
+      participants
+        .filter((p) => parseMeta(p.metadata).role === "camera")
+        .map((p) => p.identity),
+    );
+    live.delete(`camera-${cameraId}`); // this publisher reconnecting
+    if (live.size >= cameraLimit) {
+      return json(
+        {
+          error:
+            `This event is set up for ${cameraLimit} camera${cameraLimit === 1 ? "" : "s"}, ` +
+            `and ${live.size} ${live.size === 1 ? "is" : "are"} already connected.`,
+        },
+        409,
+      );
+    }
+  } catch {
+    // Room not up yet — nothing to exceed.
+  }
 
   // The HOST's camera may also subscribe, and only when it asks to. This feeds
   // the macOS Studio's monitor wall — a host has to see every crew feed to run
@@ -473,7 +528,9 @@ async function startShow(body: any, userId: string, admin: any, json: Json): Pro
   const { eventId } = body;
   if (!eventId) return json({ error: "eventId is required" }, 400);
 
-  const gate = await requireOperator(eventId, userId, admin, json);
+  // Host-only (review C11): starting the show is the host's call, not an
+  // operator's.
+  const gate = await requireHost(eventId, userId, admin, json);
   if (gate instanceof Response) return gate;
 
   const roomName = roomNameFor(eventId);
@@ -576,7 +633,9 @@ async function stopEgress(body: any, userId: string, admin: any, json: Json): Pr
   const { eventId } = body;
   if (!eventId) return json({ error: "eventId is required" }, 400);
 
-  const gate = await requireOperator(eventId, userId, admin, json);
+  // Host-only (review C11): an operator finalizing the recording mid-show
+  // truncates the replay the host later sells.
+  const gate = await requireHost(eventId, userId, admin, json);
   if (gate instanceof Response) return gate;
 
   const { data: replay } = await admin
@@ -592,6 +651,15 @@ async function stopEgress(body: any, userId: string, admin: any, json: Json): Pr
       log("warn", { action: "stop-egress", error: String(err) }),
     );
   }
+
+  // C12: nothing used to close the LiveKit room when a show ended — the cron is
+  // DB-only, and publishers relied entirely on receiving the realtime 'ended'
+  // record. A wedged socket kept a camera publishing into a finished show.
+  // deleteRoom disconnects every participant; it also fires room_finished, which
+  // the webhook treats as idempotent.
+  await roomService.deleteRoom(roomNameFor(eventId)).catch((err) =>
+    log("warn", { action: "stop-egress", note: "room delete failed", error: String(err) }),
+  );
 
   return json({ success: true });
 }
