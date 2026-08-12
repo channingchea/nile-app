@@ -259,6 +259,8 @@ class _EventDetailScreenState extends State<EventDetailScreen>
     _ticker?.cancel();
     final target = _event?.scheduledAt;
     if (_event?.isScheduled != true || target == null) return;
+    // Nothing to count down to on a window that has already closed.
+    if (_event!.isOver) return;
     _tick(target);
     _ticker = Timer.periodic(const Duration(seconds: 1), (_) => _tick(target));
   }
@@ -275,7 +277,7 @@ class _EventDetailScreenState extends State<EventDetailScreen>
   /// former still gets a buy-ticket CTA. (fix 1)
   Future<void> _checkReplay() async {
     final event = _event;
-    if (event == null || !event.isEnded) return;
+    if (event == null || !event.isOver) return;
     final slug = event.liveKitEventId ?? event.id;
     final r = await LivekitService.replayExists(eventId: slug);
     if (!mounted) return;
@@ -427,7 +429,7 @@ class _EventDetailScreenState extends State<EventDetailScreen>
   /// browser (not an in-app webview). All checkout happens on the web, so there
   /// is no in-app purchase path — this CTA is just a link out, never a buy button.
   Future<void> _boost() async {
-    if (_event == null || !_isOwnEvent || _event!.isEnded) return;
+    if (_event == null || !_isOwnEvent || _event!.isOver) return;
     final uri = Uri.parse(ShareUrls.boost(_event!.id));
     if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
       if (!mounted) return;
@@ -447,7 +449,8 @@ class _EventDetailScreenState extends State<EventDetailScreen>
   void _watch() {
     // Allow entry once the show is live OR while the host is in Sound Check
     // (the viewer lands in the Lobby until Start Show).
-    if (_event == null || !(_event!.isLive || _event!.isSoundCheck)) return;
+    if (_event == null || _event!.isOver) return;
+    if (!(_event!.isLive || _event!.isSoundCheck)) return;
     context.push(NileRoutes.watch(_event!.liveKitEventId!));
   }
 
@@ -457,7 +460,8 @@ class _EventDetailScreenState extends State<EventDetailScreen>
   /// Operators (and the host re-entering a show already in Sound Check or live)
   /// go straight to streaming.
   void _enterAsCamera() {
-    if (_event == null || !(_isOwnEvent || _isOperator)) return;
+    if (_event == null || _event!.isOver) return;
+    if (!(_isOwnEvent || _isOperator)) return;
     final needsSetup = _isOwnEvent && !_event!.isSoundCheck && !_event!.isLive;
     // Audio operators run the audio feed; everyone else runs a camera.
     final audio = _assignment?.isAudioOperator == true;
@@ -473,6 +477,10 @@ class _EventDetailScreenState extends State<EventDetailScreen>
         _event!.liveKitEventId!,
         audio: audio,
         host: _isOwnEvent,
+        // Carry the Crew Setup slot so the streaming screen auto-connects
+        // rather than asking for the camera name by hand. Null (unassigned)
+        // keeps the manual form.
+        cameraName: _assignment?.cameraLabel,
       ),
     );
   }
@@ -666,7 +674,9 @@ class _EventDetailScreenState extends State<EventDetailScreen>
       ),
       const SizedBox(height: 16),
     ],
-    if (_event!.isScheduled) ...[
+    // No countdown once the window has passed — that block's expired state
+    // spins "Waiting for host to start the stream…" forever otherwise.
+    if (_event!.isScheduled && !_event!.isOver) ...[
       _CountdownBlock(
         scheduledAt: _event!.scheduledAt,
         remaining: _remaining,
@@ -724,7 +734,7 @@ class _EventDetailScreenState extends State<EventDetailScreen>
     ),
     // Host-only: promote this event via the web ad portal. Opens in the
     // external browser — a link out, not an in-app purchase.
-    if (_isOwnEvent && !_event!.isEnded) ...[
+    if (_isOwnEvent && !_event!.isOver) ...[
       const SizedBox(height: 12),
       SizedBox(
         width: double.infinity,
@@ -944,7 +954,13 @@ class _StatusChip extends StatelessWidget {
     late final Color bg;
     late final Color fg;
     late final String label;
-    if (event.isSoundCheck) {
+    // isOver first: a sound check the host abandoned yesterday is over, not
+    // "starting soon", and a no-show never flips to status == 'ended'.
+    if (event.isOver) {
+      bg = NileColors.bgRaised;
+      fg = NileColors.txtSecondary;
+      label = 'ENDED';
+    } else if (event.isSoundCheck) {
       bg = NileColors.bgRaised;
       fg = NileColors.volt;
       label = 'STARTING SOON';
@@ -1309,7 +1325,9 @@ class _PrimaryCta extends StatelessWidget {
     // camera, available on scheduled/soundcheck/live events (so they can enter
     // Sound Check, set up, and press Start Show). The host runs the show, so the
     // host always gets this entry even without an event_operators row.
-    if ((isOwn || isOperator) && !event.isEnded) {
+    // isOver, not isEnded: once the scheduled window has passed there is
+    // nothing left to start, even if the row never flipped to 'ended'.
+    if ((isOwn || isOperator) && !event.isOver) {
       return Column(
         children: [
           SizedBox(
@@ -1347,7 +1365,9 @@ class _PrimaryCta extends StatelessWidget {
       );
     }
 
-    if (event.isLive || event.isSoundCheck) {
+    // A sound check whose window has passed is an abandoned lobby, not an
+    // event about to start — fall through to the ended branch below.
+    if (event.isLive || (event.isSoundCheck && !event.isOver)) {
       // Paid event — user needs a ticket (gate applies in the Lobby too)
       if (_isPaid && !_canWatch) {
         return _GetTicketButton(
@@ -1405,7 +1425,7 @@ class _PrimaryCta extends StatelessWidget {
       );
     }
 
-    if (event.isEnded) {
+    if (event.isOver) {
       final children = <Widget>[];
 
       // A ready replay this user may watch → primary "Watch Replay" CTA.

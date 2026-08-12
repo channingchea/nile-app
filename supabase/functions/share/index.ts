@@ -141,7 +141,12 @@ function assetlinks(): Response {
 async function eventPage(id: string): Promise<Response> {
   const { data } = await admin
     .from("events")
-    .select("title, description, cover_image_url, host:profiles!events_host_id_fkey(username)")
+    .select("title, description, cover_image_url, status, host:profiles!events_host_id_fkey(username)")
+    // This runs through the service-role client, which bypasses RLS — so the
+    // `events_select_visible` policy that correctly hides drafts in-app did
+    // nothing here, and an unreleased title + cover unfurled to anyone with the
+    // id in Slack or iMessage. RLS is right; this query has to say so too.
+    .neq("status", "draft")
     .eq("id", id)
     .maybeSingle();
   if (!data) return html(genericPage(), 404);

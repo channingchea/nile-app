@@ -9,20 +9,6 @@ import 'pagination.dart';
 import 'supabase_client.dart';
 import 'topic_service.dart';
 
-// ── Required SQL (run once in Supabase SQL editor) ────────────────────────────
-// create or replace function increment_viewer_count(p_livekit_room text)
-// returns void language sql as $$
-//   update events set viewer_count = viewer_count + 1
-//   where livekit_room = p_livekit_room;
-// $$;
-//
-// create or replace function decrement_viewer_count(p_livekit_room text)
-// returns void language sql as $$
-//   update events set viewer_count = greatest(0, viewer_count - 1)
-//   where livekit_room = p_livekit_room;
-// $$;
-// ─────────────────────────────────────────────────────────────────────────────
-
 // ── Model ─────────────────────────────────────────────────────────────────────
 
 class Event {
@@ -134,6 +120,50 @@ class Event {
   bool get isEnded => status == 'ended';
   bool get isDraft => status == 'draft';
 
+  /// Longest a show is allowed to run — mirrors `app_config.max_stream_minutes`
+  /// (480), the same bound the `auto_end_expired_events` sweep uses. Only
+  /// relevant for events whose host never set a duration.
+  static const maxStreamDuration = Duration(hours: 8);
+
+  /// The instant after which this show is definitively over, whatever [status]
+  /// says. Falls back to the max stream length for events with no `end_at`.
+  DateTime? get effectiveEndAt =>
+      endAt ?? scheduledAt?.add(maxStreamDuration);
+
+  /// True once the show is over. Covers three cases raw [status] gets wrong:
+  ///
+  ///  * the host never showed up, so the row is still `scheduled`;
+  ///  * the host opened Sound Check and quit, so it is still `soundcheck`;
+  ///  * the 5-minute auto-end sweep hasn't run yet.
+  ///
+  /// Never true for a draft or an actually-live stream. **Use this, not
+  /// [isEnded], for anything that promises the viewer a stream is coming** —
+  /// beta testers hit day-old events still saying "waiting for host".
+  bool get isOver =>
+      isOverAt(status: status, scheduledAt: scheduledAt, endAt: endAt);
+
+  /// [isOver] for callers that hold a raw `events` row rather than an [Event] —
+  /// the viewer screen reads its state straight off `fetchEventState`. Keeping
+  /// one implementation is the point: the bug this whole rule exists to fix was
+  /// six screens each re-deciding what "over" meant.
+  static bool isOverAt({
+    required String status,
+    DateTime? scheduledAt,
+    DateTime? endAt,
+  }) {
+    if (status == 'ended') return true;
+    if (status == 'draft' || status == 'live') return false;
+    final end = endAt ?? scheduledAt?.add(maxStreamDuration);
+    // isAfter compares absolute instants, so no UTC/local conversion here.
+    return end != null && DateTime.now().isAfter(end);
+  }
+
+  /// True when this event promises the viewer a stream: it's on air now, or the
+  /// lobby is open. The affirmative form of [isOver] — surfaces that offer a way
+  /// IN (Watch buttons, the Lobby, the viewer's live branch) should gate on this
+  /// rather than on `!isEnded`, which is true for a show that never happened.
+  bool get isWatchable => (isLive || isSoundCheck) && !isOver;
+
   factory Event.fromJson(
     Map<String, dynamic> json, {
     String? repostedByUsername,
@@ -183,6 +213,17 @@ class EventService {
   /// PostgREST value list for a `not(col,'in',...)` filter, or null if empty.
   static String? _notInList(List<String> ids) =>
       ids.isEmpty ? null : '(${ids.join(',')})';
+
+  /// Drops shows that are over — see [Event.isOver].
+  ///
+  /// Every feed, rail, and search query has to run this client-side: the only
+  /// thing a PostgREST filter can see is `status`, and `status` lies for a host
+  /// no-show (still `scheduled`) and an abandoned Sound Check (still
+  /// `soundcheck`) until the 5-minute sweep catches up. Callers that page should
+  /// compute hasMore/cursor from the RAW page before calling this, so dropping
+  /// rows never shortens a page into a false "end of list".
+  static List<Event> dropOver(Iterable<Event> events) =>
+      events.where((e) => !e.isOver).toList();
 
   /// Live events across the whole platform (not follow-scoped), most-watched
   /// first. Powers the zero-follow starter feed and the Live Now rail.
@@ -287,16 +328,10 @@ class EventService {
         ? fetched.last.createdAt.toIso8601String()
         : null;
 
-    final now = DateTime.now();
-    final events = fetched.where((e) {
-      if (e.isEnded) return false;
-      if (e.isScheduled &&
-          e.scheduledAt != null &&
-          e.scheduledAt!.isBefore(now)) {
-        return false;
-      }
-      return true;
-    }).toList();
+    // Was a hand-rolled no-show filter that missed 'soundcheck' entirely and
+    // disagreed with Event.isOver's grace window, so the feed and the detail
+    // page contradicted each other for up to 8 hours on the same event.
+    final events = dropOver(fetched);
 
     // Live first, then upcoming-soonest scheduled, then evergreen by recency.
     events.sort((a, b) {
@@ -576,11 +611,16 @@ class EventService {
       final ev = m['event'] as Map<String, dynamic>?;
       if (ev == null) continue;
       final reposter = (m['reposter'] as Map<String, dynamic>?) ?? {};
+      final event = Event.fromJson(
+        ev,
+        repostedByUsername: reposter['username'] as String?,
+      );
+      // This query has no status filter of its own, so without this a repost
+      // re-injects an ended or no-showed event into the very feed getFeed
+      // excludes it from.
+      if (event.isOver) continue;
       out.add((
-        event: Event.fromJson(
-          ev,
-          repostedByUsername: reposter['username'] as String?,
-        ),
+        event: event,
         repostedAt: DateTime.parse(m['created_at'] as String),
       ));
     }
@@ -687,21 +727,9 @@ class EventService {
     ),
   );
 
-  /// Atomically increment viewer_count (requires the SQL function above).
-  static Future<void> incrementViewerCount(String liveKitEventId) async {
-    await supabase.rpc(
-      'increment_viewer_count',
-      params: {'p_livekit_room': liveKitEventId},
-    );
-  }
-
-  /// Atomically decrement viewer_count (floor 0, requires the SQL function above).
-  static Future<void> decrementViewerCount(String liveKitEventId) async {
-    await supabase.rpc(
-      'decrement_viewer_count',
-      params: {'p_livekit_room': liveKitEventId},
-    );
-  }
+  // increment/decrement_viewer_count wrappers removed (migration 0085): the
+  // count is reconciled server-side from LiveKit's participant list, and the
+  // RPCs are no longer callable by anon or authenticated.
 
   /// Fetch current viewer_count, status, and the timing anchors for an event by
   /// liveKitEventId. scheduled_at gates how early a host may enter sound check;

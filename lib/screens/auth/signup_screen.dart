@@ -203,7 +203,17 @@ class _SignupScreenState extends State<SignupScreen> {
                   color: NileColors.txtTertiary,
                 ),
               ),
-              const SizedBox(height: 40),
+              const SizedBox(height: 32),
+
+              // ── Social sign-up ───────────────────────────────────────
+              // Above the form deliberately: below it, five fields plus the
+              // Create Account button pushed these under the fold on every
+              // iPhone and testers never found them.
+              const SocialAuthButtons(
+                dividerBelow: true,
+                dividerLabel: 'or sign up with email',
+              ),
+              const SizedBox(height: 24),
 
               // ── Username ─────────────────────────────────────────────
               TextFormField(
@@ -368,10 +378,6 @@ class _SignupScreenState extends State<SignupScreen> {
                       )
                     : const Text('Create Account'),
               ),
-              const SizedBox(height: 24),
-
-              // ── Social sign-in ───────────────────────────────────────
-              const SocialAuthButtons(),
               const SizedBox(height: 24),
 
               // ── Back to sign in ──────────────────────────────────────

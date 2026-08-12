@@ -185,9 +185,12 @@ class AdService {
         .from('events')
         .select('*, profiles!events_host_id_fkey(username, avatar_url, is_official)')
         .inFilter('id', ids);
-    final events = (rows as List)
-        .map((r) => Event.fromJson(r as Map<String, dynamic>))
-        .toList();
+    // A 14-day boost on a show that ended on day 3 kept rendering — and kept
+    // billing the host for impressions on it. Dropping the card here stops the
+    // impression, since nothing is shown to record.
+    final events = EventService.dropOver(
+      (rows as List).map((r) => Event.fromJson(r as Map<String, dynamic>)),
+    );
     return EventService.hydrateLikes(events);
   }
 

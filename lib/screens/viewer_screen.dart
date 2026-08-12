@@ -105,6 +105,10 @@ class _ViewerScreenState extends State<ViewerScreen>
   // countdown to showtime, host row — plus the sponsor creative when the event
   // is sponsored. The video creative loops muted (tap the speaker to unmute).
   DateTime? _scheduledAt;
+
+  /// Carried purely so [_isOver] can apply the same rule the rest of the app
+  /// uses — see [Event.isOverAt].
+  DateTime? _endAt;
   String? _coverImageUrl;
   String? _hostUsername;
   String? _hostAvatarUrl;
@@ -220,7 +224,7 @@ class _ViewerScreenState extends State<ViewerScreen>
   Future<void> _initLobby() async {
     _lobbyTicker?.cancel();
     _lobbyTicker = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (mounted && _eventStatus == 'soundcheck' && !_streamEnded) {
+      if (mounted && _inLobby) {
         setState(() {}); // refresh the countdown
       }
     });
@@ -228,7 +232,9 @@ class _ViewerScreenState extends State<ViewerScreen>
     final dbId = _eventDbId;
     if (dbId == null) return;
     final spons = await AdService.lobbySponsorship(dbId);
-    if (!mounted || spons == null || _eventStatus != 'soundcheck') return;
+    // Re-checked after the await: a lobby that has since aged out must not log
+    // the impression the advertiser is billed for.
+    if (!mounted || spons == null || !_inLobby) return;
 
     VideoPlayerController? controller;
     if (spons.kind == 'video' && spons.videoUrl != null) {
@@ -245,7 +251,7 @@ class _ViewerScreenState extends State<ViewerScreen>
         controller = null; // fall back to the thumb/cover
       }
     }
-    if (!mounted || _eventStatus != 'soundcheck') {
+    if (!mounted || !_inLobby) {
       controller?.dispose();
       return;
     }
@@ -288,12 +294,40 @@ class _ViewerScreenState extends State<ViewerScreen>
     }
   }
 
+  /// Parses a timestamp off a raw `events` row into local time. Null-safe and
+  /// tolerant of a bad value, because the viewer must still open if one field
+  /// is malformed.
+  static DateTime? _parseTs(Object? raw) => raw is String
+      ? DateTime.tryParse(raw)?.toLocal()
+      : null;
+
+  /// True once this show is over, whatever `status` claims — a host no-show
+  /// stays `scheduled` and an abandoned Sound Check stays `soundcheck` until the
+  /// 5-minute sweep catches up. Same rule the feeds and the event page use.
+  bool get _isOver => Event.isOverAt(
+    status: _eventStatus ?? '',
+    scheduledAt: _scheduledAt,
+    endAt: _endAt,
+  );
+
+  /// The Pre-Show lobby holds viewers between Sound Check and Start Show.
+  ///
+  /// Gated on [_isOver] as well as the raw status: an abandoned Sound Check used
+  /// to render a countdown, a looping sponsor creative, an open chat, and a
+  /// billed advertiser impression — for a show that was never going to happen.
+  bool get _inLobby =>
+      _eventStatus == 'soundcheck' && !_streamEnded && !_isOver;
+
   /// "Starts in 2h 14m" → "Starting soon" once showtime passes.
   String get _countdownLabel {
     final at = _scheduledAt;
     if (at == null) return 'Starting soon';
     final diff = at.difference(DateTime.now());
-    if (diff.isNegative) return 'Starting soon';
+    // Every past time used to collapse to "Starting soon" — the exact string
+    // the testers reported, still showing on a show three days gone.
+    if (diff.isNegative) {
+      return _isOver ? 'This event didn’t take place' : 'Starting soon';
+    }
     final d = diff.inDays, h = diff.inHours % 24, m = diff.inMinutes % 60;
     final s = diff.inSeconds % 60;
     if (d > 0) return 'Starts in ${d}d ${h}h';
@@ -550,12 +584,24 @@ class _ViewerScreenState extends State<ViewerScreen>
     try {
       // Fetch initial event state (viewer count + guard against already-ended)
       final eventState = await EventService.fetchEventState(eventId);
-      if (eventState != null && eventState['status'] == 'ended') {
-        setState(() {
-          _state = ViewerState.idle;
-          _errorMessage = 'This stream has already ended.';
-        });
-        return;
+      if (eventState != null) {
+        // Was `status == 'ended'` only, so an abandoned Sound Check opened a
+        // live viewer onto a room nobody was ever going to publish into.
+        final status = eventState['status'] as String? ?? '';
+        final over = Event.isOverAt(
+          status: status,
+          scheduledAt: _parseTs(eventState['scheduled_at']),
+          endAt: _parseTs(eventState['end_at']),
+        );
+        if (over) {
+          setState(() {
+            _state = ViewerState.idle;
+            _errorMessage = status == 'ended'
+                ? 'This stream has already ended.'
+                : 'This event didn’t take place.';
+          });
+          return;
+        }
       }
 
       // Viewer identity now comes from the signed-in user's JWT (the Edge
@@ -660,9 +706,8 @@ class _ViewerScreenState extends State<ViewerScreen>
         _eventDbId = eventState?['id'] as String?;
         _eventTitle = eventState?['title'] as String?;
         _hostId = eventState?['host_id'] as String?;
-        _scheduledAt = eventState?['scheduled_at'] != null
-            ? DateTime.tryParse(eventState!['scheduled_at'] as String)?.toLocal()
-            : null;
+        _scheduledAt = _parseTs(eventState?['scheduled_at']);
+        _endAt = _parseTs(eventState?['end_at']);
         _coverImageUrl = eventState?['cover_image_url'] as String?;
         _hostUsername = (hostProfile?['display_name'] ??
             hostProfile?['username']) as String?;
@@ -675,7 +720,7 @@ class _ViewerScreenState extends State<ViewerScreen>
 
       // Entering during Sound Check → set up the Pre-Show lobby (sponsor
       // creative + countdown). Live entry skips it entirely.
-      if (_eventStatus == 'soundcheck') _initLobby();
+      if (_inLobby) _initLobby();
 
       _updateAudioRouting();
     } catch (e) {
@@ -1449,6 +1494,44 @@ class _ViewerScreenState extends State<ViewerScreen>
   /// Connected, but no camera has published yet. Shared by both bodies so the
   /// wait reads the same whichever one you are looking at.
   Widget _buildWaitingForCameras() {
+    // Only a live show is actually waiting for cameras. A 'scheduled' row used
+    // to fall through to here and spin this spinner forever — the reconnect
+    // loop only stops on 'ended', so nothing ever took it off screen.
+    if (_eventStatus != 'live' && !_streamEnded) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(NileSpacing.s24),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(
+                Icons.videocam_off_outlined,
+                size: 40,
+                color: NileColors.txtTertiary,
+              ),
+              const SizedBox(height: 16),
+              Text(
+                _isOver
+                    ? 'This event didn’t take place'
+                    : 'This show hasn’t started yet',
+                textAlign: TextAlign.center,
+                style: NileTextStyles.headingSm(),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                _isOver
+                    ? 'The host never went live.'
+                    : 'Check the event page for the start time.',
+                textAlign: TextAlign.center,
+                style: NileTextStyles.bodyMd().copyWith(
+                  color: NileColors.txtSecondary,
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
     return Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
@@ -1469,7 +1552,7 @@ class _ViewerScreenState extends State<ViewerScreen>
   Widget _buildWatching() {
     // Lobby: the host is in Sound Check — hold viewers here until Start Show
     // flips status to 'live' (handled by realtime in _onRealtimeUpdate).
-    if (_eventStatus == 'soundcheck' && !_streamEnded) {
+    if (_inLobby) {
       return _buildLobby();
     }
     return Stack(
@@ -1551,7 +1634,7 @@ class _ViewerScreenState extends State<ViewerScreen>
   Widget _buildTopBar({bool showChatToggle = true}) {
     // In the Lobby the bar floats over the full-bleed creative (the scrim
     // keeps it readable); everywhere else it keeps its solid background.
-    final inLobbyBar = _eventStatus == 'soundcheck' && !_streamEnded;
+    final inLobbyBar = _inLobby;
     return Container(
       padding: EdgeInsets.only(
         top: MediaQuery.of(context).padding.top + 8,
@@ -1565,7 +1648,7 @@ class _ViewerScreenState extends State<ViewerScreen>
           // Status badge — SOUND CHECK (volt) in the Lobby, LIVE (coral) once live
           Builder(
             builder: (_) {
-              final inLobby = _eventStatus == 'soundcheck' && !_streamEnded;
+              final inLobby = _inLobby;
               return Container(
                 padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s8, vertical: NileSpacing.s4),
                 decoration: BoxDecoration(
@@ -2268,7 +2351,7 @@ class _ViewerScreenState extends State<ViewerScreen>
     final Widget main;
     if (_streamEnded) {
       main = _buildDesktopEnded();
-    } else if (_eventStatus == 'soundcheck') {
+    } else if (_inLobby) {
       main = _buildDesktopLobby();
     } else {
       main = _buildDesktopLive();
@@ -2561,7 +2644,7 @@ class _ViewerScreenState extends State<ViewerScreen>
           NileSectionHeader(
             'Live chat',
             dense: true,
-            accent: _eventStatus == 'soundcheck'
+            accent: _inLobby
                 ? NileColors.volt
                 : NileColors.coral,
             padding: const EdgeInsets.fromLTRB(

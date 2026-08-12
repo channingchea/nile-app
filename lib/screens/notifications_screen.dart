@@ -193,9 +193,13 @@ class _NotificationTile extends StatelessWidget {
       '@${notification.actorUsername} started following you',
     NotificationType.eventStarting =>
       '@${notification.actorUsername}’s event starts in 15 minutes',
-    NotificationType.eventLive => '@${notification.actorUsername} is live now',
+    // Past tense on purpose: this row is a record of a moment, and it sat in the
+    // list saying "is live now" for days after the show finished.
+    NotificationType.eventLive => '@${notification.actorUsername} went live',
     NotificationType.eventEnded =>
       '@${notification.actorUsername}’s event ended',
+    NotificationType.eventNoShow =>
+      '@${notification.actorUsername}’s event didn’t take place',
     NotificationType.operatorAssigned =>
       '@${notification.actorUsername} added you as a camera operator',
     NotificationType.newMessage =>
@@ -219,6 +223,7 @@ class _NotificationTile extends StatelessWidget {
     NotificationType.eventStarting => Icons.live_tv,
     NotificationType.eventLive => Icons.sensors,
     NotificationType.eventEnded => Icons.replay,
+    NotificationType.eventNoShow => Icons.event_busy,
     NotificationType.operatorAssigned => Icons.videocam,
     NotificationType.newMessage => Icons.send_rounded,
     NotificationType.messageReaction => Icons.favorite,
@@ -235,6 +240,7 @@ class _NotificationTile extends StatelessWidget {
     NotificationType.eventStarting => NileColors.coral,
     NotificationType.eventLive => NileColors.coral,
     NotificationType.eventEnded => NileColors.txtSecondary,
+    NotificationType.eventNoShow => NileColors.txtSecondary,
     NotificationType.operatorAssigned => NileColors.azure,
     NotificationType.newMessage => NileColors.volt,
     NotificationType.messageReaction => NileColors.coral,

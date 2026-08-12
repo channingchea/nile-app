@@ -7,12 +7,30 @@ import 'package:flutter_svg/flutter_svg.dart';
 import '../services/social_auth_service.dart';
 import '../theme.dart';
 
-/// "or continue with" divider + Apple / Google buttons, shared by the login
-/// and signup screens. Apple is iOS-only and listed first there (HIG: at least
-/// as prominent as other providers). Navigation after success is automatic —
+/// Apple / Google buttons + a labelled divider, shared by the login and signup
+/// screens. Apple is iOS-only and listed first there (HIG: at least as
+/// prominent as other providers). Navigation after success is automatic —
 /// _AuthGate reacts to the auth state stream.
+///
+/// Both screens mount this ABOVE their email form with [dividerBelow] set, so
+/// the buttons sit in the first screenful. They used to sit at the tail of the
+/// column, which put them under the fold on the five-field signup form — beta
+/// testers reported the providers "missing" until they reached the shorter
+/// login screen after email confirmation.
 class SocialAuthButtons extends StatefulWidget {
-  const SocialAuthButtons({super.key});
+  /// Divider caption. Reads as a lead-in to whatever follows the buttons —
+  /// 'or sign up with email' on signup, 'or sign in with email' on login.
+  final String dividerLabel;
+
+  /// Render the divider after the buttons (the layout used when this block is
+  /// above the email form) rather than before them.
+  final bool dividerBelow;
+
+  const SocialAuthButtons({
+    super.key,
+    this.dividerLabel = 'or continue with',
+    this.dividerBelow = false,
+  });
 
   @override
   State<SocialAuthButtons> createState() => _SocialAuthButtonsState();
@@ -57,9 +75,32 @@ class _SocialAuthButtonsState extends State<SocialAuthButtons> {
         children: [
           icon,
           const SizedBox(width: NileSpacing.s12),
-          Text(label),
+          // Flexible, not bare Text: "Continue with Google" overflows by a few
+          // pixels at 375pt width (iPhone SE) and at larger accessibility text
+          // sizes on any phone.
+          Flexible(
+            child: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis),
+          ),
         ],
       ),
+    );
+  }
+
+  Widget _divider() {
+    return Row(
+      children: [
+        Expanded(child: Divider(color: NileColors.border)),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s12),
+          child: Text(
+            widget.dividerLabel,
+            style: NileTextStyles.bodySm().copyWith(
+              color: NileColors.txtTertiary,
+            ),
+          ),
+        ),
+        Expanded(child: Divider(color: NileColors.border)),
+      ],
     );
   }
 
@@ -68,23 +109,10 @@ class _SocialAuthButtonsState extends State<SocialAuthButtons> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        // ── "or continue with" divider ─────────────────────────────────────
-        Row(
-          children: [
-            Expanded(child: Divider(color: NileColors.border)),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s12),
-              child: Text(
-                'or continue with',
-                style: NileTextStyles.bodySm().copyWith(
-                  color: NileColors.txtTertiary,
-                ),
-              ),
-            ),
-            Expanded(child: Divider(color: NileColors.border)),
-          ],
-        ),
-        const SizedBox(height: NileSpacing.s24),
+        if (!widget.dividerBelow) ...[
+          _divider(),
+          const SizedBox(height: NileSpacing.s24),
+        ],
 
         // Apple first on iOS (HIG prominence requirement).
         if (_appleSupported) ...[
@@ -100,6 +128,11 @@ class _SocialAuthButtonsState extends State<SocialAuthButtons> {
           label: 'Continue with Google',
           onPressed: () => _run(SocialAuthService.signInWithGoogle),
         ),
+
+        if (widget.dividerBelow) ...[
+          const SizedBox(height: NileSpacing.s24),
+          _divider(),
+        ],
       ],
     );
   }

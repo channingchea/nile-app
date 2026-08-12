@@ -393,8 +393,15 @@ final GoRouter _router = GoRouter(
                 eventId: id,
                 // Crew setup hands straight off to the stream it was set up for,
                 // replacing itself so back doesn't land on the setup form.
-                onContinue: () => context.pushReplacement(
-                  NileRoutes.stream(id, audio: audio),
+                // /stream is keyed on the LiveKit room slug, never the events
+                // UUID this route carries, and it needs the caller's camera slot
+                // to auto-connect — Crew Setup resolves both and passes them up.
+                onContinue: (room, cameraName) => context.pushReplacement(
+                  NileRoutes.stream(
+                    room,
+                    audio: audio,
+                    cameraName: cameraName,
+                  ),
                 ),
               );
             },

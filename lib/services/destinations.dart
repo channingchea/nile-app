@@ -128,6 +128,7 @@ class Destinations {
       case NotificationType.eventStarting:
       case NotificationType.eventLive:
       case NotificationType.eventEnded:
+      case NotificationType.eventNoShow:
       case NotificationType.operatorAssigned:
       case NotificationType.replayReady:
       case NotificationType.soundcheckOpen:
@@ -152,6 +153,7 @@ class Destinations {
     'event_starting' => NotificationType.eventStarting,
     'event_live' => NotificationType.eventLive,
     'event_ended' => NotificationType.eventEnded,
+    'event_no_show' => NotificationType.eventNoShow,
     'operator_assigned' => NotificationType.operatorAssigned,
     'new_message' => NotificationType.newMessage,
     'message_reaction' => NotificationType.messageReaction,

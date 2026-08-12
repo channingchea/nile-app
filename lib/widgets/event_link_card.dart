@@ -93,25 +93,29 @@ class _EventLinkCardState extends State<EventLinkCard> {
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Row(
-                      children: [
-                        Icon(
-                          ev.isLive ? Icons.sensors : Icons.event,
-                          size: 13,
-                          color: ev.isLive
-                              ? NileColors.coral
-                              : NileColors.txtTertiary,
-                        ),
-                        const SizedBox(width: 5),
-                        Text(
-                          ev.isLive ? 'LIVE NOW' : 'EVENT',
-                          style: NileTextStyles.labelSm().copyWith(
-                            color: ev.isLive
-                                ? NileColors.coral
-                                : NileColors.txtTertiary,
-                          ),
-                        ),
-                      ],
+                    // Three states, not two: a shared link to a finished show
+                    // used to read "EVENT", indistinguishable from one that
+                    // hasn't happened yet.
+                    Builder(
+                      builder: (_) {
+                        final (label, icon, color) = ev.isLive
+                            ? ('LIVE NOW', Icons.sensors, NileColors.coral)
+                            : ev.isOver
+                            ? ('ENDED', Icons.event_busy, NileColors.txtTertiary)
+                            : ('EVENT', Icons.event, NileColors.txtTertiary);
+                        return Row(
+                          children: [
+                            Icon(icon, size: 13, color: color),
+                            const SizedBox(width: 5),
+                            Text(
+                              label,
+                              style: NileTextStyles.labelSm().copyWith(
+                                color: color,
+                              ),
+                            ),
+                          ],
+                        );
+                      },
                     ),
                     const SizedBox(height: 4),
                     Text(

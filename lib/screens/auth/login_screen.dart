@@ -107,7 +107,16 @@ class _LoginScreenState extends State<LoginScreen> {
                           color: NileColors.txtTertiary,
                         ),
                       ),
-                      const SizedBox(height: 48),
+                      const SizedBox(height: 32),
+
+                      // ── Social sign-in ───────────────────────────────────────
+                      // Above the form, mirroring signup — keeps the providers
+                      // in the first screenful on short phones too.
+                      const SocialAuthButtons(
+                        dividerBelow: true,
+                        dividerLabel: 'or sign in with email',
+                      ),
+                      const SizedBox(height: 24),
 
                       // ── Email ────────────────────────────────────────────────
                       TextFormField(
@@ -217,18 +226,20 @@ class _LoginScreenState extends State<LoginScreen> {
                       ),
                       const SizedBox(height: 24),
 
-                      // ── Social sign-in ───────────────────────────────────────
-                      const SocialAuthButtons(),
-                      const SizedBox(height: 24),
-
                       // ── Sign up link ─────────────────────────────────────────
                       Row(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
-                          Text(
-                            "Don't have an account?",
-                            style: NileTextStyles.bodyMd().copyWith(
-                              color: NileColors.txtTertiary,
+                          // Flexible: this row overflows at 375pt width
+                          // (iPhone SE) once the button's padding is counted.
+                          Flexible(
+                            child: Text(
+                              "Don't have an account?",
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: NileTextStyles.bodyMd().copyWith(
+                                color: NileColors.txtTertiary,
+                              ),
                             ),
                           ),
                           TextButton(

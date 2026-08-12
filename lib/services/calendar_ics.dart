@@ -13,7 +13,12 @@ class CalendarIcs {
   CalendarIcs._();
 
   /// Whether an "Add to calendar" affordance makes sense for [e].
-  static bool canAdd(Event e) => e.scheduledAt != null && e.status != 'ended';
+  ///
+  /// `status != 'ended'` let a ticket holder export a past no-show to their
+  /// calendar, and allowed drafts through — a host could put an unpublished
+  /// event on someone's calendar.
+  static bool canAdd(Event e) =>
+      e.scheduledAt != null && !e.isDraft && !e.isOver;
 
   /// The raw .ics file contents for [e].
   static String build(Event e) {

@@ -719,7 +719,10 @@ class _ScheduleCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final at = event.scheduledAt?.toLocal();
     final live = event.isLive;
-    final stripe = live ? NileColors.coral : (tint ?? NileColors.border);
+    final over = event.isOver;
+    final stripe = live
+        ? NileColors.coral
+        : (over ? NileColors.border : (tint ?? NileColors.border));
 
     return NileHoverCard(
       borderRadius: NileRadius.md,
@@ -753,11 +756,17 @@ class _ScheduleCard extends StatelessWidget {
                               const SizedBox(width: NileSpacing.s6),
                             ],
                             Text(
-                              live ? 'LIVE' : (at == null ? '' : nileClock(at)),
+                              live
+                                  ? 'LIVE'
+                                  : over
+                                      ? 'ENDED'
+                                      : (at == null ? '' : nileClock(at)),
                               style: NileTextStyles.caption().copyWith(
                                 color: live
                                     ? NileColors.coral
-                                    : NileColors.txtSecondary,
+                                    : over
+                                        ? NileColors.txtTertiary
+                                        : NileColors.txtSecondary,
                                 fontWeight: FontWeight.w700,
                               ).tabular,
                             ),

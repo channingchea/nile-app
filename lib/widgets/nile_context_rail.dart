@@ -357,7 +357,18 @@ String nileWhen(DateTime? at) {
   final now = DateTime.now();
   final delta = local.difference(now);
 
-  if (delta.isNegative) return 'Starting now';
+  // A past timestamp used to collapse to "Starting now" whether the slot was 40
+  // seconds or three days ago. Only the first few minutes still read as "now";
+  // past that, fall through to an absolute date, which can't lie.
+  if (delta.isNegative) {
+    if (delta.inMinutes > -10) return 'Starting now';
+    final clock = nileClock(local);
+    final daysAgo = nileDayKey(now).difference(nileDayKey(local)).inDays;
+    if (daysAgo == 0) return 'Earlier today, $clock';
+    if (daysAgo == 1) return 'Yesterday $clock';
+    return '${nileMonthAbbr(local.month)} ${local.day}, $clock';
+  }
+
   if (delta.inMinutes < 1) return 'Starting now';
   if (delta.inMinutes < 60) return 'in ${delta.inMinutes}m';
   if (delta.inHours < 12) return 'in ${delta.inHours}h';

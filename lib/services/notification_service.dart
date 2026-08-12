@@ -10,6 +10,12 @@ enum NotificationType {
   eventStarting,
   eventLive,
   eventEnded,
+
+  /// The show was auto-closed without ever going live (migration 0088). Split
+  /// out of [eventEnded] because telling a ticket holder their event "ended"
+  /// when it never happened is both wrong and hides the thing they care about:
+  /// the host still has their money.
+  eventNoShow,
   operatorAssigned,
   newMessage,
   messageReaction,
@@ -68,6 +74,7 @@ class AppNotification {
     'event_starting' => NotificationType.eventStarting,
     'event_live' => NotificationType.eventLive,
     'event_ended' => NotificationType.eventEnded,
+    'event_no_show' => NotificationType.eventNoShow,
     'operator_assigned' => NotificationType.operatorAssigned,
     'new_message' => NotificationType.newMessage,
     'message_reaction' => NotificationType.messageReaction,

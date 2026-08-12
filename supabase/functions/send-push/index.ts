@@ -48,6 +48,14 @@ function buildMessage(p: Payload): { title: string; body: string } {
       return { title: "Live now", body: `${who} is live` };
     case "event_ended":
       return { title: "Event ended", body: `${who}'s event has ended` };
+    case "event_no_show":
+      // Migration 0088: the show was auto-closed without ever going live.
+      // Deliberately does NOT say "ended" — nothing happened, and the ticket
+      // holder still has money with the host.
+      return {
+        title: "Event didn't take place",
+        body: `${who}'s event never started`,
+      };
     case "operator_assigned":
       return { title: "You're on the crew", body: `${who} added you as a camera operator` };
     case "new_message":

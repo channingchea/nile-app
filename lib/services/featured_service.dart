@@ -55,10 +55,13 @@ class FeaturedService {
         .select('*, profiles!events_host_id_fkey(username, avatar_url, is_official)')
         .inFilter('id', ids)
         .neq('status', 'draft');
-    var events = (rows as List)
-        .map((r) => Event.fromJson(r as Map<String, dynamic>))
-        .where((e) => !blocked.contains(e.hostId))
-        .toList();
+    // A curated rail that keeps promoting a finished show reads as neglect —
+    // and the curation is manual, so nothing else removes it.
+    var events = EventService.dropOver(
+      (rows as List)
+          .map((r) => Event.fromJson(r as Map<String, dynamic>))
+          .where((e) => !blocked.contains(e.hostId)),
+    );
     _restoreOrder(events, ids, (e) => e.id);
     return EventService.hydrateLikes(events);
   }

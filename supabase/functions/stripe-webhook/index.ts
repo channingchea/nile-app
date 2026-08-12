@@ -126,11 +126,28 @@ serve(async (req) => {
     const charge = event.data.object as Stripe.Charge;
     const paymentIntentId = charge.payment_intent as string;
     if (paymentIntentId) {
-      // Ticket sale refund (original path).
-      await adminClient.rpc("confirm_ticket", {
-        p_payment_intent_id: paymentIntentId,
-        p_status: "refunded",
-      });
+      // Ticket sale refund (original path). FULL refunds only — `charge.refunded`
+      // is Stripe's "nothing left on this charge" flag, and it is false for a
+      // partial refund. Without this guard a $5 goodwill refund on a $20 ticket
+      // revoked live + replay access mid-show and zeroed the host's $20. The tip
+      // and ad branches below always had the guard; the ticket branch didn't.
+      if (charge.refunded) {
+        await adminClient.rpc("confirm_ticket", {
+          p_payment_intent_id: paymentIntentId,
+          p_status: "refunded",
+        });
+      } else {
+        // Partial refund: the buyer keeps their access and the host keeps the
+        // remainder. Logged because nothing else records that it happened.
+        console.log(JSON.stringify({
+          level: "info",
+          fn: "stripe-webhook",
+          note: "partial refund — ticket access left intact",
+          payment_intent: paymentIntentId,
+          amount_refunded: charge.amount_refunded,
+          amount: charge.amount,
+        }));
+      }
 
       // Tip refund (out-of-band dashboard refund). A destination-charge refund
       // also reverses the transfer, so keep host earnings honest by marking the
