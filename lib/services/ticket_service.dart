@@ -134,6 +134,31 @@ class TicketService {
     return Paged(items: items, hasMore: hasMore, nextCursor: nextCursor);
   }
 
+  /// Gross, net and head-count for one event's paid tickets, across every page.
+  ///
+  /// The Attendee list used to sum the loaded page and label it "revenue",
+  /// which was gross — while the Payouts screen showed net. Same sales, two
+  /// numbers, no explanation on either screen. This is host-only (migration
+  /// 0094 checks host_id server-side).
+  static Future<({int grossCents, int netCents, int feeCents, int paidCount})>
+  eventTotals(String eventId) async {
+    final rows = await supabase.rpc(
+      'host_event_ticket_totals',
+      params: {'p_event_id': eventId},
+    );
+    final list = rows as List;
+    if (list.isEmpty) {
+      return (grossCents: 0, netCents: 0, feeCents: 0, paidCount: 0);
+    }
+    final r = list.first as Map<String, dynamic>;
+    return (
+      grossCents: (r['gross_cents'] as num?)?.toInt() ?? 0,
+      netCents: (r['net_cents'] as num?)?.toInt() ?? 0,
+      feeCents: (r['fee_cents'] as num?)?.toInt() ?? 0,
+      paidCount: (r['paid_count'] as num?)?.toInt() ?? 0,
+    );
+  }
+
   /// Attendees for [eventId] with buyer profiles joined, newest first.
   /// Keyset-paged by created_at via [cursor]. Includes paid and refunded
   /// tickets (pending hidden). RLS (`tickets_select_host`) restricts to host.

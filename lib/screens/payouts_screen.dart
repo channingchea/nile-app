@@ -263,31 +263,67 @@ class _TicketsCard extends StatelessWidget {
         color: NileColors.bgSurface,
         borderRadius: BorderRadius.circular(NileRadius.lg),
       ),
-      child: Row(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(Icons.confirmation_number_outlined,
-              color: NileColors.volt, size: 20),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('Tickets earned', style: NileTextStyles.headingSm()),
-                const SizedBox(height: 4),
-                Text(
-                  '${tickets.count} ${tickets.count == 1 ? 'sale' : 'sales'} · '
-                  '${_money(tickets.monthNetCents)} this month',
-                  style: NileTextStyles.bodySm().copyWith(
-                    color: NileColors.txtSecondary,
-                  ),
+          Row(
+            children: [
+              Icon(Icons.confirmation_number_outlined,
+                  color: NileColors.volt, size: 20),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('Tickets earned', style: NileTextStyles.headingSm()),
+                    const SizedBox(height: 4),
+                    Text(
+                      '${tickets.count} ${tickets.count == 1 ? 'sale' : 'sales'} · '
+                      '${_money(tickets.lifetimeGrossCents)} in sales · '
+                      '${_money(tickets.monthNetCents)} this month',
+                      style: NileTextStyles.bodySm().copyWith(
+                        color: NileColors.txtSecondary,
+                      ),
+                    ),
+                  ],
                 ),
-              ],
+              ),
+              Text(
+                _money(tickets.lifetimeNetCents),
+                style: NileTextStyles.headingSm()
+                    .copyWith(color: NileColors.volt),
+              ),
+            ],
+          ),
+          // Sales made before the host finished Stripe onboarding land on the
+          // platform account, so the money is earned but hasn't moved. It used
+          // to be invisible here — and, until migration 0092, counted as $0.
+          if (tickets.hasPendingTransfer) ...[
+            const SizedBox(height: 12),
+            Container(
+              padding: const EdgeInsets.all(NileSpacing.s12),
+              decoration: BoxDecoration(
+                color: NileColors.bgRaised,
+                borderRadius: BorderRadius.circular(NileRadius.sm),
+              ),
+              child: Row(
+                children: [
+                  Icon(Icons.schedule, size: 16, color: NileColors.txtSecondary),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      '${_money(tickets.fallbackOwedCents)} of this was sold '
+                      'before your payout account was ready, so we transfer it '
+                      'to you manually. Nothing is lost.',
+                      style: NileTextStyles.bodySm().copyWith(
+                        color: NileColors.txtSecondary,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
             ),
-          ),
-          Text(
-            _money(tickets.lifetimeNetCents),
-            style: NileTextStyles.headingSm().copyWith(color: NileColors.volt),
-          ),
+          ],
         ],
       ),
     );

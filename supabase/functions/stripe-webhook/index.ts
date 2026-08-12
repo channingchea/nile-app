@@ -111,14 +111,47 @@ serve(async (req) => {
         }
       }
     } else {
-      // Ticket sale (default). The pending row was stored under session.id
-      // (PaymentIntent is null at session creation). Mark paid by session.id and
-      // record the real PI id so a later refund (which carries only the PI id)
-      // can match.
-      await adminClient
-        .from("tickets")
-        .update({ status: "paid", stripe_payment_intent_id: piId })
-        .eq("stripe_payment_intent_id", session.id);
+      // Ticket sale (default). Settles through the ticket_checkouts ledger
+      // (migration 0092/0093) rather than by rewriting the tickets row:
+      //
+      //  - it resolves by SESSION id, so a buyer who opened checkout twice and
+      //    completed the first tab is still found (the old flow overwrote
+      //    stripe_payment_intent_id and matched zero rows — card charged,
+      //    ticket stuck pending forever);
+      //  - it re-checks capacity under a row lock, so the last seat can only be
+      //    sold once no matter how many people paid for it simultaneously;
+      //  - it never erases a refund, because the refund lives in the ledger.
+      const { data: outcome, error: settleErr } = await adminClient.rpc(
+        "settle_ticket_checkout",
+        { p_session_id: session.id, p_payment_intent_id: piId },
+      );
+
+      if (settleErr) {
+        // Returning 500 makes Stripe retry, which is what we want: the buyer has
+        // paid and holds no ticket until this succeeds.
+        console.error("settle_ticket_checkout failed:", settleErr.message);
+        return new Response(JSON.stringify({ error: settleErr.message }), {
+          status: 500,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      if (outcome === "oversold") {
+        // Someone else took the last seat while this payment was in flight.
+        // Refund immediately — holding money for a seat that doesn't exist is
+        // the one outcome nobody can defend.
+        try {
+          await stripe.refunds.create({ payment_intent: piId });
+          console.log(JSON.stringify({
+            level: "warn", fn: "stripe-webhook", note: "oversold — refunded",
+            session: session.id, payment_intent: piId,
+          }));
+        } catch (err) {
+          console.error("oversold refund FAILED — manual refund owed:", piId, err);
+        }
+      } else if (outcome === "not_found") {
+        console.error("no ticket_checkouts row for session", session.id);
+      }
     }
   }
 
@@ -132,9 +165,10 @@ serve(async (req) => {
       // revoked live + replay access mid-show and zeroed the host's $20. The tip
       // and ad branches below always had the guard; the ticket branch didn't.
       if (charge.refunded) {
-        await adminClient.rpc("confirm_ticket", {
+        // Marks BOTH the ledger row and the entitlement (migration 0093), so
+        // the refund survives a later replay purchase by the same buyer.
+        await adminClient.rpc("refund_ticket_checkout", {
           p_payment_intent_id: paymentIntentId,
-          p_status: "refunded",
         });
       } else {
         // Partial refund: the buyer keeps their access and the host keeps the

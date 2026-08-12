@@ -214,17 +214,47 @@ serve(async (req) => {
       },
     });
 
-    // Pre-create a pending ticket row (upsert in case of retry)
+    // Record the attempt in the ledger (migration 0092). One immutable row per
+    // checkout, keyed on the session id, which is what the webhook resolves
+    // through. This is what makes a second checkout stop hiding the first: both
+    // attempts exist, and whichever one the buyer actually completes settles.
+    //
+    // application_fee_cents is recorded even on the fallback path. It used to be
+    // null there, and host_ticket_earnings netted amount - coalesce(fee, amount)
+    // — exactly zero. The host earned their share either way; only the transfer
+    // mechanism differs.
+    const { error: ledgerErr } = await adminClient.from("ticket_checkouts").insert({
+      event_id,
+      buyer_id: user.id,
+      session_id: session.id,
+      payment_intent_id: (session.payment_intent as string) ?? null,
+      kind,
+      amount_cents,
+      application_fee_cents: feeCents,
+      split_status: destination ? "split" : "platform_fallback",
+      status: "pending",
+    });
+    if (ledgerErr) {
+      // Without a ledger row the webhook cannot settle this session, so the
+      // buyer would be charged for nothing. Better to not open checkout at all.
+      console.error("ticket_checkouts insert failed:", ledgerErr.message);
+      await stripe.checkout.sessions.expire(session.id).catch(() => {});
+      return json({ error: "Could not start checkout. Please try again." }, 500);
+    }
+
+    // Pre-create a pending ticket row so My Tickets can show the attempt. A
+    // 'refunded' row is deliberately left alone: overwriting it with 'pending'
+    // was how a later replay purchase erased a refund from history.
     await adminClient.from("tickets").upsert(
       {
         event_id,
         buyer_id: user.id,
-        stripe_payment_intent_id: session.payment_intent as string ?? session.id,
+        stripe_payment_intent_id: (session.payment_intent as string) ?? session.id,
         amount_cents,
         status: "pending",
         kind,
         split_status: destination ? "split" : "platform_fallback",
-        application_fee_cents: destination ? feeCents : null,
+        application_fee_cents: feeCents,
       },
       { onConflict: "event_id,buyer_id", ignoreDuplicates: false }
     );

@@ -24,6 +24,10 @@ class _AttendeeListScreenState extends State<AttendeeListScreen> {
   List<Attendee>? _attendees;
   String? _error;
 
+  /// Totals across every page, not just the loaded one — see
+  /// [TicketService.eventTotals].
+  ({int grossCents, int netCents, int feeCents, int paidCount})? _totals;
+
   final _scroll = ScrollController();
   String? _cursor;
   bool _hasMore = false;
@@ -56,10 +60,14 @@ class _AttendeeListScreenState extends State<AttendeeListScreen> {
       _error = null;
     });
     try {
-      final page = await TicketService.attendees(widget.eventId);
+      final (page, totals) = await (
+        TicketService.attendees(widget.eventId),
+        TicketService.eventTotals(widget.eventId),
+      ).wait;
       if (mounted) {
         setState(() {
           _attendees = page.items;
+          _totals = totals;
           _cursor = page.nextCursor;
           _hasMore = page.hasMore;
         });
@@ -265,9 +273,15 @@ class _AttendeeListScreenState extends State<AttendeeListScreen> {
     }
 
     // Revenue and head-count reflect active (paid) tickets only; refunded
-    // rows stay visible for history but don't count.
+    // rows stay visible for history but don't count. Totals come from the
+    // server so they cover every page, not just the loaded one — falling back
+    // to the loaded page if the RPC failed.
     final paid = _attendees!.where((a) => !a.isRefunded);
-    final total = paid.fold<int>(0, (s, a) => s + a.amountCents);
+    final totals = _totals;
+    final count = totals?.paidCount ?? paid.length;
+    final total =
+        totals?.grossCents ?? paid.fold<int>(0, (s, a) => s + a.amountCents);
+    final net = totals?.netCents ?? 0;
 
     return ListView.separated(
       controller: _scroll,
@@ -277,7 +291,11 @@ class _AttendeeListScreenState extends State<AttendeeListScreen> {
           i == 0 ? const SizedBox(height: 12) : const SizedBox(height: 8),
       itemBuilder: (_, i) {
         if (i == 0) {
-          return _SummaryRow(count: paid.length, totalCents: total);
+          return _SummaryRow(
+            count: count,
+            totalCents: total,
+            netCents: net,
+          );
         }
         if (i > _attendees!.length) return const LoadMoreFooter();
         final a = _attendees![i - 1];
@@ -290,16 +308,44 @@ class _AttendeeListScreenState extends State<AttendeeListScreen> {
 class _SummaryRow extends StatelessWidget {
   final int count;
   final int totalCents;
-  const _SummaryRow({required this.count, required this.totalCents});
+  final int netCents;
+  const _SummaryRow({
+    required this.count,
+    required this.totalCents,
+    required this.netCents,
+  });
 
   @override
   Widget build(BuildContext context) {
-    final revenue = '\$${(totalCents / 100).toStringAsFixed(2)}';
-    return Row(
+    String money(int cents) => '\$${(cents / 100).toStringAsFixed(2)}';
+    // This screen used to show gross while Payouts showed net — same sales,
+    // two numbers, no explanation of the platform cut on either. Both are here
+    // now, and the caption says which is which.
+    final showNet = netCents > 0 && netCents != totalCents;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _Stat(label: count == 1 ? 'attendee' : 'attendees', value: '$count'),
-        const SizedBox(width: 12),
-        _Stat(label: 'revenue', value: revenue),
+        Row(
+          children: [
+            _Stat(label: count == 1 ? 'attendee' : 'attendees', value: '$count'),
+            const SizedBox(width: 12),
+            _Stat(label: 'ticket sales', value: money(totalCents)),
+            if (showNet) ...[
+              const SizedBox(width: 12),
+              _Stat(label: 'your share', value: money(netCents)),
+            ],
+          ],
+        ),
+        if (showNet) ...[
+          const SizedBox(height: 8),
+          Text(
+            'Ticket sales is what buyers paid. Your share is what reaches your '
+            'payouts after the platform fee — the same figure Payouts shows.',
+            style: NileTextStyles.caption().copyWith(
+              color: NileColors.txtTertiary,
+            ),
+          ),
+        ],
       ],
     );
   }

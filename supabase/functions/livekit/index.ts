@@ -829,7 +829,7 @@ async function viewerToken(body: any, userId: string, admin: any, json: Json): P
   // hole (3.3). `eventId` is the LiveKit slug (events.livekit_room), not the PK.
   const { data: event, error } = await admin
     .from("events")
-    .select("id, host_id, status, livekit_room, price")
+    .select("id, host_id, status, livekit_room, price, ticket_limit")
     .eq("livekit_room", eventId)
     .maybeSingle();
 
@@ -860,6 +860,33 @@ async function viewerToken(body: any, userId: string, admin: any, json: Json): P
         .maybeSingle();
       if (!ticket || ticket.status !== "paid") {
         return json({ error: "A valid ticket is required to join this event" }, 403);
+      }
+    }
+  } else if (event.ticket_limit != null) {
+    // B9: on a free event, ticket_limit did nothing at all — free events create
+    // no ticket rows, so nothing ever read it. A host who set "limit 30" on a
+    // free workshop got 400 viewers and no warning. Enforce it here, where the
+    // seat is actually taken: count live viewers and turn away the overflow.
+    // Crew are never counted or blocked.
+    const isCrew = await isAuthorizedOperator(
+      { id: event.id, host_id: event.host_id },
+      userId,
+      admin,
+    );
+    if (!isCrew) {
+      try {
+        const participants = await roomService.listParticipants(roomNameFor(eventId));
+        const viewers = new Set(
+          participants
+            .filter((p) => parseMeta(p.metadata).role === "viewer")
+            .map((p) => p.identity),
+        );
+        viewers.delete(`viewer-${userId}`); // rejoining doesn't take a new seat
+        if (viewers.size >= event.ticket_limit) {
+          return json({ error: "This event is full" }, 409);
+        }
+      } catch {
+        // Room not up yet — nobody is in it, so nothing to be full of.
       }
     }
   }

@@ -112,8 +112,13 @@ class SponsorshipEarnings {
 }
 
 /// Host ticket/replay earnings. Net = gross minus the platform application fee
-/// frozen per split ticket; fallback (un-onboarded) sales count toward gross
-/// but net 0 until manually transferred.
+/// frozen per ticket at purchase.
+///
+/// Fallback sales — where the host had no payable Connect account, so the
+/// charge landed on the platform — used to net exactly zero here, because the
+/// fee was stored as null and the SQL did `amount - coalesce(fee, amount)`.
+/// They now count normally and are also reported separately in
+/// [fallbackOwedCents], since that money still has to be moved by hand.
 class TicketEarnings {
   final int lifetimeNetCents;
   final int monthNetCents;
@@ -121,12 +126,20 @@ class TicketEarnings {
   final int monthGrossCents;
   final int count;
 
+  /// Earned, but charged to the platform account because the host had no
+  /// payable Connect account when the sale happened — owed by manual transfer
+  /// (migration 0094). Until this shipped the only record was a console.warn.
+  final int fallbackOwedCents;
+  final int fallbackCount;
+
   const TicketEarnings({
     required this.lifetimeNetCents,
     required this.monthNetCents,
     required this.lifetimeGrossCents,
     required this.monthGrossCents,
     required this.count,
+    this.fallbackOwedCents = 0,
+    this.fallbackCount = 0,
   });
 
   static const empty = TicketEarnings(
@@ -139,11 +152,16 @@ class TicketEarnings {
 
   bool get hasSales => count > 0;
 
+  /// True when some of [lifetimeNetCents] is waiting on a manual transfer.
+  bool get hasPendingTransfer => fallbackOwedCents > 0;
+
   factory TicketEarnings.fromRow(Map<String, dynamic> r) => TicketEarnings(
     lifetimeNetCents: (r['lifetime_net_cents'] as num?)?.toInt() ?? 0,
     monthNetCents: (r['month_net_cents'] as num?)?.toInt() ?? 0,
     lifetimeGrossCents: (r['lifetime_gross_cents'] as num?)?.toInt() ?? 0,
     monthGrossCents: (r['month_gross_cents'] as num?)?.toInt() ?? 0,
     count: (r['ticket_count'] as num?)?.toInt() ?? 0,
+    fallbackOwedCents: (r['fallback_owed_cents'] as num?)?.toInt() ?? 0,
+    fallbackCount: (r['fallback_count'] as num?)?.toInt() ?? 0,
   );
 }
