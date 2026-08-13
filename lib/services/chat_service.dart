@@ -73,6 +73,13 @@ class ChatService {
 
   static String _channelName(String eventId) => 'live_chat:$eventId';
 
+  /// Server-authored announcements (tips today). Read-only for clients: the
+  /// Realtime Authorization policy in migration 0099 grants SELECT but no
+  /// INSERT on this topic, so only the service role can put a message on it.
+  /// That is what stops a viewer forging a "@host tipped $200 🎉" line in the
+  /// distinct system style, to an audience that just paid to be in the room.
+  static String _systemChannelName(String eventId) => 'live_system:$eventId';
+
   /// Opens the broadcast channel for [eventId] and invokes [onMessage] for each
   /// incoming message (and [onReaction] for each emoji burst, if provided).
   /// Returns the channel — call [RealtimeChannel.unsubscribe] to leave.
@@ -84,15 +91,24 @@ class ChatService {
     void Function(LiveReaction)? onReaction,
     void Function(RealtimeSubscribeStatus status, Object? error)? onStatus,
   }) {
+    // private: true routes the join and every broadcast through the Realtime
+    // Authorization policies in migration 0099. Before that the only thing
+    // between a stranger and a paid show's chat was knowing the slug — which is
+    // in the public share URL.
     final channel = supabase.channel(
       _channelName(eventId),
-      opts: const RealtimeChannelConfig(self: true),
+      opts: const RealtimeChannelConfig(self: true, private: true),
     );
     channel.onBroadcast(
       event: _event,
       callback: (payload) {
         try {
-          onMessage(ChatMessage.fromJson(payload));
+          final msg = ChatMessage.fromJson(payload);
+          // A client cannot author a system message any more, and one arriving
+          // on the chat topic is by definition forged — drop it rather than
+          // render it in the announcement style.
+          if (msg.isSystem) return;
+          onMessage(msg);
         } catch (_) {}
       },
     );
@@ -107,6 +123,29 @@ class ChatService {
       );
     }
     channel.subscribe(onStatus);
+    return channel;
+  }
+
+  /// Opens the read-only system-announcement channel for [eventId]. Separate
+  /// from [subscribe] so the caller can tear both down; nothing is ever sent on
+  /// it from the client.
+  static RealtimeChannel subscribeSystem(
+    String eventId,
+    void Function(ChatMessage) onMessage,
+  ) {
+    final channel = supabase.channel(
+      _systemChannelName(eventId),
+      opts: const RealtimeChannelConfig(private: true),
+    );
+    channel.onBroadcast(
+      event: _event,
+      callback: (payload) {
+        try {
+          onMessage(ChatMessage.fromJson(payload));
+        } catch (_) {}
+      },
+    );
+    channel.subscribe();
     return channel;
   }
 
@@ -144,22 +183,10 @@ class ChatService {
     await channel.sendBroadcastMessage(event: _reactEvent, payload: r.toJson());
   }
 
-  /// Broadcasts a system announcement (e.g. a tip) on [channel]. Rendered
-  /// author-less and styled distinctly; carries the sender id only so the
-  /// tipper's own client can dedupe. Ephemeral, like every chat message.
-  static Future<void> sendSystem(
-    RealtimeChannel channel, {
-    required String content,
-  }) async {
-    final text = content.trim();
-    if (text.isEmpty) return;
-    final msg = ChatMessage(
-      senderId: supabase.auth.currentUser?.id ?? '',
-      username: '',
-      content: text,
-      sentAt: DateTime.now(),
-      kind: 'system',
-    );
-    await channel.sendBroadcastMessage(event: _event, payload: msg.toJson());
-  }
+  // sendSystem is gone on purpose (review E1). Announcements are authored by
+  // the server now — stripe-webhook broadcasts to live_system:<slug> when a tip
+  // actually settles. That also fixed the two ways the old client-side path got
+  // it wrong (E10): a cancelled tip used to re-announce the viewer's PREVIOUS
+  // tip, and a tip that settled after the viewer closed the screen was never
+  // announced at all.
 }

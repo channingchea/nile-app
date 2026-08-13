@@ -35,6 +35,12 @@ class _EditEventScreenState extends State<EditEventScreen> {
   late final TextEditingController _ticketLimitController;
   late final TextEditingController _durationController;
 
+  /// Whether the event actually had an end time when this screen opened, and
+  /// the duration text we seeded from it — together they tell us whether the
+  /// host has expressed an opinion about duration at all. See [_save].
+  late final bool _hadEndAt;
+  late final String _initialDurationText;
+
   Uint8List? _coverBytes; // newly picked, not yet uploaded
   String? _existingCoverUrl; // current saved cover (may be null)
   bool _coverCleared = false; // user removed the existing cover
@@ -87,10 +93,15 @@ class _EditEventScreenState extends State<EditEventScreen> {
     _scheduledAt = e.scheduledAt?.toLocal();
 
     // Seed duration from the saved end_at − scheduled_at (default 60 min).
+    // _hadEndAt records whether that 60 was real or a placeholder: an event
+    // saved with no end time used to have one silently imposed on it the next
+    // time anything else on this screen was edited.
+    _hadEndAt = e.endAt != null;
     final mins = _initialDurationMinutes();
     _durationController = TextEditingController(
       text: _trimNum(mins / 60),
     ); // hours by default
+    _initialDurationText = _durationController.text;
     _durationController.addListener(() => setState(() {}));
     _priceController.addListener(() => setState(() {}));
 
@@ -145,6 +156,12 @@ class _EditEventScreenState extends State<EditEventScreen> {
     } catch (_) {
       /* chips just start empty — non-fatal */
     }
+  }
+
+  /// Same instant, regardless of whether either side is UTC or local.
+  static bool _sameInstant(DateTime? a, DateTime? b) {
+    if (a == null || b == null) return a == b;
+    return a.isAtSameMomentAs(b);
   }
 
   int _initialDurationMinutes() {
@@ -323,14 +340,22 @@ class _EditEventScreenState extends State<EditEventScreen> {
       ),
     );
     if (time == null) return;
+    final picked = DateTime(
+      date.year,
+      date.month,
+      date.day,
+      time.hour,
+      time.minute,
+    );
+    // firstDate constrains the DATE only — picking today and then a time that
+    // has already been meant an event the auto-end sweep closed within five
+    // minutes. Migration 0100 enforces the same rule server-side.
+    if (picked.isBefore(DateTime.now())) {
+      setState(() => _dateError = 'Pick a start time in the future.');
+      return;
+    }
     setState(() {
-      _scheduledAt = DateTime(
-        date.year,
-        date.month,
-        date.day,
-        time.hour,
-        time.minute,
-      );
+      _scheduledAt = picked;
       _dateError = null;
     });
   }
@@ -391,10 +416,22 @@ class _EditEventScreenState extends State<EditEventScreen> {
           : (double.parse(priceText) * 100).round();
       final ticketLimit = limitText.isEmpty ? null : int.parse(limitText);
       final durationMinutes = _parsedDurationMinutes() ?? 60;
-      final newEndAt = _scheduledAt?.add(Duration(minutes: durationMinutes));
+      // An event with no end time keeps having none unless the host actually
+      // touches the duration field. It used to acquire a silent 60 minutes on
+      // the next save of anything at all — which then priced it at the
+      // 60-minute floor while the auto-end sweep still assumed eight hours.
+      final durationUntouched =
+          _durationController.text.trim() == _initialDurationText;
+      final newEndAt = (!_hadEndAt && durationUntouched)
+          ? null
+          : _scheduledAt?.add(Duration(minutes: durationMinutes));
 
-      final scheduledChanged = _scheduledAt != widget.event.scheduledAt;
-      final endChanged = newEndAt != widget.event.endAt;
+      // isAtSameMomentAs, not ==: _scheduledAt is local and event.scheduledAt is
+      // UTC, and Dart's == compares isUtc as well as the instant. Every save
+      // therefore wrote both fields whether or not anything had changed.
+      final scheduledChanged =
+          !_sameInstant(_scheduledAt, widget.event.scheduledAt);
+      final endChanged = !_sameInstant(newEndAt, widget.event.endAt);
       final priceChanged = priceCents != widget.event.price;
       final limitChanged = ticketLimit != widget.event.ticketLimit;
 

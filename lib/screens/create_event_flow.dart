@@ -1,3 +1,5 @@
+import 'dart:math';
+
 import 'package:croppy/croppy.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -257,15 +259,26 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
 
   // ── Helpers ─────────────────────────────────────────────────────────────────
 
+  /// A LiveKit room slug for [name].
+  ///
+  /// The suffix used to be `millisecondsSinceEpoch % 10000` — four digits, so
+  /// one collision in ten thousand per identical title. That is not a rounding
+  /// error here: the slug also keys the cover-image path and the LiveKit room,
+  /// so a collision overwrote another host's cover and cross-wired their room
+  /// before finally failing on the unique constraint. Ten random hex characters
+  /// from a secure source costs six extra bytes in a URL and makes it a
+  /// non-event.
   String _generateEventId(String name) {
     final slug = name
         .toLowerCase()
         .replaceAll(RegExp(r'[^a-z0-9\s]'), '')
         .trim()
         .replaceAll(RegExp(r'\s+'), '-');
-    final suffix = (DateTime.now().millisecondsSinceEpoch % 10000)
-        .toString()
-        .padLeft(4, '0');
+    final rng = Random.secure();
+    final suffix = List.generate(
+      10,
+      (_) => rng.nextInt(16).toRadixString(16),
+    ).join();
     return slug.isNotEmpty ? '$slug-$suffix' : 'event-$suffix';
   }
 
@@ -386,14 +399,22 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
       ),
     );
     if (time == null) return;
+    final picked = DateTime(
+      date.year,
+      date.month,
+      date.day,
+      time.hour,
+      time.minute,
+    );
+    // firstDate constrains the DATE only — picking today and then a time that
+    // has already been meant an event the auto-end sweep closed within five
+    // minutes. Migration 0100 enforces the same rule server-side.
+    if (picked.isBefore(DateTime.now())) {
+      setState(() => _dateError = 'Pick a start time in the future.');
+      return;
+    }
     setState(() {
-      _draft.scheduledAt = DateTime(
-        date.year,
-        date.month,
-        date.day,
-        time.hour,
-        time.minute,
-      );
+      _draft.scheduledAt = picked;
       _dateError = null;
     });
   }

@@ -778,6 +778,9 @@ class _CameraScreenState extends State<CameraScreen> {
   // viewers use; capped buffer, newest first (list renders reversed).
   static const int _maxChatMessages = 200;
   RealtimeChannel? _chatChannel;
+
+  /// Read-only topic for server-authored announcements (migration 0099).
+  RealtimeChannel? _systemChannel;
   final List<ChatMessage> _chatMessages = [];
   bool _chatVisible = true;
 
@@ -805,6 +808,7 @@ class _CameraScreenState extends State<CameraScreen> {
     _countdownTimer?.cancel();
     _statusChannel?.unsubscribe();
     _chatChannel?.unsubscribe();
+    _systemChannel?.unsubscribe();
     _deviceChangeSub?.cancel();
     _eventIdController.dispose();
     _cameraNameController.dispose();
@@ -1045,6 +1049,9 @@ class _CameraScreenState extends State<CameraScreen> {
 
       // Join the live-chat broadcast so the host/operator can watch the room.
       _chatChannel = ChatService.subscribe(eventId, _onChatMessage);
+      // Server-authored announcements (tips) come in on their own read-only
+      // topic — the host should see them in the Studio too.
+      _systemChannel = ChatService.subscribeSystem(eventId, _onChatMessage);
 
       // Show clock: fetch the timing anchors and start the 1s ticker that
       // drives the crew-only countdown (and the host's auto-end at zero).
@@ -1405,6 +1412,8 @@ class _CameraScreenState extends State<CameraScreen> {
     _statusChannel = null;
     _chatChannel?.unsubscribe();
     _chatChannel = null;
+    _systemChannel?.unsubscribe();
+    _systemChannel = null;
     _chatMessages.clear();
     // Stop screen capture explicitly — disconnect unpublishes the track but
     // doesn't always halt the native capturer promptly.

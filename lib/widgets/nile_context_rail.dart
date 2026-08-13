@@ -363,7 +363,7 @@ String nileWhen(DateTime? at) {
   if (delta.isNegative) {
     if (delta.inMinutes > -10) return 'Starting now';
     final clock = nileClock(local);
-    final daysAgo = nileDayKey(now).difference(nileDayKey(local)).inDays;
+    final daysAgo = nileDaysBetween(local, now);
     if (daysAgo == 0) return 'Earlier today, $clock';
     if (daysAgo == 1) return 'Yesterday $clock';
     return '${nileMonthAbbr(local.month)} ${local.day}, $clock';
@@ -373,7 +373,7 @@ String nileWhen(DateTime? at) {
   if (delta.inMinutes < 60) return 'in ${delta.inMinutes}m';
   if (delta.inHours < 12) return 'in ${delta.inHours}h';
 
-  final days = nileDayKey(local).difference(nileDayKey(now)).inDays;
+  final days = nileDaysBetween(now, local);
   final time = nileClock(local);
   if (days == 0) return 'Today $time';
   if (days == 1) return 'Tomorrow $time';

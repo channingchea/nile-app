@@ -90,8 +90,19 @@ serve(async (req) => {
         .update({ status: "paid", stripe_payment_intent_id: piId })
         .eq("stripe_payment_intent_id", session.id)
         .eq("status", "pending")
-        .select("host_id, tipper_id, event_id")
+        .select("host_id, tipper_id, event_id, amount_cents")
         .maybeSingle();
+
+      // Announce it in the live chat, from here (review E1 + E10).
+      //
+      // The tipper's client used to do this on app-resume: a CANCELLED tip
+      // re-announced their PREVIOUS tip (it just read the latest paid one), and
+      // a tip that settled after they closed the screen was never announced at
+      // all. Doing it on settlement is the only moment that's actually true.
+      // It also means clients no longer need — and no longer have — the ability
+      // to author a system message, which is what made the announcement style
+      // forgeable by anyone in the room.
+      if (tip) await announceTip(adminClient, tip);
 
       // Notify the host (only on a real transition, so replays don't re-notify).
       // Gated by the host's tip_received preference (fail-open); push delivery is
@@ -214,6 +225,58 @@ serve(async (req) => {
     headers: { "Content-Type": "application/json" },
   });
 });
+
+// Broadcast "@someone tipped $20 🎉" onto the event's read-only announcement
+// topic. Clients may subscribe to live_system:<slug> but have no INSERT grant
+// on it (migration 0099), so this is the only way such a message can exist.
+// Never throws: an announcement is not worth failing a settled payment over.
+// deno-lint-ignore no-explicit-any
+async function announceTip(admin: any, tip: any) {
+  try {
+    const [{ data: event }, { data: tipper }] = await Promise.all([
+      admin.from("events").select("livekit_room").eq("id", tip.event_id).maybeSingle(),
+      admin.from("profiles").select("username").eq("id", tip.tipper_id).maybeSingle(),
+    ]);
+    const slug = event?.livekit_room as string | undefined;
+    if (!slug) return;
+
+    const cents = Number(tip.amount_cents ?? 0);
+    if (!cents) return;
+    const dollars = cents / 100;
+    const amount = Number.isInteger(dollars)
+      ? `$${dollars.toFixed(0)}`
+      : `$${dollars.toFixed(2)}`;
+    const who = tipper?.username ? `@${tipper.username}` : "Someone";
+
+    const res = await fetch(`${Deno.env.get("SUPABASE_URL")}/realtime/v1/api/broadcast`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        apikey: Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
+        Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!}`,
+      },
+      body: JSON.stringify({
+        messages: [
+          {
+            topic: `live_system:${slug}`,
+            event: "msg",
+            private: true,
+            payload: {
+              sender_id: tip.tipper_id,
+              username: "",
+              content: `${who} tipped ${amount} 🎉`,
+              sent_at: new Date().toISOString(),
+              kind: "system",
+            },
+          },
+        ],
+      }),
+    });
+    if (!res.ok) console.error("tip announce failed:", res.status, await res.text());
+  } catch (err) {
+    console.error("tip announce error:", err);
+  }
+}
 
 // Admin alert: a paid standalone ad just entered pending_review (Part 2 of
 // the hardening plan — the Stripe auth window is only ~7 days, so a silent

@@ -127,6 +127,11 @@ class _ViewerScreenState extends State<ViewerScreen>
   // populated without persisting anything server-side.
   static const int _maxChatMessages = 200;
   RealtimeChannel? _chatChannel;
+
+  /// Read-only topic carrying server-authored announcements (tips). Clients
+  /// have no INSERT grant on it, which is what makes those messages
+  /// unforgeable — see migration 0099.
+  RealtimeChannel? _systemChannel;
   final List<ChatMessage> _chatMessages = [];
   final _chatController = TextEditingController();
   final _chatScrollController = ScrollController();
@@ -166,11 +171,14 @@ class _ViewerScreenState extends State<ViewerScreen>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    // Returning from the external tip checkout: confirm the tip landed, then
-    // announce it in chat. _tipPending prevents any other resume from firing it.
+    // Returning from the external tip checkout. The announcement itself is the
+    // server's job now (stripe-webhook broadcasts when the tip settles), which
+    // is what fixed the two failure modes here: a CANCELLED tip used to
+    // re-announce this viewer's previous tip, and a tip that settled after they
+    // closed the screen was never announced at all. All this does now is clear
+    // the pending flag.
     if (state == AppLifecycleState.resumed && _tipPending) {
       _tipPending = false;
-      _confirmAndAnnounceTip();
     }
   }
 
@@ -203,6 +211,8 @@ class _ViewerScreenState extends State<ViewerScreen>
     _eventConn = null;
     _chatChannel?.unsubscribe();
     _chatChannel = null;
+    _systemChannel?.unsubscribe();
+    _systemChannel = null;
   }
 
   /// Re-pull authoritative event state after a realtime drop/rejoin, so a status
@@ -511,33 +521,6 @@ class _ViewerScreenState extends State<ViewerScreen>
     }
   }
 
-  /// After returning from checkout, confirm the tip actually paid (webhook may
-  /// lag a beat, so retry once) and broadcast an ephemeral announcement.
-  Future<void> _confirmAndAnnounceTip() async {
-    final eventId = _eventDbId;
-    final channel = _chatChannel;
-    if (eventId == null || channel == null) return;
-    for (var attempt = 0; attempt < 2; attempt++) {
-      final cents = await TipService.latestPaidTipCents(eventId);
-      if (cents != null) {
-        final name = _myUsername ?? 'Someone';
-        await ChatService.sendSystem(
-          channel,
-          content: '$name tipped ${_formatCents(cents)} 🎉',
-        );
-        return;
-      }
-      if (attempt == 0) await Future<void>.delayed(const Duration(seconds: 3));
-    }
-  }
-
-  String _formatCents(int cents) {
-    final dollars = cents / 100;
-    return dollars == dollars.roundToDouble()
-        ? '\$${dollars.toStringAsFixed(0)}'
-        : '\$${dollars.toStringAsFixed(2)}';
-  }
-
   void _showSnack(String msg) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
@@ -690,6 +673,9 @@ class _ViewerScreenState extends State<ViewerScreen>
         _onChatMessage,
         onReaction: _onReaction,
       );
+      // Server-authored announcements (tips) arrive on their own read-only
+      // topic — see ChatService.subscribeSystem.
+      _systemChannel = ChatService.subscribeSystem(eventId, _onChatMessage);
       ProfileService.fetchCurrentProfile().then((p) {
         _myUsername = p?.username;
         _myAvatarUrl = p?.avatarUrl;

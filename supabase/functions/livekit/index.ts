@@ -304,10 +304,38 @@ async function isAuthorizedOperator(
 // which is the right bar for "may create a room for an event I'm about to own".
 // eventId is a client-generated slug; a stray room with no backing event simply
 // auto-closes after emptyTimeout.
-async function createRoom(body: any, _userId: string, _admin: any, json: Json): Promise<Response> {
+async function createRoom(body: any, userId: string, admin: any, json: Json): Promise<Response> {
   const { eventId, eventName } = body;
   if (!eventId || !eventName) {
     return json({ error: "eventId and eventName are required" }, 400);
+  }
+
+  // E21: "any signed-in user" was the whole authorization, with no check that
+  // the slug was unclaimed and no rate limit.
+  //
+  // Claim check: if an event already owns this slug and it isn't the caller's,
+  // creating the room would let a stranger set the metadata on — and then join
+  // — someone else's show.
+  const { data: claimed } = await admin
+    .from("events")
+    .select("host_id")
+    .eq("livekit_room", eventId)
+    .maybeSingle();
+  if (claimed && claimed.host_id !== userId) {
+    return json({ error: "That room id is already taken" }, 409);
+  }
+
+  // Rate limit: rooms are created just before the draft row is written, so the
+  // caller's recent event count is a good proxy. Generous enough that no real
+  // host will meet it, tight enough that a script can't churn rooms.
+  const hourAgo = new Date(Date.now() - 3600_000).toISOString();
+  const { count: recent } = await admin
+    .from("events")
+    .select("id", { count: "exact", head: true })
+    .eq("host_id", userId)
+    .gte("created_at", hourAgo);
+  if ((recent ?? 0) > 30) {
+    return json({ error: "Too many events created — try again later" }, 429);
   }
 
   const roomName = roomNameFor(eventId);
@@ -677,28 +705,65 @@ async function reconcileViewers(body: any, userId: string, admin: any, json: Jso
 
   const { data: event } = await admin
     .from("events")
-    .select("id")
+    .select("id, status")
     .eq("livekit_room", eventId)
     .maybeSingle();
   if (!event) return json({ error: "Event not found" }, 404);
 
+  // E9: this accepted ANY authenticated caller for ANY event — a cheap way to
+  // generate service-role writes and realtime churn on someone else's show.
+  // Only someone actually in the room has a count to reconcile.
+  try {
+    const inRoom = await roomService.listParticipants(roomNameFor(eventId));
+    const isPresent = inRoom.some(
+      (p) => parseMeta(p.metadata).userId === userId,
+    );
+    // excludeSelf is the leaving case: the caller is on their way out, so they
+    // may legitimately no longer be in the participant list.
+    if (!isPresent && excludeSelf !== true) {
+      return json({ error: "Forbidden — not in this room" }, 403);
+    }
+  } catch {
+    // Room gone: fall through so the count still settles to 0 below.
+  }
+
+  // E7: a show that has ended has no viewers, whatever the room says. Nothing
+  // used to zero this on end, so the last number just stuck forever.
+  if (event.status === "ended") {
+    await admin.from("events").update({ viewer_count: 0 }).eq("id", event.id);
+    return json({ success: true, viewer_count: 0 });
+  }
+
   // A leaving viewer passes excludeSelf so they aren't counted even if LiveKit
   // hasn't yet processed their disconnect — makes the last-viewer-leaves case
   // settle to the right number instead of sticking at 1.
-  const selfIdentity = `viewer-${userId}`;
+  //
+  // Counting is by the userId in each participant's metadata, NOT by identity:
+  // identities carry a per-connection suffix now (E8), so one person on a phone
+  // and a laptop is still one viewer.
   let count = 0;
   try {
     const participants = await roomService.listParticipants(roomNameFor(eventId));
     const viewers = new Set<string>();
     for (const p of participants) {
-      if (parseMeta(p.metadata).role !== "viewer") continue;
-      if (excludeSelf === true && p.identity === selfIdentity) continue;
-      viewers.add(p.identity);
+      const meta = parseMeta(p.metadata);
+      if (meta.role !== "viewer") continue;
+      const who = (meta.userId as string | undefined) ?? p.identity;
+      if (excludeSelf === true && who === userId) continue;
+      viewers.add(who);
     }
     count = viewers.size;
-  } catch {
-    // Room gone/unreadable (show ended) → 0 viewers.
-    count = 0;
+  } catch (err) {
+    // E7: this used to fall through to count = 0 and WRITE it — one transient
+    // LiveKit API error zeroed the viewer count mid-show, for everyone. If we
+    // can't read the room we don't know the count, so we leave it alone.
+    log("warn", { action: "reconcile-viewers", error: String(err) });
+    const { data: current } = await admin
+      .from("events")
+      .select("viewer_count")
+      .eq("id", event.id)
+      .maybeSingle();
+    return json({ success: false, viewer_count: current?.viewer_count ?? 0 });
   }
 
   await admin.from("events").update({ viewer_count: count }).eq("id", event.id);
@@ -879,9 +944,9 @@ async function viewerToken(body: any, userId: string, admin: any, json: Json): P
         const viewers = new Set(
           participants
             .filter((p) => parseMeta(p.metadata).role === "viewer")
-            .map((p) => p.identity),
+            .map((p) => (parseMeta(p.metadata).userId as string) ?? p.identity),
         );
-        viewers.delete(`viewer-${userId}`); // rejoining doesn't take a new seat
+        viewers.delete(userId); // rejoining doesn't take a new seat
         if (viewers.size >= event.ticket_limit) {
           return json({ error: "This event is full" }, 409);
         }
@@ -895,8 +960,13 @@ async function viewerToken(body: any, userId: string, admin: any, json: Json): P
   // events.livekit_room stores the bare slug, so using it here put viewers in a
   // DIFFERENT room than the publishers (viewer saw 0 participants).
   const roomName = roomNameFor(eventId);
+  // E8: this was a bare `viewer-<userId>`. LiveKit treats an identity as unique
+  // per room, so the same person on a phone and a laptop evicted each other
+  // forever — both devices reconnecting, neither able to watch. A per-connection
+  // suffix makes every session distinct; the count still dedupes on the userId
+  // in the metadata (see reconcile-viewers), so one person is still one viewer.
   const token = await buildToken({
-    identity: `viewer-${userId}`,
+    identity: `viewer-${userId}-${crypto.randomUUID().slice(0, 8)}`,
     name: `Viewer ${userId}`,
     roomName,
     canPublish: false,

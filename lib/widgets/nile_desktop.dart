@@ -62,10 +62,22 @@ DateTime nileAddDays(DateTime d, int n) =>
 DateTime nileMondayOf(DateTime d) =>
     DateTime(d.year, d.month, d.day - (d.weekday - DateTime.monday));
 
+/// Whole calendar days from [from] to [to], counting date boxes on a wall
+/// calendar rather than elapsed time.
+///
+/// `nileDayKey(a).difference(nileDayKey(b)).inDays` looks equivalent and isn't:
+/// a Duration measures real elapsed hours, and the gap between two local
+/// midnights is 23 hours on a spring-forward day and 25 on a fall-back one.
+/// Truncating 23 hours gives 0, so "Tomorrow" read as "Today" every March.
+/// Rebuilding the dates in UTC removes DST from the arithmetic entirely.
+int nileDaysBetween(DateTime from, DateTime to) =>
+    DateTime.utc(to.year, to.month, to.day)
+        .difference(DateTime.utc(from.year, from.month, from.day))
+        .inDays;
+
 /// "Today", "Tomorrow", then "Wed 13".
 String nileDayLabel(DateTime day, {DateTime? now}) {
-  final today = nileDayKey(now ?? DateTime.now());
-  final days = nileDayKey(day).difference(today).inDays;
+  final days = nileDaysBetween(now ?? DateTime.now(), day);
   if (days == 0) return 'Today';
   if (days == 1) return 'Tomorrow';
   return '${nileWeekdayAbbr(day.weekday)} ${day.day}';
