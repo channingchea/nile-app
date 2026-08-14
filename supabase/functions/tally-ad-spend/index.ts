@@ -62,7 +62,12 @@
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import Stripe from "https://esm.sh/stripe@14?target=deno";
-import { expireRecoverySession, klaviyoEvent } from "../_shared/sponsorship.ts";
+import {
+  dollars,
+  expireRecoverySession,
+  formatWhen,
+  klaviyoEvent,
+} from "../_shared/sponsorship.ts";
 
 const stripe = new Stripe(Deno.env.get("STRIPE_SECRET_KEY")!, {
   apiVersion: "2023-10-16",
@@ -395,7 +400,7 @@ async function expireOffers(
     .eq("placement", "lobby")
     .eq("status", fromStatus)
     .lt(col, cutoff)
-    .select("id, stripe_payment_intent_id, advertiser_accounts(name, contact_email), events(title)");
+    .select("id, budget_cents, stripe_payment_intent_id, advertiser_accounts(name, contact_email), events(title)");
   if (error) { console.error(`expire ${fromStatus} failed:`, error); return 0; }
   // deno-lint-ignore no-explicit-any
   for (const r of (rows ?? []) as any[]) {
@@ -410,7 +415,10 @@ async function expireOffers(
       {
         brand: r.advertiser_accounts?.name ?? "there",
         event_title: r.events?.title ?? "an event",
+        amount: dollars(r.budget_cents),
+        amount_cents: r.budget_cents,
         campaign_id: r.id,
+        // Already a complete human sentence — the email renders it verbatim.
         reason,
       },
     );
@@ -482,10 +490,12 @@ async function emailWaitingOffers(admin: any): Promise<number> {
         brand: r.advertiser_accounts?.name ?? "A brand",
         event_title: r.events?.title ?? "your event",
         amount: dollars(amount),
+        amount_cents: amount,
         host_net: dollars(Math.round(amount * hostShare)),
         thumbnail_url: creativeThumbUrl(r.ad_creatives?.[0]),
-        offer_expires_at: r.offer_expires_at,
-        offer_url: deepLink,
+        offer_expires_at: formatWhen(r.offer_expires_at),
+        offer_expires_at_iso: r.offer_expires_at,
+        deep_link: deepLink,
         // Overrides klaviyoEvent's advertiser-portal default: nothing in a
         // host email should point at the advertiser dashboard.
         dashboard_url: deepLink,
@@ -561,12 +571,6 @@ async function nudgeExpiringOffers(admin: any): Promise<number> {
     console.error("expiring offer nudge error:", err);
     return 0;
   }
-}
-
-// Whole dollars read as whole dollars; cents only when there are cents.
-function dollars(cents: number): string {
-  const d = cents / 100;
-  return Number.isInteger(d) ? `$${d.toFixed(0)}` : `$${d.toFixed(2)}`;
 }
 
 // Image creatives already store a public URL; video creatives store a

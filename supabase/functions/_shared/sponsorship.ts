@@ -23,6 +23,38 @@ export function portalUrl() {
 
 export const PLATFORM_MIN_OFFER_CENTS = 2500;
 
+// Every sponsorship email is a Django template in Klaviyo, and Django's filters
+// are a bad place to turn 4500 into "$45" or an ISO timestamp into a date a
+// person can read. Money and deadlines are formatted HERE, once, so a template
+// author can only ever print the right thing. Raw values ride along under
+// explicitly raw names (amount_cents, offer_expires_at_iso) for anything that
+// needs to compute rather than display.
+
+// Whole dollars read as whole dollars; cents only when there are cents.
+export function dollars(cents: number): string {
+  const d = Number(cents ?? 0) / 100;
+  return Number.isInteger(d) ? `$${d.toFixed(0)}` : `$${d.toFixed(2)}`;
+}
+
+// "Aug 17, 2026, 4:00 AM UTC". UTC because these go to advertisers and hosts in
+// unknown timezones, and a wrong local time is worse than an explicit one.
+export function formatWhen(iso: string | null | undefined): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  return `${
+    new Intl.DateTimeFormat("en-US", {
+      timeZone: "UTC",
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      hour12: true,
+    }).format(d)
+  } UTC`;
+}
+
 // Klaviyo server-side event — the only email channel these functions have.
 // Env-gated on KLAVIYO_API_KEY (private pk_ key): no-ops cleanly when unset,
 // same posture as the notify helpers in review-ad-campaign. Never throws: an
@@ -242,8 +274,9 @@ export async function acceptSponsorshipOffer(
     {
       brand: c.advertiser_accounts?.name ?? "there",
       event_title: eventTitle,
-      campaign_id: campaignId,
+      amount: dollars(amount),
       amount_cents: amount,
+      campaign_id: campaignId,
       host_note: note,
     },
   );
@@ -274,7 +307,7 @@ export async function declineSponsorshipSiblings(
     .eq("placement", "lobby")
     .in("status", ["pending_host", "payment_pending"])
     .neq("id", winnerId)
-    .select("id, stripe_payment_intent_id, advertiser_accounts(name, contact_email)");
+    .select("id, budget_cents, stripe_payment_intent_id, advertiser_accounts(name, contact_email)");
   if (error) { console.error("sibling decline failed:", error); return; }
   // deno-lint-ignore no-explicit-any
   for (const l of (losers ?? []) as any[]) {
@@ -286,6 +319,8 @@ export async function declineSponsorshipSiblings(
       {
         brand: l.advertiser_accounts?.name ?? "there",
         event_title: eventTitle,
+        amount: dollars(l.budget_cents),
+        amount_cents: l.budget_cents,
         campaign_id: l.id,
         host_note: autoNote,
       },
@@ -404,6 +439,8 @@ async function onChargeFailed(
       {
         brand: c.advertiser_accounts?.name ?? "there",
         event_title: eventTitle,
+        amount: dollars(amount),
+        amount_cents: amount,
         campaign_id: c.id,
         decline_code: key,
         confirm_url: recovery?.url ?? portalUrl(),

@@ -46,6 +46,7 @@ import Stripe from "https://esm.sh/stripe@14?target=deno";
 import { corsHeaders as corsHeadersFor } from "../_shared/cors.ts";
 import {
   acceptSponsorshipOffer,
+  dollars,
   notifyHostOfferCleared,
   PLATFORM_MIN_OFFER_CENTS,
 } from "../_shared/sponsorship.ts";
@@ -198,7 +199,13 @@ serve(async (req) => {
         await notifyAdvertiser(
           action, to, acct?.name ?? "there",
           (c as any).ad_creatives?.[0]?.headline ?? "your ad",
-          campaign_id, update.review_note, isLobby,
+          campaign_id, update.review_note,
+          isLobby
+            ? {
+              eventTitle: (c as any).events?.title ?? "an event",
+              amountCents: Number((c as any).budget_cents ?? 0),
+            }
+            : null,
         );
       }
     }
@@ -238,7 +245,9 @@ async function notifyAdvertiser(
   headline: string,
   campaignId: string,
   note?: string,
-  isLobby = false,
+  // Non-null ⇒ lobby sponsorship; carries what a sponsorship email renders
+  // that an ad email doesn't.
+  lobby: { eventTitle: string; amountCents: number } | null = null,
 ) {
   const key = Deno.env.get("KLAVIYO_API_KEY");
   if (!key) return;
@@ -247,7 +256,7 @@ async function notifyAdvertiser(
   // be a lie the advertiser finds out about later.
   const metric = action === "reject"
     ? "Nile Ad Rejected"
-    : isLobby
+    : lobby
     ? "Nile Sponsorship Offer Cleared"
     : "Nile Ad Approved";
   const payload = {
@@ -260,6 +269,15 @@ async function notifyAdvertiser(
           brand,
           headline,
           campaign_id: campaignId,
+          // Money is formatted at the source: Klaviyo templates are Django,
+          // and "$45" is not something a Django filter should be deriving.
+          ...(lobby
+            ? {
+              event_title: lobby.eventTitle,
+              amount: dollars(lobby.amountCents),
+              amount_cents: lobby.amountCents,
+            }
+            : {}),
           ...(action === "reject" ? { reason: note ?? "" } : {}),
           dashboard_url: "https://ads.joinnile.com/advertise/portal",
         },
