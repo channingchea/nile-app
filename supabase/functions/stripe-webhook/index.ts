@@ -19,6 +19,10 @@
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import Stripe from "https://esm.sh/stripe@14?target=deno";
+import {
+  declineSponsorshipSiblings,
+  notifyHostOfferCleared,
+} from "../_shared/sponsorship.ts";
 
 const stripe = new Stripe(Deno.env.get("STRIPE_SECRET_KEY")!, {
   apiVersion: "2023-10-16",
@@ -53,12 +57,24 @@ serve(async (req) => {
     //     fn) captures the PaymentIntent and does the final → active, rejection
     //     cancels the authorization.
     //   otherwise (A-2 host boost) → active immediately (automatic capture).
+    //   mode:"setup" (0095 sponsorship offer) → no money moved at all; see
+    //     onSponsorshipCardSaved below.
     // Status guard: only transition rows still in pending_payment, so a replayed
     // or late Stripe event can never flip an already-reviewed (rejected/active/
     // paused) campaign back.
     if (session.metadata?.type === "ad_campaign") {
       const campaignId = session.metadata.campaign_id;
-      if (campaignId) {
+      if (campaignId && session.metadata.sponsorship_recovery === "1") {
+        // A payment_pending offer's advertiser just paid through the hosted
+        // recovery session. Checked before the mode branches: this is a
+        // payment-mode session, but it must NOT take the generic path.
+        await onSponsorshipPaymentRecovered(session, campaignId, piId);
+      } else if (campaignId && session.mode === "setup") {
+        // Sponsorship OFFER (0095–0097): checkout saved a card and nothing
+        // else. Separate branch because there is no PaymentIntent to record and
+        // the next status depends on the advertiser's trust tier.
+        await onSponsorshipCardSaved(session, campaignId);
+      } else if (campaignId) {
         const nextStatus =
           session.metadata.standalone === "1" ? "pending_review" : "active";
         const { data: updatedCampaign } = await adminClient
@@ -211,6 +227,11 @@ serve(async (req) => {
       // no captured charge, and rejected/completed are already terminal. The
       // normal reject path (cancel the manual-capture hold) emits no
       // charge.refunded, so this only catches out-of-band dashboard refunds.
+      //
+      // The new offer statuses are safe to leave out of this list: an offer only
+      // acquires a real PaymentIntent at acceptance, so pending_review /
+      // pending_host rows can never match a payment_intent_id at all, and a
+      // payment_pending row's intent was never captured.
       if (charge.refunded) {
         await adminClient
           .from("ad_campaigns")
@@ -225,6 +246,141 @@ serve(async (req) => {
     headers: { "Content-Type": "application/json" },
   });
 });
+
+// A payment_pending sponsorship recovered: the advertiser completed the hosted
+// Checkout Session we created when their card soft-declined off-session. Money
+// has ALREADY moved by the time this runs, so every failure below has to end in
+// a refund — an advertiser paying for a lobby slot that is gone is the one
+// outcome with no defence (same posture as the oversold-ticket refund above).
+//
+// The fee travels in session metadata rather than being recomputed: config can
+// be retuned between the host's decision and the advertiser's second attempt,
+// and the split the host agreed to is the one that must settle.
+async function onSponsorshipPaymentRecovered(
+  session: Stripe.Checkout.Session,
+  campaignId: string,
+  piId: string,
+) {
+  const fee = Number(session.metadata?.fee_cents ?? "");
+  const { data: recovered, error } = await adminClient
+    .from("ad_campaigns")
+    .update({
+      status: "active",
+      stripe_payment_intent_id: piId,
+      ...(Number.isFinite(fee) ? { application_fee_cents: fee } : {}),
+      split_status: "split",
+      payment_recovery_url: null,
+      payment_retry_until: null,
+    })
+    .eq("id", campaignId)
+    .eq("status", "payment_pending")
+    .select("id, event_id, events(title)")
+    .maybeSingle();
+
+  // No row means one of two things, and both are "this slot is gone": the
+  // offer left payment_pending (expired by the sweep, declined because a
+  // sibling was accepted), or the partial unique index rejected the write
+  // because another campaign is already the active sponsor.
+  if (error || !recovered) {
+    console.error(JSON.stringify({
+      level: "error",
+      fn: "stripe-webhook",
+      note: "sponsorship recovery landed on a slot that was gone — refunding",
+      campaign_id: campaignId,
+      payment_intent: piId,
+      error: error?.message ?? null,
+    }));
+    try {
+      await stripe.refunds.create({
+        payment_intent: piId,
+        reverse_transfer: true,
+        refund_application_fee: true,
+      });
+    } catch (refundErr) {
+      console.error("RECOVERY REFUND FAILED — manual refund owed:", piId, refundErr);
+    }
+    return;
+  }
+
+  // This campaign is now the sponsor, so the offers it beat have to be told —
+  // the losing side was never decided when the original charge soft-declined.
+  // deno-lint-ignore no-explicit-any
+  const title = (recovered as any).events?.title ?? "your event";
+  await declineSponsorshipSiblings(
+    adminClient,
+    campaignId,
+    // deno-lint-ignore no-explicit-any
+    (recovered as any).event_id ?? null,
+    title,
+    new Date().toISOString(),
+  );
+}
+
+// Sponsorship offer: the advertiser finished the setup-mode Checkout Session,
+// so a card is now on file. Persist the payment method (the SetupIntent is the
+// only place it exists — the Session doesn't carry it) and move the offer on.
+//
+// Trusted advertisers skip Nile's blocking queue and go straight in front of
+// the host. That tier is earned by one approved creative and lost by one upheld
+// report (moderate-report), and it exists because a 72h fuse can't afford to
+// wait on a human for a brand we've already cleared once.
+//
+// Status-guarded on pending_payment, so a replayed delivery can't drag an
+// already-decided offer backwards.
+async function onSponsorshipCardSaved(session: Stripe.Checkout.Session, campaignId: string) {
+  const setupIntentId = typeof session.setup_intent === "string"
+    ? session.setup_intent
+    : session.setup_intent?.id;
+  if (!setupIntentId) {
+    console.error("setup-mode session with no setup_intent:", session.id);
+    return;
+  }
+  const si = await stripe.setupIntents.retrieve(setupIntentId);
+  const paymentMethodId = typeof si.payment_method === "string"
+    ? si.payment_method
+    : si.payment_method?.id;
+  if (!paymentMethodId) {
+    console.error("SetupIntent has no payment method:", setupIntentId);
+    return;
+  }
+  const customerId = (typeof session.customer === "string" ? session.customer : session.customer?.id) ??
+    (typeof si.customer === "string" ? si.customer : si.customer?.id) ?? null;
+
+  const { data: campaign } = await adminClient
+    .from("ad_campaigns")
+    .select("id, advertiser_accounts(name, trust_tier), ad_creatives(headline)")
+    .eq("id", campaignId)
+    .maybeSingle();
+  // deno-lint-ignore no-explicit-any
+  const acct = (campaign as any)?.advertiser_accounts;
+  const trusted = acct?.trust_tier === "trusted";
+
+  const { data: updated } = await adminClient
+    .from("ad_campaigns")
+    .update({
+      status: trusted ? "pending_host" : "pending_review",
+      stripe_payment_method_id: paymentMethodId,
+      ...(customerId ? { stripe_customer_id: customerId } : {}),
+    })
+    .eq("id", campaignId)
+    .eq("status", "pending_payment")
+    .select("id")
+    .maybeSingle();
+  if (!updated) return; // replay, or the offer already moved on
+
+  if (trusted) {
+    // Straight to the host — and no "needs review" alert, since there is
+    // nothing blocking. The spot-check list (Phase 5) is where admins see it.
+    await notifyHostOfferCleared(adminClient, campaignId);
+    return;
+  }
+  await notifyAdminNeedsReview(
+    campaignId,
+    acct?.name ?? "Unknown",
+    // deno-lint-ignore no-explicit-any
+    (campaign as any)?.ad_creatives?.[0]?.headline ?? "Untitled sponsorship",
+  );
+}
 
 // Broadcast "@someone tipped $20 🎉" onto the event's read-only announcement
 // topic. Clients may subscribe to live_system:<slug> but have no INSERT grant

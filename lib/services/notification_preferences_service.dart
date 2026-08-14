@@ -16,6 +16,11 @@ class NotificationPreferences {
   final bool replayPricePrompt;
   final bool feedbackResolved;
 
+  /// Covers BOTH `sponsorship_offer` and `sponsorship_offer_expiring` — the
+  /// server's `notif_enabled` maps the two types onto this one column, so the
+  /// reminder can't outlive the thing it's reminding you about.
+  final bool sponsorshipOffer;
+
   const NotificationPreferences({
     this.postLike = true,
     this.postComment = true,
@@ -30,6 +35,7 @@ class NotificationPreferences {
     this.soundcheckOpen = true,
     this.replayPricePrompt = true,
     this.feedbackResolved = true,
+    this.sponsorshipOffer = true,
   });
 
   factory NotificationPreferences.fromJson(Map<String, dynamic> j) =>
@@ -47,6 +53,7 @@ class NotificationPreferences {
         soundcheckOpen: j['soundcheck_open'] as bool? ?? true,
         replayPricePrompt: j['replay_price_prompt'] as bool? ?? true,
         feedbackResolved: j['feedback_resolved'] as bool? ?? true,
+        sponsorshipOffer: j['sponsorship_offer'] as bool? ?? true,
       );
 
   NotificationPreferences copyWith({
@@ -63,6 +70,7 @@ class NotificationPreferences {
     bool? soundcheckOpen,
     bool? replayPricePrompt,
     bool? feedbackResolved,
+    bool? sponsorshipOffer,
   }) => NotificationPreferences(
     postLike: postLike ?? this.postLike,
     postComment: postComment ?? this.postComment,
@@ -77,6 +85,7 @@ class NotificationPreferences {
     soundcheckOpen: soundcheckOpen ?? this.soundcheckOpen,
     replayPricePrompt: replayPricePrompt ?? this.replayPricePrompt,
     feedbackResolved: feedbackResolved ?? this.feedbackResolved,
+    sponsorshipOffer: sponsorshipOffer ?? this.sponsorshipOffer,
   );
 
   Map<String, dynamic> toColumns() => {
@@ -93,6 +102,7 @@ class NotificationPreferences {
     'soundcheck_open': soundcheckOpen,
     'replay_price_prompt': replayPricePrompt,
     'feedback_resolved': feedbackResolved,
+    'sponsorship_offer': sponsorshipOffer,
   };
 }
 

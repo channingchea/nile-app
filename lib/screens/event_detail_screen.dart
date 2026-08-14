@@ -94,8 +94,14 @@ class _EventDetailScreenState extends State<EventDetailScreen>
   Timer? _ticker;
   Duration _remaining = Duration.zero;
 
-  // Active sponsorship (0079): advertiser name for the "Sponsored by" line.
+  // Active sponsorship (0079): advertiser name for the "Sponsored by" line, and
+  // (0098) whether the host's auto-accept rule took it rather than the host.
   String? _sponsorName;
+  bool _sponsorAutoAccepted = false;
+
+  // Host-only: open offers on THIS event (0097). Empty is a real state, not a
+  // "not loaded yet" — see [_hostSponsorshipBlock].
+  List<SponsorshipOffer> _offers = const [];
 
   // Realtime
   RealtimeChannel? _channel;
@@ -243,15 +249,43 @@ class _EventDetailScreenState extends State<EventDetailScreen>
       // approved sponsorship; never blocks or fails the screen.
       AdService.lobbySponsorship(_event!.id).then((s) {
         if (mounted && s != null) {
-          setState(() => _sponsorName = s.advertiserName);
+          setState(() {
+            _sponsorName = s.advertiserName;
+            _sponsorAutoAccepted = s.autoAccepted;
+          });
         }
       });
+
+      _loadOffers();
     } catch (e) {
       if (!mounted) return;
       setState(() {
         _error = e.toString();
         _loading = false;
       });
+    }
+  }
+
+  /// Host-only: open offers on this event. There is no per-event RPC — the
+  /// host's whole set comes back at once — so this filters client-side rather
+  /// than adding a second query shape for one banner.
+  Future<void> _loadOffers() async {
+    final event = _event;
+    if (event == null ||
+        !_isOwnEvent ||
+        !event.sponsorshipOpen ||
+        event.isOver) {
+      return;
+    }
+    try {
+      final all = await AdService.hostOffers();
+      if (!mounted) return;
+      setState(
+        () => _offers = all.where((o) => o.eventId == event.id).toList(),
+      );
+    } catch (_) {
+      // The Payouts card and the notification both still lead here; a failure
+      // on someone else's event page isn't worth an error state.
     }
   }
 
@@ -623,12 +657,50 @@ class _EventDetailScreenState extends State<EventDetailScreen>
     const SizedBox(width: 4),
   ];
 
+  /// The host's view of this event's sponsorship, or null when there's nothing
+  /// honest to say — someone else's event, an event not open to sponsors, or
+  /// one whose window has closed.
+  ///
+  /// The empty case is deliberate. A host flips "open to sponsorship" on and
+  /// then sees nothing anywhere, which reads as a broken switch rather than as
+  /// "no brand has bid yet"; this says which it is.
+  List<Widget>? _hostSponsorshipBlock() {
+    final e = _event;
+    if (e == null || !_isOwnEvent || !e.sponsorshipOpen || e.isOver) {
+      return null;
+    }
+    if (_offers.isNotEmpty) {
+      return [
+        _HostOffersBanner(
+          offers: _offers,
+          onTap: () async {
+            await context.push(
+              NileRoutes.sponsorshipOffers(eventId: e.id),
+            );
+            if (mounted) await _loadOffers();
+          },
+        ),
+        const SizedBox(height: 20),
+      ];
+    }
+    // Already sponsored — the "Sponsored by" line below says so, and "no offers
+    // yet" would contradict it.
+    if (_sponsorName != null) return null;
+    return [
+      _HostAwaitingOffersNote(autoAccept: e.sponsorshipAutoAccept),
+      const SizedBox(height: 20),
+    ];
+  }
+
   /// Everything about the event that isn't an action: status, title, host,
   /// sponsor, countdown, description.
   ///
   /// [showPrice] is false on desktop, where the price belongs in the ticket
   /// panel next to the button you'd press after reading it.
   List<Widget> _detailBlocks({bool showPrice = true}) => [
+    // Pinned above everything else, and only ever visible to the host: an offer
+    // on this event has a 48-hour fuse, which outranks anything below it.
+    ...?_hostSponsorshipBlock(),
     Row(
       children: [
         _StatusChip(event: _event!),
@@ -672,6 +744,21 @@ class _EventDetailScreenState extends State<EventDetailScreen>
           ),
         ],
       ),
+      // Host-only, and about THIS campaign rather than the event's setting
+      // (0098 returns `auto_accepted` on the sponsorship itself). A host who
+      // accepted by hand before the rule could fire is not told otherwise, and
+      // a viewer is told nothing at all — to them it's a disclaimer about a
+      // decision that was never theirs.
+      if (_isOwnEvent && _sponsorAutoAccepted) ...[
+        const SizedBox(height: 4),
+        Padding(
+          padding: const EdgeInsets.only(left: 22),
+          child: Text(
+            'Accepted automatically — this brand met your minimum.',
+            style: NileTextStyles.caption(),
+          ),
+        ),
+      ],
       const SizedBox(height: 16),
     ],
     // No countdown once the window has passed — that block's expired state
@@ -1618,4 +1705,118 @@ class _ErrorView extends StatelessWidget {
       ),
     );
   }
+}
+
+// ── Host sponsorship blocks (0097) ────────────────────────────────────────────
+
+/// "N brands want to sponsor this" — the whole point of the banner is the
+/// headline number and the best amount, so the host can tell at a glance
+/// whether it's worth opening.
+class _HostOffersBanner extends StatelessWidget {
+  final List<SponsorshipOffer> offers;
+  final VoidCallback onTap;
+  const _HostOffersBanner({required this.offers, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    // The RPC orders by amount desc within an event, but this banner shouldn't
+    // depend on that holding.
+    final best = offers
+        .map((o) => o.budgetCents)
+        .reduce((a, b) => a > b ? a : b);
+    final actionable = offers.where((o) => o.isActionable).length;
+    final soonest = offers
+        .map((o) => o.offerExpiresAt)
+        .reduce((a, b) => a.isBefore(b) ? a : b);
+    final dollars = best / 100;
+    final money = dollars == dollars.roundToDouble()
+        ? '\$${dollars.toStringAsFixed(0)}'
+        : '\$${dollars.toStringAsFixed(2)}';
+
+    return Material(
+      color: NileColors.volt.withValues(alpha: 0.08),
+      borderRadius: BorderRadius.circular(NileRadius.lg),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(NileRadius.lg),
+        child: Container(
+          padding: const EdgeInsets.all(NileSpacing.s16),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(NileRadius.lg),
+            border: Border.all(color: NileColors.volt),
+          ),
+          child: Row(
+            children: [
+              Icon(Icons.workspace_premium, color: NileColors.volt, size: 20),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      actionable == 1
+                          ? 'A brand wants to sponsor this event'
+                          : '${offers.length} brands want to sponsor this event',
+                      style: NileTextStyles.headingSm(),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Best offer $money · '
+                      '${SponsorshipOffer.expiresLabelFor(soonest)}',
+                      style: NileTextStyles.bodySm().copyWith(
+                        color: NileColors.txtSecondary,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Icon(Icons.chevron_right, size: 18, color: NileColors.volt),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Open to sponsorship, nothing offered yet. Quiet by design — it exists to
+/// stop the toggle reading as broken, not to occupy the top of the page.
+class _HostAwaitingOffersNote extends StatelessWidget {
+  final bool autoAccept;
+  const _HostAwaitingOffersNote({required this.autoAccept});
+
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.all(NileSpacing.s12),
+    decoration: BoxDecoration(
+      color: NileColors.bgSurface,
+      borderRadius: BorderRadius.circular(NileRadius.md),
+      border: Border.all(color: NileColors.border),
+    ),
+    child: Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Icon(
+          Icons.workspace_premium_outlined,
+          size: 16,
+          color: NileColors.txtTertiary,
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(
+            autoAccept
+                ? 'Open to sponsorship — no offers yet. Anything at or above '
+                      'your minimum is accepted automatically, and we\'ll tell '
+                      'you when it happens.'
+                : 'Open to sponsorship — no offers yet. We\'ll notify you when '
+                      'a brand makes one. Offers close 48 hours before '
+                      'showtime.',
+            style: NileTextStyles.bodySm().copyWith(
+              color: NileColors.txtSecondary,
+            ),
+          ),
+        ),
+      ],
+    ),
+  );
 }

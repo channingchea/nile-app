@@ -156,8 +156,36 @@ async function resolveOrDismiss(
     return json({ error: "No open/reviewing reports for this target (already handled?)" }, 409);
   }
 
+  // An upheld ad report is the exact signal the sponsorship trusted tier is
+  // meant to react to: this advertiser's creative got in front of people
+  // without a human looking at it, and it shouldn't have. Back to the blocking
+  // queue until an admin clears them again. (dismiss means the report was
+  // wrong, so it leaves the tier alone.)
+  if (action === "resolve" && targetType === "ad") {
+    await demoteAdvertiserTrust(admin, targetId);
+  }
+
   await logAudit(admin, { actor: actorId, action, target_type: targetType, target_id: targetId, note });
   return json({ target_type: targetType, target_id: targetId, action, reports_updated: updated.length });
+}
+
+// reports.target_id for an 'ad' is the ad_campaigns row. Fire-and-forget: a
+// failed demotion is logged, never a reason to fail the moderation action.
+// deno-lint-ignore no-explicit-any
+async function demoteAdvertiserTrust(admin: any, campaignId: string) {
+  try {
+    const { data: c } = await admin
+      .from("ad_campaigns").select("advertiser_account_id").eq("id", campaignId).maybeSingle();
+    const accountId = c?.advertiser_account_id as string | null;
+    if (!accountId) return; // host boost — no advertiser account to demote
+    const { error } = await admin
+      .from("advertiser_accounts")
+      .update({ trust_tier: "new", trusted_at: null })
+      .eq("id", accountId);
+    if (error) console.error("trust demotion failed:", error);
+  } catch (err) {
+    console.error("trust demotion error:", err);
+  }
 }
 
 // ── remove_content ───────────────────────────────────────────────────────

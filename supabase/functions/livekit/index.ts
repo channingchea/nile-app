@@ -729,8 +729,13 @@ async function reconcileViewers(body: any, userId: string, admin: any, json: Jso
 
   // E7: a show that has ended has no viewers, whatever the room says. Nothing
   // used to zero this on end, so the last number just stuck forever.
+  // set_viewer_count also keeps events.peak_viewer_count as a running max.
+  // viewer_count decays to zero the moment a show ends, so it carries no
+  // attendance history — and attendance history is exactly what sponsorship
+  // price suggestions are built from. greatest() means writing 0 here clears
+  // the live number without touching the peak.
   if (event.status === "ended") {
-    await admin.from("events").update({ viewer_count: 0 }).eq("id", event.id);
+    await admin.rpc("set_viewer_count", { p_event_id: event.id, p_count: 0 });
     return json({ success: true, viewer_count: 0 });
   }
 
@@ -766,7 +771,7 @@ async function reconcileViewers(body: any, userId: string, admin: any, json: Jso
     return json({ success: false, viewer_count: current?.viewer_count ?? 0 });
   }
 
-  await admin.from("events").update({ viewer_count: count }).eq("id", event.id);
+  await admin.rpc("set_viewer_count", { p_event_id: event.id, p_count: count });
   return json({ success: true, viewer_count: count });
 }
 

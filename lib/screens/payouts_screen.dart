@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../router.dart';
+import '../services/ad_service.dart';
 import '../services/mfa_service.dart';
 import '../services/payout_service.dart';
 import '../services/tip_service.dart';
@@ -21,6 +22,7 @@ class _PayoutsScreenState extends State<PayoutsScreen> {
   TipEarnings? _tips;
   TicketEarnings? _tickets;
   SponsorshipEarnings? _sponsorships;
+  int _pendingOffers = 0;
   String? _error;
   bool _busy = false;
 
@@ -44,12 +46,15 @@ class _PayoutsScreenState extends State<PayoutsScreen> {
           .catchError((_) => TicketEarnings.empty);
       final sponsorships = await PayoutService.sponsorshipEarnings()
           .catchError((_) => SponsorshipEarnings.empty);
+      // Already best-effort (returns 0 on failure), so no catchError here.
+      final offers = await AdService.hostOfferCount();
       if (mounted) {
         setState(() {
           _status = s;
           _tips = tips;
           _tickets = tickets;
           _sponsorships = sponsorships;
+          _pendingOffers = offers;
         });
       }
     } catch (e) {
@@ -129,6 +134,16 @@ class _PayoutsScreenState extends State<PayoutsScreen> {
       padding: const EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s16, NileSpacing.s16, NileSpacing.s32),
       children: [
         _StatusCard(status: s),
+        const SizedBox(height: 12),
+        // Above the earnings cards on purpose: those are money already made,
+        // this is money on a 48-hour fuse.
+        _OffersCard(
+          count: _pendingOffers,
+          onTap: () async {
+            await context.push(NileRoutes.sponsorshipOffers());
+            if (context.mounted) await _load();
+          },
+        ),
         if (_tickets?.hasSales ?? false) ...[
           const SizedBox(height: 12),
           _TicketsCard(tickets: _tickets!),
@@ -249,6 +264,88 @@ String _money(int cents) {
   return d == d.roundToDouble()
       ? '\$${d.toStringAsFixed(0)}'
       : '\$${d.toStringAsFixed(2)}';
+}
+
+/// Entry point to the offers screen, with the pending count as a badge.
+///
+/// Shown even at zero: this is the only way into the screen from Settings, and
+/// a host who has just switched an event to "open to sponsorship" needs
+/// somewhere to look that says the feature is working rather than broken.
+class _OffersCard extends StatelessWidget {
+  final int count;
+  final VoidCallback onTap;
+  const _OffersCard({required this.count, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final waiting = count > 0;
+    return Material(
+      color: NileColors.bgSurface,
+      borderRadius: BorderRadius.circular(NileRadius.lg),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(NileRadius.lg),
+        child: Padding(
+          padding: const EdgeInsets.all(NileSpacing.s16),
+          child: Row(
+            children: [
+              Icon(
+                Icons.mark_email_unread_outlined,
+                color: waiting ? NileColors.volt : NileColors.txtTertiary,
+                size: 20,
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Sponsorship offers',
+                      style: NileTextStyles.headingSm(),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      waiting
+                          ? '$count ${count == 1 ? 'offer' : 'offers'} waiting '
+                                'for your decision'
+                          : 'Nothing waiting right now',
+                      style: NileTextStyles.bodySm().copyWith(
+                        color: NileColors.txtSecondary,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              if (waiting)
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: NileSpacing.s8,
+                    vertical: NileSpacing.s2,
+                  ),
+                  decoration: BoxDecoration(
+                    color: NileColors.volt,
+                    borderRadius: BorderRadius.circular(NileRadius.pill),
+                  ),
+                  child: Text(
+                    '$count',
+                    style: NileTextStyles.labelSm().copyWith(
+                      color: NileColors.onVolt,
+                      letterSpacing: 0,
+                    ),
+                  ),
+                ),
+              const SizedBox(width: NileSpacing.s8),
+              Icon(
+                Icons.chevron_right,
+                size: 18,
+                color: NileColors.txtTertiary,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class _TicketsCard extends StatelessWidget {

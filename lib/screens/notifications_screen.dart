@@ -214,6 +214,13 @@ class _NotificationTile extends StatelessWidget {
       'Your replay is ready — set a price to publish it',
     NotificationType.feedbackResolved =>
       'Your report has an update — tap to read it',
+    // No `@username` on either: there is no user account behind an advertiser,
+    // so actor_id on these rows is the host themselves. The brand name isn't in
+    // the notification row either — it's on the card these open.
+    NotificationType.sponsorshipOffer =>
+      'A brand offered to sponsor your event — tap to review it',
+    NotificationType.sponsorshipOfferExpiring =>
+      'A sponsorship offer on your event expires in 24 hours',
   };
 
   IconData _icon() => switch (notification.type) {
@@ -231,6 +238,8 @@ class _NotificationTile extends StatelessWidget {
     NotificationType.soundcheckOpen => Icons.tune,
     NotificationType.replayPricePrompt => Icons.sell,
     NotificationType.feedbackResolved => Icons.bug_report,
+    NotificationType.sponsorshipOffer => Icons.workspace_premium,
+    NotificationType.sponsorshipOfferExpiring => Icons.hourglass_bottom,
   };
 
   Color _iconColor() => switch (notification.type) {
@@ -248,6 +257,8 @@ class _NotificationTile extends StatelessWidget {
     NotificationType.soundcheckOpen => NileColors.azure,
     NotificationType.replayPricePrompt => NileColors.volt,
     NotificationType.feedbackResolved => NileColors.azure,
+    NotificationType.sponsorshipOffer => NileColors.volt,
+    NotificationType.sponsorshipOfferExpiring => NileColors.coral,
   };
 
   String _timeAgo(DateTime dt) {

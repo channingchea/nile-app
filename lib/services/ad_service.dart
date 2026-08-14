@@ -38,6 +38,11 @@ class LobbySponsorship {
   final String headline;
   final String clickUrl;
   final String advertiserName;
+
+  /// Accepted by the host's auto-accept rule rather than by hand (0098). Only
+  /// ever shown to the host — to a viewer it's a disclaimer about a decision
+  /// that wasn't theirs.
+  final bool autoAccepted;
   const LobbySponsorship({
     required this.campaignId,
     required this.kind,
@@ -48,8 +53,217 @@ class LobbySponsorship {
     required this.headline,
     required this.clickUrl,
     required this.advertiserName,
+    this.autoAccepted = false,
+  });
+
+  /// A `get_lobby_sponsorship` row. Video/thumb arrive as bucket-relative paths
+  /// in `ad-videos` and become public URLs here.
+  factory LobbySponsorship.fromRow(Map<String, dynamic> r) {
+    final videoPath = r['video_path'] as String?;
+    return LobbySponsorship(
+      campaignId: r['campaign_id'] as String,
+      kind: r['kind'] as String? ?? 'image',
+      imageUrl: r['image_url'] as String?,
+      videoUrl: videoPath != null
+          ? supabase.storage.from('ad-videos').getPublicUrl(videoPath)
+          : null,
+      thumbUrl: r['thumb_path'] != null
+          ? supabase.storage
+                .from('ad-videos')
+                .getPublicUrl(r['thumb_path'] as String)
+          : null,
+      durationMs: (r['duration_ms'] as num?)?.toInt() ?? 0,
+      headline: r['headline'] as String? ?? '',
+      clickUrl: r['click_url'] as String? ?? '',
+      advertiserName: (r['advertiser_name'] as String?) ?? 'Sponsored',
+      // Absent on a client talking to the pre-0098 RPC. Defaulting to false
+      // matters: the label claims a decision the host didn't make.
+      autoAccepted: r['auto_accepted'] as bool? ?? false,
+    );
+  }
+}
+
+/// One advertiser's bid to sponsor one of the caller's events
+/// (`host_sponsorship_offers`, migration 0097).
+///
+/// [status] is either `pending_host` — Nile has screened the creative for
+/// policy and the host now owns the brand-fit decision — or `payment_pending`,
+/// where the accept charge is stuck at the advertiser's bank and there is
+/// nothing for the host to do but wait.
+class SponsorshipOffer {
+  final String campaignId;
+  final String eventId;
+  final String eventTitle;
+  final DateTime? scheduledAt;
+  final String advertiserName;
+  final int budgetCents;
+  final int hostNetCents;
+  final String status;
+  final String kind; // 'image' | 'video'
+  final String? imageUrl;
+  final String? videoUrl;
+  final String? thumbUrl;
+  final int durationMs;
+  final String headline;
+  final String? body;
+  final String clickUrl;
+  final DateTime offerExpiresAt;
+
+  const SponsorshipOffer({
+    required this.campaignId,
+    required this.eventId,
+    required this.eventTitle,
+    this.scheduledAt,
+    required this.advertiserName,
+    required this.budgetCents,
+    required this.hostNetCents,
+    required this.status,
+    required this.kind,
+    this.imageUrl,
+    this.videoUrl,
+    this.thumbUrl,
+    required this.durationMs,
+    required this.headline,
+    this.body,
+    required this.clickUrl,
+    required this.offerExpiresAt,
+  });
+
+  /// The host can accept or decline. False for `payment_pending`, which renders
+  /// read-only.
+  bool get isActionable => status == 'pending_host';
+
+  bool get isPaymentPending => status == 'payment_pending';
+
+  /// Bare host of the click-through ("nikeshoes.com"), with any `www.` dropped.
+  /// The host is deciding whose logo sits in front of their audience; a full
+  /// tracking URL is something they'd have to parse to answer that.
+  String? get clickDomain {
+    final host = Uri.tryParse(clickUrl)?.host ?? '';
+    if (host.isEmpty) return null;
+    return host.startsWith('www.') ? host.substring(4) : host;
+  }
+
+  Duration timeLeftFrom(DateTime now) => offerExpiresAt.difference(now);
+
+  String expiresLabel({DateTime? now}) =>
+      expiresLabelFor(offerExpiresAt, now: now);
+
+  /// "2 days left" / "5 hours left" / "Expired". Coarse on purpose: a
+  /// to-the-second countdown on a 48-hour fuse reads as pressure rather than
+  /// information, and the offer is worth the same at 47h as at 3h.
+  ///
+  /// Static so the event page can label the soonest expiry across several
+  /// offers without picking one of them to ask.
+  static String expiresLabelFor(DateTime expiresAt, {DateTime? now}) {
+    final left = expiresAt.difference(now ?? DateTime.now());
+    if (left <= Duration.zero) return 'Expired';
+    if (left.inDays >= 1) {
+      return '${left.inDays} ${left.inDays == 1 ? 'day' : 'days'} left';
+    }
+    if (left.inHours >= 1) {
+      return '${left.inHours} ${left.inHours == 1 ? 'hour' : 'hours'} left';
+    }
+    final mins = left.inMinutes < 1 ? 1 : left.inMinutes;
+    return '$mins ${mins == 1 ? 'minute' : 'minutes'} left';
+  }
+
+  /// Under a day left. Drives the card's urgent colour — the point at which the
+  /// `sponsorship_offer_expiring` nudge has also gone out.
+  bool get isUrgent {
+    final left = timeLeftFrom(DateTime.now());
+    return left > Duration.zero && left < const Duration(hours: 24);
+  }
+
+  factory SponsorshipOffer.fromJson(Map<String, dynamic> j) {
+    // Same bucket and the same public-URL construction as [LobbySponsorship] —
+    // the creative a host approves here is byte-for-byte the one that plays in
+    // the lobby.
+    String? publicUrl(String? path) => path == null
+        ? null
+        : supabase.storage.from('ad-videos').getPublicUrl(path);
+    return SponsorshipOffer(
+      campaignId: j['campaign_id'] as String,
+      eventId: j['event_id'] as String,
+      eventTitle: j['event_title'] as String? ?? 'Untitled event',
+      scheduledAt: j['scheduled_at'] != null
+          ? DateTime.parse(j['scheduled_at'] as String)
+          : null,
+      advertiserName: (j['advertiser_name'] as String?) ?? 'A brand',
+      budgetCents: (j['budget_cents'] as num?)?.toInt() ?? 0,
+      hostNetCents: (j['host_net_cents'] as num?)?.toInt() ?? 0,
+      status: j['status'] as String? ?? 'pending_host',
+      kind: j['kind'] as String? ?? 'image',
+      imageUrl: j['image_url'] as String?,
+      videoUrl: publicUrl(j['video_path'] as String?),
+      thumbUrl: publicUrl(j['thumb_path'] as String?),
+      durationMs: (j['duration_ms'] as num?)?.toInt() ?? 0,
+      headline: j['headline'] as String? ?? '',
+      body: j['body'] as String?,
+      clickUrl: j['click_url'] as String? ?? '',
+      offerExpiresAt: DateTime.parse(j['offer_expires_at'] as String),
+    );
+  }
+
+  /// Groups offers under the event they're bidding on, preserving the RPC's
+  /// order (soonest event first, then highest amount). Competing offers on one
+  /// event only make sense side by side — accepting one declines the rest.
+  static List<SponsorshipOfferGroup> groupByEvent(
+    List<SponsorshipOffer> offers,
+  ) {
+    final byEvent = <String, List<SponsorshipOffer>>{};
+    for (final o in offers) {
+      (byEvent[o.eventId] ??= <SponsorshipOffer>[]).add(o);
+    }
+    return [
+      for (final entry in byEvent.entries)
+        SponsorshipOfferGroup(
+          eventId: entry.key,
+          eventTitle: entry.value.first.eventTitle,
+          scheduledAt: entry.value.first.scheduledAt,
+          offers: entry.value,
+        ),
+    ];
+  }
+}
+
+/// One event's competing offers — a section header plus its cards.
+class SponsorshipOfferGroup {
+  final String eventId;
+  final String eventTitle;
+  final DateTime? scheduledAt;
+  final List<SponsorshipOffer> offers;
+  const SponsorshipOfferGroup({
+    required this.eventId,
+    required this.eventTitle,
+    this.scheduledAt,
+    required this.offers,
   });
 }
+
+/// A starting number for the host's minimum ask (`suggest_sponsorship_price`,
+/// migration 0097), plus the [basis] line that says where it came from.
+///
+/// Show [basis] verbatim. "4 past events" and "estimated from follower count"
+/// are the difference between a measurement and a guess, and the host is
+/// setting a price floor on the strength of it.
+class PriceSuggestion {
+  final int suggestedCents;
+  final int lowCents;
+  final int highCents;
+  final String basis;
+  const PriceSuggestion({
+    required this.suggestedCents,
+    required this.lowCents,
+    required this.highCents,
+    required this.basis,
+  });
+}
+
+/// Platform bounds on a sponsorship offer, mirroring `app_config`. Config, not
+/// constants, because retuning them is meant to be a row update rather than a
+/// release.
+typedef SponsorshipBounds = ({int minCents, int maxCents});
 
 /// A standalone advertiser creative (Phase A-4): a self-uploaded image +
 /// headline + body that opens an external [clickUrl], referencing no event/post.
@@ -230,25 +444,7 @@ class AdService {
           .rpc('get_lobby_sponsorship', params: {'p_event_id': eventId});
       final list = (rows as List).cast<Map<String, dynamic>>();
       if (list.isEmpty) return null;
-      final r = list.first;
-      final videoPath = r['video_path'] as String?;
-      return LobbySponsorship(
-        campaignId: r['campaign_id'] as String,
-        kind: r['kind'] as String? ?? 'image',
-        imageUrl: r['image_url'] as String?,
-        videoUrl: videoPath != null
-            ? supabase.storage.from('ad-videos').getPublicUrl(videoPath)
-            : null,
-        thumbUrl: r['thumb_path'] != null
-            ? supabase.storage
-                .from('ad-videos')
-                .getPublicUrl(r['thumb_path'] as String)
-            : null,
-        durationMs: (r['duration_ms'] as num?)?.toInt() ?? 0,
-        headline: r['headline'] as String? ?? '',
-        clickUrl: r['click_url'] as String? ?? '',
-        advertiserName: (r['advertiser_name'] as String?) ?? 'Sponsored',
-      );
+      return LobbySponsorship.fromRow(list.first);
     } catch (_) {
       return null;
     }
@@ -319,5 +515,109 @@ class AdService {
     return (rows as List)
         .map((r) => BoostStats.fromJson(r as Map<String, dynamic>))
         .toList();
+  }
+
+  // ── Host-approved sponsorships (0096/0097) ──────────────────────────────────
+
+  /// Every open offer on the caller's events, soonest event first then highest
+  /// amount. SECURITY DEFINER server-side — RLS hides `ad_campaigns` from hosts.
+  ///
+  /// Throws, unlike the best-effort feed methods above. This is the one screen
+  /// where a swallowed error would show "no offers" to a host who has money on
+  /// a 48-hour fuse, and they would never know to look again.
+  static Future<List<SponsorshipOffer>> hostOffers() async {
+    final rows = await supabase.rpc('host_sponsorship_offers');
+    return (rows as List)
+        .map((r) => SponsorshipOffer.fromJson(r as Map<String, dynamic>))
+        .toList();
+  }
+
+  /// Unexpired offers awaiting the host's decision. Best-effort: this feeds a
+  /// badge, and a badge that fails is better silent than loud.
+  static Future<int> hostOfferCount() async {
+    try {
+      final v = await supabase.rpc('host_sponsorship_offer_count');
+      return (v as num?)?.toInt() ?? 0;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  /// Accept or decline an offer. Accepting charges the advertiser's saved card
+  /// immediately and locks the event, so the server does the work; [note] is
+  /// the host's comment, which the advertiser sees either way.
+  static Future<void> respondToOffer({
+    required String campaignId,
+    required bool accept,
+    String? note,
+  }) async {
+    final response = await supabase.functions.invoke(
+      'respond-sponsorship-offer',
+      body: {
+        'campaign_id': campaignId,
+        'accept': accept,
+        if (note != null && note.isNotEmpty) 'note': note,
+      },
+    );
+    if (response.status != 200) {
+      // The failures worth reading are the advertiser's bank declining and the
+      // offer having expired under the host — both need the server's words.
+      throw Exception(
+        (response.data as Map?)?['error'] ?? "Couldn't send your response",
+      );
+    }
+  }
+
+  /// A suggested minimum ask for [eventId]. Best-effort: null on failure, and
+  /// the field falls back to the platform floor rather than blocking the form.
+  static Future<PriceSuggestion?> suggestSponsorshipPrice(
+    String eventId,
+  ) async {
+    try {
+      final rows = await supabase.rpc(
+        'suggest_sponsorship_price',
+        params: {'p_event_id': eventId},
+      );
+      final list = (rows as List).cast<Map<String, dynamic>>();
+      if (list.isEmpty) return null;
+      final r = list.first;
+      final suggested = (r['suggested_cents'] as num?)?.toInt();
+      final basis = r['basis'] as String?;
+      if (suggested == null || basis == null) return null;
+      return PriceSuggestion(
+        suggestedCents: suggested,
+        lowCents: (r['low_cents'] as num?)?.toInt() ?? suggested,
+        highCents: (r['high_cents'] as num?)?.toInt() ?? suggested,
+        basis: basis,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Platform floor/ceiling for an offer amount, for client-side validation.
+  /// Falls back to the shipped config values so the form still validates
+  /// offline; the server rejects anything outside them regardless.
+  static Future<SponsorshipBounds> sponsorshipBounds() async {
+    const fallback = (minCents: 2500, maxCents: 250000);
+    try {
+      final rows = await supabase
+          .from('app_config')
+          .select('sponsorship_min_offer_cents, sponsorship_max_offer_cents')
+          .eq('id', 1)
+          .limit(1);
+      if (rows.isEmpty) return fallback;
+      final r = rows.first;
+      return (
+        minCents:
+            (r['sponsorship_min_offer_cents'] as num?)?.toInt() ??
+            fallback.minCents,
+        maxCents:
+            (r['sponsorship_max_offer_cents'] as num?)?.toInt() ??
+            fallback.maxCents,
+      );
+    } catch (_) {
+      return fallback;
+    }
   }
 }

@@ -33,6 +33,14 @@ class Event {
 
   /// Host opt-in to Pre-Show sponsorship (0079).
   final bool sponsorshipOpen;
+
+  /// Smallest offer this host will look at, in cents. Null means the platform
+  /// floor (`app_config.sponsorship_min_offer_cents`) applies (0096).
+  final int? sponsorshipMinOfferCents;
+
+  /// Accept any offer at or above the minimum without asking (0096). Default
+  /// off — turning it on waives brand-fit review, not Nile's policy screen.
+  final bool sponsorshipAutoAccept;
   final DateTime createdAt;
   final DateTime? startedAt;
   final DateTime? scheduledAt;
@@ -65,6 +73,8 @@ class Event {
     this.ticketLimit,
     this.cameraCount = 1,
     this.sponsorshipOpen = false,
+    this.sponsorshipMinOfferCents,
+    this.sponsorshipAutoAccept = false,
     required this.createdAt,
     this.startedAt,
     this.scheduledAt,
@@ -101,6 +111,8 @@ class Event {
       ticketLimit: ticketLimit,
       cameraCount: cameraCount,
       sponsorshipOpen: sponsorshipOpen,
+      sponsorshipMinOfferCents: sponsorshipMinOfferCents,
+      sponsorshipAutoAccept: sponsorshipAutoAccept,
       createdAt: createdAt,
       startedAt: startedAt,
       scheduledAt: scheduledAt,
@@ -193,6 +205,10 @@ class Event {
       ticketLimit: (json['ticket_limit'] as num?)?.toInt(),
       cameraCount: (json['camera_count'] as num?)?.toInt() ?? 1,
       sponsorshipOpen: json['sponsorship_open'] as bool? ?? false,
+      sponsorshipMinOfferCents:
+          (json['sponsorship_min_offer_cents'] as num?)?.toInt(),
+      sponsorshipAutoAccept:
+          json['sponsorship_auto_accept'] as bool? ?? false,
       createdAt: DateTime.parse(json['created_at'] as String),
       startedAt: json['started_at'] != null
           ? DateTime.parse(json['started_at'] as String)
@@ -430,6 +446,8 @@ class EventService {
     bool asDraft = false,
     List<String>? topicIds,
     bool sponsorshipOpen = false, // host opt-in to Pre-Show sponsorship (0079)
+    int? sponsorshipMinOfferCents, // null = platform floor (0096)
+    bool sponsorshipAutoAccept = false,
   }) async {
     final uid = supabase.auth.currentUser?.id;
     if (uid == null) throw StateError('EventService: no authenticated user');
@@ -453,6 +471,12 @@ class EventService {
           'ticket_limit': ?ticketLimit,
           'camera_count': ?cameraCount,
           if (sponsorshipOpen) 'sponsorship_open': true,
+          // Both only mean anything with the toggle on, and writing them for a
+          // closed event would resurrect stale terms if it were reopened later.
+          if (sponsorshipOpen)
+            'sponsorship_min_offer_cents': ?sponsorshipMinOfferCents,
+          if (sponsorshipOpen && sponsorshipAutoAccept)
+            'sponsorship_auto_accept': true,
         })
         .select('*, profiles!events_host_id_fkey(username, avatar_url, is_official)')
         .single();
@@ -483,6 +507,9 @@ class EventService {
     int? cameraCount,
     List<String>? topicIds, // null = leave tags untouched; [] = clear all
     bool? sponsorshipOpen, // Pre-Show sponsorship opt-in (0079)
+    int? sponsorshipMinOfferCents, // 0096
+    bool clearSponsorshipMinOffer = false, // back to the platform floor
+    bool? sponsorshipAutoAccept,
   }) async {
     if (topicIds != null) {
       await TopicService.setEventTopics(eventId, topicIds);
@@ -503,6 +530,9 @@ class EventService {
       if (clearTicketLimit) 'ticket_limit': null,
       'camera_count': ?cameraCount,
       'sponsorship_open': ?sponsorshipOpen,
+      'sponsorship_min_offer_cents': ?sponsorshipMinOfferCents,
+      if (clearSponsorshipMinOffer) 'sponsorship_min_offer_cents': null,
+      'sponsorship_auto_accept': ?sponsorshipAutoAccept,
     };
 
     // Nothing changed — skip the update and just fetch the current row.

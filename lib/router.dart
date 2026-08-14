@@ -52,6 +52,7 @@ import 'screens/report_issue_screen.dart';
 import 'screens/schedule_screen.dart';
 import 'screens/settings_screen.dart';
 import 'screens/splash_screen.dart';
+import 'screens/sponsorship_offers_screen.dart';
 import 'screens/user_list_screen.dart';
 import 'screens/viewer_screen.dart';
 import 'services/auth_gate.dart';
@@ -147,6 +148,19 @@ class NileRoutes {
   static const currents = '/currents';
   static String currentsFrom(String userId) => '/currents?user=$userId';
   static const boost = '/boost';
+
+  /// Host sponsorship offers. Both parameters narrow what's already there
+  /// rather than changing what's fetched: [campaignId] scrolls to and marks one
+  /// card (where a `sponsorship_offer` notification lands), [eventId] filters to
+  /// a single event (where the event page's banner lands).
+  static String sponsorshipOffers({String? campaignId, String? eventId}) {
+    final q = [
+      if (campaignId != null) 'campaign=$campaignId',
+      if (eventId != null) 'event=$eventId',
+    ];
+    return q.isEmpty ? '/sponsorship-offers' : '/sponsorship-offers?${q.join('&')}';
+  }
+
   static String report(String id) => '/report/$id';
   static const userList = '/people';
 
@@ -512,6 +526,13 @@ final GoRouter _router = GoRouter(
             CurrentsPlayerScreen(startUserId: s.uri.queryParameters['user']),
       ),
       GoRoute(path: NileRoutes.boost, builder: (_, _) => const BoostPerformanceScreen()),
+      GoRoute(
+        path: '/sponsorship-offers',
+        builder: (_, s) => SponsorshipOffersScreen(
+          highlightCampaignId: s.uri.queryParameters['campaign'],
+          eventId: s.uri.queryParameters['event'],
+        ),
+      ),
       GoRoute(
         path: '/report/:id',
         builder: (_, s) => MyReportScreen(reportId: s.pathParameters['id']!),

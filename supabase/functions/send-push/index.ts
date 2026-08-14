@@ -70,6 +70,18 @@ function buildMessage(p: Payload): { title: string; body: string } {
       return { title: "New tip", body: `${who} sent you a tip` };
     case "replay_price_prompt":
       return { title: "Price your replay", body: "Your replay is ready — set a price to publish it" };
+    // No `who` on either sponsorship case. An advertiser has no user account,
+    // so actor_id on these rows is the HOST — interpolating it would read "you
+    // want to sponsor your event". The brand name isn't in this payload either
+    // (the row carries a campaign id, nothing else), so the copy works without
+    // it and the card behind the tap names the brand.
+    case "sponsorship_offer":
+      return { title: "Sponsorship offer", body: "A brand wants to sponsor your event — tap to review" };
+    case "sponsorship_offer_expiring":
+      return {
+        title: "Offer expires tomorrow",
+        body: "A sponsorship offer on your event expires in 24 hours",
+      };
     default:
       return { title: "Nile", body: "You have a new notification" };
   }

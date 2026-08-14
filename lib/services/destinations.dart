@@ -83,6 +83,12 @@ class Destinations {
   static NileDestination report(String reportId) =>
       NileDestination(NileRoutes.report(reportId));
 
+  /// Host-only: the offers list, scrolled to and marking one campaign. No fetch
+  /// — the offer's own screen loads it, and a campaign id resolves to nothing
+  /// this client can read on its own (RLS hides `ad_campaigns` from hosts).
+  static NileDestination sponsorshipOffer(String campaignId) =>
+      NileDestination(NileRoutes.sponsorshipOffers(campaignId: campaignId));
+
   // ── Inbound taps ───────────────────────────────────────────────────────────
 
   /// A parsed deep link (`{kind, value}`) → destination. `profile` links carry
@@ -140,6 +146,11 @@ class Destinations {
       case NotificationType.feedbackResolved:
         if (entityId == null) return null;
         return report(entityId);
+      case NotificationType.sponsorshipOffer:
+      case NotificationType.sponsorshipOfferExpiring:
+        // entity_id is the campaign, not the event.
+        if (entityId == null) return null;
+        return sponsorshipOffer(entityId);
     }
   }
 
@@ -161,6 +172,8 @@ class Destinations {
     'soundcheck_open' => NotificationType.soundcheckOpen,
     'replay_price_prompt' => NotificationType.replayPricePrompt,
     'feedback_resolved' => NotificationType.feedbackResolved,
+    'sponsorship_offer' => NotificationType.sponsorshipOffer,
+    'sponsorship_offer_expiring' => NotificationType.sponsorshipOfferExpiring,
     _ => null,
   };
 }

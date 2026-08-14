@@ -153,6 +153,15 @@ class _NotificationPreferencesScreenState
           p.replayPricePrompt,
           (v) => _set(p.copyWith(replayPricePrompt: v), p),
         ),
+        _section('Sponsorship'),
+        // One switch for both offer types: the 24-hour warning is only useful
+        // to someone who wanted the offer notification in the first place.
+        _toggle(
+          'Sponsorship offers',
+          'When a brand offers to sponsor one of your events',
+          p.sponsorshipOffer,
+          (v) => _set(p.copyWith(sponsorshipOffer: v), p),
+        ),
         _section('Support'),
         _toggle(
           'Report updates',

@@ -23,6 +23,14 @@ enum NotificationType {
   soundcheckOpen,
   replayPricePrompt,
   feedbackResolved,
+
+  /// A brand has cleared Nile's policy screen and is offering to sponsor one of
+  /// the host's events (0095). `entity_id` is the CAMPAIGN id, not the event —
+  /// the tap has to land on the one offer, not the list.
+  sponsorshipOffer,
+
+  /// 24 hours before that offer expires untouched.
+  sponsorshipOfferExpiring,
 }
 
 class AppNotification {
@@ -82,6 +90,8 @@ class AppNotification {
     'soundcheck_open' => NotificationType.soundcheckOpen,
     'replay_price_prompt' => NotificationType.replayPricePrompt,
     'feedback_resolved' => NotificationType.feedbackResolved,
+    'sponsorship_offer' => NotificationType.sponsorshipOffer,
+    'sponsorship_offer_expiring' => NotificationType.sponsorshipOfferExpiring,
     _ => NotificationType.follow,
   };
 }

@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
 import 'package:share_plus/share_plus.dart';
 
+import '../services/ad_service.dart';
 import '../services/crew_service.dart';
 import '../services/share_urls.dart';
 import '../services/event_service.dart';
@@ -35,6 +36,12 @@ class EventDraft {
 
   /// Host opt-in: let a brand sponsor this event's Pre-Show lobby (0079).
   bool sponsorshipOpen = false;
+
+  /// Smallest offer worth showing the host, in cents. Null = platform floor.
+  int? sponsorshipMinOfferCents;
+
+  /// Accept anything at or above the minimum without asking (0096).
+  bool sponsorshipAutoAccept = false;
 
   /// Topic tags — what `recommend_events_by_topic` matches interests against.
   final Set<String> topicIds = {};
@@ -102,6 +109,18 @@ class _CreateEventFlowState extends State<CreateEventFlow> {
 const double _kPreviewWidth = 360;
 const double _kSplitMaxWidth = 1100;
 
+/// "$25" / "$2,500" — the sponsorship bounds are always whole dollars, and
+/// "$2500.00" in an error string reads like a bug.
+String _wholeDollars(int cents) {
+  final s = (cents ~/ 100).toString();
+  final buf = StringBuffer();
+  for (var i = 0; i < s.length; i++) {
+    if (i > 0 && (s.length - i) % 3 == 0) buf.write(',');
+    buf.write(s[i]);
+  }
+  return '\$$buf';
+}
+
 class EventDetailsPage extends StatefulWidget {
   final EventDraft draft;
   final VoidCallback onCancel;
@@ -123,6 +142,11 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
   late final TextEditingController _priceController;
   late final TextEditingController _ticketLimitController;
   late final TextEditingController _durationController;
+  late final TextEditingController _minOfferController;
+
+  /// Platform floor/ceiling for a sponsorship offer, from app_config. Fetched
+  /// the first time the toggle goes on — most events never open to sponsors.
+  SponsorshipBounds? _sponsorshipBounds;
 
   bool _uploadingCover = false;
   bool _submitting = false;
@@ -159,6 +183,11 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
     );
     _ticketLimitController = TextEditingController(
       text: _draft.ticketLimit?.toString() ?? '',
+    );
+    _minOfferController = TextEditingController(
+      text: _draft.sponsorshipMinOfferCents == null
+          ? ''
+          : (_draft.sponsorshipMinOfferCents! / 100).toStringAsFixed(2),
     );
     // Seed duration field from the draft in the currently-selected unit (hours).
     _durationController = TextEditingController(
@@ -254,6 +283,7 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
     _priceController.dispose();
     _ticketLimitController.dispose();
     _durationController.dispose();
+    _minOfferController.dispose();
     super.dispose();
   }
 
@@ -424,7 +454,12 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
   /// one. Reuses the payout gate sheet with sponsorship copy.
   Future<void> _toggleSponsorship(bool v) async {
     if (!v) {
-      setState(() => _draft.sponsorshipOpen = false);
+      // Auto-accept goes with it, so it can't sit armed on a closed event and
+      // fire the day the host reopens sponsorship.
+      setState(() {
+        _draft.sponsorshipOpen = false;
+        _draft.sponsorshipAutoAccept = false;
+      });
       return;
     }
     final ok = await ensurePaidPublishAllowed(
@@ -436,6 +471,37 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
     );
     if (!mounted) return;
     setState(() => _draft.sponsorshipOpen = ok);
+    if (ok && _sponsorshipBounds == null) {
+      final b = await AdService.sponsorshipBounds();
+      if (mounted) setState(() => _sponsorshipBounds = b);
+    }
+  }
+
+  /// Offer bounds, on the shipped defaults until app_config answers. Cents.
+  SponsorshipBounds get _bounds =>
+      _sponsorshipBounds ?? (minCents: 2500, maxCents: 250000);
+
+  /// The typed minimum in cents, or null for "use the platform floor".
+  int? get _typedMinOfferCents {
+    final raw = _minOfferController.text.trim();
+    if (raw.isEmpty) return null;
+    final n = double.tryParse(raw);
+    return n == null ? null : (n * 100).round();
+  }
+
+  String? _validateMinOffer(String? v) {
+    if (!_draft.sponsorshipOpen) return null;
+    if (v == null || v.trim().isEmpty) return null; // platform floor
+    final n = double.tryParse(v.trim());
+    if (n == null) return 'Invalid';
+    final cents = (n * 100).round();
+    if (cents < _bounds.minCents) {
+      return 'At least ${_wholeDollars(_bounds.minCents)}';
+    }
+    if (cents > _bounds.maxCents) {
+      return 'At most ${_wholeDollars(_bounds.maxCents)}';
+    }
+    return null;
   }
 
   /// Validate, persist the draft fields, create the LiveKit room + event row,
@@ -459,6 +525,7 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
         ? null
         : int.parse(_ticketLimitController.text.trim());
     _draft.durationMinutes = _parsedDurationMinutes() ?? 60;
+    _draft.sponsorshipMinOfferCents = _typedMinOfferCents;
 
     setState(() {
       _submitting = true;
@@ -506,6 +573,8 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
         asDraft: true,
         topicIds: _draft.topicIds.toList(),
         sponsorshipOpen: _draft.sponsorshipOpen,
+        sponsorshipMinOfferCents: _draft.sponsorshipMinOfferCents,
+        sponsorshipAutoAccept: _draft.sponsorshipAutoAccept,
       );
       _draft.event = event;
 
@@ -782,6 +851,57 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
             ),
             activeTrackColor: NileColors.volt,
           ),
+          // Only once the toggle is on: two fields about terms are noise to the
+          // majority of hosts who leave sponsorship off.
+          if (_draft.sponsorshipOpen) ...[
+            const SizedBox(height: 12),
+            _SectionLabel('Minimum offer'),
+            const SizedBox(height: 6),
+            TextFormField(
+              controller: _minOfferController,
+              keyboardType: const TextInputType.numberWithOptions(
+                decimal: true,
+              ),
+              inputFormatters: [
+                FilteringTextInputFormatter.allow(RegExp(r'^\d*\.?\d{0,2}')),
+              ],
+              decoration: InputDecoration(
+                prefixText: '\$ ',
+                hintText: (_bounds.minCents / 100).toStringAsFixed(2),
+                // No suggestion on this screen: suggest_sponsorship_price is
+                // keyed on an event id, and the event doesn't exist yet. Edit
+                // Event shows one.
+                helperText:
+                    'Offers below this are turned down for you. Leave blank '
+                    'for the ${_wholeDollars(_bounds.minCents)} platform '
+                    'minimum.',
+                helperMaxLines: 3,
+              ),
+              validator: _validateMinOffer,
+            ),
+            const SizedBox(height: 8),
+            CheckboxListTile.adaptive(
+              contentPadding: EdgeInsets.zero,
+              controlAffinity: ListTileControlAffinity.leading,
+              value: _draft.sponsorshipAutoAccept,
+              onChanged: (v) =>
+                  setState(() => _draft.sponsorshipAutoAccept = v ?? false),
+              title: Text(
+                'Automatically accept offers at or above my minimum',
+                style: NileTextStyles.bodyMd(),
+              ),
+              subtitle: Text(
+                'Nile still screens every ad for policy. What you\'re giving '
+                'up is the look — you won\'t see which brand it is before it '
+                'runs in your lobby.',
+                style: NileTextStyles.caption().copyWith(
+                  color: NileColors.txtTertiary,
+                ),
+              ),
+              activeColor: NileColors.volt,
+              checkColor: NileColors.onVolt,
+            ),
+          ],
           if (_errorMessage != null) ...[
             const SizedBox(height: 20),
             Container(

@@ -2,6 +2,7 @@ import 'package:croppy/croppy.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../services/ad_service.dart';
 import '../services/crew_service.dart';
 import '../services/event_service.dart';
 import '../services/pricing_service.dart';
@@ -13,6 +14,18 @@ import '../widgets/duration_field.dart';
 import '../widgets/payout_gate.dart';
 import '../widgets/payout_preview_card.dart';
 import '../widgets/topic_chips.dart';
+
+/// "$25" / "$2,500" — sponsorship bounds are whole dollars, and "$2500.00" in
+/// an error string reads like a bug.
+String _wholeDollars(int cents) {
+  final s = (cents ~/ 100).toString();
+  final buf = StringBuffer();
+  for (var i = 0; i < s.length; i++) {
+    if (i > 0 && (s.length - i) % 3 == 0) buf.write(',');
+    buf.write(s[i]);
+  }
+  return '\$$buf';
+}
 
 /// Edit an event the signed-in user hosts. Mirrors the create flow's fields
 /// (details + duration + crew) on a single screen. Pops with the updated
@@ -64,6 +77,13 @@ class _EditEventScreenState extends State<EditEventScreen> {
 
   // Pre-Show sponsorship opt-in (0079); seeded from the event row.
   late bool _sponsorshipOpen;
+  late bool _sponsorshipAutoAccept; // 0096
+  late final TextEditingController _minOfferController;
+
+  /// app_config bounds and the server's price suggestion. Both fetched only
+  /// when the toggle is on — most events never open to sponsors.
+  SponsorshipBounds? _sponsorshipBounds;
+  PriceSuggestion? _suggestion;
 
   // Server pricing constants; local fallback until the real config loads.
   PricingConfig _pricing = PricingService.current;
@@ -88,6 +108,13 @@ class _EditEventScreenState extends State<EditEventScreen> {
     );
     _existingCoverUrl = e.coverImageUrl;
     _sponsorshipOpen = e.sponsorshipOpen;
+    _sponsorshipAutoAccept = e.sponsorshipAutoAccept;
+    _minOfferController = TextEditingController(
+      text: e.sponsorshipMinOfferCents == null
+          ? ''
+          : (e.sponsorshipMinOfferCents! / 100).toStringAsFixed(2),
+    );
+    if (_sponsorshipOpen) _loadSponsorshipTerms();
     // toLocal(): the server returns UTC; the picker and previews are all
     // wall-clock local. Save converts back with toUtc().
     _scheduledAt = e.scheduledAt?.toLocal();
@@ -213,6 +240,7 @@ class _EditEventScreenState extends State<EditEventScreen> {
     _priceController.dispose();
     _ticketLimitController.dispose();
     _durationController.dispose();
+    _minOfferController.dispose();
     super.dispose();
   }
 
@@ -364,7 +392,12 @@ class _EditEventScreenState extends State<EditEventScreen> {
   /// share is a Connect destination charge). Mirrors the create flow.
   Future<void> _toggleSponsorship(bool v) async {
     if (!v) {
-      setState(() => _sponsorshipOpen = false);
+      // Auto-accept goes with it. Leaving it armed on a closed event means it
+      // silently fires the day the host reopens sponsorship.
+      setState(() {
+        _sponsorshipOpen = false;
+        _sponsorshipAutoAccept = false;
+      });
       return;
     }
     final ok = await ensurePaidPublishAllowed(
@@ -376,6 +409,53 @@ class _EditEventScreenState extends State<EditEventScreen> {
     );
     if (!mounted) return;
     setState(() => _sponsorshipOpen = ok);
+    if (ok) _loadSponsorshipTerms();
+  }
+
+  /// Platform bounds plus the server's suggested minimum for THIS event.
+  /// Best-effort on both counts — the field falls back to the platform floor.
+  Future<void> _loadSponsorshipTerms() async {
+    final (bounds, suggestion) = await (
+      AdService.sponsorshipBounds(),
+      AdService.suggestSponsorshipPrice(widget.event.id),
+    ).wait;
+    if (!mounted) return;
+    setState(() {
+      _sponsorshipBounds = bounds;
+      _suggestion = suggestion;
+      // Only ever fills a blank field. A saved minimum — or one the host typed
+      // while this was in flight — is theirs, not ours to overwrite.
+      if (suggestion != null && _minOfferController.text.trim().isEmpty) {
+        _minOfferController.text = (suggestion.suggestedCents / 100)
+            .toStringAsFixed(2);
+      }
+    });
+  }
+
+  SponsorshipBounds get _bounds =>
+      _sponsorshipBounds ?? (minCents: 2500, maxCents: 250000);
+
+  /// The typed minimum in cents, or null for "use the platform floor".
+  int? get _typedMinOfferCents {
+    final raw = _minOfferController.text.trim();
+    if (raw.isEmpty) return null;
+    final n = double.tryParse(raw);
+    return n == null ? null : (n * 100).round();
+  }
+
+  String? _validateMinOffer(String? v) {
+    if (!_sponsorshipOpen) return null;
+    if (v == null || v.trim().isEmpty) return null; // platform floor
+    final n = double.tryParse(v.trim());
+    if (n == null) return 'Invalid';
+    final cents = (n * 100).round();
+    if (cents < _bounds.minCents) {
+      return 'At least ${_wholeDollars(_bounds.minCents)}';
+    }
+    if (cents > _bounds.maxCents) {
+      return 'At most ${_wholeDollars(_bounds.maxCents)}';
+    }
+    return null;
   }
 
   Future<void> _save() async {
@@ -434,6 +514,9 @@ class _EditEventScreenState extends State<EditEventScreen> {
       final endChanged = !_sameInstant(newEndAt, widget.event.endAt);
       final priceChanged = priceCents != widget.event.price;
       final limitChanged = ticketLimit != widget.event.ticketLimit;
+      final minOfferCents = _typedMinOfferCents;
+      final minOfferChanged =
+          minOfferCents != widget.event.sponsorshipMinOfferCents;
 
       // Publishing a paid draft or flipping a free event to paid requires an
       // active payout account. Gate before writing so we never leave an event
@@ -473,6 +556,18 @@ class _EditEventScreenState extends State<EditEventScreen> {
             : _topicIds.toList(),
         sponsorshipOpen: _sponsorshipOpen != widget.event.sponsorshipOpen
             ? _sponsorshipOpen
+            : null,
+        // Terms are only written while the event is open to sponsors — closing
+        // it must not wipe a minimum the host set. Auto-accept is the exception:
+        // _toggleSponsorship clears it on the way out, and that clear has to
+        // land.
+        sponsorshipMinOfferCents:
+            _sponsorshipOpen && minOfferChanged ? minOfferCents : null,
+        clearSponsorshipMinOffer:
+            _sponsorshipOpen && minOfferChanged && minOfferCents == null,
+        sponsorshipAutoAccept:
+            _sponsorshipAutoAccept != widget.event.sponsorshipAutoAccept
+            ? _sponsorshipAutoAccept
             : null,
       );
 
@@ -716,6 +811,72 @@ class _EditEventScreenState extends State<EditEventScreen> {
                     ),
                     activeTrackColor: NileColors.volt,
                   ),
+                  // Only once the toggle is on: two fields about terms are
+                  // noise to the majority of hosts who leave sponsorship off.
+                  if (_sponsorshipOpen) ...[
+                    const SizedBox(height: 12),
+                    _SectionLabel('Minimum offer'),
+                    const SizedBox(height: 6),
+                    TextFormField(
+                      controller: _minOfferController,
+                      keyboardType: const TextInputType.numberWithOptions(
+                        decimal: true,
+                      ),
+                      inputFormatters: [
+                        FilteringTextInputFormatter.allow(
+                          RegExp(r'^\d*\.?\d{0,2}'),
+                        ),
+                      ],
+                      decoration: InputDecoration(
+                        prefixText: '\$ ',
+                        hintText: (_bounds.minCents / 100).toStringAsFixed(2),
+                        helperText:
+                            'Offers below this are turned down for you. Leave '
+                            'blank for the ${_wholeDollars(_bounds.minCents)} '
+                            'platform minimum.',
+                        helperMaxLines: 3,
+                      ),
+                      validator: _validateMinOffer,
+                    ),
+                    if (_suggestion != null) ...[
+                      const SizedBox(height: 6),
+                      // `basis` verbatim, separated rather than folded into a
+                      // sentence: "4 past events" and "estimated from follower
+                      // count" don't both survive a shared prefix, and the
+                      // difference between them is the whole point.
+                      Text(
+                        'Suggested '
+                        '${_wholeDollars(_suggestion!.suggestedCents)} · '
+                        '${_suggestion!.basis}',
+                        style: NileTextStyles.caption().copyWith(
+                          color: NileColors.txtTertiary,
+                        ),
+                      ),
+                    ],
+                    const SizedBox(height: 8),
+                    CheckboxListTile.adaptive(
+                      contentPadding: EdgeInsets.zero,
+                      controlAffinity: ListTileControlAffinity.leading,
+                      value: _sponsorshipAutoAccept,
+                      onChanged: (v) => setState(
+                        () => _sponsorshipAutoAccept = v ?? false,
+                      ),
+                      title: Text(
+                        'Automatically accept offers at or above my minimum',
+                        style: NileTextStyles.bodyMd(),
+                      ),
+                      subtitle: Text(
+                        'Nile still screens every ad for policy. What you\'re '
+                        'giving up is the look — you won\'t see which brand it '
+                        'is before it runs in your lobby.',
+                        style: NileTextStyles.caption().copyWith(
+                          color: NileColors.txtTertiary,
+                        ),
+                      ),
+                      activeColor: NileColors.volt,
+                      checkColor: NileColors.onVolt,
+                    ),
+                  ],
                   const SizedBox(height: 24),
                   Divider(color: NileColors.border),
                   const SizedBox(height: 16),
