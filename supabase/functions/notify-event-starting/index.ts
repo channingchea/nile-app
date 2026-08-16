@@ -33,8 +33,20 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 const LEAD_MINUTES = 15;
 const GRACE_MINUTES = 5; // tolerate a slightly late cron tick.
 
-serve(async (_req) => {
+serve(async (req) => {
   try {
+    // Auth: cron proves it's us with a shared secret. Deployed --no-verify-jwt,
+    // so without this gate anyone who knows the URL could fan out "starting
+    // soon" push to every ticket holder on demand. Same pattern as send-push;
+    // the cron side ships the header in migration 0103.
+    const expected = Deno.env.get("CRON_SHARED_SECRET");
+    if (!expected || req.headers.get("x-cron-secret") !== expected) {
+      return new Response(JSON.stringify({ error: "unauthorized" }), {
+        status: 401,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
     const admin = createClient(
       Deno.env.get("SUPABASE_URL")!,
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,

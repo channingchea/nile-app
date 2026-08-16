@@ -76,6 +76,20 @@ const stripe = new Stripe(Deno.env.get("STRIPE_SECRET_KEY")!, {
 
 serve(async (req) => {
   try {
+    // Auth: cron proves it's us with a shared secret. This function is deployed
+    // --no-verify-jwt, so without this gate anyone who knows the URL (it's in
+    // 0085's committed migration body) could drive live Stripe refund/cancel
+    // calls, the offer-expiry sweep, the abandoned-checkout delete, and every
+    // Klaviyo + FCM send. Same pattern as send-push. The cron side ships the
+    // header in migration 0103; the secret's twin lives in Vault.
+    const expected = Deno.env.get("CRON_SHARED_SECRET");
+    if (!expected || req.headers.get("x-cron-secret") !== expected) {
+      return new Response(JSON.stringify({ error: "unauthorized" }), {
+        status: 401,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
     const admin = createClient(
       Deno.env.get("SUPABASE_URL")!,
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
@@ -485,7 +499,7 @@ async function emailWaitingOffers(admin: any): Promise<number> {
       if (!to) continue;
 
       const amount = Number(r.budget_cents ?? 0);
-      const deepLink = r.event_id ? `https://links.nile.app/e/${r.event_id}` : null;
+      const deepLink = r.event_id ? `https://links.joinnile.com/e/${r.event_id}` : null;
       await klaviyoEvent("Nile Sponsorship Offer Waiting", to, `${r.id}:offer_waiting`, {
         brand: r.advertiser_accounts?.name ?? "A brand",
         event_title: r.events?.title ?? "your event",
