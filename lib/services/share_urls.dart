@@ -16,12 +16,20 @@ class ShareUrls {
   /// The public host that backs Universal Links / App Links and serves the web
   /// landing pages. Change this one line to move domains (also update the
   /// native config: iOS associated-domains + AASA, Android assetlinks.json).
-  static const String shareDomain = 'links.nile.app';
+  ///
+  /// NOTE: this was `links.nile.app` until 2026-08-16. That host has never
+  /// existed — it does not resolve (NXDOMAIN) — so every event, post and
+  /// profile link the app has ever shared was a dead link, as was the URL
+  /// embedded in exported calendar invites. The host that actually serves the
+  /// `share` Edge Function, the AASA file and the assetlinks file is
+  /// links.joinnile.com; verified serving the correct appID and /e/*, /p/*,
+  /// /u/* paths.
+  static const String shareDomain = 'links.joinnile.com';
 
-  /// The boost/checkout portal host (Phase A-2). Separate from [shareDomain] so
-  /// the marketing/checkout surface can live on the public brand domain WITHOUT
-  /// touching Universal Links — repointing [shareDomain] would break AASA /
-  /// assetlinks, but the boost path has no native deep-link binding.
+  /// The boost/checkout portal host (Phase A-2). Same host as [shareDomain]
+  /// since the 2026-08-16 repoint — kept as its own constant because the boost
+  /// path has no native deep-link binding, so it can move independently
+  /// without touching AASA / assetlinks.
   static const String boostDomain = 'links.joinnile.com';
 
   static const String _base = 'https://$shareDomain';

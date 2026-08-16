@@ -7,8 +7,8 @@
 	     Universal Links (once enrolled + APNs key in hand):
 	<key>com.apple.developer.associated-domains</key>
 	<array>
-		<string>applinks:links.nile.app</string>
-		<string>webcredentials:nile.app</string>
+		<string>applinks:links.joinnile.com</string>
+		<string>webcredentials:joinnile.com</string>
 	</array>
 	     webcredentials lets Apple Passwords share saved logins between the
 	     website and the app; it needs a "webcredentials" section in the
