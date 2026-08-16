@@ -51,3 +51,11 @@ supabase/.temp/
 # Secrets — never commit service-account private keys (security fix #9)
 *firebase-adminsdk*.json
 *service-account*.json
+
+# Android signing — the upload keystore and its passwords. Keep the .jks itself
+# outside the repo entirely (~/keys); these patterns are the second line of
+# defence. See android/key.properties.example.
+android/key.properties
+key.properties
+*.jks
+*.keystore

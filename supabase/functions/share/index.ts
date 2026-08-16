@@ -19,11 +19,27 @@ import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 // ── Native app identifiers (keep in sync with the app's native config) ──
-const IOS_APP_ID = "LFRAVC4CVW.com.nilestreaming.app"; // <teamID>.<bundleID>
+// <teamID>.<bundleID>. The team id MUST match what the app is actually signed
+// with, or iOS silently refuses to associate the domain and every Universal
+// Link falls through to the browser. Was LFRAVC4CVW until 2026-08-16 — stale
+// since the signing team changed on 2026-08-06; verified against the signed
+// binary (`codesign -d --entitlements :-` → application-identifier
+// 9LTD86C5X7.com.nilestreaming.app) and DEVELOPMENT_TEAM in project.pbxproj.
+const IOS_APP_ID = "9LTD86C5X7.com.nilestreaming.app";
 const ANDROID_PKG = "com.nilestreaming.app";
-const ANDROID_SHA256 =
+// Comma-separated, because Play App Signing means TWO certificates sign Nile
+// builds and App Links must verify against both:
+//   • the UPLOAD key   — signs local + Firebase App Distribution builds
+//   • the Play app signing key — signs whatever users install from Play
+//     (Play Console → Test and release → Setup → App integrity)
+// Set with: supabase secrets set ANDROID_CERT_SHA256="AA:BB:...,CC:DD:..."
+const ANDROID_SHA256 = (
   Deno.env.get("ANDROID_CERT_SHA256") ??
-  "REPLACE_WITH_RELEASE_SHA256_FINGERPRINT";
+    "REPLACE_WITH_RELEASE_SHA256_FINGERPRINT"
+)
+  .split(",")
+  .map((f) => f.trim().toUpperCase())
+  .filter((f) => f.length > 0);
 
 const APP_STORE_URL = "https://apps.apple.com/app/nile/id000000000"; // TODO real ID
 const PLAY_STORE_URL =
@@ -127,7 +143,7 @@ function assetlinks(): Response {
       target: {
         namespace: "android_app",
         package_name: ANDROID_PKG,
-        sha256_cert_fingerprints: [ANDROID_SHA256],
+        sha256_cert_fingerprints: ANDROID_SHA256,
       },
     },
   ];

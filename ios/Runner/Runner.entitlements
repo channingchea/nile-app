@@ -2,19 +2,24 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!-- TEMPORARILY DISABLED: Associated Domains requires a paid Apple Developer
-	     team; personal team builds fail with it present. RESTORE before shipping
-	     Universal Links (once enrolled + APNs key in hand):
+	<!-- Universal Links. Enabled 2026-08-16, once Associated Domains was turned
+	     on for the App ID in the developer portal. links.joinnile.com is
+	     verified serving /.well-known/apple-app-site-association with this
+	     appID and the /e/*, /p/*, /u/* paths (the `share` Edge Function).
+	     Keep this host in step with ShareUrls.shareDomain — the pair is
+	     asserted by test/share_domain_consistency_test.dart.
+
+	     NOT listed here: webcredentials:joinnile.com. That entry would let
+	     Apple Passwords share saved logins between the website and the app,
+	     but it requires a "webcredentials" section in an AASA served from
+	     joinnile.com itself, and that host currently returns 404 for
+	     /.well-known/apple-app-site-association. Adding it before the file
+	     exists just leaves a domain Apple can never validate. In-app
+	     save/fill already works without it, scoped to the bundle ID. -->
 	<key>com.apple.developer.associated-domains</key>
 	<array>
 		<string>applinks:links.joinnile.com</string>
-		<string>webcredentials:joinnile.com</string>
 	</array>
-	     webcredentials lets Apple Passwords share saved logins between the
-	     website and the app; it needs a "webcredentials" section in the
-	     apple-app-site-association file too. In-app save/fill works without it,
-	     just scoped to the bundle ID.
-	-->
 	<!-- Push notifications (APNs). Without this key iOS never issues an APNs
 	     device token, so FCM getToken() silently fails and no push arrives.
 	     Codesigning flips "development" to "production" automatically in
