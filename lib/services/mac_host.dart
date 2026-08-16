@@ -46,6 +46,16 @@ class MacHost {
 
   static Future<void> quit() => _invoke<void>('quit');
 
+  /// Opens the system Character Viewer — the emoji picker ⌃⌘Space reaches in
+  /// every other Mac app.
+  ///
+  /// It has to be asked for explicitly because the shortcut is not a system
+  /// hotkey: AppKit gets it from the "Emoji & Symbols" item in the standard
+  /// Edit menu, and that menu lives in `MainMenu.xib`, which [NileMenuBar]
+  /// replaces wholesale on the first frame.
+  static Future<void> showCharacterPalette() =>
+      _invoke<void>('showCharacterPalette');
+
   /// `true`/`false` when the OS can answer, `null` on macOS 12 — `SMAppService`
   /// is macOS 13+ and the deployment target is 12.0. Settings treats `null` as
   /// "hide the row" rather than showing a switch that cannot move.

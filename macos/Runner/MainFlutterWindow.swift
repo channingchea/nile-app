@@ -89,6 +89,14 @@ class MainFlutterWindow: NSWindow {
         NSApp.terminate(nil)
         result(nil)
 
+      // The emoji picker. Normally the "Emoji & Symbols" item in the Edit menu
+      // sends this, but that menu comes from MainMenu.xib and Flutter's
+      // PlatformMenuBar replaces the whole bar on the first frame — so the Dart
+      // side owns the item and calls the selector through here instead.
+      case "showCharacterPalette":
+        NSApp.orderFrontCharacterPalette(nil)
+        result(nil)
+
       // SMAppService rather than the launch_at_startup plugin: that plugin has
       // no macOS implementation of its own and expects the LaunchAtLogin Swift
       // Package to be added to this Xcode project. SMAppService is one system

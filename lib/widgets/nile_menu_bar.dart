@@ -6,6 +6,23 @@ import '../services/auth_gate.dart';
 import '../services/mac_host.dart';
 import 'nile_destinations.dart';
 
+/// Performs an Edit-menu action on whatever currently has focus.
+///
+/// The Edit items carry their real key equivalents (⌘C and friends), which
+/// means AppKit claims those keystrokes at `performKeyEquivalent` and they never
+/// reach the Flutter view — so declaring the menu without doing the work would
+/// break copy and paste rather than merely duplicate them. This dispatches the
+/// same intent, at the same context, that Flutter's own text-editing shortcuts
+/// would have: [ShortcutManager] invokes actions against the primary focus, and
+/// [EditableText] registers its handlers above its own [Focus].
+///
+/// A no-op when nothing focused can honour the intent — with focus outside a
+/// text field, [Actions.maybeInvoke] finds no enabled action and returns null.
+void nileInvokeTextIntent(Intent intent) {
+  final context = FocusManager.instance.primaryFocus?.context;
+  if (context != null) Actions.maybeInvoke(context, intent);
+}
+
 /// The Mac menu bar.
 ///
 /// Built in Dart with [PlatformMenuBar] rather than by editing `MainMenu.xib`,
@@ -54,15 +71,15 @@ class _NileMenuBarState extends State<NileMenuBar> {
     push ? nileRouter.push(location) : nileRouter.go(location);
   }
 
+  void _edit(Intent intent) => nileInvokeTextIntent(intent);
+
   /// The rail's own rows, in the rail's order, so the menu and the rail can
   /// never disagree about what Nile's destinations are or what ⌘2 means.
   List<PlatformMenuItem> _destinations() => [
     for (final (slot, entry) in kNileRailEntries.indexed)
       PlatformMenuItem(
         label: entry.destination.label,
-        shortcut: slot < 9
-            ? SingleActivator(_digits[slot], meta: true)
-            : null,
+        shortcut: slot < 9 ? SingleActivator(_digits[slot], meta: true) : null,
         onSelected: () => entry.isBranch
             ? _go(kNileBranchLocations[entry.branch!])
             : _go(entry.location!, push: true),
@@ -126,6 +143,70 @@ class _NileMenuBarState extends State<NileMenuBar> {
         const PlatformMenuItemGroup(
           members: [
             PlatformProvidedMenuItem(type: PlatformProvidedMenuItemType.quit),
+          ],
+        ),
+      ],
+    ),
+    // Not gated on `signedIn`: the login screen is two text fields, and an app
+    // whose Edit menu appears only after you sign in is stranger than one that
+    // always has it.
+    PlatformMenu(
+      label: 'Edit',
+      menus: [
+        PlatformMenuItemGroup(
+          members: [
+            PlatformMenuItem(
+              label: 'Cut',
+              shortcut: const SingleActivator(
+                LogicalKeyboardKey.keyX,
+                meta: true,
+              ),
+              onSelected: () => _edit(
+                const CopySelectionTextIntent.cut(
+                  SelectionChangedCause.keyboard,
+                ),
+              ),
+            ),
+            PlatformMenuItem(
+              label: 'Copy',
+              shortcut: const SingleActivator(
+                LogicalKeyboardKey.keyC,
+                meta: true,
+              ),
+              onSelected: () => _edit(CopySelectionTextIntent.copy),
+            ),
+            PlatformMenuItem(
+              label: 'Paste',
+              shortcut: const SingleActivator(
+                LogicalKeyboardKey.keyV,
+                meta: true,
+              ),
+              onSelected: () =>
+                  _edit(const PasteTextIntent(SelectionChangedCause.keyboard)),
+            ),
+            PlatformMenuItem(
+              label: 'Select All',
+              shortcut: const SingleActivator(
+                LogicalKeyboardKey.keyA,
+                meta: true,
+              ),
+              onSelected: () => _edit(
+                const SelectAllTextIntent(SelectionChangedCause.keyboard),
+              ),
+            ),
+          ],
+        ),
+        PlatformMenuItemGroup(
+          members: [
+            PlatformMenuItem(
+              label: 'Emoji & Symbols',
+              shortcut: const SingleActivator(
+                LogicalKeyboardKey.space,
+                control: true,
+                meta: true,
+              ),
+              onSelected: MacHost.showCharacterPalette,
+            ),
           ],
         ),
       ],
