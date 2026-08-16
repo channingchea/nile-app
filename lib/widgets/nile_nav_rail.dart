@@ -9,9 +9,15 @@ import 'nile_logo.dart';
 /// The desktop left navigation rail — the counterpart to [NileGlassNavBar],
 /// which it replaces from the `medium` breakpoint up.
 ///
-/// Two widths, chosen by the window class rather than by a flag the caller has
-/// to remember: 214 px with labels at `expanded` and wider, 72 px icon-only
-/// between 900 and 1279.
+/// Two widths: 214 px with labels, 72 px icon-only. The window class decides
+/// whether labels are possible at all (icon-only below `expanded`), and above
+/// that the user's own collapse choice decides — see [NileShellState].
+///
+/// [width] is animated by the shell, which has to move the content column by
+/// the same amount on the same frame. It can differ from the width the current
+/// layout wants mid-animation, so the content is laid out at its own natural
+/// width and clipped rather than squeezed — a Row of icon + label has a hard
+/// minimum and would overflow on the way down.
 ///
 /// Unlike the glass bar it does not take a flat list of destinations, because
 /// the rail is not a flat list of branches: Currents, Notifications and My
@@ -27,6 +33,8 @@ class NileNavRail extends StatefulWidget {
     required this.labelled,
     required this.onCreate,
     required this.onSettings,
+    this.width,
+    this.onToggle,
   }) : assert(entries.length >= 2);
 
   /// Rail slot to highlight, or `-1` for none — which is what standing on a
@@ -40,6 +48,15 @@ class NileNavRail extends StatefulWidget {
 
   final VoidCallback onCreate;
   final VoidCallback onSettings;
+
+  /// Painted width. Defaults to whatever [labelled] asks for; the shell passes
+  /// an animated value so the rail and the content column move together.
+  final double? width;
+
+  /// Flips [labelled]. Null where the window is too narrow for labels to be an
+  /// option, which is also where the control is hidden — offering a toggle that
+  /// changes nothing is worse than not offering one.
+  final VoidCallback? onToggle;
 
   static const double expandedWidth = 214;
   static const double collapsedWidth = 72;
@@ -97,48 +114,59 @@ class _NileNavRailState extends State<NileNavRail> {
   @override
   Widget build(BuildContext context) {
     final labelled = widget.labelled;
+    final layoutWidth = NileNavRail.widthFor(labelled);
     return Container(
-      width: NileNavRail.widthFor(labelled),
+      width: widget.width ?? layoutWidth,
       decoration: BoxDecoration(
         color: NileColors.bgSurface,
         border: Border(right: BorderSide(color: NileColors.border)),
       ),
-      child: SafeArea(
-        right: false,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            _Brand(labelled: labelled),
-            Padding(
-              padding: EdgeInsets.symmetric(
-                horizontal: labelled ? NileSpacing.s12 : NileSpacing.s16,
-              ),
-              child: _CreateAction(labelled: labelled, onTap: widget.onCreate),
+      child: ClipRect(
+        child: OverflowBox(
+          alignment: Alignment.topLeft,
+          minWidth: layoutWidth,
+          maxWidth: layoutWidth,
+          child: SafeArea(
+            right: false,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _Brand(labelled: labelled, onToggle: widget.onToggle),
+                Padding(
+                  padding: EdgeInsets.symmetric(
+                    horizontal: labelled ? NileSpacing.s12 : NileSpacing.s16,
+                  ),
+                  child: _CreateAction(
+                    labelled: labelled,
+                    onTap: widget.onCreate,
+                  ),
+                ),
+                const SizedBox(height: NileSpacing.s16),
+                for (final (i, e) in widget.entries.indexed)
+                  _RailItem(
+                    icon: e.destination.icon,
+                    selectedIcon: e.destination.selectedIcon,
+                    label: e.destination.label,
+                    labelled: labelled,
+                    selected: i == widget.selectedIndex,
+                    badge: _badgeFor(e.badge),
+                    onTap: () => _tap(i, e),
+                  ),
+                const Spacer(),
+                Divider(color: NileColors.border, height: 1),
+                const SizedBox(height: NileSpacing.s8),
+                _RailItem(
+                  icon: Icons.settings_outlined,
+                  selectedIcon: Icons.settings,
+                  label: 'Settings',
+                  labelled: labelled,
+                  selected: false,
+                  onTap: widget.onSettings,
+                ),
+                const SizedBox(height: NileSpacing.s12),
+              ],
             ),
-            const SizedBox(height: NileSpacing.s16),
-            for (final (i, e) in widget.entries.indexed)
-              _RailItem(
-                icon: e.destination.icon,
-                selectedIcon: e.destination.selectedIcon,
-                label: e.destination.label,
-                labelled: labelled,
-                selected: i == widget.selectedIndex,
-                badge: _badgeFor(e.badge),
-                onTap: () => _tap(i, e),
-              ),
-            const Spacer(),
-            Divider(color: NileColors.border, height: 1),
-            const SizedBox(height: NileSpacing.s8),
-            _RailItem(
-              icon: Icons.settings_outlined,
-              selectedIcon: Icons.settings,
-              label: 'Settings',
-              labelled: labelled,
-              selected: false,
-              onTap: widget.onSettings,
-            ),
-            const SizedBox(height: NileSpacing.s12),
-          ],
+          ),
         ),
       ),
     );
@@ -150,43 +178,76 @@ class _NileNavRailState extends State<NileNavRail> {
 /// illegibility — [FittedBox] keeps the mark itself inside either width without
 /// needing a separate icon-only asset.
 class _Brand extends StatelessWidget {
-  const _Brand({required this.labelled});
+  const _Brand({required this.labelled, this.onToggle});
   final bool labelled;
+  final VoidCallback? onToggle;
 
   @override
-  Widget build(BuildContext context) => Padding(
-    padding: EdgeInsets.fromLTRB(
-      labelled ? NileSpacing.s16 : NileSpacing.s8,
-      NileSpacing.s24,
-      NileSpacing.s16,
-      NileSpacing.s24,
-    ),
-    child: Align(
-      alignment: labelled ? Alignment.centerLeft : Alignment.center,
-      child: FittedBox(
-        fit: BoxFit.scaleDown,
-        child: labelled
-            ? Row(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.center,
-                children: [
-                  NileLogo(size: 'small', height: 26),
-                  const SizedBox(width: NileSpacing.s8),
-                  Text(
-                    'Nile',
-                    style: GoogleFonts.syne(
-                      fontSize: 22,
-                      fontWeight: FontWeight.w800,
-                      color: NileColors.volt,
-                      letterSpacing: -0.5,
-                    ),
+  Widget build(BuildContext context) {
+    final toggle = onToggle == null
+        ? null
+        : IconButton(
+            onPressed: onToggle,
+            tooltip: labelled ? 'Collapse sidebar' : 'Expand sidebar',
+            icon: Icon(labelled ? Icons.menu_open : Icons.menu, size: 20),
+            color: NileColors.txtSecondary,
+            visualDensity: VisualDensity.compact,
+            splashRadius: 18,
+          );
+
+    final mark = FittedBox(
+      fit: BoxFit.scaleDown,
+      child: labelled
+          ? Row(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                NileLogo(size: 'small', height: 26),
+                const SizedBox(width: NileSpacing.s8),
+                Text(
+                  'Nile',
+                  style: GoogleFonts.syne(
+                    fontSize: 22,
+                    fontWeight: FontWeight.w800,
+                    color: NileColors.volt,
+                    letterSpacing: -0.5,
                   ),
-                ],
-              )
-            : NileLogo(size: 'small', height: 20),
+                ),
+              ],
+            )
+          : NileLogo(size: 'small', height: 20),
+    );
+
+    return Padding(
+      padding: EdgeInsets.fromLTRB(
+        labelled ? NileSpacing.s16 : NileSpacing.s8,
+        NileSpacing.s24,
+        labelled ? NileSpacing.s4 : NileSpacing.s8,
+        NileSpacing.s24,
       ),
-    ),
-  );
+      // Collapsed there is no room beside the mark, so the control stacks under
+      // it — still in the corner the eye goes to for "open/close this panel",
+      // and the one row of height it costs is height the 72 px rail has spare.
+      child: labelled
+          ? Row(
+              children: [
+                Expanded(
+                  child: Align(alignment: Alignment.centerLeft, child: mark),
+                ),
+                ?toggle,
+              ],
+            )
+          : Column(
+              children: [
+                mark,
+                if (toggle != null) ...[
+                  const SizedBox(height: NileSpacing.s4),
+                  toggle,
+                ],
+              ],
+            ),
+    );
+  }
 }
 
 /// The single primary action, in volt — a labelled pill when there's room, a
@@ -225,9 +286,7 @@ class _CreateAction extends StatelessWidget {
       onPressed: onTap,
       icon: const Icon(Icons.add, size: 20),
       label: const Text('Create'),
-      style: FilledButton.styleFrom(
-        minimumSize: const Size.fromHeight(44),
-      ),
+      style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(44)),
     );
   }
 }
@@ -263,9 +322,7 @@ class _RailItem extends StatelessWidget {
       duration: NileMotion.fast,
       curve: NileMotion.curve,
       height: 44,
-      padding: EdgeInsets.symmetric(
-        horizontal: labelled ? NileSpacing.s12 : 0,
-      ),
+      padding: EdgeInsets.symmetric(horizontal: labelled ? NileSpacing.s12 : 0),
       decoration: BoxDecoration(
         color: selected
             ? NileColors.volt.withValues(alpha: 0.15)
@@ -273,8 +330,9 @@ class _RailItem extends StatelessWidget {
         borderRadius: BorderRadius.circular(NileRadius.pill),
       ),
       child: Row(
-        mainAxisAlignment:
-            labelled ? MainAxisAlignment.start : MainAxisAlignment.center,
+        mainAxisAlignment: labelled
+            ? MainAxisAlignment.start
+            : MainAxisAlignment.center,
         children: [
           // In the labelled rail the count belongs at the far end of the row,
           // where the eye already is after reading the label. In the icon-only

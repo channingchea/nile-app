@@ -17,6 +17,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import 'package:nile_app/services/shell_state.dart';
 import 'package:nile_app/theme.dart';
 import 'package:nile_app/widgets/nile_context_rail.dart';
 import 'package:nile_app/widgets/nile_destinations.dart';
@@ -28,8 +29,9 @@ import 'package:nile_app/widgets/nile_nav_rail.dart';
 /// are routes rather than branches. These fixtures stay branch-only: what the
 /// widget tests below measure is width and labelling, which is the same either
 /// way, and the real composition is asserted in desktop_layouts_test.dart.
-List<NileRailEntry> get _entries =>
-    [for (final (i, d) in _destinations.indexed) NileRailEntry.branch(d, i)];
+List<NileRailEntry> get _entries => [
+  for (final (i, d) in _destinations.indexed) NileRailEntry.branch(d, i),
+];
 
 const _destinations = [
   NileGlassDestination(
@@ -54,11 +56,7 @@ const _destinations = [
   ),
 ];
 
-Future<void> _pumpAt(
-  WidgetTester tester,
-  Size size,
-  Widget child,
-) async {
+Future<void> _pumpAt(WidgetTester tester, Size size, Widget child) async {
   tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1.0;
   addTearDown(tester.view.reset);
@@ -75,9 +73,9 @@ void main() {
     const channel = MethodChannel('plugins.flutter.io/shared_preferences');
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(channel, (call) async {
-      if (call.method == 'getAll') return <String, Object>{};
-      return null;
-    });
+          if (call.method == 'getAll') return <String, Object>{};
+          return null;
+        });
 
     await Supabase.initialize(
       url: 'https://test.supabase.co',
@@ -110,11 +108,7 @@ void main() {
         '13" landscape': Size(1366, 1024),
       };
       ipads.forEach((name, size) {
-        expect(
-          NileBreakpoints.classify(size).hasNavRail,
-          isTrue,
-          reason: name,
-        );
+        expect(NileBreakpoints.classify(size).hasNavRail, isTrue, reason: name);
       });
     });
 
@@ -156,14 +150,16 @@ void main() {
       expect(wide.hasContextRail, isTrue);
     });
 
-    test('the content column is still readable at the narrowest wide window',
-        () {
-      const zones = NileNavRail.expandedWidth + NileContextRail.minWidth;
-      // What's left for the content column at 1180 — wider than the 600 pt
-      // phone column, which is the bar the context rail has to clear to earn
-      // its place.
-      expect(NileBreakpoints.wide - zones, greaterThan(NileMaxWidth.compact));
-    });
+    test(
+      'the content column is still readable at the narrowest wide window',
+      () {
+        const zones = NileNavRail.expandedWidth + NileContextRail.minWidth;
+        // What's left for the content column at 1180 — wider than the 600 pt
+        // phone column, which is the bar the context rail has to clear to earn
+        // its place.
+        expect(NileBreakpoints.wide - zones, greaterThan(NileMaxWidth.compact));
+      },
+    );
 
     // The zone arithmetic the desktop shell runs, kept here so a change to any
     // one constant has to face the widths it produces on real windows.
@@ -176,20 +172,29 @@ void main() {
       return (content: content, context: available - content);
     }
 
-    test('both rails stay pinned: the zones always fill the window exactly', () {
-      for (final width in [1180.0, 1280.0, 1366.0, 1512.0, 1682.0, 1728.0]) {
-        final z = zones(width);
-        expect(
-          NileNavRail.expandedWidth + z.content + z.context,
-          width,
-          reason: '$width',
-        );
-        expect(z.context, greaterThanOrEqualTo(NileContextRail.minWidth),
-            reason: '$width');
-        expect(z.content, lessThanOrEqualTo(NileMaxWidth.desktop),
-            reason: '$width');
-      }
-    });
+    test(
+      'both rails stay pinned: the zones always fill the window exactly',
+      () {
+        for (final width in [1180.0, 1280.0, 1366.0, 1512.0, 1682.0, 1728.0]) {
+          final z = zones(width);
+          expect(
+            NileNavRail.expandedWidth + z.content + z.context,
+            width,
+            reason: '$width',
+          );
+          expect(
+            z.context,
+            greaterThanOrEqualTo(NileContextRail.minWidth),
+            reason: '$width',
+          );
+          expect(
+            z.content,
+            lessThanOrEqualTo(NileMaxWidth.desktop),
+            reason: '$width',
+          );
+        }
+      },
+    );
 
     test('the context rail only grows once the column hits its ceiling', () {
       // 1366 (13" iPad landscape): column still under the ceiling, rail at its
@@ -202,8 +207,9 @@ void main() {
   });
 
   group('NileMaxWidth', () {
-    testWidgets('is the 600 phone column below the iPad threshold',
-        (tester) async {
+    testWidgets('is the 600 phone column below the iPad threshold', (
+      tester,
+    ) async {
       await _pumpAt(
         tester,
         const Size(700, 1000),
@@ -259,8 +265,9 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     });
 
-    testWidgets('labelled rail is 214 wide and names every destination',
-        (tester) async {
+    testWidgets('labelled rail is 214 wide and names every destination', (
+      tester,
+    ) async {
       await _pumpAt(tester, const Size(1400, 800), rail(labelled: true));
       expect(
         tester.getSize(find.byType(NileNavRail)).width,
@@ -279,11 +286,105 @@ void main() {
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox());
     });
+
+    // Mid-collapse the shell hands the rail a width its labelled layout cannot
+    // fit in. Squeezing the row instead of clipping it overflows, and an
+    // overflow during an animation is the kind that only shows up on the
+    // machine it ships to.
+    testWidgets('paints at a width narrower than its layout', (tester) async {
+      await _pumpAt(
+        tester,
+        const Size(1400, 800),
+        Scaffold(
+          body: Row(
+            children: [
+              NileNavRail(
+                selectedIndex: 0,
+                onDestinationSelected: (_) {},
+                entries: _entries,
+                labelled: true,
+                width: NileNavRail.collapsedWidth,
+                onCreate: () {},
+                onSettings: () {},
+              ),
+              const Expanded(child: SizedBox()),
+            ],
+          ),
+        ),
+      );
+      expect(tester.takeException(), isNull);
+      expect(
+        tester.getSize(find.byType(NileNavRail)).width,
+        NileNavRail.collapsedWidth,
+      );
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('the toggle is offered only when a caller can honour it', (
+      tester,
+    ) async {
+      await _pumpAt(tester, const Size(1400, 800), rail(labelled: true));
+      expect(find.byTooltip('Collapse sidebar'), findsNothing);
+      await tester.pumpWidget(const SizedBox());
+
+      var toggled = 0;
+      await _pumpAt(
+        tester,
+        const Size(1400, 800),
+        Scaffold(
+          body: Row(
+            children: [
+              NileNavRail(
+                selectedIndex: 0,
+                onDestinationSelected: (_) {},
+                entries: _entries,
+                labelled: true,
+                onToggle: () => toggled++,
+                onCreate: () {},
+                onSettings: () {},
+              ),
+              const Expanded(child: SizedBox()),
+            ],
+          ),
+        ),
+      );
+      await tester.tap(find.byTooltip('Collapse sidebar'));
+      expect(toggled, 1);
+      await tester.pumpWidget(const SizedBox());
+    });
+  });
+
+  group('NileShellState.railCollapsed', () {
+    tearDown(() => NileShellState.railCollapsed.value = false);
+
+    test('toggling flips the flag and notifies', () {
+      var notified = 0;
+      void listener() => notified++;
+      NileShellState.railCollapsed.addListener(listener);
+      addTearDown(() => NileShellState.railCollapsed.removeListener(listener));
+
+      NileShellState.toggleRail();
+      expect(NileShellState.railCollapsed.value, isTrue);
+      NileShellState.toggleRail();
+      expect(NileShellState.railCollapsed.value, isFalse);
+      expect(notified, 2);
+    });
+
+    test('setting the value it already holds is a no-op', () {
+      var notified = 0;
+      void listener() => notified++;
+      NileShellState.railCollapsed.addListener(listener);
+      addTearDown(() => NileShellState.railCollapsed.removeListener(listener));
+
+      NileShellState.setRailCollapsed(false);
+      expect(notified, 0);
+    });
   });
 
   group('NileContextRail', () {
-    testWidgets('defaults to its design width and takes a slot override',
-        (tester) async {
+    testWidgets('defaults to its design width and takes a slot override', (
+      tester,
+    ) async {
       await _pumpAt(
         tester,
         const Size(1400, 800),
@@ -327,8 +428,9 @@ void main() {
 
     setUp(() => fired = []);
 
-    testWidgets('J/K walk the list and L acts on the selection',
-        (tester) async {
+    testWidgets('J/K walk the list and L acts on the selection', (
+      tester,
+    ) async {
       await _pumpAt(tester, const Size(1400, 900), list());
       final state = tester.state<NileKeyboardListState>(
         find.byType(NileKeyboardList),
@@ -358,8 +460,9 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     });
 
-    testWidgets('an item with no like path lets the keystroke fall through',
-        (tester) async {
+    testWidgets('an item with no like path lets the keystroke fall through', (
+      tester,
+    ) async {
       await _pumpAt(tester, const Size(1400, 900), list());
       final state = tester.state<NileKeyboardListState>(
         find.byType(NileKeyboardList),
@@ -375,8 +478,9 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     });
 
-    testWidgets('items do not register on a phone-width window',
-        (tester) async {
+    testWidgets('items do not register on a phone-width window', (
+      tester,
+    ) async {
       await _pumpAt(tester, const Size(600, 900), list());
       final state = tester.state<NileKeyboardListState>(
         find.byType(NileKeyboardList),

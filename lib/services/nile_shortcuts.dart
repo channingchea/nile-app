@@ -7,6 +7,7 @@ import '../router.dart';
 import '../widgets/nile_command_palette.dart';
 import '../widgets/nile_destinations.dart';
 import '../widgets/nile_keyboard_list.dart';
+import 'shell_state.dart';
 
 /// App-wide keyboard shortcuts for the desktop build.
 ///
@@ -18,6 +19,7 @@ import '../widgets/nile_keyboard_list.dart';
 ///
 /// Bindings:
 ///   ⌘K / Ctrl K   command palette
+///   ⌘\            collapse / expand the nav rail
 ///   ⌘1 – ⌘5       jump to a rail destination, in rail order
 ///   J / K         next / previous item in the focused list
 ///   L             like the selected item
@@ -107,6 +109,12 @@ class NileShortcuts {
     // platform, since an external keyboard can be plugged into anything.
     if (keyboard.isMetaPressed || keyboard.isControlPressed) {
       if (key == LogicalKeyboardKey.keyK) return _openPalette();
+      if (key == LogicalKeyboardKey.backslash) {
+        // Harmless on a window too narrow for a labelled rail: the choice is
+        // stored and takes effect the next time there is room for labels.
+        NileShellState.toggleRail();
+        return true;
+      }
       final slot = _tabKeys[key];
       if (slot != null) {
         final entry = kNileRailEntries[slot];

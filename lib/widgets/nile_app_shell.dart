@@ -107,11 +107,45 @@ class NileAppShell extends StatelessWidget {
 
     final atBranchRoot = kNileBranchLocations.contains(location);
 
+    // Labels are the user's call, but only where the window has room for them:
+    // below `expanded` the rail is icon-only regardless and the toggle is
+    // hidden rather than left to do nothing.
+    return ValueListenableBuilder<bool>(
+      valueListenable: NileShellState.railCollapsed,
+      builder: (context, collapsed, _) {
+        final labelled = window.navRailLabelled && !collapsed;
+        // One animated number drives both zones. Animating the rail alone would
+        // slide it out from under a content column that jumped to its new width
+        // a frame earlier.
+        return TweenAnimationBuilder<double>(
+          tween: Tween<double>(end: NileNavRail.widthFor(labelled)),
+          duration: NileMotion.fast,
+          curve: NileMotion.curve,
+          builder: (context, railWidth, _) => _layout(
+            context,
+            location: location,
+            window: window,
+            labelled: labelled,
+            railWidth: railWidth,
+            atBranchRoot: atBranchRoot,
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _layout(
+    BuildContext context, {
+    required String location,
+    required NileWindowClass window,
+    required bool labelled,
+    required double railWidth,
+    required bool atBranchRoot,
+  }) {
     // Same zone arithmetic as before the chrome moved up: both rails pinned to
     // the window edges, the content column growing first to its ceiling, the
     // context rail absorbing the surplus. The three always sum to exactly the
     // window width, so nothing floats.
-    final railWidth = NileNavRail.widthFor(window.navRailLabelled);
     final available = MediaQuery.sizeOf(context).width - railWidth;
     final showContextRail = window.hasContextRail && !wantsFullWidth(location);
     final contentWidth = showContextRail
@@ -138,7 +172,9 @@ class NileAppShell extends StatelessWidget {
               }
             },
             entries: kNileRailEntries,
-            labelled: window.navRailLabelled,
+            labelled: labelled,
+            width: railWidth,
+            onToggle: window.navRailLabelled ? NileShellState.toggleRail : null,
             onCreate: () => showNileCreateSheet(context),
             onSettings: () => context.push(NileRoutes.settings),
           ),
@@ -149,15 +185,12 @@ class NileAppShell extends StatelessWidget {
             width: contentWidth,
             child: Column(
               children: [
-                NileTopBar(
-                  leading: atBranchRoot ? null : const _ShellBack(),
-                ),
+                NileTopBar(leading: atBranchRoot ? null : const _ShellBack()),
                 Expanded(child: child),
               ],
             ),
           ),
-          if (showContextRail)
-            NileContextRail(width: available - contentWidth),
+          if (showContextRail) NileContextRail(width: available - contentWidth),
         ],
       ),
     );

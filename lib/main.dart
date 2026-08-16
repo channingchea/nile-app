@@ -22,6 +22,7 @@ import 'services/nile_shortcuts.dart';
 import 'services/nile_window_title.dart';
 import 'services/push_service.dart';
 import 'services/shake_detector.dart';
+import 'services/shell_state.dart';
 import 'services/theme_service.dart';
 import 'theme.dart';
 import 'services/feedback_service.dart';
@@ -110,8 +111,9 @@ Future<void> _bootstrap() async {
     // thing App Check gates, and a Mac user can sign up on the web or a phone.
     if (!kIsWeb && defaultTargetPlatform != TargetPlatform.macOS) {
       await FirebaseAppCheck.instance.activate(
-        androidProvider:
-            kDebugMode ? AndroidProvider.debug : AndroidProvider.playIntegrity,
+        androidProvider: kDebugMode
+            ? AndroidProvider.debug
+            : AndroidProvider.playIntegrity,
         appleProvider: kDebugMode
             ? AppleProvider.debug
             : AppleProvider.appAttestWithDeviceCheckFallback,
@@ -121,6 +123,10 @@ Future<void> _bootstrap() async {
 
   // Load the saved theme mode before the first frame paints (no flash).
   await ThemeService.instance.load();
+
+  // Same reason: a collapsed nav rail should be collapsed on the first frame,
+  // not snap shut a moment after the window opens.
+  await NileShellState.loadRailCollapsed();
 
   await Supabase.initialize(url: supabaseUrl, anonKey: supabaseAnonKey);
 

@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 /// What the desktop chrome needs to know about the tab shell underneath it.
 ///
@@ -22,5 +23,42 @@ class NileShellState {
   /// Set by the shell on mount; cleared when it goes away.
   static void publish(int index) {
     if (branch.value != index) branch.value = index;
+  }
+
+  // ── Nav rail collapse ──────────────────────────────────────────────────────
+  // Manual only. The window class still decides whether labels are *possible*
+  // (below `expanded` the rail is icon-only regardless); this is the user's
+  // choice on top of that, so a wide window can be run with a narrow rail and
+  // the choice survives a resize instead of being undone by one.
+
+  static const _railPrefKey = 'nav_rail_collapsed';
+
+  /// True when the desktop nav rail is pinned to icons only.
+  static final ValueNotifier<bool> railCollapsed = ValueNotifier<bool>(false);
+
+  static SharedPreferences? _prefs;
+
+  /// Read the saved choice. Call before runApp so the first frame is already
+  /// the right width — otherwise the rail visibly snaps shut on launch.
+  static Future<void> loadRailCollapsed() async {
+    try {
+      _prefs = await SharedPreferences.getInstance();
+      railCollapsed.value = _prefs?.getBool(_railPrefKey) ?? false;
+    } catch (_) {
+      // shared_preferences unavailable — keep the expanded default.
+    }
+  }
+
+  static void toggleRail() => setRailCollapsed(!railCollapsed.value);
+
+  static Future<void> setRailCollapsed(bool value) async {
+    if (railCollapsed.value == value) return;
+    railCollapsed.value = value;
+    try {
+      await (_prefs ??= await SharedPreferences.getInstance()).setBool(
+        _railPrefKey,
+        value,
+      );
+    } catch (_) {}
   }
 }
