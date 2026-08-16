@@ -147,6 +147,47 @@ class _NileMenuBarState extends State<NileMenuBar> {
         ),
       ],
     ),
+    if (signedIn)
+      PlatformMenu(
+        label: 'File',
+        menus: [
+          PlatformMenuItemGroup(
+            members: [
+              PlatformMenuItem(
+                label: 'New Post',
+                shortcut: const SingleActivator(
+                  LogicalKeyboardKey.keyN,
+                  meta: true,
+                ),
+                onSelected: () => _go(NileRoutes.createPost, push: true),
+              ),
+              PlatformMenuItem(
+                label: 'New Event',
+                shortcut: const SingleActivator(
+                  LogicalKeyboardKey.keyN,
+                  meta: true,
+                  shift: true,
+                ),
+                onSelected: () => _go(NileRoutes.createEvent, push: true),
+              ),
+            ],
+          ),
+          PlatformMenuItemGroup(
+            members: [
+              PlatformMenuItem(
+                label: 'Close Window',
+                shortcut: const SingleActivator(
+                  LogicalKeyboardKey.keyW,
+                  meta: true,
+                ),
+                // Hides rather than closes, matching the red button. See
+                // MainFlutterWindow.performClose for why.
+                onSelected: MacHost.hideWindow,
+              ),
+            ],
+          ),
+        ],
+      ),
     // Not gated on `signedIn`: the login screen is two text fields, and an app
     // whose Edit menu appears only after you sign in is stranger than one that
     // always has it.
@@ -211,47 +252,6 @@ class _NileMenuBarState extends State<NileMenuBar> {
         ),
       ],
     ),
-    if (signedIn)
-      PlatformMenu(
-        label: 'File',
-        menus: [
-          PlatformMenuItemGroup(
-            members: [
-              PlatformMenuItem(
-                label: 'New Post',
-                shortcut: const SingleActivator(
-                  LogicalKeyboardKey.keyN,
-                  meta: true,
-                ),
-                onSelected: () => _go(NileRoutes.createPost, push: true),
-              ),
-              PlatformMenuItem(
-                label: 'New Event',
-                shortcut: const SingleActivator(
-                  LogicalKeyboardKey.keyN,
-                  meta: true,
-                  shift: true,
-                ),
-                onSelected: () => _go(NileRoutes.createEvent, push: true),
-              ),
-            ],
-          ),
-          PlatformMenuItemGroup(
-            members: [
-              PlatformMenuItem(
-                label: 'Close Window',
-                shortcut: const SingleActivator(
-                  LogicalKeyboardKey.keyW,
-                  meta: true,
-                ),
-                // Hides rather than closes, matching the red button. See
-                // MainFlutterWindow.performClose for why.
-                onSelected: MacHost.hideWindow,
-              ),
-            ],
-          ),
-        ],
-      ),
     if (signedIn)
       PlatformMenu(
         label: 'View',
