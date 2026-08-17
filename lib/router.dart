@@ -39,6 +39,7 @@ import 'screens/follow_list_screen.dart';
 import 'screens/home_screen.dart';
 import 'screens/like_list_screen.dart';
 import 'screens/messages_screen.dart';
+import 'screens/moderation_notices_screen.dart';
 import 'screens/my_currents_screen.dart';
 import 'screens/my_report_screen.dart';
 import 'screens/my_tickets_screen.dart';
@@ -183,6 +184,7 @@ class NileRoutes {
   static const settingsPassword = '/settings/password';
   static const settingsMfa = '/settings/mfa';
   static const settingsBlocked = '/settings/blocked';
+  static const settingsDecisions = '/settings/decisions';
 
   static const mfaEnroll = '/mfa/enroll';
   static const mfaBackupCodes = '/mfa/backup-codes';
@@ -596,6 +598,10 @@ final GoRouter _router = GoRouter(
           GoRoute(path: 'password', builder: (_, _) => const ChangePasswordScreen()),
           GoRoute(path: 'mfa', builder: (_, _) => const MfaSettingsScreen()),
           GoRoute(path: 'blocked', builder: (_, _) => const BlockedAccountsScreen()),
+          GoRoute(
+            path: 'decisions',
+            builder: (_, _) => const ModerationNoticesScreen(),
+          ),
         ],
       ),
 

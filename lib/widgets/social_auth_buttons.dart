@@ -6,6 +6,7 @@ import 'package:flutter_svg/flutter_svg.dart';
 
 import '../services/social_auth_service.dart';
 import '../theme.dart';
+import 'suspended_dialog.dart';
 
 /// Apple / Google buttons + a labelled divider, shared by the login and signup
 /// screens. Apple is iOS-only and listed first there (HIG: at least as
@@ -47,7 +48,13 @@ class _SocialAuthButtonsState extends State<SocialAuthButtons> {
     try {
       await flow(); // false = user cancelled → silent no-op
     } on SocialAuthException catch (e) {
-      if (mounted) {
+      if (!mounted) {
+        // nothing to show
+      } else if (isSuspendedAuthError(e)) {
+        // Same handling as the email form: a suspension needs an explanation
+        // and an appeal route, not a red snackbar (P3 #35).
+        await showSuspendedDialog(context);
+      } else {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(e.message, style: NileTextStyles.bodyMd()),

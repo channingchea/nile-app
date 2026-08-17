@@ -9,6 +9,7 @@ import '../../services/supabase_client.dart';
 import '../../theme.dart';
 import '../../widgets/nile_logo.dart';
 import '../../widgets/social_auth_buttons.dart';
+import '../../widgets/suspended_dialog.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -49,7 +50,15 @@ class _LoginScreenState extends State<LoginScreen> {
       // _AuthGate in main.dart handles the navigation automatically
       // once the auth state stream emits a session.
     } on AuthException catch (e) {
-      if (mounted) _showError(e.message);
+      if (!mounted) {
+        // nothing to show
+      } else if (isSuspendedAuthError(e)) {
+        // GoTrue's "User is banned" is not an error message to put in a
+        // snackbar — it needs an explanation and a way to appeal (P3 #35).
+        await showSuspendedDialog(context);
+      } else {
+        _showError(e.message);
+      }
     } catch (_) {
       if (mounted) _showError('Something went wrong. Please try again.');
     } finally {

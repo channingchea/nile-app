@@ -214,6 +214,11 @@ class SettingsScreen extends StatelessWidget {
                   onTap: () => _reportIssue(context),
                 ),
                 _SettingsRow(
+                  icon: Icons.gavel_outlined,
+                  label: 'Content decisions',
+                  onTap: () => context.push(NileRoutes.settingsDecisions),
+                ),
+                _SettingsRow(
                   icon: Icons.mail_outline,
                   label: 'Contact us',
                   onTap: () => openLegalUrl(contactUrl),

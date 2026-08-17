@@ -64,6 +64,17 @@ const CONTENT_TABLES: Record<string, string> = {
   live_chat_message: "live_chat_messages",
 };
 
+// Who each content type belongs to — the person a takedown actually happens
+// to, and therefore who is owed a statement of reasons (P3 #35, DSA Art. 17).
+const OWNER_COLUMNS: Record<string, string> = {
+  posts: "user_id",
+  post_comments: "user_id",
+  events: "host_id",
+  currents: "user_id",
+  current_comments: "user_id",
+  live_chat_messages: "sender_id",
+};
+
 // Comment-shaped tables keep a denormalized count on their parent; soft
 // removal doesn't fire the count trigger, so it's adjusted by hand.
 const COMMENT_PARENTS: Record<string, { parentTable: string; parentCol: string }> = {
@@ -233,6 +244,7 @@ async function removeContent(
   if (rErr) console.error("report resolve failed:", rErr);
 
   await logAudit(admin, { actor: actorId, action: "remove_content", target_type: targetType, target_id: targetId, note });
+  await notifySubject(admin, { targetType, targetId, action: "remove_content", note });
   return json({
     target_type: targetType, target_id: targetId, removed: true,
     reports_resolved: resolved?.length ?? 0,
@@ -268,6 +280,7 @@ async function restoreContent(
 
   // Reports intentionally stay resolved — restoring doesn't reopen them.
   await logAudit(admin, { actor: actorId, action: "restore_content", target_type: targetType, target_id: targetId, note });
+  await notifySubject(admin, { targetType, targetId, action: "restore_content", note });
   return json({ target_type: targetType, target_id: targetId, restored: true });
 }
 
@@ -310,6 +323,9 @@ async function suspendUser(admin: any, actorId: string, targetId: string, note: 
   if (rErr) console.error("report resolve failed:", rErr);
 
   await logAudit(admin, { actor: actorId, action: "suspend_user", target_type: "user", target_id: targetId, note });
+  // Written even though a suspended account can't sign in to read it: the
+  // appeal page quotes it back, and it is the record if the ban is lifted.
+  await notifySubject(admin, { targetType: "user", targetId, action: "suspend_user", note });
   return json({ target_id: targetId, suspended: true, reports_resolved: resolved?.length ?? 0 });
 }
 
@@ -332,7 +348,47 @@ async function unsuspendUser(admin: any, actorId: string, targetId: string, note
   }
 
   await logAudit(admin, { actor: actorId, action: "unsuspend_user", target_type: "user", target_id: targetId, note });
+  await notifySubject(admin, { targetType: "user", targetId, action: "unsuspend_user", note });
   return json({ target_id: targetId, suspended: false });
+}
+
+// The statement of reasons owed to the person an action was taken against
+// (P3 #35). Distinct from moderation_audit, which is the internal record: this
+// one is readable by its subject, and is what an appeal argues with.
+// Fire-and-forget, same posture as logAudit — failing to tell someone must not
+// leave the content up.
+// deno-lint-ignore no-explicit-any
+async function notifySubject(admin: any, args: {
+  targetType: string;
+  targetId: string;
+  action: string;
+  note: string | null;
+}) {
+  try {
+    let userId: string | null = null;
+    if (args.targetType === "user") {
+      userId = args.targetId;
+    } else {
+      const table = CONTENT_TABLES[args.targetType];
+      const col = table ? OWNER_COLUMNS[table] : null;
+      if (!table || !col) return;
+      const { data } = await admin
+        .from(table).select(col).eq("id", args.targetId).maybeSingle();
+      userId = (data?.[col] as string | null) ?? null;
+    }
+    if (!userId) return;
+
+    const { error } = await admin.from("moderation_notices").insert({
+      user_id: userId,
+      action: args.action,
+      target_type: args.targetType,
+      target_id: args.targetId,
+      reason: args.note,
+    });
+    if (error) console.error("notice insert failed:", error);
+  } catch (err) {
+    console.error("notice insert error:", err);
+  }
 }
 
 // Permanent record of a moderation action. Written with the service role
