@@ -35,19 +35,21 @@ migration 0104.
 - Moderator roles below the host (crew-as-moderator is a possible Phase 5)
 
 ## Decisions — settled 2026-08-17
-All five schema-shaping questions went to the recommendation. #6 is a writing
-task, not a build decision, and is still open.
+All six are now closed.
 
 1. **Retention.** 30 days, purged by the nightly cron.
 2. **Ban scope.** Per-event, issued by the host.
 3. **Ban duration.** Permanent for that event.
 4. **Who moderates.** Host only in v1.
 5. **Removal.** Silent — no tombstone.
-6. **⚠️ OPEN — the product promise.** Chat is described to users as ephemeral,
-   and phase 1 makes that only half true: the audience experience is still
-   ephemeral, but there is now a 30-day moderation record. The privacy policy
-   has to say so before this ships in a build. Nothing in the code blocks on it;
-   the copy does.
+6. **✅ The product promise — closed 2026-08-17.** Chat is described to users
+   as ephemeral, and that was only half true after phase 1: the audience
+   experience is still ephemeral, but there is now a 30-day moderation record.
+   `nile-website`'s `/privacy` page (`672deb5`) now says so — a "Live chat
+   messages" bullet under §1 and a retention sentence under §4 Data Retention,
+   both scoped to the moderation record and the filter-hit log (which stores
+   only the matched word, never the message). No in-app legal copy needed
+   touching — the app has none, it only links to the website page.
 
 ## Phase 1: Server-side record + limits — ✅ SHIPPED 2026-08-17
 Server halves are deployed and verified on prod; the client half ships with the
