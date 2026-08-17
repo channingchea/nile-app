@@ -86,6 +86,7 @@ class NileStudioStats {
     this.cameraCount = 1,
     this.quality = NileStudioQuality.unknown,
     this.audioSourceLabel,
+    this.notRecording = false,
   });
 
   final bool isLive;
@@ -110,6 +111,12 @@ class NileStudioStats {
   /// Who viewers are hearing — the Stream Audio operator, or the camera
   /// holding master audio.
   final String? audioSourceLabel;
+
+  /// Set when Start Show came back saying the replay recording never started.
+  /// It gets a permanent chip rather than a toast: a host who misses the
+  /// message has no way of finding out until the show is over and there is
+  /// nothing to sell, and by then it is unfixable.
+  final bool notRecording;
 
   static String formatClock(Duration d) {
     final h = d.inHours;
@@ -315,6 +322,18 @@ class _StudioStatsRow extends StatelessWidget {
   List<Widget> _statChips(NileStudioStats stats, bool urgent) {
     final remaining = stats.remaining;
     return [
+          // First in the row, and in the error colour: this is the one thing
+          // here the host can still act on while the show is running.
+          if (stats.notRecording) ...[
+            const SizedBox(width: NileSpacing.s12),
+            _Stat(
+              icon: Icons.fiber_smart_record,
+              label: 'NOT RECORDING',
+              tooltip: 'The replay recording never started — there will be no '
+                  'replay to sell for this show',
+              color: NileColors.error,
+            ),
+          ],
           if (stats.elapsed != null) ...[
             const SizedBox(width: NileSpacing.s12),
             _Stat(

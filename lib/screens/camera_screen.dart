@@ -695,6 +695,11 @@ class _CameraScreenState extends State<CameraScreen> {
   Duration? _remaining; // non-null only inside the countdown window
   bool _autoEnding = false;
 
+  /// Start Show reported that the replay egress never came up. Sticky for the
+  /// rest of the session: there is no recovery mid-show, and the host needs to
+  /// know now rather than discovering it when they go to sell the replay.
+  bool _notRecording = false;
+
   DateTime? get _effectiveEndAt {
     final started = _startedAt;
     final planned = _plannedDuration;
@@ -1261,6 +1266,21 @@ class _CameraScreenState extends State<CameraScreen> {
     return false;
   }
 
+  /// [_retry] for a call whose answer matters. Returns null when every attempt
+  /// failed, which is distinct from a call that succeeded and returned false.
+  static Future<T?> _retryValue<T>(Future<T> Function() op) async {
+    for (var attempt = 0; attempt < 3; attempt++) {
+      try {
+        return await op();
+      } catch (_) {
+        if (attempt < 2) {
+          await Future.delayed(Duration(milliseconds: 400 * (attempt + 1)));
+        }
+      }
+    }
+    return null;
+  }
+
   void _toast(String message) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
@@ -1297,12 +1317,19 @@ class _CameraScreenState extends State<CameraScreen> {
     // Stamp the camera-sync anchor (showStartedAt) into the room metadata.
     // Non-fatal: the show is live either way, but angles lose their alignment,
     // and this is also what kicks off the replay recording.
-    final anchored = await _retry(
+    //
+    // null → the call never got through. false → it did, and the server told us
+    // the recording did not start (replay storage misconfigured, or LiveKit
+    // refused the egress). Both mean "assume there is no replay": the server
+    // used to swallow the second case entirely and answer success, so a host
+    // only discovered it after the show, with nothing to sell.
+    final egressStarted = await _retryValue(
       () => LivekitService.startShow(eventId: _eventId!),
     );
-    if (!anchored) {
+    if (egressStarted != true) {
+      if (mounted) setState(() => _notRecording = true);
       _toast(
-        'You’re live, but the recording didn’t start. There may be no replay '
+        'You’re live, but the recording didn’t start. There will be no replay '
         'for this show.',
       );
     }
@@ -2126,6 +2153,45 @@ class _CameraScreenState extends State<CameraScreen> {
           ),
         ),
 
+        // ── Not-recording badge — under the status badge ───────────────
+        // The Studio gets this as a stats chip; the phone layout needs its own,
+        // because most hosts run the show from a phone and a toast they scrolled
+        // past is the same as never being told. Sticky for the session: there is
+        // no recovering the recording mid-show.
+        if (_notRecording)
+          Positioned(
+            top: 48,
+            left: 16,
+            child: Container(
+              padding: const EdgeInsets.symmetric(
+                horizontal: NileSpacing.s8,
+                vertical: NileSpacing.s4,
+              ),
+              decoration: BoxDecoration(
+                color: NileColors.error,
+                borderRadius: BorderRadius.circular(NileRadius.pill),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(
+                    Icons.fiber_smart_record,
+                    size: 10,
+                    color: Colors.white,
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    'NOT RECORDING',
+                    style: NileTextStyles.labelSm().copyWith(
+                      color: Colors.white,
+                      letterSpacing: 1.5,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+
         // ── Show countdown — top centre, crew only ─────────────────────
         // Appears for the last 10 minutes of the purchased duration so the
         // host and operators can wrap up. Viewers never see this screen.
@@ -2481,6 +2547,7 @@ class _CameraScreenState extends State<CameraScreen> {
             .length,
         quality: _quality,
         audioSourceLabel: _audioSourceLabel,
+        notRecording: _notRecording,
       ),
       leading: IconButton(
         onPressed: _leaveStream,

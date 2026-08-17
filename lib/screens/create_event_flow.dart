@@ -814,11 +814,20 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
                       ],
                       decoration: const InputDecoration(
                         hintText: 'Unlimited',
+                        helperText:
+                            'Up to ${LivekitService.maxViewersPerEvent}',
                       ),
                       validator: (v) {
                         if (v == null || v.isEmpty) return null;
                         final n = int.tryParse(v);
                         if (n == null || n <= 0) return 'Invalid';
+                        // Selling past room capacity used to be accepted here
+                        // and only refused at the door, mid-show, with no
+                        // refund path. Caught at the point of sale instead —
+                        // and again by a CHECK constraint (migration 0105).
+                        if (n > LivekitService.maxViewersPerEvent) {
+                          return 'Max ${LivekitService.maxViewersPerEvent}';
+                        }
                         return null;
                       },
                     ),

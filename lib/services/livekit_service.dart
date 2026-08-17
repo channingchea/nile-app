@@ -7,6 +7,15 @@ import 'supabase_client.dart';
 /// user's JWT automatically — the Edge Function derives identity from that token,
 /// so we never send a userId/viewerId in the body.
 class LivekitService {
+  /// The most viewers one event can admit.
+  ///
+  /// A LiveKit room holds 1050 participants, but the host, camera operators, a
+  /// Stream Audio operator and the egress recorder all take slots — so the
+  /// number of seats we can actually honour is lower. Keep in step with
+  /// MAX_VIEWERS in supabase/functions/livekit/index.ts and the CHECK
+  /// constraint in migration 0105.
+  static const int maxViewersPerEvent = 1000;
+
   static Future<T> _invoke<T>(Map<String, dynamic> body) async {
     try {
       final res = await supabase.functions.invoke('livekit', body: body);
@@ -81,6 +90,18 @@ class LivekitService {
     'cameraIdentity': cameraIdentity,
   });
 
+  /// Host: report whether the replay recording actually started.
+  ///
+  /// Returns false when the egress never came up — misconfigured replay storage
+  /// or a LiveKit error. The show is live either way; what changes is that the
+  /// host finds out now instead of after the show, with nothing to sell.
+  /// Old servers omit the flag; absence is treated as "started", which is the
+  /// behaviour that shipped before this existed.
+  static Future<bool> startShow({required String eventId}) async {
+    final d = await _invoke<Map>({'action': 'start-show', 'eventId': eventId});
+    return d['egressStarted'] != false;
+  }
+
   /// Host: disconnect one participant from the live room.
   ///
   /// LiveKit drops them immediately. Whether they can rejoin is decided by the
@@ -103,11 +124,6 @@ class LivekitService {
     required bool ready,
   }) => _invoke<Map>({'action': 'set-ready', 'eventId': eventId, 'ready': ready});
 
-  /// Host: stamp the show's wall-clock anchor (showStartedAt) into room metadata.
-  /// Call alongside EventService.goLive when Start Show is pressed.
-  static Future<void> startShow({required String eventId}) =>
-      _invoke<Map>({'action': 'start-show', 'eventId': eventId});
-
   /// Host: stop the replay egress so the recording finalizes. Call when ending
   /// the show. Best-effort — the live show already ended via EventService.end,
   /// and the server-side auto-end + stuck-row sweep cover any missed call.
@@ -115,8 +131,15 @@ class LivekitService {
       _invoke<Map>({'action': 'stop-egress', 'eventId': eventId});
 
   /// Write the true live viewer count (from LiveKit participants) into the event.
-  /// Server-authoritative and self-healing — replaces the drift-prone
-  /// increment/decrement pair. Call on join and on a light interval while viewing.
+  ///
+  /// ⚠️ DEPRECATED for new call sites, and no longer called by the viewer.
+  /// Having every viewer drive this on a timer is what made it an O(N²) storm:
+  /// N clients each triggering a recount and a write to one hot events row,
+  /// which realtime then fanned back out to all N of them. The `livekit-sweep`
+  /// cron does it once per live event now and clients simply read the row.
+  ///
+  /// Kept because builds shipped before that sweep still call it, and it is
+  /// harmless at their scale.
   static Future<void> reconcileViewers({
     required String eventId,
     bool excludeSelf = false,

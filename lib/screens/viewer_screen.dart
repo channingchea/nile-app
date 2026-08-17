@@ -104,7 +104,6 @@ class _ViewerScreenState extends State<ViewerScreen>
   // Event status drives the Lobby: 'soundcheck' → Lobby, 'live' → stream.
   String? _eventStatus;
   ResilientChannel? _eventConn;
-  bool _hasIncrementedViewerCount = false;
 
   // Pre-Show lobby (0079): event context for the upgraded lobby — cover image,
   // countdown to showtime, host row — plus the sponsor creative when the event
@@ -123,11 +122,6 @@ class _ViewerScreenState extends State<ViewerScreen>
   bool _lobbyImpressionLogged = false;
   Timer? _lobbyTicker; // 1s countdown refresh while the lobby is showing
 
-  // Periodic server-authoritative viewer-count reconcile. Any watching client
-  // re-derives the true count from LiveKit participants, so the number self-heals
-  // from killed-app drift instead of relying on matched increment/decrement.
-  Timer? _viewerReconcileTimer;
-
   // Live chat (ephemeral broadcast). Capped in-memory buffer so a session feels
   // populated without persisting anything server-side.
   static const int _maxChatMessages = 200;
@@ -137,6 +131,10 @@ class _ViewerScreenState extends State<ViewerScreen>
   /// have no INSERT grant on it, which is what makes those messages
   /// unforgeable — see migration 0099.
   RealtimeChannel? _systemChannel;
+
+  /// True once the chat channel has failed to join. Surfaced in the chat pane
+  /// rather than swallowed — see [_onChatStatus].
+  bool _chatUnavailable = false;
   final List<ChatMessage> _chatMessages = [];
   final _chatController = TextEditingController();
   final _chatScrollController = ScrollController();
@@ -201,20 +199,13 @@ class _ViewerScreenState extends State<ViewerScreen>
 
   void _decrementAndCleanup() {
     _teardownLobby();
-    _viewerReconcileTimer?.cancel();
-    _viewerReconcileTimer = null;
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
     _clearReconnect();
-    if (_hasIncrementedViewerCount && _streamEventId != null) {
-      // Reconcile excluding ourselves so the count drops even before LiveKit
-      // registers our disconnect (covers the last-viewer-leaves case).
-      LivekitService.reconcileViewers(
-        eventId: _streamEventId!,
-        excludeSelf: true,
-      ).catchError((_) {});
-      _hasIncrementedViewerCount = false;
-    }
+    // No recount on the way out either. It existed to make the count settle
+    // immediately when the last viewer left, but at the end of a real show
+    // everyone leaves at once — which is precisely when a per-client write to
+    // one row is worst. The sweep settles it within the minute.
     _eventConn?.dispose();
     _eventConn = null;
     _chatChannel?.unsubscribe();
@@ -534,6 +525,22 @@ class _ViewerScreenState extends State<ViewerScreen>
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
 
+  /// Chat's private channel refused us, or never answered.
+  ///
+  /// Almost always an authorization failure: the Realtime policy is missing or
+  /// this viewer genuinely isn't entitled to this room's chat. Either way the
+  /// old behaviour — render an empty, permanently silent chat — was the worst
+  /// possible one, because it is indistinguishable from a room where nobody has
+  /// said anything yet. Say it plainly instead.
+  void _onChatStatus(RealtimeSubscribeStatus status, Object? error) {
+    if (!mounted) return;
+    final failed =
+        status == RealtimeSubscribeStatus.channelError ||
+        status == RealtimeSubscribeStatus.timedOut;
+    if (failed == _chatUnavailable) return;
+    setState(() => _chatUnavailable = failed);
+  }
+
   // ── Realtime callback ─────────────────────────────────────────────────────
 
   void _onRealtimeUpdate(Map<String, dynamic> record) {
@@ -679,14 +686,13 @@ class _ViewerScreenState extends State<ViewerScreen>
         }
       }
 
-      // Reconcile the viewer count from LiveKit now, then on a light interval —
-      // authoritative and self-healing (replaces the drift-prone increment).
-      LivekitService.reconcileViewers(eventId: eventId).catchError((_) {});
-      _viewerReconcileTimer?.cancel();
-      _viewerReconcileTimer = Timer.periodic(
-        const Duration(seconds: 30),
-        (_) => LivekitService.reconcileViewers(eventId: eventId).catchError((_) {}),
-      );
+      // The viewer count is now reconciled server-side, once per live event, by
+      // the livekit-sweep cron. This used to be a 30s timer per viewer: every
+      // client asking the server to recount the room, each recount writing the
+      // same hot events row, and realtime fanning every write back out to every
+      // viewer — thousands of messages a second at scale for a number that
+      // barely moves, with lock contention peaking exactly at the busiest
+      // moment of the show. We're already subscribed to the row; just read it.
 
       final eventConn = ResilientChannel(
         onResync: () => _resyncEventState(eventId),
@@ -699,10 +705,16 @@ class _ViewerScreenState extends State<ViewerScreen>
 
       // Open the ephemeral chat channel and resolve our username once for
       // outgoing messages (broadcast carries no profile join).
+      // Chat joins a *private* channel, so the join is authorized by the
+      // Realtime policy in migration 0104 rather than by knowing the slug. A
+      // refused join looks exactly like a quiet room from here — nobody is
+      // talking — which is how a broken policy could sit unnoticed. Watch the
+      // subscribe status and say so instead.
       final chatChannel = ChatService.subscribe(
         eventId,
         _onChatMessage,
         onReaction: _onReaction,
+        onStatus: _onChatStatus,
       );
       // Server-authored announcements (tips) arrive on their own read-only
       // topic — see ChatService.subscribeSystem.
@@ -729,7 +741,6 @@ class _ViewerScreenState extends State<ViewerScreen>
         _hostUsername = (hostProfile?['display_name'] ??
             hostProfile?['username']) as String?;
         _hostAvatarUrl = hostProfile?['avatar_url'] as String?;
-        _hasIncrementedViewerCount = true;
         _eventConn = eventConn;
         _chatChannel = chatChannel;
         _state = ViewerState.watching;
@@ -1900,6 +1911,22 @@ class _ViewerScreenState extends State<ViewerScreen>
   }
 
   Widget _buildChatList() {
+    // Distinguishing "nobody has spoken" from "we were never let in" is the
+    // whole point of tracking the subscribe status — the two look identical.
+    if (_chatUnavailable && _chatMessages.isEmpty) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(NileSpacing.s16),
+          child: Text(
+            'Chat isn’t available for this show.',
+            textAlign: TextAlign.center,
+            style: NileTextStyles.bodySm().copyWith(
+              color: NileColors.txtTertiary,
+            ),
+          ),
+        ),
+      );
+    }
     if (_chatMessages.isEmpty) {
       return Center(
         child: Text(

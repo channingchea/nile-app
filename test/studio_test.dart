@@ -222,6 +222,33 @@ void main() {
   });
 
   group('stats row', () {
+    // A failed replay egress used to be a toast at Start Show and nothing else,
+    // on a server that reported success anyway. The chip has to be persistent:
+    // there is no recovering the recording mid-show, and the host otherwise
+    // finds out when they go to sell a replay that does not exist.
+    testWidgets('a failed recording is stated, and only when it failed', (
+      tester,
+    ) async {
+      Widget studio({required bool notRecording}) => _wrap(
+        NileStudio(
+          sources: [_source('camera-1')],
+          selectedIdentity: 'camera-1',
+          onSelectSource: (_) {},
+          selfIdentity: null,
+          stats: NileStudioStats(isLive: true, notRecording: notRecording),
+          controls: const SizedBox.shrink(),
+          showChatColumn: false,
+        ),
+      );
+
+      await tester.pumpWidget(studio(notRecording: false));
+      expect(find.text('NOT RECORDING'), findsNothing);
+
+      await tester.pumpWidget(studio(notRecording: true));
+      expect(find.text('NOT RECORDING'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    });
+
     testWidgets('reports the show state a host asks about', (tester) async {
       await tester.pumpWidget(
         _wrap(

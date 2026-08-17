@@ -78,10 +78,66 @@ const REPLAYS_S3_ACCESS_KEY = Deno.env.get("REPLAYS_S3_ACCESS_KEY") ?? "";
 const REPLAYS_S3_SECRET_KEY = Deno.env.get("REPLAYS_S3_SECRET_KEY") ?? "";
 const REPLAYS_BUCKET = "replays";
 
+// Signed replay URLs are valid for the recording's own length plus slack, held
+// between a floor and the old flat ceiling. See replayUrl() for the reasoning.
+const REPLAY_URL_SLACK_SECONDS = 10 * 60;
+const REPLAY_URL_MIN_TTL_SECONDS = 10 * 60;
+const REPLAY_URL_MAX_TTL_SECONDS = 4 * 60 * 60;
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function roomNameFor(eventId: string) {
   return `nile-event-${eventId}`;
+}
+
+// What a room actually holds, and how much of that is not for sale. The host,
+// every camera operator, a Stream Audio operator and the egress recorder all
+// occupy participant slots, so the number of tickets we can honour is strictly
+// less than the room ceiling. MAX_VIEWERS is the number the DB CHECK on
+// events.ticket_limit and the create-event form both enforce (migration 0105).
+const ROOM_CAPACITY = 1050;
+const CREW_HEADROOM = 50;
+const MAX_VIEWERS = ROOM_CAPACITY - CREW_HEADROOM;
+
+/**
+ * Make sure the room exists before a publisher joins, sized to what this event
+ * actually sold.
+ *
+ * The room used to be created exactly once, from the create-event flow — often
+ * days before the show — and `emptyTimeout` then tore it down long before
+ * anyone arrived. Shows still worked, because LiveKit auto-creates a room when
+ * the first valid token joins, but it comes up with LiveKit's defaults: the
+ * maxParticipants ceiling set at creation was, in practice, almost never the
+ * one in force. Calling this on every publisher mint is what makes the cap real.
+ *
+ * Safe to call repeatedly, including mid-show: LiveKit's CreateRoom returns an
+ * existing room untouched rather than reconfiguring it, so this cannot clobber
+ * the `showStartedAt` anchor that start-show writes into the same metadata.
+ */
+async function ensureRoom(slug: string, admin: any): Promise<void> {
+  try {
+    const { data: ev } = await admin
+      .from("events")
+      .select("title, ticket_limit")
+      .eq("livekit_room", slug)
+      .maybeSingle();
+    const limit = (ev?.ticket_limit as number | null) ?? null;
+    await roomService.createRoom({
+      name: roomNameFor(slug),
+      emptyTimeout: 1800, // close after 30 min idle
+      // A capped event gets its seats plus crew headroom; an uncapped one gets
+      // the whole room. Either way LiveKit enforces the ceiling, not just our
+      // own seat counting.
+      maxParticipants: limit != null
+        ? Math.min(ROOM_CAPACITY, limit + CREW_HEADROOM)
+        : ROOM_CAPACITY,
+      metadata: JSON.stringify({ eventName: ev?.title ?? "", eventId: slug }),
+    });
+  } catch (err) {
+    // Never block a publisher over this. Without it LiveKit auto-creates the
+    // room on join, which is exactly the behaviour that shipped before.
+    log("warn", { action: "ensure-room", slug, error: String(err) });
+  }
 }
 
 // How long a freshly minted token may be used to JOIN, in seconds. The SDK
@@ -354,11 +410,15 @@ async function createRoom(body: any, userId: string, admin: any, json: Json): Pr
     return json({ error: "Too many events created — try again later" }, 429);
   }
 
+  // The events row does not exist yet (see the note above), so there is no
+  // ticket_limit to size against — take the whole room for now. ensureRoom()
+  // applies the real per-event ceiling when the first publisher joins, which is
+  // also the point at which this room has usually expired and been recreated.
   const roomName = roomNameFor(eventId);
   await roomService.createRoom({
     name: roomName,
     emptyTimeout: 1800, // close after 30 min idle
-    maxParticipants: 1050,
+    maxParticipants: ROOM_CAPACITY,
     metadata: JSON.stringify({ eventName, eventId }),
   });
 
@@ -374,6 +434,10 @@ async function cameraToken(body: any, userId: string, admin: any, json: Json): P
 
   const gate = await requireOperator(eventId, userId, admin, json);
   if (gate instanceof Response) return gate;
+
+  // Publishers are the first to arrive, so this is where the room gets built
+  // with the right ceiling for this event.
+  await ensureRoom(eventId, admin);
 
   const roomName = roomNameFor(eventId);
 
@@ -461,6 +525,10 @@ async function audioToken(body: any, userId: string, admin: any, json: Json): Pr
 
   const gate = await requireOperator(eventId, userId, admin, json);
   if (gate instanceof Response) return gate;
+
+  // Same reason as camera-token: a Stream Audio operator may be the first
+  // publisher in, so the room has to be built correctly here too.
+  await ensureRoom(eventId, admin);
 
   const roomName = roomNameFor(eventId);
   const token = await buildToken({
@@ -630,8 +698,17 @@ async function startShow(body: any, userId: string, admin: any, json: Json): Pro
     ? (meta.showStartedAt as number)
     : null;
   if (existingAnchor !== null) {
+    // Report the real recording state even on the no-op path, so a host who
+    // rejoined after a drop still sees the "not recording" warning if the
+    // egress never came up on the first call.
+    const { data: recording } = await admin
+      .from("replays")
+      .select("id")
+      .eq("event_id", gate.event.id)
+      .eq("status", "recording")
+      .maybeSingle();
     log("info", { action: "start-show", note: "already started; no-op", eventId });
-    return json({ success: true, alreadyStarted: true });
+    return json({ success: true, alreadyStarted: true, egressStarted: !!recording });
   }
 
   const startedAt = Date.now();
@@ -640,22 +717,29 @@ async function startShow(body: any, userId: string, admin: any, json: Json): Pro
     JSON.stringify({ ...meta, showStartedAt: startedAt }),
   );
 
-  // Kick off the composited replay recording. Non-fatal: a failed egress must
-  // never block the live show, so we log and continue. Guarded against a
-  // duplicate row in case an anchor write was lost but a recording exists.
+  // Kick off the composited replay recording. Still non-fatal — a failed egress
+  // must never block the live show — but no longer silent. This used to swallow
+  // both the "storage isn't configured" case and any start error, then return
+  // {success: true} regardless, so a host learned there was no recording after
+  // the show, with nothing to sell. `egressStarted` is what the Studio's
+  // "not recording" warning is driven from.
   const { data: existingReplay } = await admin
     .from("replays")
     .select("id")
     .eq("event_id", gate.event.id)
     .eq("status", "recording")
     .maybeSingle();
+
+  let egressStarted = true;
   if (!existingReplay) {
-    await startReplayEgress(gate.event.id, roomName, startedAt, admin).catch((err) =>
-      log("error", { reqId: "-", action: "start-egress", error: String(err) }),
-    );
+    egressStarted = await startReplayEgress(gate.event.id, roomName, startedAt, admin)
+      .catch((err) => {
+        log("error", { reqId: "-", action: "start-egress", error: String(err) });
+        return false;
+      });
   }
 
-  return json({ success: true });
+  return json({ success: true, egressStarted });
 }
 
 // Start Room Composite Egress → an MP4 in the 'replays' bucket, and record the
@@ -665,10 +749,10 @@ async function startReplayEgress(
   roomName: string,
   startedAt: number,
   admin: any,
-): Promise<void> {
+): Promise<boolean> {
   if (!REPLAYS_S3_ENDPOINT || !REPLAYS_S3_ACCESS_KEY) {
     log("warn", { action: "start-egress", note: "replay storage not configured; skipping" });
-    return;
+    return false;
   }
 
   // Object path inside the bucket: <eventPk>/<startedAt>.mp4
@@ -704,6 +788,8 @@ async function startReplayEgress(
     playback_path: filepath,
     started_at: new Date(startedAt).toISOString(),
   });
+
+  return true;
 }
 
 // stop-egress — host ends the show; stop the active egress so the file
@@ -934,13 +1020,34 @@ async function replayUrl(body: any, userId: string, admin: any, json: Json): Pro
     .maybeSingle();
   if (!replay?.playback_path) return json({ error: "No replay available" }, 404);
 
-  // Signed URL valid for 4h — long enough to watch, short enough to not leak.
+  // A Storage signed URL carries no identity: whoever holds the string can
+  // fetch the file. A flat four hours meant every replay — a ten-minute clip
+  // included — was a shareable download link for the rest of the afternoon.
+  //
+  // Size the window to the recording instead. The player streams the file in
+  // range requests for as long as someone is watching, so the URL has to
+  // outlive the content or playback dies partway through; duration + 10 minutes
+  // does that with room for pausing, while a typical 20-minute service now gets
+  // a 30-minute window instead of a 4-hour one.
+  //
+  // ⚠️ This shortens the exposure, it does not remove it. The URL is still a
+  // bearer token, so anyone it is forwarded to inside the window can fetch the
+  // whole file. Binding playback to a user means proxying it through an
+  // authenticated endpoint — a real piece of work, tracked separately.
+  const durationMs = (replay.duration_ms as number | null) ?? null;
+  const ttl = Math.min(
+    REPLAY_URL_MAX_TTL_SECONDS,
+    Math.max(
+      REPLAY_URL_MIN_TTL_SECONDS,
+      Math.ceil((durationMs ?? 0) / 1000) + REPLAY_URL_SLACK_SECONDS,
+    ),
+  );
   const { data: signed, error: signErr } = await admin.storage
     .from(REPLAYS_BUCKET)
-    .createSignedUrl(replay.playback_path, 60 * 60 * 4);
+    .createSignedUrl(replay.playback_path, ttl);
   if (signErr || !signed) return json({ error: "Could not sign replay URL" }, 500);
 
-  return json({ url: signed.signedUrl, durationMs: replay.duration_ms ?? null });
+  return json({ url: signed.signedUrl, durationMs, expiresInSeconds: ttl });
 }
 
 // viewer-token (was POST /api/viewer-token) — JWT-derived identity + mode seam
