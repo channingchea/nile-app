@@ -22,58 +22,15 @@
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import Stripe from "https://esm.sh/stripe@14?target=deno";
-import { RoomServiceClient } from "https://esm.sh/livekit-server-sdk@2.9.7?target=deno";
 import { corsHeaders as corsHeadersFor } from "../_shared/cors.ts";
+// Shared with stripe-webhook's chargeback path — a revoked ticket has to leave
+// the room whether the money went back voluntarily or was pulled.
+import { ejectFromLiveRoom } from "../_shared/livekit_eject.ts";
 
 const stripe = new Stripe(Deno.env.get("STRIPE_SECRET_KEY")!, {
   apiVersion: "2023-10-16",
   httpClient: Stripe.createFetchHttpClient(),
 });
-
-// Same LiveKit credentials the `livekit` function uses — Supabase secrets are
-// project-wide, so nothing new needs setting.
-const LIVEKIT_URL = Deno.env.get("LIVEKIT_URL") ?? "";
-const roomService = LIVEKIT_URL
-  ? new RoomServiceClient(
-    LIVEKIT_URL.replace(/^wss:/, "https:").replace(/^ws:/, "http:"),
-    Deno.env.get("LIVEKIT_API_KEY")!,
-    Deno.env.get("LIVEKIT_API_SECRET")!,
-  )
-  : null;
-
-/**
- * Disconnect a refunded buyer from the show they no longer hold a ticket to.
- *
- * The ticket gate runs once, when the viewer token is minted, so refunding
- * someone mid-show took their money back and left them watching to the end.
- * Their identity carries a per-connection suffix and they may be on more than
- * one device, so match on the userId in the participant metadata rather than
- * trying to reconstruct an identity string.
- *
- * Best-effort throughout: the refund itself has already succeeded by the time
- * this runs, and failing the request over a room that is not up would tell the
- * host their refund broke when it did not.
- */
-async function ejectFromLiveRoom(livekitRoom: string | null, buyerId: string) {
-  if (!roomService || !livekitRoom || !buyerId) return;
-  try {
-    const roomName = `nile-event-${livekitRoom}`;
-    const participants = await roomService.listParticipants(roomName);
-    await Promise.all(
-      participants
-        .filter((p) => {
-          try {
-            return JSON.parse(p.metadata || "{}").userId === buyerId;
-          } catch {
-            return false;
-          }
-        })
-        .map((p) => roomService!.removeParticipant(roomName, p.identity)),
-    );
-  } catch (err) {
-    console.error("refund-ticket: could not eject refunded viewer", String(err));
-  }
-}
 
 serve(async (req) => {
   // Per-request CORS (fix #4): allowlisted origins only — see _shared/cors.ts.
@@ -157,6 +114,7 @@ serve(async (req) => {
       await ejectFromLiveRoom(
         event.livekit_room ?? null,
         ticket.buyer_id as string,
+        "refund-ticket",
       );
     }
 

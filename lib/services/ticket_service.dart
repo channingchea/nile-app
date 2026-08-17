@@ -173,7 +173,7 @@ class TicketService {
           'profiles!tickets_buyer_id_fkey(id, username, avatar_url)',
         )
         .eq('event_id', eventId)
-        .inFilter('status', ['paid', 'refunded']);
+        .inFilter('status', ['paid', 'refunded', 'disputed']);
     if (cursor != null) b = b.lt('created_at', cursor);
     final rows = await b.order('created_at', ascending: false).limit(kPageSize);
 
@@ -210,7 +210,7 @@ class Attendee {
   final String username;
   final String? avatarUrl;
   final int amountCents;
-  final String status; // 'paid' | 'refunded'
+  final String status; // 'paid' | 'refunded' | 'disputed'
   final DateTime purchasedAt;
 
   const Attendee({
@@ -224,6 +224,15 @@ class Attendee {
   });
 
   bool get isRefunded => status == 'refunded';
+
+  /// A chargeback: the buyer's bank pulled the money back. Access is revoked
+  /// exactly like a refund, but the host can't refund it again and it isn't
+  /// their decision — so it reads differently on screen.
+  bool get isDisputed => status == 'disputed';
+
+  /// Not a live entitlement any more, whichever way it ended. Head-counts,
+  /// revenue, and the refund action all key on this rather than on 'refunded'.
+  bool get isVoid => status != 'paid';
 
   factory Attendee.fromJson(Map<String, dynamic> j) {
     final p = (j['profiles'] as Map<String, dynamic>?) ?? const {};

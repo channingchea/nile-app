@@ -14,7 +14,19 @@
 //
 // In Stripe Dashboard → Webhooks → Add endpoint:
 //   URL: https://<project>.supabase.co/functions/v1/stripe-webhook
-//   Events: checkout.session.completed, charge.refunded
+//   Events: checkout.session.completed, charge.refunded,
+//           charge.dispute.created, charge.dispute.closed,
+//           checkout.session.expired, checkout.session.async_payment_failed
+//
+// ── Delivery semantics (review #19) ─────────────────────────────────────────
+// Stripe delivers at LEAST once. Every event is claimed against
+// stripe_webhook_events (migration 0112) before any work happens and marked
+// processed after, so a redelivery of an event we already finished is acked and
+// dropped. This is not belt-and-braces on top of the per-handler status guards:
+// onSponsorshipPaymentRecovered interprets "my status guard matched nothing" as
+// "the lobby slot is gone" and REFUNDS, so on a replay it clawed back a live
+// sponsorship and reversed the host's transfer. The dedupe plus the re-read in
+// that function are the two halves of that fix.
 
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
@@ -23,6 +35,7 @@ import {
   declineSponsorshipSiblings,
   notifyHostOfferCleared,
 } from "../_shared/sponsorship.ts";
+import { ejectFromLiveRoom } from "../_shared/livekit_eject.ts";
 
 const stripe = new Stripe(Deno.env.get("STRIPE_SECRET_KEY")!, {
   apiVersion: "2023-10-16",
@@ -33,6 +46,11 @@ const adminClient = createClient(
   Deno.env.get("SUPABASE_URL")!,
   Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
 );
+
+const ok = (extra: Record<string, unknown> = {}) =>
+  new Response(JSON.stringify({ received: true, ...extra }), {
+    headers: { "Content-Type": "application/json" },
+  });
 
 serve(async (req) => {
   const body = await req.text();
@@ -46,6 +64,55 @@ serve(async (req) => {
     return new Response(`Webhook error: ${err}`, { status: 400 });
   }
 
+  // ── dedupe gate (0112) ─────────────────────────────────────────────────────
+  // Claim before any work. A claim that is already finished is a replay: ack it
+  // and stop. A claim held by a delivery still in flight gets a 5xx so Stripe
+  // redelivers rather than considering the event handled by a request that may
+  // yet fail. A claim RPC that errors is also a 5xx — if the database is
+  // unreachable, nothing downstream would have worked anyway.
+  const { data: claim, error: claimErr } = await adminClient.rpc(
+    "claim_stripe_webhook_event",
+    { p_event_id: event.id, p_type: event.type },
+  );
+  if (claimErr) {
+    console.error("claim_stripe_webhook_event failed:", claimErr.message);
+    return new Response(JSON.stringify({ error: "claim failed" }), { status: 500 });
+  }
+  if (claim === "duplicate") {
+    console.log(JSON.stringify({
+      level: "info", fn: "stripe-webhook", note: "duplicate delivery ignored",
+      event: event.id, type: event.type,
+    }));
+    return ok({ duplicate: true });
+  }
+  if (claim === "in_flight") {
+    return new Response(JSON.stringify({ error: "already processing" }), { status: 409 });
+  }
+
+  // Any throw leaves the claim unfinished, which is deliberate: an unfinished
+  // claim is retryable (0112 reclaims it after 5 minutes) where a completed one
+  // is not.
+  let res: Response;
+  try {
+    res = await handleEvent(event);
+  } catch (err) {
+    console.error("unhandled webhook error:", event.id, event.type, err);
+    return new Response(JSON.stringify({ error: String(err) }), { status: 500 });
+  }
+
+  // Only a success closes the claim. The ticket branch returns 500 on purpose
+  // when settlement fails — the buyer has paid and holds nothing until it
+  // succeeds — and that retry has to stay live.
+  if (res.status < 300) {
+    const { error } = await adminClient.rpc("complete_stripe_webhook_event", {
+      p_event_id: event.id,
+    });
+    if (error) console.error("complete_stripe_webhook_event failed:", error.message);
+  }
+  return res;
+});
+
+async function handleEvent(event: Stripe.Event): Promise<Response> {
   if (event.type === "checkout.session.completed") {
     const session = event.data.object as Stripe.Checkout.Session;
     const piId = (session.payment_intent as string) ?? session.id;
@@ -242,10 +309,112 @@ serve(async (req) => {
     }
   }
 
-  return new Response(JSON.stringify({ received: true }), {
-    headers: { "Content-Type": "application/json" },
-  });
-});
+  // ── chargebacks (review #18) ───────────────────────────────────────────────
+  // A dispute pulls the money AND a non-refundable fee out of the platform
+  // balance the moment it is filed. Until now nothing here noticed: the buyer
+  // kept live + replay access, the sponsor kept serving in the lobby, the
+  // advertiser kept their trusted tier, and the host kept a destination
+  // transfer funded by money that had already left. open_payment_dispute
+  // (migration 0113) resolves the charge to whatever it bought, revokes it, and
+  // records the exposure; everything below is the part that lives outside
+  // Postgres.
+  if (event.type === "charge.dispute.created") {
+    const dispute = event.data.object as Stripe.Dispute;
+    const { data: result, error } = await adminClient.rpc("open_payment_dispute", {
+      p_dispute_id: dispute.id,
+      p_charge_id: idOf(dispute.charge),
+      p_payment_intent: idOf(dispute.payment_intent),
+      p_amount_cents: dispute.amount ?? 0,
+      p_reason: dispute.reason ?? null,
+      p_status: dispute.status,
+    });
+    if (error) {
+      // Retry rather than lose it: a dispute nobody records is a dispute
+      // nobody answers, and the response window is days.
+      console.error("open_payment_dispute failed:", dispute.id, error.message);
+      return new Response(JSON.stringify({ error: error.message }), { status: 500 });
+    }
+
+    // deno-lint-ignore no-explicit-any
+    const r = (result ?? {}) as any;
+    if (!r.duplicate) {
+      // Same posture as a refund mid-show: revoking access is only real if the
+      // viewer actually leaves. The gate runs once, at token mint.
+      if (r.kind === "ticket" && r.event_live) {
+        await ejectFromLiveRoom(r.livekit_room ?? null, r.payer_id ?? null, "stripe-webhook");
+      }
+      console.log(JSON.stringify({
+        level: "warn", fn: "stripe-webhook", note: "dispute opened",
+        dispute: dispute.id, kind: r.kind, subject: r.subject_id,
+        revoked: r.revoked, exposure_cents: r.exposure_cents,
+        amount_cents: dispute.amount, reason: dispute.reason,
+      }));
+      await notifyAdminDispute(dispute, r, "opened");
+    }
+  }
+
+  if (event.type === "charge.dispute.closed") {
+    const dispute = event.data.object as Stripe.Dispute;
+    // Stripe's closing statuses are won / lost / warning_closed. Only the first
+    // two decide anything; an inquiry that closed without escalating leaves the
+    // ledger row closed with no outcome.
+    const outcome = dispute.status === "won" || dispute.status === "lost"
+      ? dispute.status
+      : null;
+    const { data: result, error } = await adminClient.rpc("close_payment_dispute", {
+      p_dispute_id: dispute.id,
+      p_status: dispute.status,
+      p_outcome: outcome,
+    });
+    if (error) {
+      console.error("close_payment_dispute failed:", dispute.id, error.message);
+      return new Response(JSON.stringify({ error: error.message }), { status: 500 });
+    }
+    console.log(JSON.stringify({
+      level: "info", fn: "stripe-webhook", note: "dispute closed",
+      dispute: dispute.id, status: dispute.status, result,
+    }));
+    // deno-lint-ignore no-explicit-any
+    await notifyAdminDispute(dispute, (result ?? {}) as any, "closed");
+  }
+
+  // ── checkout died without paying ───────────────────────────────────────────
+  // expire-abandoned-ticket-checkouts (cron, hourly) already sweeps these up,
+  // but a held seat is the difference between "sold out" and a sale, so free it
+  // the moment Stripe says the session is dead rather than up to an hour later.
+  if (
+    event.type === "checkout.session.expired" ||
+    event.type === "checkout.session.async_payment_failed"
+  ) {
+    const session = event.data.object as Stripe.Checkout.Session;
+    const { data: released } = await adminClient
+      .from("ticket_checkouts")
+      .update({
+        status: "abandoned",
+        settled_at: new Date().toISOString(),
+        note: `stripe ${event.type}`,
+      })
+      .eq("session_id", session.id)
+      .eq("status", "pending")
+      .select("id")
+      .maybeSingle();
+    if (released) {
+      console.log(JSON.stringify({
+        level: "info", fn: "stripe-webhook", note: "seat released",
+        session: session.id, type: event.type,
+      }));
+    }
+  }
+
+  return ok();
+}
+
+// Stripe hands these back as either a bare id or an expanded object.
+function idOf(v: unknown): string | null {
+  if (typeof v === "string") return v;
+  // deno-lint-ignore no-explicit-any
+  return (v as any)?.id ?? null;
+}
 
 // A payment_pending sponsorship recovered: the advertiser completed the hosted
 // Checkout Session we created when their card soft-declined off-session. Money
@@ -277,11 +446,41 @@ async function onSponsorshipPaymentRecovered(
     .select("id, event_id, events(title)")
     .maybeSingle();
 
-  // No row means one of two things, and both are "this slot is gone": the
-  // offer left payment_pending (expired by the sweep, declined because a
-  // sibling was accepted), or the partial unique index rejected the write
-  // because another campaign is already the active sponsor.
+  // "No row" used to be read as one thing — this slot is gone — and answered
+  // with a refund. It is actually three things, and only two of them are
+  // that. Re-read before touching the money (review #19):
+  //
+  //   1. THIS payment already landed on an earlier delivery of this same
+  //      event. Refunding here reverses a live sponsorship and claws back the
+  //      host's transfer while the ad keeps serving. The PI on the row is the
+  //      tell — if it is ours, the money is where it belongs.
+  //   2. The offer left payment_pending (swept as expired, or declined because
+  //      a sibling was accepted).
+  //   3. The partial unique index rejected the write because another campaign
+  //      is already this event's active sponsor.
+  //
+  // 0112's dedupe catches most of case 1 on its own. This check also covers
+  // the case the dedupe cannot see: two DIFFERENT Stripe events for the same
+  // recovered payment.
   if (error || !recovered) {
+    const { data: current } = await adminClient
+      .from("ad_campaigns")
+      .select("id, status, stripe_payment_intent_id")
+      .eq("id", campaignId)
+      .maybeSingle();
+
+    if (current?.stripe_payment_intent_id === piId) {
+      console.log(JSON.stringify({
+        level: "info",
+        fn: "stripe-webhook",
+        note: "sponsorship recovery already applied — not refunding",
+        campaign_id: campaignId,
+        payment_intent: piId,
+        status: current?.status ?? null,
+      }));
+      return;
+    }
+
     console.error(JSON.stringify({
       level: "error",
       fn: "stripe-webhook",
@@ -431,6 +630,64 @@ async function announceTip(admin: any, tip: any) {
     if (!res.ok) console.error("tip announce failed:", res.status, await res.text());
   } catch (err) {
     console.error("tip announce error:", err);
+  }
+}
+
+// Admin alert: a chargeback was filed, or one closed. Same env-gated Klaviyo
+// posture as notifyAdminNeedsReview — no-ops when KLAVIYO_API_KEY or
+// ADMIN_ALERT_EMAIL is unset, and never throws. This one matters more than the
+// review alert: the money is already gone, the evidence window is measured in
+// days, and Stripe's own email goes to whoever owns the Stripe login rather
+// than to whoever can pull the ticket, the stream logs, and the chat record.
+// unique_id keys on dispute id + phase, so redelivery can't double-send.
+async function notifyAdminDispute(
+  dispute: Stripe.Dispute,
+  // deno-lint-ignore no-explicit-any
+  result: any,
+  phase: "opened" | "closed",
+) {
+  const key = Deno.env.get("KLAVIYO_API_KEY");
+  const adminEmail = Deno.env.get("ADMIN_ALERT_EMAIL");
+  if (!key || !adminEmail) return;
+  const payload = {
+    data: {
+      type: "event",
+      attributes: {
+        unique_id: `${dispute.id}:${phase}`,
+        properties: {
+          phase,
+          dispute_id: dispute.id,
+          kind: result?.kind ?? "unknown",
+          subject_id: result?.subject_id ?? null,
+          host_id: result?.host_id ?? null,
+          amount_cents: dispute.amount ?? 0,
+          exposure_cents: result?.exposure_cents ?? 0,
+          reason: dispute.reason ?? null,
+          status: dispute.status,
+          revoked: result?.revoked ?? false,
+          restored: result?.restored ?? false,
+          due_by: dispute.evidence_details?.due_by ?? null,
+          stripe_url: `https://dashboard.stripe.com/disputes/${dispute.id}`,
+        },
+        metric: { data: { type: "metric", attributes: { name: "Nile Payment Dispute" } } },
+        profile: { data: { type: "profile", attributes: { email: adminEmail } } },
+      },
+    },
+  };
+  try {
+    const res = await fetch("https://a.klaviyo.com/api/events/", {
+      method: "POST",
+      headers: {
+        Authorization: `Klaviyo-API-Key ${key}`,
+        revision: "2024-10-15",
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) console.error("dispute alert failed:", res.status, await res.text());
+  } catch (err) {
+    console.error("dispute alert error:", err);
   }
 }
 

@@ -263,7 +263,7 @@ class _TicketCard extends StatelessWidget {
 }
 
 class _StatusBadge extends StatelessWidget {
-  final String status; // pending | paid | refunded
+  final String status; // pending | paid | refunded | disputed
   const _StatusBadge({required this.status});
 
   @override
@@ -278,6 +278,12 @@ class _StatusBadge extends StatelessWidget {
       case 'refunded':
         color = NileColors.txtTertiary;
         label = 'Refunded';
+        break;
+      case 'disputed':
+        // The buyer's own bank pulled this back, so they know why. Saying
+        // "Refunded" would be a lie and "Pending" would imply it's coming.
+        color = NileColors.coral;
+        label = 'Charged back';
         break;
       default:
         color = NileColors.warning;

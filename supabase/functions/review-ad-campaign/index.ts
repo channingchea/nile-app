@@ -115,12 +115,23 @@ serve(async (req) => {
 
     const { data: c } = await admin
       .from("ad_campaigns")
-      .select("id, name, status, starts_at, ends_at, stripe_payment_intent_id, placement, split_status, budget_cents, advertiser_account_id, advertiser_accounts(name, contact_email), ad_creatives(headline), events(title, host_id, sponsorship_auto_accept, sponsorship_min_offer_cents)")
+      .select("id, name, status, starts_at, ends_at, stripe_payment_intent_id, placement, split_status, budget_cents, disputed_at, advertiser_account_id, advertiser_accounts(name, contact_email), ad_creatives(headline), events(title, host_id, sponsorship_auto_accept, sponsorship_min_offer_cents)")
       .eq("id", campaign_id)
       .maybeSingle();
     if (!c) return json({ error: "Campaign not found" }, 404);
     if (c.status !== t.from) {
       return json({ error: `Campaign is ${c.status}, expected ${t.from}` }, 409);
+    }
+
+    // A campaign paused by a chargeback (migration 0113) looks exactly like an
+    // ordinary paused campaign in the queue, and resume is a one-click habit.
+    // Restarting an ad whose money is being pulled back is the mistake this
+    // stops; close_payment_dispute clears the stamp when we win.
+    // deno-lint-ignore no-explicit-any
+    if (action === "resume" && (c as any).disputed_at) {
+      return json({
+        error: "Campaign is under a payment dispute — resolve the chargeback in Stripe first",
+      }, 409);
     }
 
     // Lobby approve clears the offer for the host instead of buying it, so the

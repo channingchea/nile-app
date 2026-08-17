@@ -124,7 +124,9 @@ class _AttendeeListScreenState extends State<AttendeeListScreen> {
               title: Text('View profile', style: NileTextStyles.labelLg()),
               onTap: () => Navigator.pop(context, 'profile'),
             ),
-            if (!a.isRefunded)
+            // Nothing left to refund on a refunded or charged-back ticket —
+            // the bank already took the money on a dispute.
+            if (!a.isVoid)
               ListTile(
                 leading: const Icon(Icons.undo, color: NileColors.coral),
                 title: Text(
@@ -272,11 +274,11 @@ class _AttendeeListScreenState extends State<AttendeeListScreen> {
       );
     }
 
-    // Revenue and head-count reflect active (paid) tickets only; refunded
-    // rows stay visible for history but don't count. Totals come from the
-    // server so they cover every page, not just the loaded one — falling back
-    // to the loaded page if the RPC failed.
-    final paid = _attendees!.where((a) => !a.isRefunded);
+    // Revenue and head-count reflect active (paid) tickets only; refunded and
+    // charged-back rows stay visible for history but don't count. Totals come
+    // from the server so they cover every page, not just the loaded one —
+    // falling back to the loaded page if the RPC failed.
+    final paid = _attendees!.where((a) => !a.isVoid);
     final totals = _totals;
     final count = totals?.paidCount ?? paid.length;
     final total =
@@ -431,9 +433,11 @@ class _AttendeeTile extends StatelessWidget {
                           style: NileTextStyles.labelLg(),
                         ),
                       ),
-                      if (attendee.isRefunded) ...[
+                      if (attendee.isVoid) ...[
                         const SizedBox(width: 8),
-                        const _RefundedBadge(),
+                        _VoidBadge(
+                          label: attendee.isDisputed ? 'chargeback' : 'refunded',
+                        ),
                       ],
                     ],
                   ),
@@ -450,10 +454,10 @@ class _AttendeeTile extends StatelessWidget {
             Text(
               '\$${(attendee.amountCents / 100).toStringAsFixed(2)}',
               style: NileTextStyles.labelMd().copyWith(
-                color: attendee.isRefunded
+                color: attendee.isVoid
                     ? NileColors.txtTertiary
                     : NileColors.volt,
-                decoration: attendee.isRefunded
+                decoration: attendee.isVoid
                     ? TextDecoration.lineThrough
                     : null,
               ),
@@ -484,8 +488,9 @@ class _AttendeeTile extends StatelessWidget {
   }
 }
 
-class _RefundedBadge extends StatelessWidget {
-  const _RefundedBadge();
+class _VoidBadge extends StatelessWidget {
+  final String label;
+  const _VoidBadge({required this.label});
 
   @override
   Widget build(BuildContext context) {
@@ -496,7 +501,7 @@ class _RefundedBadge extends StatelessWidget {
         borderRadius: BorderRadius.circular(NileRadius.pill),
       ),
       child: Text(
-        'refunded',
+        label,
         style: NileTextStyles.caption().copyWith(color: NileColors.coral),
       ),
     );
