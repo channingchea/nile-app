@@ -27,6 +27,27 @@ const FIREBASE_PROJECT_NUMBER =
 const FIREBASE_PROJECT_ID = Deno.env.get("FIREBASE_PROJECT_ID") ?? "nile-35c48";
 const ENFORCE = (Deno.env.get("APP_CHECK_ENFORCE") ?? "false") === "true";
 
+// P3 #30 — age gate. Same two-stage rollout as APP_CHECK_ENFORCE, and for the
+// same reason: builds already on people's phones send no birthdate, so
+// enforcing on day one would break signup for everyone who hasn't updated.
+//   "false" / unset → monitor: log the missing/underage birthdate, allow.
+//   "true"          → enforce: reject the signup.
+// Flip with `supabase secrets set AGE_GATE_ENFORCE=true` once the build
+// carrying the signup date-of-birth field is the minimum supported version.
+const AGE_ENFORCE = (Deno.env.get("AGE_GATE_ENFORCE") ?? "false") === "true";
+const MIN_AGE = 13;
+
+/// True when `birthdate` (YYYY-MM-DD) is at least MIN_AGE years ago. Anything
+/// unparseable is not old enough — this is a gate, so it fails closed.
+function isOldEnough(birthdate: string | null): boolean {
+  if (!birthdate) return false;
+  const dob = new Date(`${birthdate}T00:00:00Z`);
+  if (Number.isNaN(dob.getTime())) return false;
+  const cutoff = new Date();
+  cutoff.setUTCFullYear(cutoff.getUTCFullYear() - MIN_AGE);
+  return dob.getTime() <= cutoff.getTime();
+}
+
 // Firebase App Check public keys (cached by jose between invocations).
 const JWKS = jose.createRemoteJWKSet(
   new URL("https://firebaseappcheck.googleapis.com/v1/jwks"),
@@ -71,6 +92,24 @@ serve(async (req) => {
     string,
     unknown
   >;
+  // ── 2a. Age gate ─────────────────────────────────────────────────────────
+  // OAuth signups returned above: their providers hand us no birthdate, and
+  // the in-app compliance gate collects one before they can reach anything.
+  const birthdate = typeof meta.birthdate === "string" ? meta.birthdate : null;
+  if (!isOldEnough(birthdate)) {
+    console.warn(
+      `Signup ${birthdate ? "under age" : "without a birthdate"} (email: ${
+        user.email ?? "?"
+      })`,
+    );
+    if (AGE_ENFORCE) {
+      return reject(
+        403,
+        `You must be at least ${MIN_AGE} years old to use Nile.`,
+      );
+    }
+  }
+
   const token = typeof meta.app_check_token === "string"
     ? meta.app_check_token
     : null;

@@ -2,10 +2,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../config.dart';
+import '../../services/compliance_service.dart';
 import '../../services/human_check.dart';
 import '../../services/profile_service.dart';
 import '../../services/supabase_client.dart';
 import '../../theme.dart';
+import '../../widgets/legal_links.dart';
 import '../../widgets/nile_logo.dart';
 import '../../widgets/social_auth_buttons.dart';
 
@@ -30,6 +32,12 @@ class _SignupScreenState extends State<SignupScreen> {
   bool _obscureConf = true;
   bool _submitted = false;
 
+  /// P3 #30. Collected here so an email signup never meets the compliance gate,
+  /// and re-checked by the `before-user-created` hook and by the DB trigger —
+  /// this field is convenience, not enforcement.
+  DateTime? _birthdate;
+  bool _birthdateTouched = false;
+
   @override
   void dispose() {
     _usernameCtrl.dispose();
@@ -40,7 +48,39 @@ class _SignupScreenState extends State<SignupScreen> {
     super.dispose();
   }
 
+  Future<void> _pickBirthdate() async {
+    final now = DateTime.now();
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: _birthdate ?? DateTime(now.year - 25, now.month, now.day),
+      firstDate: DateTime(now.year - 120),
+      lastDate: now,
+      helpText: 'Your date of birth',
+      initialDatePickerMode: DatePickerMode.year,
+    );
+    if (picked == null) return;
+    setState(() {
+      _birthdate = picked;
+      _birthdateTouched = true;
+    });
+  }
+
+  String? get _birthdateError {
+    final b = _birthdate;
+    if (b == null) return _birthdateTouched ? 'Date of birth is required' : null;
+    return ComplianceService.isOldEnough(b)
+        ? null
+        : 'You must be at least $minimumAge to use Nile';
+  }
+
   Future<void> _signUp() async {
+    final birthdate = _birthdate;
+    if (birthdate == null || !ComplianceService.isOldEnough(birthdate)) {
+      setState(() => _birthdateTouched = true);
+      // Still run the form validator so every problem is shown at once.
+      _formKey.currentState!.validate();
+      return;
+    }
     if (!_formKey.currentState!.validate()) return;
     setState(() => _loading = true);
 
@@ -75,6 +115,10 @@ class _SignupScreenState extends State<SignupScreen> {
           'display_name': _nameCtrl.text.trim(),
           // Verified (and stripped) by the before-user-created auth hook.
           'app_check_token': ?attestation,
+          // P3 #29/#30 — handle_new_user reads both: the birthdate becomes the
+          // user_age_verification row, the version stamps profiles.
+          'birthdate': ComplianceService.isoDate(birthdate),
+          'terms_version': termsVersion,
         },
       );
 
@@ -213,6 +257,11 @@ class _SignupScreenState extends State<SignupScreen> {
                 dividerBelow: true,
                 dividerLabel: 'or sign up with email',
               ),
+              const SizedBox(height: 16),
+
+              // Apple / Google skip the form entirely, so the agreement has to
+              // sit with the buttons too, not only above Create Account.
+              const LegalConsentText(action: 'continuing'),
               const SizedBox(height: 24),
 
               // ── Username ─────────────────────────────────────────────
@@ -356,7 +405,42 @@ class _SignupScreenState extends State<SignupScreen> {
                   return null;
                 },
               ),
-              const SizedBox(height: 32),
+              const SizedBox(height: 16),
+
+              // ── Date of birth ────────────────────────────────────────
+              // Not a TextFormField: a typed date is a mess to validate and a
+              // picker makes "I'm 12" a deliberate act rather than a typo.
+              InkWell(
+                onTap: _loading ? null : _pickBirthdate,
+                borderRadius: BorderRadius.circular(NileRadius.md),
+                child: InputDecorator(
+                  decoration: InputDecoration(
+                    labelText: 'Date of birth',
+                    prefixIcon: Icon(
+                      Icons.cake_outlined,
+                      color: NileColors.txtTertiary,
+                    ),
+                    errorText: _birthdateError,
+                    helperText: 'Nile is for people $minimumAge and over. '
+                        'Yours stays private.',
+                    helperMaxLines: 2,
+                  ),
+                  child: Text(
+                    _birthdate == null
+                        ? 'Tap to choose'
+                        : '${_birthdate!.month}/${_birthdate!.day}/${_birthdate!.year}',
+                    style: NileTextStyles.bodyMd().copyWith(
+                      color: _birthdate == null
+                          ? NileColors.txtTertiary
+                          : NileColors.txtPrimary,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 24),
+
+              const LegalConsentText(),
+              const SizedBox(height: 24),
 
               // ── Create account button ────────────────────────────────
               FilledButton(

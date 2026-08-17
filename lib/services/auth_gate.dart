@@ -16,7 +16,19 @@ import 'theme_service.dart';
 /// be answerable *synchronously*, from outside the tree, so the router's
 /// `redirect` can consult it — hence a ChangeNotifier holding the state and a
 /// pure function turning it into a location.
-enum GateStage { splash, intro, signedOut, mfaChallenge, claimUsername, onboarding, ready }
+enum GateStage {
+  splash,
+  intro,
+  signedOut,
+  mfaChallenge,
+  /// Birthdate + Terms acceptance (P3 #29/#30). Sits directly under the MFA
+  /// challenge because an account that has not stated an age should not be
+  /// able to reach any content, not even to pick a username.
+  compliance,
+  claimUsername,
+  onboarding,
+  ready,
+}
 
 /// Auth + onboarding state, hoisted out of the widget tree so `GoRouter`'s
 /// redirect can read it and its `refreshListenable` can react to it.
@@ -34,7 +46,7 @@ class AuthGate extends ChangeNotifier {
   Session? _session;
   bool _initialized = false;
   bool _splashDone = false;
-  ({bool onboarded, bool needsUsernameClaim})? _gate;
+  ({bool onboarded, bool needsUsernameClaim, bool needsCompliance})? _gate;
   bool? _introSeen;
 
   /// Set when a recovery link arrives, cleared once the password is changed.
@@ -72,6 +84,7 @@ class AuthGate extends ChangeNotifier {
     if (MfaService.needsChallenge()) return GateStage.mfaChallenge;
     final gate = _gate;
     if (gate == null) return GateStage.splash;
+    if (gate.needsCompliance) return GateStage.compliance;
     if (gate.needsUsernameClaim) return GateStage.claimUsername;
     if (!gate.onboarded) return GateStage.onboarding;
     return GateStage.ready;
@@ -170,12 +183,29 @@ class AuthGate extends ChangeNotifier {
   void usernameClaimed() {
     final gate = _gate;
     if (gate == null) return;
-    _gate = (onboarded: gate.onboarded, needsUsernameClaim: false);
+    _gate = (
+      onboarded: gate.onboarded,
+      needsUsernameClaim: false,
+      needsCompliance: gate.needsCompliance,
+    );
+    notifyListeners();
+  }
+
+  /// Birthdate recorded and the current Terms accepted — same hand-off as
+  /// [usernameClaimed], since the RPC's effect isn't pushed to the client.
+  void complianceRecorded() {
+    final gate = _gate;
+    if (gate == null) return;
+    _gate = (
+      onboarded: gate.onboarded,
+      needsUsernameClaim: gate.needsUsernameClaim,
+      needsCompliance: false,
+    );
     notifyListeners();
   }
 
   void onboarded() {
-    _gate = (onboarded: true, needsUsernameClaim: false);
+    _gate = (onboarded: true, needsUsernameClaim: false, needsCompliance: false);
     notifyListeners();
   }
 

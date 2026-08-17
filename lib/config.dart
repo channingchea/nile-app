@@ -45,6 +45,26 @@ const String googleWebClientId =
 const String googleIosClientId =
     '907048556625-1cl82rkemt4g164mtuj6448r3aujnasc.apps.googleusercontent.com';
 
+// ── Legal / compliance ────────────────────────────────────────────────────────
+// App Store Guideline 1.2 requires a UGC EULA the user agrees to, reachable
+// from inside the app. Nile's Terms of Service is that EULA; these are the
+// canonical copies on the marketing site, so an update never needs a build.
+const String nileWebsiteUrl = 'https://joinnile.com';
+const String termsUrl = '$nileWebsiteUrl/terms';
+const String privacyUrl = '$nileWebsiteUrl/privacy';
+const String cookiesUrl = '$nileWebsiteUrl/cookies';
+const String guidelinesUrl = '$nileWebsiteUrl/guidelines';
+const String contactUrl = '$nileWebsiteUrl/contact';
+const String appealUrl = '$nileWebsiteUrl/appeal';
+
+/// Stamped into `profiles.terms_version` when a user accepts. Bump this on the
+/// same day the published Terms change and every account is asked again.
+const String termsVersion = '2026-08-17';
+
+/// Nile's minimum age, matching the published Terms and enforced server-side in
+/// `record_compliance_consent` and the `before-user-created` auth hook.
+const int minimumAge = 13;
+
 // ── Sentry (crash / error reporting) ──────────────────────────────────────────
 // Injected at build time so the DSN never lives in the repo:
 //   flutter run --dart-define=SENTRY_DSN=https://...@oXXXX.ingest.sentry.io/XXXX

@@ -6,6 +6,7 @@ import 'screens/appearance_screen.dart';
 import 'screens/attendee_list_screen.dart';
 import 'screens/audio_screen.dart';
 import 'screens/auth/claim_username_screen.dart';
+import 'screens/auth/compliance_gate_screen.dart';
 import 'screens/auth/feature_intro_screen.dart';
 import 'screens/auth/forgot_password_screen.dart';
 import 'screens/auth/interest_picker_screen.dart';
@@ -83,6 +84,7 @@ class NileRoutes {
   static const forgotPassword = '/forgot-password';
   static const resetPassword = '/reset-password';
   static const mfaChallenge = '/mfa-challenge';
+  static const compliance = '/compliance';
   static const claimUsername = '/claim-username';
   static const onboarding = '/onboarding';
 
@@ -95,6 +97,7 @@ class NileRoutes {
     signup,
     forgotPassword,
     mfaChallenge,
+    compliance,
     claimUsername,
     onboarding,
   };
@@ -245,6 +248,11 @@ final GoRouter _router = GoRouter(
     GoRoute(
       path: NileRoutes.mfaChallenge,
       builder: (_, _) => MfaChallengeScreen(onVerified: AuthGate.instance.mfaVerified),
+    ),
+    GoRoute(
+      path: NileRoutes.compliance,
+      builder: (_, _) =>
+          ComplianceGateScreen(onDone: AuthGate.instance.complianceRecorded),
     ),
     GoRoute(
       path: NileRoutes.claimUsername,
@@ -632,6 +640,8 @@ String? _gateRedirect(BuildContext context, GoRouterState state) {
       return NileRoutes.signedOutAllowed.contains(loc) ? null : NileRoutes.login;
     case GateStage.mfaChallenge:
       return loc == NileRoutes.mfaChallenge ? null : NileRoutes.mfaChallenge;
+    case GateStage.compliance:
+      return loc == NileRoutes.compliance ? null : NileRoutes.compliance;
     case GateStage.claimUsername:
       return loc == NileRoutes.claimUsername ? null : NileRoutes.claimUsername;
     case GateStage.onboarding:

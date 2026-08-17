@@ -2,11 +2,13 @@ import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import '../config.dart';
 import '../services/account_service.dart';
 import '../services/mac_host.dart';
 import '../services/profile_service.dart';
 import '../router.dart';
 import '../theme.dart';
+import '../widgets/legal_links.dart';
 import '../widgets/nile_glass_app_bar.dart';
 import '../widgets/pressable.dart';
 import 'auth/feature_intro_screen.dart';
@@ -210,6 +212,39 @@ class SettingsScreen extends StatelessWidget {
                   icon: Icons.bug_report_outlined,
                   label: 'Report a bug or idea',
                   onTap: () => _reportIssue(context),
+                ),
+                _SettingsRow(
+                  icon: Icons.mail_outline,
+                  label: 'Contact us',
+                  onTap: () => openLegalUrl(contactUrl),
+                ),
+              ],
+            ),
+            // App Store Guideline 1.2: the EULA (our Terms) and the content
+            // policy have to be reachable from inside the app, not only from
+            // the marketing site. Reviewers look for exactly this list.
+            _SettingsSection(
+              header: 'LEGAL',
+              rows: [
+                _SettingsRow(
+                  icon: Icons.description_outlined,
+                  label: 'Terms of Service',
+                  onTap: () => openLegalUrl(termsUrl),
+                ),
+                _SettingsRow(
+                  icon: Icons.privacy_tip_outlined,
+                  label: 'Privacy Policy',
+                  onTap: () => openLegalUrl(privacyUrl),
+                ),
+                _SettingsRow(
+                  icon: Icons.rule_outlined,
+                  label: 'Community Guidelines',
+                  onTap: () => openLegalUrl(guidelinesUrl),
+                ),
+                _SettingsRow(
+                  icon: Icons.cookie_outlined,
+                  label: 'Cookie Policy',
+                  onTap: () => openLegalUrl(cookiesUrl),
                 ),
               ],
             ),

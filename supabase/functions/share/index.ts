@@ -178,11 +178,18 @@ async function eventPage(id: string): Promise<Response> {
 async function postPage(id: string): Promise<Response> {
   const { data } = await admin
     .from("posts")
-    .select("content, image_url, author:profiles!posts_user_id_fkey(username, display_name)")
+    .select("content, image_url, author:profiles!posts_user_id_fkey(username, display_name, suspended_at)")
+    // Same reasoning as eventPage: the service-role client bypasses RLS, so a
+    // post a moderator removed still unfurled its title, body and image to
+    // anyone with the id — and Slack/iMessage cached it. A removed post, or a
+    // post by a suspended author, is a 404 here.
+    .is("removed_at", null)
     .eq("id", id)
     .maybeSingle();
   if (!data) return html(genericPage(), 404);
-  const author = data.author as { username?: string; display_name?: string } | null;
+  const author = data.author as
+    { username?: string; display_name?: string; suspended_at?: string | null } | null;
+  if (author?.suspended_at) return html(genericPage(), 404);
   const who = author?.display_name || (author?.username ? `@${author.username}` : "Someone");
   return html(page({
     title: `${who} on Nile`,
@@ -196,6 +203,9 @@ async function profilePage(username: string): Promise<Response> {
   const { data } = await admin
     .from("profiles")
     .select("username, display_name, bio, avatar_url")
+    // A suspended account's name, bio and avatar are not public. Same
+    // RLS-bypass reasoning as eventPage and postPage.
+    .is("suspended_at", null)
     .ilike("username", username)
     .maybeSingle();
   if (!data) return html(genericPage(), 404);
