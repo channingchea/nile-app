@@ -11,6 +11,7 @@
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:nile_app/services/chat_service.dart';
+import 'package:nile_app/services/report_service.dart';
 
 Map<String, dynamic> _payload({String? id, String kind = 'user'}) => {
   'id': ?id,
@@ -61,6 +62,21 @@ void main() {
       // never be the thing that trips the backstop.
       expect(250, lessThan(ChatService.maxMessageLength));
       expect(ChatService.maxMessageLength, 500);
+    });
+  });
+
+  group('report target', () {
+    test('every multi-word target serializes to its DB spelling', () {
+      // ReportTargetTypeX falls through to Dart's `name` for single-word
+      // values, which means a new multi-word one silently sends camelCase and
+      // is rejected by the enum cast at insert time — a report that looks
+      // filed and never lands.
+      expect(ReportTargetType.liveChatMessage.dbValue, 'live_chat_message');
+      expect(ReportTargetType.currentComment.dbValue, 'current_comment');
+      expect(ReportTargetType.post.dbValue, 'post');
+      for (final t in ReportTargetType.values) {
+        expect(t.dbValue, matches(RegExp(r'^[a-z_]+$')), reason: '$t');
+      }
     });
   });
 

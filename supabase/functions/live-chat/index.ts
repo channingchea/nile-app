@@ -1,22 +1,27 @@
 // Supabase Edge Function: live-chat
 //
-// Server side of live chat (P1 #16, phase 1). Until now a message went straight
-// from the sender's client onto the Realtime broadcast channel: no length cap,
-// no rate limit, no record, and nothing a host could actually remove.
+// Server side of live chat (P1 #16). Until phase 1 a message went straight from
+// the sender's client onto the Realtime broadcast channel: no length cap, no
+// rate limit, no record, and nothing a host could actually remove.
 //
 // Action-routed on `action` in the body, same shape as `livekit`:
-//   send    viewer  → { id }            ← the only path that may author chat
-//   remove  host    → { success: true } ← soft-delete one message, silently
-//   ban     host    → { success: true, removed } ← ban for this event + eject
+//   send      viewer     → { id }            ← the only path that may author chat
+//   remove    moderator  → { success: true } ← soft-delete one message, silently
+//   ban       moderator  → { success: true, removed } ← ban for this event + eject
+//   settings  host       → { success: true } ← slow mode / who may speak / crew
 //
 // Auth: verify-jwt is ON at the gateway. The sender is always derived from the
-// JWT, never from the body — and so, now, is the display name: `send` reads the
+// JWT, never from the body — and so is the display name: `send` reads the
 // username and avatar from `profiles` rather than trusting what the client
 // passed, which is what stops one viewer chatting as another.
 //
 // Entitlement reuses `can_join_live_chat` (migration 0104) by calling it as the
 // *user*, so the rule that decides who may be in the room is stated once and
 // this function cannot drift from the Realtime policy.
+//
+// "Moderator" is the host, plus assigned crew when the host has switched
+// `events.chat_crew_moderation` on for that show (phase 5). Default is off,
+// which keeps the v1 decision — host only — as the behaviour nobody opts into.
 //
 // Secrets: SUPABASE_URL / SUPABASE_ANON_KEY / SUPABASE_SERVICE_ROLE_KEY are
 // auto-injected. LIVEKIT_* are already set project-wide for `livekit`.
@@ -28,8 +33,9 @@
 // doing so until they update. This function is purely additive — the
 // realtime.messages INSERT policy from 0104 stays as it is. Tightening it to
 // service-role only is a separate change, and only safe once the force-update
-// floor passes the build that sends through here. Same shape of problem as the
-// `lobbySafe` flag from P1 #7.
+// floor passes the build that adopts it. Same shape of problem as the
+// `lobbySafe` flag from P1 #7. Until then the word filter, slow mode and the
+// speak-access rules only bind clients that send through here.
 
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
@@ -40,6 +46,11 @@ import { corsHeaders as corsHeadersFor } from "../_shared/cors.ts";
 // scrollback. The viewer's own input already truncates at 250; this is the
 // backstop for a client that does not.
 const MAX_MESSAGE_LENGTH = 500;
+
+// Default bucket: 5 messages per 10 seconds sustained, burst 10. Slow mode
+// replaces it with a capacity of 1 refilling once per slow-mode second.
+const DEFAULT_BUCKET = { capacity: 10, refillPerSecond: 0.5 };
+const MAX_SLOW_MODE_SECONDS = 300;
 
 // Same LiveKit credentials the `livekit` function uses — Supabase secrets are
 // project-wide, so nothing new needs setting. Null when unset so a missing
@@ -148,6 +159,8 @@ async function handle(req: Request, json: Json): Promise<Response> {
       return await remove(body, user.id, admin, json);
     case "ban":
       return await ban(body, user.id, admin, json);
+    case "settings":
+      return await settings(body, user.id, admin, json);
     default:
       return json({ error: `Unknown action: ${body.action}` }, 400);
   }
@@ -159,7 +172,14 @@ interface EventRow {
   id: string;
   host_id: string;
   livekit_room: string | null;
+  price: number | null;
+  chat_crew_moderation: boolean;
+  chat_slow_mode_seconds: number;
+  chat_access: string;
 }
+
+const EVENT_COLS =
+  "id, host_id, livekit_room, price, chat_crew_moderation, chat_slow_mode_seconds, chat_access";
 
 /**
  * Resolve the event from the client-side LiveKit slug (`events.livekit_room`),
@@ -169,17 +189,48 @@ interface EventRow {
 async function findEvent(slug: string, admin: any): Promise<EventRow | null> {
   const { data } = await admin
     .from("events")
-    .select("id, host_id, livekit_room")
+    .select(EVENT_COLS)
     .eq("livekit_room", slug)
     .maybeSingle();
   return (data as EventRow | null) ?? null;
 }
 
+/** Is `userId` assigned crew on this event? */
+// deno-lint-ignore no-explicit-any
+async function isCrew(eventId: string, userId: string, admin: any): Promise<boolean> {
+  const { data } = await admin
+    .from("event_operators")
+    .select("id")
+    .eq("event_id", eventId)
+    .eq("operator_id", userId)
+    .maybeSingle();
+  return !!data;
+}
+
 /**
- * Host-only gate for the moderation actions. Host only in v1 by decision —
- * `event_operators` crew publish cameras but do not police the room. Widening
- * this to crew later is a change to this one function.
+ * Gate for the moderation actions.
+ *
+ * The host always. Assigned crew only when the host has turned
+ * `chat_crew_moderation` on for this show — phase 5, opt-in per event, so the
+ * "host only in v1" decision stays the default rather than being overwritten by
+ * shipping the capability.
  */
+// deno-lint-ignore no-explicit-any
+async function requireModerator(
+  slug: string,
+  userId: string,
+  admin: any,
+  json: Json,
+): Promise<EventRow | Response> {
+  if (!slug) return json({ error: "eventId is required" }, 400);
+  const event = await findEvent(slug, admin);
+  if (!event) return json({ error: "Event not found" }, 404);
+  if (event.host_id === userId) return event;
+  if (event.chat_crew_moderation && await isCrew(event.id, userId, admin)) return event;
+  return json({ error: "Forbidden — you can't moderate this chat" }, 403);
+}
+
+/** Host-only, for the settings that decide how the room behaves. */
 // deno-lint-ignore no-explicit-any
 async function requireHost(
   slug: string,
@@ -191,7 +242,7 @@ async function requireHost(
   const event = await findEvent(slug, admin);
   if (!event) return json({ error: "Event not found" }, 404);
   if (event.host_id !== userId) {
-    return json({ error: "Forbidden — only the host can moderate this chat" }, 403);
+    return json({ error: "Forbidden — only the host can do this" }, 403);
   }
   return event;
 }
@@ -232,6 +283,11 @@ async function ejectFromRoom(slug: string, targetId: string): Promise<void> {
  * send — validate, record, then broadcast. In that order: a message the
  * audience saw but we cannot produce later is exactly the gap this whole tier
  * exists to close.
+ *
+ * Check order is deliberate. Ban and entitlement first because they are cheap
+ * and final. The rate limit next, so everything after it is bounded — including
+ * the word filter, which would otherwise be a free oracle anyone could probe
+ * the blocklist with.
  */
 async function send(
   // deno-lint-ignore no-explicit-any
@@ -275,12 +331,60 @@ async function send(
   if (gateError) return json({ error: "Could not verify chat access" }, 500);
   if (allowed !== true) return json({ error: "You don't have access to this chat" }, 403);
 
-  const { data: ok, error: rateError } = await admin.rpc("consume_live_chat_token", {
-    p_event_id: event.id,
-    p_user_id: userId,
-  });
-  if (rateError) return json({ error: "Could not check rate limit" }, 500);
-  if (ok !== true) return json({ error: "You're sending messages too quickly" }, 429);
+  // Crew and the host are exempt from every restriction below — a host cannot
+  // lock themselves out of their own show by turning slow mode on.
+  const privileged = event.host_id === userId || await isCrew(event.id, userId, admin);
+
+  if (!privileged) {
+    const denied = await accessDenial(event, userId, admin);
+    if (denied) return json({ error: denied }, 403);
+  }
+
+  // Slow mode replaces the default bucket rather than stacking on it: capacity
+  // 1, refilling once every N seconds. `least(capacity, …)` inside the function
+  // clamps a bucket that was filled under the old settings, so a host can turn
+  // this on mid-show and it binds immediately.
+  const slow = Math.min(MAX_SLOW_MODE_SECONDS, Math.max(0, event.chat_slow_mode_seconds ?? 0));
+  const bucket = slow > 0
+    ? { capacity: 1, refillPerSecond: 1 / slow }
+    : DEFAULT_BUCKET;
+
+  if (!privileged) {
+    const { data: ok, error: rateError } = await admin.rpc("consume_live_chat_token", {
+      p_event_id: event.id,
+      p_user_id: userId,
+      p_capacity: bucket.capacity,
+      p_refill_per_second: bucket.refillPerSecond,
+    });
+    if (rateError) return json({ error: "Could not check rate limit" }, 500);
+    if (ok !== true) {
+      return json({
+        error: slow > 0
+          ? `Slow mode is on — one message every ${slow} seconds`
+          : "You're sending messages too quickly",
+      }, 429);
+    }
+  }
+
+  // Word filter (phase 4). Rejected out loud, not shadow-dropped: a message
+  // that silently vanishes teaches the sender nothing and generates a support
+  // ticket instead of a corrected sentence. Crew and host skip it — a host
+  // being filtered on their own show is the worst version of a false positive.
+  if (!privileged) {
+    const { data: hit } = await admin.rpc("live_chat_filter_hit", { p_text: text });
+    if (typeof hit === "string" && hit.length > 0) {
+      // The matched word and who tripped it, never the message. Best-effort:
+      // failing a send because the tuning log was unavailable would be absurd.
+      await admin
+        .from("live_chat_filter_hits")
+        .insert({ event_id: event.id, user_id: userId, matched: hit })
+        .then(
+          (r: { error?: unknown }) =>
+            r.error && log("warn", { action: "filter-log", error: String(r.error) }),
+        );
+      return json({ error: "That message can't be sent in this chat" }, 422);
+    }
+  }
 
   // Identity comes from the database, not the body. The old client-side path
   // put the sender's own username in the payload because a broadcast carries no
@@ -317,11 +421,47 @@ async function send(
 }
 
 /**
+ * Who may speak, when the host has narrowed it (phase 5). Returns the wording
+ * to send back, or null when they're allowed.
+ *
+ * Reading is deliberately untouched — a follower gate that also hid the
+ * conversation would make a restricted room indistinguishable from a broken
+ * one, and the whole point of #15's client half was to stop chat failing
+ * silently.
+ */
+async function accessDenial(
+  event: EventRow,
+  userId: string,
+  // deno-lint-ignore no-explicit-any
+  admin: any,
+): Promise<string | null> {
+  if (event.chat_access === "followers") {
+    const { data } = await admin
+      .from("follows")
+      .select("follower_id")
+      .eq("follower_id", userId)
+      .eq("following_id", event.host_id)
+      .maybeSingle();
+    return data ? null : "Only followers can chat in this show";
+  }
+  if (event.chat_access === "ticket_holders") {
+    const { data } = await admin
+      .from("tickets")
+      .select("status")
+      .eq("event_id", event.id)
+      .eq("buyer_id", userId)
+      .maybeSingle();
+    return data?.status === "paid" ? null : "Only ticket holders can chat in this show";
+  }
+  return null;
+}
+
+/**
  * remove — soft-delete one message and tell every client to drop it.
  *
  * Soft, not hard: the row is the evidence a report is built on, and hard-
- * deleting it would mean a host could erase what they are being reported for.
- * The audience sees a silent disappearance either way.
+ * deleting it would mean a moderator could erase what they are being reported
+ * for. The audience sees a silent disappearance either way.
  */
 // deno-lint-ignore no-explicit-any
 async function remove(body: any, userId: string, admin: any, json: Json): Promise<Response> {
@@ -329,11 +469,11 @@ async function remove(body: any, userId: string, admin: any, json: Json): Promis
   const messageId = body.messageId as string | undefined;
   if (!messageId) return json({ error: "messageId is required" }, 400);
 
-  const gate = await requireHost(slug ?? "", userId, admin, json);
+  const gate = await requireModerator(slug ?? "", userId, admin, json);
   if (gate instanceof Response) return gate;
 
-  // Scoped to this event so a host cannot reach into another show's chat with
-  // a borrowed message id.
+  // Scoped to this event so a moderator cannot reach into another show's chat
+  // with a borrowed message id.
   const { error } = await admin
     .from("live_chat_messages")
     .update({ removed_at: new Date().toISOString(), removed_by: userId })
@@ -366,14 +506,20 @@ async function ban(body: any, userId: string, admin: any, json: Json): Promise<R
   const targetId = body.targetId as string | undefined;
   if (!targetId) return json({ error: "targetId is required" }, 400);
 
-  const gate = await requireHost(slug ?? "", userId, admin, json);
+  const gate = await requireModerator(slug ?? "", userId, admin, json);
   if (gate instanceof Response) return gate;
   if (targetId === gate.host_id) {
     return json({ error: "You can't ban the host" }, 400);
   }
+  // Crew are off limits too, now that crew can moderate. Removing someone from
+  // the crew is a roster decision on the event page, not something one operator
+  // does to another mid-show.
+  if (await isCrew(gate.id, targetId, admin)) {
+    return json({ error: "You can't ban someone on the crew" }, 400);
+  }
 
-  // Idempotent: banning someone already banned is a host clicking twice, not an
-  // error worth surfacing mid-show.
+  // Idempotent: banning someone already banned is a moderator clicking twice,
+  // not an error worth surfacing mid-show.
   const { error: banError } = await admin
     .from("live_chat_bans")
     .upsert(
@@ -402,4 +548,60 @@ async function ban(body: any, userId: string, admin: any, json: Json): Promise<R
   await ejectFromRoom(slug ?? "", targetId);
 
   return json({ success: true, removed: (wiped ?? []).length });
+}
+
+/**
+ * settings — the host's three chat controls (phase 5).
+ *
+ * Written here rather than straight from the client so the validation and the
+ * "only the host" rule live next to the code that enforces them at send time,
+ * and so the ticket-holders/free-event CHECK comes back as a sentence rather
+ * than a Postgres constraint name.
+ *
+ * Partial: only the keys present in the body are written, so a client that
+ * predates one control cannot blank it.
+ */
+// deno-lint-ignore no-explicit-any
+async function settings(body: any, userId: string, admin: any, json: Json): Promise<Response> {
+  const slug = body.eventId as string | undefined;
+  const gate = await requireHost(slug ?? "", userId, admin, json);
+  if (gate instanceof Response) return gate;
+
+  const patch: Record<string, unknown> = {};
+
+  if (body.crewModeration !== undefined) {
+    if (typeof body.crewModeration !== "boolean") {
+      return json({ error: "crewModeration must be true or false" }, 400);
+    }
+    patch.chat_crew_moderation = body.crewModeration;
+  }
+
+  if (body.slowModeSeconds !== undefined) {
+    const n = Number(body.slowModeSeconds);
+    if (!Number.isInteger(n) || n < 0 || n > MAX_SLOW_MODE_SECONDS) {
+      return json({ error: `slowModeSeconds must be 0-${MAX_SLOW_MODE_SECONDS}` }, 400);
+    }
+    patch.chat_slow_mode_seconds = n;
+  }
+
+  if (body.access !== undefined) {
+    if (!["everyone", "followers", "ticket_holders"].includes(body.access)) {
+      return json({ error: "access must be everyone, followers or ticket_holders" }, 400);
+    }
+    // Free events create no ticket rows at all, so this setting would mute the
+    // entire room. The DB CHECK refuses it too; this is the readable version.
+    if (body.access === "ticket_holders" && !(gate.price && gate.price > 0)) {
+      return json({
+        error: "This show is free, so there are no ticket holders to limit chat to",
+      }, 400);
+    }
+    patch.chat_access = body.access;
+  }
+
+  if (Object.keys(patch).length === 0) return json({ error: "Nothing to update" }, 400);
+
+  const { error } = await admin.from("events").update(patch).eq("id", gate.id);
+  if (error) return json({ error: "Could not update chat settings" }, 500);
+
+  return json({ success: true, ...patch });
 }

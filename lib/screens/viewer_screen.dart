@@ -10,15 +10,18 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:video_player/video_player.dart';
 import '../services/ad_service.dart';
+import '../services/block_service.dart';
 import '../services/chat_service.dart';
 import '../services/event_service.dart';
 import '../services/livekit_service.dart';
 import '../services/realtime.dart';
+import '../services/report_service.dart';
 import '../services/share_urls.dart';
 import '../services/supabase_client.dart';
 import '../services/tip_service.dart';
 import '../router.dart';
 import '../theme.dart';
+import 'widgets/moderation_menu.dart';
 import '../widgets/nile_desktop.dart';
 import '../widgets/rolling_number.dart';
 import '../widgets/share_to_sheet.dart';
@@ -135,6 +138,15 @@ class _ViewerScreenState extends State<ViewerScreen>
   /// rather than swallowed — see [_onChatStatus].
   bool _chatUnavailable = false;
   final List<ChatMessage> _chatMessages = [];
+
+  /// Accounts this viewer has blocked. Chat arrives over a broadcast, not a
+  /// table, so RLS never sees it — without this a viewer who blocked someone
+  /// everywhere else in the app would still read them in chat.
+  ///
+  /// Unlike the host's ban this changes only this viewer's own view, which is
+  /// the correct scope for a block: one person deciding what they read, not
+  /// deciding it for the room.
+  final Set<String> _blockedChatSenders = {};
   final _chatController = TextEditingController();
   final _chatScrollController = ScrollController();
   bool _chatOpen = false;
@@ -741,6 +753,12 @@ class _ViewerScreenState extends State<ViewerScreen>
       // Server-authored announcements (tips) arrive on their own read-only
       // topic — see ChatService.subscribeSystem.
       _systemChannel = ChatService.subscribeSystem(eventId, _onChatMessage);
+      // Chat is a broadcast, so a block can only be applied client-side here.
+      BlockService.blockedIds()
+          .then((ids) {
+            if (mounted) setState(() => _blockedChatSenders.addAll(ids));
+          })
+          .catchError((_) {});
 
       final hostProfile = eventState?['profiles'] as Map<String, dynamic>?;
       setState(() {
@@ -1944,7 +1962,13 @@ class _ViewerScreenState extends State<ViewerScreen>
         ),
       );
     }
-    if (_chatMessages.isEmpty) {
+    // Anyone this viewer has blocked drops out here. Chat is a broadcast, so
+    // RLS never gets a look at it — this is the only place a block can apply.
+    final visible = [
+      for (final m in _chatMessages)
+        if (m.isSystem || !_blockedChatSenders.contains(m.senderId)) m,
+    ];
+    if (visible.isEmpty) {
       return Center(
         child: Text(
           'No messages yet. Say hi 👋',
@@ -1957,12 +1981,12 @@ class _ViewerScreenState extends State<ViewerScreen>
     return ListView.builder(
       controller: _chatScrollController,
       padding: const EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s8, NileSpacing.s16, NileSpacing.s8),
-      itemCount: _chatMessages.length,
+      itemCount: visible.length,
       itemBuilder: (context, i) {
-        final m = _chatMessages[i];
+        final m = visible[i];
         final row = _buildChatRow(m);
         // Gentle entry animation for the newest message only.
-        if (i == _chatMessages.length - 1) {
+        if (i == visible.length - 1) {
           return TweenAnimationBuilder<double>(
             key: ValueKey('anim_${m.senderId}_${m.sentAt.microsecondsSinceEpoch}'),
             tween: Tween(begin: 0, end: 1),
@@ -1977,6 +2001,91 @@ class _ViewerScreenState extends State<ViewerScreen>
         }
         return row;
       },
+    );
+  }
+
+  /// Long-press a chat line → report it, or block its author.
+  ///
+  /// Every other user-content surface in the app has had this since the
+  /// blocks/reports work; live chat was the one place a viewer could be
+  /// harassed with no gesture at all. Report targets the message itself when it
+  /// has an id, so the review queue gets the text rather than a bare account.
+  Future<void> _showChatActions(ChatMessage m) async {
+    if (m.isSystem || m.senderId.isEmpty || m.isMine) return;
+
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: NileColors.bgSurface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(
+          top: Radius.circular(NileRadius.lg),
+        ),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(
+                NileSpacing.s16,
+                NileSpacing.s16,
+                NileSpacing.s16,
+                NileSpacing.s8,
+              ),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  '@${m.username}',
+                  style: NileTextStyles.headingSm(),
+                ),
+              ),
+            ),
+            ListTile(
+              leading: Icon(Icons.block, color: NileColors.txtPrimary),
+              title: Text('Block @${m.username}', style: NileTextStyles.bodyMd()),
+              subtitle: Text(
+                'You stop seeing each other across Nile.',
+                style: NileTextStyles.caption().copyWith(
+                  color: NileColors.txtTertiary,
+                ),
+              ),
+              onTap: () => Navigator.pop(ctx, 'block'),
+            ),
+            ListTile(
+              leading: Icon(Icons.flag_outlined, color: NileColors.error),
+              title: Text(
+                m.id != null ? 'Report this message' : 'Report @${m.username}',
+                style: NileTextStyles.bodyMd().copyWith(
+                  color: NileColors.error,
+                ),
+              ),
+              onTap: () => Navigator.pop(ctx, 'report'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (!mounted || action == null) return;
+
+    if (action == 'block') {
+      final blocked = await Moderation.confirmBlock(
+        context,
+        userId: m.senderId,
+        username: m.username,
+      );
+      if (blocked && mounted) {
+        setState(() => _blockedChatSenders.add(m.senderId));
+      }
+      return;
+    }
+
+    final id = m.id;
+    await Moderation.showReportSheet(
+      context,
+      targetType: id != null
+          ? ReportTargetType.liveChatMessage
+          : ReportTargetType.user,
+      targetId: id ?? m.senderId,
     );
   }
 
@@ -2008,7 +2117,7 @@ class _ViewerScreenState extends State<ViewerScreen>
         ? NileColors.coral
         : (m.isMine ? NileColors.volt : NileColors.azure);
 
-    return Container(
+    final row = Container(
       margin: const EdgeInsets.symmetric(vertical: NileSpacing.s2),
       padding: isHost
           ? const EdgeInsets.symmetric(horizontal: NileSpacing.s8, vertical: NileSpacing.s6)
@@ -2067,6 +2176,16 @@ class _ViewerScreenState extends State<ViewerScreen>
           ),
         ],
       ),
+    );
+
+    // Long-press rather than a hover menu: this row is the same widget on a
+    // phone and in the desktop column, and an overflow icon on every line would
+    // cost more than it is worth in a column this narrow. Your own message has
+    // nothing to report or block.
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onLongPress: m.isMine ? null : () => _showChatActions(m),
+      child: row,
     );
   }
 

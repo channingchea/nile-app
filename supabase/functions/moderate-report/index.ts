@@ -7,7 +7,7 @@
 // leaves a row in `moderation_audit` (fire-and-forget; never fails the call).
 //
 //   { target_type: "user" | "post" | "event" | "comment" | "ad"
-//                | "current" | "current_comment",
+//                | "current" | "current_comment" | "live_chat_message",
 //     target_id: uuid,
 //     action: "resolve" | "dismiss" | "remove_content" | "restore_content"
 //           | "suspend_user" | "unsuspend_user",
@@ -58,6 +58,10 @@ const CONTENT_TABLES: Record<string, string> = {
   event: "events",
   current: "currents",
   current_comment: "current_comments",
+  // #16 phase 3. live_chat_messages carries the same id/removed_at/removed_by
+  // shape the generic remove path expects, so this entry is the whole change —
+  // remove_content and restore_content need no new code.
+  live_chat_message: "live_chat_messages",
 };
 
 // Comment-shaped tables keep a denormalized count on their parent; soft
@@ -69,6 +73,7 @@ const COMMENT_PARENTS: Record<string, { parentTable: string; parentCol: string }
 
 const TARGET_TYPES = new Set([
   "user", "post", "event", "comment", "ad", "current", "current_comment",
+  "live_chat_message",
 ]);
 const ACTIONS = new Set([
   "resolve", "dismiss", "remove_content", "restore_content",

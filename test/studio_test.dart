@@ -44,13 +44,21 @@ NileStudioSource _source(
   isRemovable: isRemovable,
 );
 
-ChatMessage _msg(String senderId, String username, String content) =>
-    ChatMessage(
-      senderId: senderId,
-      username: username,
-      content: content,
-      sentAt: DateTime(2026, 8, 10),
-    );
+/// [id] is `live_chat_messages.id`. Null models a line broadcast by a client
+/// that predates #16 — it can still be banned by sender, but not removed on its
+/// own, and the menu has to reflect that.
+ChatMessage _msg(
+  String senderId,
+  String username,
+  String content, {
+  String? id,
+}) => ChatMessage(
+  id: id,
+  senderId: senderId,
+  username: username,
+  content: content,
+  sentAt: DateTime(2026, 8, 10),
+);
 
 Widget _wrap(Widget child) =>
     MaterialApp(home: Scaffold(body: child), debugShowCheckedModeBanner: false);
@@ -413,6 +421,10 @@ void main() {
       String? selfId,
       void Function(ChatMessage)? onHide,
       VoidCallback? onShowAll,
+      void Function(ChatMessage)? onRemove,
+      void Function(ChatMessage)? onBan,
+      VoidCallback? onSettings,
+      String? restrictionLabel,
     }) => _wrap(
       SizedBox(
         width: NileStudio.chatColumnWidth,
@@ -425,6 +437,10 @@ void main() {
           onShowAll: onShowAll ?? () {},
           onBlock: (_) {},
           onReport: (_) {},
+          onRemove: onRemove,
+          onBan: onBan,
+          onSettings: onSettings,
+          restrictionLabel: restrictionLabel,
         ),
       ),
     );
@@ -490,26 +506,77 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     });
 
-    testWidgets('a viewer message offers hide, block and report', (
+    testWidgets('without moderator rights, only the for-me actions appear', (
       tester,
     ) async {
+      // The labels carry the whole point of #16: before it, "Block" sat in this
+      // menu reading like moderation while only ever changing one person's
+      // view. Anything that changes just this host's screen now says "for me".
       ChatMessage? hidden;
       await tester.pumpWidget(
         chatPanel(
-          messages: [_msg('u1', 'alice', 'hello')],
+          messages: [_msg('u1', 'alice', 'hello', id: 'm1')],
           onHide: (m) => hidden = m,
         ),
       );
       await tester.tap(find.byIcon(Icons.more_horiz));
       await tester.pumpAndSettle();
 
-      expect(find.text('Hide @alice for this show'), findsOneWidget);
-      expect(find.text('Block @alice'), findsOneWidget);
-      expect(find.text('Report @alice'), findsOneWidget);
+      expect(find.text('Hide @alice for me'), findsOneWidget);
+      expect(find.text('Block @alice for me'), findsOneWidget);
+      expect(find.text('Report this message'), findsOneWidget);
+      expect(find.text('Remove this message'), findsNothing);
+      expect(find.text('Ban @alice from this show'), findsNothing);
 
-      await tester.tap(find.text('Hide @alice for this show'));
+      await tester.tap(find.text('Hide @alice for me'));
       await tester.pumpAndSettle();
       expect(hidden?.senderId, 'u1');
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('a moderator gets remove and ban, and ban hands back the '
+        'message', (tester) async {
+      ChatMessage? banned;
+      await tester.pumpWidget(
+        chatPanel(
+          messages: [_msg('u1', 'alice', 'hello', id: 'm1')],
+          onRemove: (_) {},
+          onBan: (m) => banned = m,
+        ),
+      );
+      await tester.tap(find.byIcon(Icons.more_horiz));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Remove this message'), findsOneWidget);
+      expect(find.text('Ban @alice from this show'), findsOneWidget);
+
+      await tester.tap(find.text('Ban @alice from this show'));
+      await tester.pumpAndSettle();
+      expect(banned?.senderId, 'u1');
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('a message with no id offers ban but not remove', (
+      tester,
+    ) async {
+      // Every device in the field on day one broadcasts straight to the channel
+      // and sends no id, so there is nothing for the server to soft-delete.
+      // Offering Remove there would be a menu item that quietly does nothing —
+      // Ban still reaches those lines, because it clears by sender.
+      await tester.pumpWidget(
+        chatPanel(
+          messages: [_msg('u1', 'alice', 'hello')],
+          onRemove: (_) {},
+          onBan: (_) {},
+        ),
+      );
+      await tester.tap(find.byIcon(Icons.more_horiz));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Remove this message'), findsNothing);
+      expect(find.text('Ban @alice from this show'), findsOneWidget);
+      // …and the report falls back to the account, which is all we can identify.
+      expect(find.text('Report @alice'), findsOneWidget);
       await tester.pumpWidget(const SizedBox());
     });
 
@@ -518,10 +585,49 @@ void main() {
         chatPanel(
           messages: [_msg('me', 'host', 'welcome in')],
           selfId: 'me',
+          onRemove: (_) {},
+          onBan: (_) {},
         ),
       );
       expect(find.textContaining('welcome in'), findsOneWidget);
       expect(find.byIcon(Icons.more_horiz), findsNothing);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('settings are the host\'s alone', (tester) async {
+      await tester.pumpWidget(
+        chatPanel(messages: [_msg('u1', 'alice', 'hi')]),
+      );
+      expect(find.byIcon(Icons.tune), findsNothing);
+
+      var opened = false;
+      await tester.pumpWidget(
+        chatPanel(
+          messages: [_msg('u1', 'alice', 'hi')],
+          onSettings: () => opened = true,
+        ),
+      );
+      await tester.tap(find.byIcon(Icons.tune));
+      expect(opened, isTrue);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('a narrowed room says so in the header', (tester) async {
+      // Slow mode and follower-only chat both look exactly like a quiet room.
+      // A host who forgot they turned one on would otherwise read the silence
+      // as chat being broken — which is the failure #15 spent a whole fix on.
+      await tester.pumpWidget(
+        chatPanel(messages: [_msg('u1', 'alice', 'hi')]),
+      );
+      expect(find.textContaining('Slow mode'), findsNothing);
+
+      await tester.pumpWidget(
+        chatPanel(
+          messages: [_msg('u1', 'alice', 'hi')],
+          restrictionLabel: 'Slow mode · 10s · Followers only',
+        ),
+      );
+      expect(find.text('Slow mode · 10s · Followers only'), findsOneWidget);
       await tester.pumpWidget(const SizedBox());
     });
   });

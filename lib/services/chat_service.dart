@@ -273,6 +273,17 @@ class ChatService {
     'targetId': targetId,
   });
 
+  /// Host: change how the room behaves — whether crew may moderate, slow mode,
+  /// and who may speak. Partial: only the keys present in [patch] are written,
+  /// so a client that predates one control cannot blank it.
+  ///
+  /// Keys: `crewModeration` (bool), `slowModeSeconds` (int 0-300),
+  /// `access` ('everyone' | 'followers' | 'ticket_holders').
+  static Future<void> updateSettings({
+    required String eventId,
+    required Map<String, dynamic> patch,
+  }) => _moderate({'action': 'settings', 'eventId': eventId, ...patch});
+
   static Future<void> _moderate(Map<String, dynamic> body) async {
     try {
       final res = await supabase.functions.invoke('live-chat', body: body);

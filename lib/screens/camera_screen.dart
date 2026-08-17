@@ -318,6 +318,14 @@ class _CameraScreenState extends State<CameraScreen> {
   final Set<String> _hiddenSenders = {};
   final Set<String> _blockedSenders = {};
 
+  /// The host's chat controls (#16 phase 5), read from the event row on
+  /// connect. Held here only to draw the UI in the state the host left it —
+  /// the `live-chat` function is what actually enforces all three.
+  bool _chatCrewModeration = false;
+  int _chatSlowModeSeconds = 0;
+  String _chatAccess = 'everyone';
+  bool _eventIsPaid = false;
+
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
@@ -494,11 +502,22 @@ class _CameraScreenState extends State<CameraScreen> {
     return null;
   }
 
-  // ── Chat moderation (Studio) ────────────────────────────────────────────────
-  // Chat is an ephemeral broadcast, so there is no server-side message to
-  // delete. Hiding is local and reversible; blocking is the real, persisted
-  // action and applies app-wide; reporting goes to the same review queue as
-  // every other report.
+  // ── Chat moderation ─────────────────────────────────────────────────────────
+  // Two tiers, and the menu labels say which is which.
+  //
+  // Hide and block change only what THIS host sees — block is persisted and
+  // app-wide, but it is still one person's view. Before #16 they were the only
+  // levers, which meant a host could believe they had dealt with a troll the
+  // rest of the room was still watching.
+  //
+  // Remove and ban change the room. Both go through the `live-chat` function
+  // against the message record from migration 0107, and every client drops the
+  // line when the broadcast lands.
+
+  /// True when this device may moderate the room, not just its own view. The
+  /// host always; assigned crew only when the host turned crew moderation on
+  /// for this show. The server re-checks — this only decides what to draw.
+  bool get _canModerateChat => widget.isHost || _chatCrewModeration;
 
   void _hideSender(ChatMessage m) {
     if (m.senderId.isEmpty) return;
@@ -519,12 +538,279 @@ class _CameraScreenState extends State<CameraScreen> {
     }
   }
 
+  /// Report the message itself when it has an id, so the review queue carries
+  /// the actual text as evidence instead of "someone reported @x". Lines from
+  /// clients that predate #16 carry no id — those still report the account,
+  /// which is what every build did before this.
   Future<void> _reportSender(ChatMessage m) async {
+    final id = m.id;
+    if (id != null) {
+      await Moderation.showReportSheet(
+        context,
+        targetType: ReportTargetType.liveChatMessage,
+        targetId: id,
+      );
+      return;
+    }
     if (m.senderId.isEmpty) return;
     await Moderation.showReportSheet(
       context,
       targetType: ReportTargetType.user,
       targetId: m.senderId,
+    );
+  }
+
+  /// Remove one message for everyone.
+  ///
+  /// No confirm dialog, deliberately: it is a single line, an admin can restore
+  /// it from the review queue, and a modal between seeing something and taking
+  /// it down is a modal the audience reads over the host's shoulder. Ban is the
+  /// one that asks.
+  Future<void> _removeMessage(ChatMessage m) async {
+    final eventId = _eventId;
+    final id = m.id;
+    if (eventId == null || id == null) return;
+    try {
+      await ChatService.removeMessage(eventId: eventId, messageId: id);
+    } on ChatSendException catch (e) {
+      _toast(e.message);
+    }
+  }
+
+  /// Ban the sender from this show — confirmed, in the pattern of
+  /// [_removeSource]. It is the one chat action with no undo in the app.
+  Future<void> _banSender(ChatMessage m) async {
+    final eventId = _eventId;
+    if (eventId == null || m.senderId.isEmpty) return;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: NileColors.bgSurface,
+        title: Text('Ban @${m.username}?', style: NileTextStyles.headingMd()),
+        content: Text(
+          'Everything they have said is removed for everyone, they are '
+          'disconnected from the show, and they cannot rejoin it. This applies '
+          'to this show only, and cannot be undone here.',
+          style: NileTextStyles.bodyMd(),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text('Ban', style: TextStyle(color: NileColors.error)),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    try {
+      await ChatService.banSender(eventId: eventId, targetId: m.senderId);
+      _toast('@${m.username} was banned from this show.');
+    } catch (e) {
+      _toast(e is ChatSendException ? e.message : 'Couldn’t ban them. Try again.');
+    }
+  }
+
+  /// One line describing how the host has narrowed the room, or null when they
+  /// haven't. Drawn in the chat header: a throttled room looks exactly like a
+  /// quiet one, and a host who forgot the setting reads the silence as a bug.
+  String? get _chatRestrictionLabel {
+    final parts = <String>[
+      if (_chatSlowModeSeconds > 0) 'Slow mode · ${_chatSlowModeSeconds}s',
+      if (_chatAccess == 'followers') 'Followers only',
+      if (_chatAccess == 'ticket_holders') 'Ticket holders only',
+    ];
+    return parts.isEmpty ? null : parts.join(' · ');
+  }
+
+  /// Read the host's chat controls off the event row. Once, on connect.
+  ///
+  /// A failed read leaves the UI showing "unrestricted", which is only a
+  /// cosmetic lie — the server is the sole enforcer, so nothing gets past a
+  /// gate because this didn't load.
+  Future<void> _loadChatSettings(String slug) async {
+    try {
+      final row = await supabase
+          .from('events')
+          .select(
+            'price, chat_crew_moderation, chat_slow_mode_seconds, chat_access',
+          )
+          .eq('livekit_room', slug)
+          .maybeSingle();
+      if (row == null || !mounted) return;
+      setState(() {
+        _eventIsPaid = ((row['price'] as num?) ?? 0) > 0;
+        _chatCrewModeration = row['chat_crew_moderation'] as bool? ?? false;
+        _chatSlowModeSeconds =
+            (row['chat_slow_mode_seconds'] as num?)?.toInt() ?? 0;
+        _chatAccess = row['chat_access'] as String? ?? 'everyone';
+      });
+    } catch (_) {}
+  }
+
+  /// Host: the three chat controls (#16 phase 5).
+  ///
+  /// Written through the `live-chat` function rather than straight to the row,
+  /// so the validation sits next to the code that enforces it at send time —
+  /// and so "this show is free, so there are no ticket holders" comes back as a
+  /// sentence rather than a CHECK-constraint name.
+  Future<void> _showChatSettings() async {
+    final eventId = _eventId;
+    if (eventId == null) return;
+
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: NileColors.bgSurface,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(
+          top: Radius.circular(NileRadius.lg),
+        ),
+      ),
+      builder: (_) => StatefulBuilder(
+        builder: (sheetCtx, setSheet) {
+          Future<void> apply(Map<String, dynamic> patch) async {
+            final before = (
+              _chatCrewModeration,
+              _chatSlowModeSeconds,
+              _chatAccess,
+            );
+            void write(Map<String, dynamic> p) {
+              if (p.containsKey('crewModeration')) {
+                _chatCrewModeration = p['crewModeration'] as bool;
+              }
+              if (p.containsKey('slowModeSeconds')) {
+                _chatSlowModeSeconds = p['slowModeSeconds'] as int;
+              }
+              if (p.containsKey('access')) {
+                _chatAccess = p['access'] as String;
+              }
+            }
+
+            // Optimistic: a control that lags a network round trip feels
+            // broken, and every one of these is trivially reversible.
+            write(patch);
+            setSheet(() {});
+            if (mounted) setState(() {});
+            try {
+              await ChatService.updateSettings(eventId: eventId, patch: patch);
+            } catch (e) {
+              _chatCrewModeration = before.$1;
+              _chatSlowModeSeconds = before.$2;
+              _chatAccess = before.$3;
+              setSheet(() {});
+              if (mounted) setState(() {});
+              _toast(
+                e is ChatSendException ? e.message : 'Couldn’t save that.',
+              );
+            }
+          }
+
+          Widget chip(String label, bool selected, VoidCallback onTap) =>
+              ChoiceChip(
+                label: Text(label, style: NileTextStyles.bodySm()),
+                selected: selected,
+                onSelected: (_) => onTap(),
+                backgroundColor: NileColors.bgRaised,
+                selectedColor: NileColors.volt,
+                showCheckmark: false,
+              );
+
+          return SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.all(NileSpacing.s16),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Chat settings', style: NileTextStyles.headingSm()),
+                  const SizedBox(height: NileSpacing.s16),
+
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    value: _chatCrewModeration,
+                    activeThumbColor: NileColors.volt,
+                    title: Text(
+                      'Crew can moderate',
+                      style: NileTextStyles.bodyMd(),
+                    ),
+                    subtitle: Text(
+                      'Your camera operators can remove messages and ban '
+                      'viewers from this show. Off by default.',
+                      style: NileTextStyles.caption().copyWith(
+                        color: NileColors.txtTertiary,
+                      ),
+                    ),
+                    onChanged: (v) => apply({'crewModeration': v}),
+                  ),
+                  const SizedBox(height: NileSpacing.s12),
+
+                  Text('Slow mode', style: NileTextStyles.bodyMd()),
+                  Text(
+                    'How long each viewer waits between messages.',
+                    style: NileTextStyles.caption().copyWith(
+                      color: NileColors.txtTertiary,
+                    ),
+                  ),
+                  const SizedBox(height: NileSpacing.s8),
+                  Wrap(
+                    spacing: NileSpacing.s8,
+                    children: [
+                      for (final s in const [0, 5, 10, 30])
+                        chip(
+                          s == 0 ? 'Off' : '${s}s',
+                          _chatSlowModeSeconds == s,
+                          () => apply({'slowModeSeconds': s}),
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: NileSpacing.s16),
+
+                  Text('Who can chat', style: NileTextStyles.bodyMd()),
+                  Text(
+                    'Everyone can still read along — this only limits who can '
+                    'send.',
+                    style: NileTextStyles.caption().copyWith(
+                      color: NileColors.txtTertiary,
+                    ),
+                  ),
+                  const SizedBox(height: NileSpacing.s8),
+                  Wrap(
+                    spacing: NileSpacing.s8,
+                    children: [
+                      chip(
+                        'Everyone',
+                        _chatAccess == 'everyone',
+                        () => apply({'access': 'everyone'}),
+                      ),
+                      chip(
+                        'Followers',
+                        _chatAccess == 'followers',
+                        () => apply({'access': 'followers'}),
+                      ),
+                      // A free show sells no tickets, so this would mute the
+                      // whole room. The server refuses it too; not offering it
+                      // is the version the host doesn't have to discover.
+                      if (_eventIsPaid)
+                        chip(
+                          'Ticket holders',
+                          _chatAccess == 'ticket_holders',
+                          () => apply({'access': 'ticket_holders'}),
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: NileSpacing.s8),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
     );
   }
 
@@ -818,6 +1104,16 @@ class _CameraScreenState extends State<CameraScreen> {
     setState(() => _chatMessages.removeWhere((m) => m.senderId == senderId));
   }
 
+  /// What this host should see, after their own hides and blocks. Derived here
+  /// so the phone overlay and the Studio column cannot disagree about it.
+  List<ChatMessage> get _visibleChatMessages => [
+    for (final m in _chatMessages)
+      if (m.isSystem ||
+          !(_hiddenSenders.contains(m.senderId) ||
+              _blockedSenders.contains(m.senderId)))
+        m,
+  ];
+
   @override
   void dispose() {
     ShakeDetector.instance.resume();
@@ -1087,6 +1383,10 @@ class _CameraScreenState extends State<CameraScreen> {
       // Server-authored announcements (tips) come in on their own read-only
       // topic — the host should see them in the Studio too.
       _systemChannel = ChatService.subscribeSystem(eventId, _onChatMessage);
+
+      // How the host has set this room up — crew moderation, slow mode, who
+      // may speak. Only drives what we draw; the server enforces it.
+      _loadChatSettings(eventId);
 
       // Show clock: fetch the timing anchors and start the 1s ticker that
       // drives the crew-only countdown (and the host's auto-end at zero).
@@ -1982,8 +2282,115 @@ class _CameraScreenState extends State<CameraScreen> {
     );
   }
 
-  /// Read-only chat overlay — top-left under the status badge, newest at the
-  /// bottom. Toggled by the chat button in the bottom controls.
+  /// Phone parity for the Studio's hover menu (#16 phase 2).
+  ///
+  /// Long-press a line in the overlay. Most hosts run the show from a phone, so
+  /// moderation that only existed on a window wide enough for the Studio was
+  /// moderation most hosts didn't actually have.
+  Future<void> _showChatActions(ChatMessage m) async {
+    if (m.isSystem || m.senderId.isEmpty) return;
+    if (m.senderId == supabase.auth.currentUser?.id) return;
+
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: NileColors.bgSurface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(
+          top: Radius.circular(NileRadius.lg),
+        ),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(
+                NileSpacing.s16,
+                NileSpacing.s16,
+                NileSpacing.s16,
+                NileSpacing.s8,
+              ),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  '@${m.username}',
+                  style: NileTextStyles.headingSm(),
+                ),
+              ),
+            ),
+            // Room-wide first, same order and same wording as the Studio menu.
+            // Remove needs an id, which a line from a pre-#16 client lacks.
+            if (_canModerateChat && m.id != null)
+              ListTile(
+                leading: Icon(
+                  Icons.backspace_outlined,
+                  color: NileColors.txtPrimary,
+                ),
+                title: Text(
+                  'Remove this message',
+                  style: NileTextStyles.bodyMd(),
+                ),
+                onTap: () => Navigator.pop(ctx, 'remove'),
+              ),
+            if (_canModerateChat)
+              ListTile(
+                leading: Icon(Icons.gavel, color: NileColors.error),
+                title: Text(
+                  'Ban from this show',
+                  style: NileTextStyles.bodyMd().copyWith(
+                    color: NileColors.error,
+                  ),
+                ),
+                onTap: () => Navigator.pop(ctx, 'ban'),
+              ),
+            if (_canModerateChat) const Divider(height: 1),
+            ListTile(
+              leading: Icon(
+                Icons.visibility_off_outlined,
+                color: NileColors.txtPrimary,
+              ),
+              title: Text('Hide for me', style: NileTextStyles.bodyMd()),
+              onTap: () => Navigator.pop(ctx, 'hide'),
+            ),
+            ListTile(
+              leading: Icon(Icons.block, color: NileColors.txtPrimary),
+              title: Text('Block for me', style: NileTextStyles.bodyMd()),
+              onTap: () => Navigator.pop(ctx, 'block'),
+            ),
+            ListTile(
+              leading: Icon(Icons.flag_outlined, color: NileColors.error),
+              title: Text(
+                m.id != null ? 'Report this message' : 'Report @${m.username}',
+                style: NileTextStyles.bodyMd().copyWith(
+                  color: NileColors.error,
+                ),
+              ),
+              onTap: () => Navigator.pop(ctx, 'report'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (!mounted || action == null) return;
+    // Run after the sheet closes so a confirm dialog isn't parented to a route
+    // on its way out.
+    switch (action) {
+      case 'remove':
+        await _removeMessage(m);
+      case 'ban':
+        await _banSender(m);
+      case 'hide':
+        _hideSender(m);
+      case 'block':
+        await _blockSender(m);
+      case 'report':
+        await _reportSender(m);
+    }
+  }
+
+  /// Chat overlay — top-left under the status badge, newest at the bottom.
+  /// Toggled by the chat button in the bottom controls. Long-press a line for
+  /// the same actions the Studio column offers on hover.
   Widget _buildChatOverlay() {
     final size = MediaQuery.of(context).size;
     return Positioned(
@@ -2000,7 +2407,10 @@ class _CameraScreenState extends State<CameraScreen> {
           color: Colors.black.withValues(alpha: 0.35),
           borderRadius: BorderRadius.circular(NileRadius.sm),
         ),
-        child: _chatMessages.isEmpty
+        // Same filter the Studio column applies. It was missing here, which
+        // meant hiding or blocking someone on a phone changed nothing at all —
+        // the host kept seeing them in the only chat view a phone has.
+        child: _visibleChatMessages.isEmpty
             ? Text(
                 'Chat is quiet — messages will appear here.',
                 style: NileTextStyles.bodySm().copyWith(color: Colors.white54),
@@ -2008,40 +2418,44 @@ class _CameraScreenState extends State<CameraScreen> {
             : ListView.builder(
                 reverse: true,
                 shrinkWrap: true,
-                itemCount: _chatMessages.length,
+                itemCount: _visibleChatMessages.length,
                 itemBuilder: (context, i) {
-                  final m = _chatMessages[i];
-                  return Padding(
-                    padding: const EdgeInsets.symmetric(
-                      vertical: NileSpacing.s2,
+                  final m = _visibleChatMessages[i];
+                  return GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onLongPress: () => _showChatActions(m),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        vertical: NileSpacing.s2,
+                      ),
+                      child: m.isSystem
+                          ? Text(
+                              m.content,
+                              style: NileTextStyles.bodySm().copyWith(
+                                color: NileColors.volt,
+                                fontStyle: FontStyle.italic,
+                              ),
+                            )
+                          : Text.rich(
+                              TextSpan(
+                                children: [
+                                  TextSpan(
+                                    text: '@${m.username}  ',
+                                    style: NileTextStyles.bodySm().copyWith(
+                                      color: NileColors.volt,
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                                  TextSpan(
+                                    text: m.content,
+                                    style: NileTextStyles.bodySm().copyWith(
+                                      color: Colors.white,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
                     ),
-                    child: m.isSystem
-                        ? Text(
-                            m.content,
-                            style: NileTextStyles.bodySm().copyWith(
-                              color: NileColors.volt,
-                              fontStyle: FontStyle.italic,
-                            ),
-                          )
-                        : Text.rich(
-                            TextSpan(
-                              children: [
-                                TextSpan(
-                                  text: '@${m.username}  ',
-                                  style: NileTextStyles.bodySm().copyWith(
-                                    color: NileColors.volt,
-                                    fontWeight: FontWeight.w700,
-                                  ),
-                                ),
-                                TextSpan(
-                                  text: m.content,
-                                  style: NileTextStyles.bodySm().copyWith(
-                                    color: Colors.white,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
                   );
                 },
               ),
@@ -2599,6 +3013,16 @@ class _CameraScreenState extends State<CameraScreen> {
               onShowAll: _showAllSenders,
               onBlock: _blockSender,
               onReport: _reportSender,
+              // Null hides the room-wide items entirely rather than showing
+              // them disabled — same call as `onRemoveSource`. The server
+              // re-checks either way.
+              onRemove: _canModerateChat ? _removeMessage : null,
+              onBan: _canModerateChat ? _banSender : null,
+              // Settings are the host's alone, even when crew can moderate:
+              // deciding how the room behaves is not the same job as policing
+              // it.
+              onSettings: widget.isHost ? _showChatSettings : null,
+              restrictionLabel: _chatRestrictionLabel,
             )
           : null,
       banner:

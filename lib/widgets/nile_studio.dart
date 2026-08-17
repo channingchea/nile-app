@@ -897,12 +897,19 @@ class _StudioControlBar extends StatelessWidget {
 }
 
 // ── Chat & moderation ────────────────────────────────────────────────────────
-// Live chat is an ephemeral Supabase broadcast — nothing is persisted, so there
-// is no message on a server for a host to delete. What a host *can* do is stop
-// hearing from someone (local, instant, undoable), block them (persisted by
-// BlockService, and it applies everywhere in the app, not just this show), and
-// report them for review. Those are the three actions here, in that order of
-// severity.
+// Five actions, in ascending order of who they affect.
+//
+// Hide and Block change only what THIS host sees: hide is local and undoable,
+// block is persisted by BlockService and applies everywhere in the app. They
+// are labelled "for me" for that reason. Until #16 they were the only levers
+// there were, which meant a host could believe they had dealt with a troll the
+// whole room could still see.
+//
+// Remove and Ban change what EVERYONE sees. They go through the `live-chat`
+// function against the message record added in migration 0107 — Remove
+// soft-deletes one line, Ban bars the sender from this show, wipes what they
+// already said and disconnects them. Report sends it to the review queue with
+// the message text attached as evidence.
 
 /// The Studio's right-hand column.
 class NileStudioChat extends StatelessWidget {
@@ -916,6 +923,10 @@ class NileStudioChat extends StatelessWidget {
     required this.onShowAll,
     required this.onBlock,
     required this.onReport,
+    this.onRemove,
+    this.onBan,
+    this.onSettings,
+    this.restrictionLabel,
   });
 
   /// Newest first — the list renders reversed, matching the phone overlay.
@@ -937,6 +948,22 @@ class NileStudioChat extends StatelessWidget {
   final VoidCallback onShowAll;
   final void Function(ChatMessage message) onBlock;
   final void Function(ChatMessage message) onReport;
+
+  /// Room-wide moderation. Null when the viewer of this panel may not moderate
+  /// — the host always may, assigned crew only when the host turned crew
+  /// moderation on for this show. Same shape as `onRemoveSource`: the caller
+  /// decides authority, the widget only decides whether to draw the item.
+  final void Function(ChatMessage message)? onRemove;
+  final void Function(ChatMessage message)? onBan;
+
+  /// Opens the host's chat controls. Host-only, so null for everyone else.
+  final VoidCallback? onSettings;
+
+  /// Set when the host has narrowed the room — "Slow mode · 10s",
+  /// "Followers only". Shown in the header because a throttled room looks
+  /// exactly like a quiet one, and a host who forgot they turned it on will
+  /// otherwise read the silence as the chat being broken.
+  final String? restrictionLabel;
 
   @override
   Widget build(BuildContext context) {
@@ -993,9 +1020,41 @@ class NileStudioChat extends StatelessWidget {
                       ),
                     ),
                   ),
+                if (onSettings != null)
+                  IconButton(
+                    onPressed: onSettings,
+                    tooltip: 'Chat settings',
+                    iconSize: 16,
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(
+                      minWidth: 28,
+                      minHeight: 28,
+                    ),
+                    icon: Icon(
+                      Icons.tune,
+                      color: restrictionLabel != null
+                          ? NileColors.volt
+                          : NileColors.txtTertiary,
+                    ),
+                  ),
               ],
             ),
           ),
+          if (restrictionLabel != null)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(
+                NileSpacing.s16,
+                0,
+                NileSpacing.s16,
+                NileSpacing.s8,
+              ),
+              child: Text(
+                restrictionLabel!,
+                style: NileTextStyles.caption().copyWith(
+                  color: NileColors.volt,
+                ),
+              ),
+            ),
           Expanded(
             child: visible.isEmpty
                 ? Padding(
@@ -1024,6 +1083,8 @@ class NileStudioChat extends StatelessWidget {
                       onHide: onHide,
                       onBlock: onBlock,
                       onReport: onReport,
+                      onRemove: onRemove,
+                      onBan: onBan,
                     ),
                   ),
           ),
@@ -1040,6 +1101,8 @@ class _ChatRow extends StatefulWidget {
     required this.onHide,
     required this.onBlock,
     required this.onReport,
+    this.onRemove,
+    this.onBan,
   });
 
   final ChatMessage message;
@@ -1047,18 +1110,24 @@ class _ChatRow extends StatefulWidget {
   final void Function(ChatMessage message) onHide;
   final void Function(ChatMessage message) onBlock;
   final void Function(ChatMessage message) onReport;
+  final void Function(ChatMessage message)? onRemove;
+  final void Function(ChatMessage message)? onBan;
 
   @override
   State<_ChatRow> createState() => _ChatRowState();
 }
 
-enum _ModAction { hide, block, report }
+enum _ModAction { remove, ban, hide, block, report }
 
 class _ChatRowState extends State<_ChatRow> {
   bool _hovering = false;
 
   void _run(_ModAction action) {
     switch (action) {
+      case _ModAction.remove:
+        widget.onRemove?.call(widget.message);
+      case _ModAction.ban:
+        widget.onBan?.call(widget.message);
       case _ModAction.hide:
         widget.onHide(widget.message);
       case _ModAction.block:
@@ -1128,25 +1197,59 @@ class _ChatRowState extends State<_ChatRow> {
                           color: NileColors.txtTertiary,
                         ),
                         onSelected: _run,
-                        itemBuilder: (_) => [
+                        itemBuilder: (_) => <PopupMenuEntry<_ModAction>>[
+                          // Room-wide first: when a host opens this menu
+                          // mid-show it is almost always because everyone can
+                          // see something they want gone.
+                          //
+                          // Remove needs a message id, and a line broadcast by
+                          // a client that predates #16 has none. Rather than
+                          // offer an item that would quietly do nothing, drop
+                          // it — Ban still reaches those lines, because it
+                          // clears by sender.
+                          if (widget.onRemove != null && m.id != null)
+                            PopupMenuItem(
+                              value: _ModAction.remove,
+                              child: Text(
+                                'Remove this message',
+                                style: NileTextStyles.bodySm(),
+                              ),
+                            ),
+                          if (widget.onBan != null)
+                            PopupMenuItem(
+                              value: _ModAction.ban,
+                              child: Text(
+                                'Ban @${m.username} from this show',
+                                style: NileTextStyles.bodySm().copyWith(
+                                  color: NileColors.error,
+                                ),
+                              ),
+                            ),
+                          if (widget.onRemove != null || widget.onBan != null)
+                            const PopupMenuDivider(),
+                          // Below the line: only what this host sees. The
+                          // labels say so — the old menu let "Block" read as
+                          // moderation when it only ever changed one view.
                           PopupMenuItem(
                             value: _ModAction.hide,
                             child: Text(
-                              'Hide @${m.username} for this show',
+                              'Hide @${m.username} for me',
                               style: NileTextStyles.bodySm(),
                             ),
                           ),
                           PopupMenuItem(
                             value: _ModAction.block,
                             child: Text(
-                              'Block @${m.username}',
+                              'Block @${m.username} for me',
                               style: NileTextStyles.bodySm(),
                             ),
                           ),
                           PopupMenuItem(
                             value: _ModAction.report,
                             child: Text(
-                              'Report @${m.username}',
+                              m.id != null
+                                  ? 'Report this message'
+                                  : 'Report @${m.username}',
                               style: NileTextStyles.bodySm().copyWith(
                                 color: NileColors.error,
                               ),
