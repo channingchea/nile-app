@@ -66,12 +66,20 @@ const stripe = new Stripe(Deno.env.get("STRIPE_SECRET_KEY")!, {
   httpClient: Stripe.createFetchHttpClient(),
 });
 
-// action → { from: required current status, to: next status }
-const TRANSITIONS: Record<string, { from: string; to: string }> = {
-  approve: { from: "pending_review", to: "active" },
-  reject:  { from: "pending_review", to: "rejected" },
-  pause:   { from: "active",         to: "paused" },
-  resume:  { from: "paused",         to: "active" },
+// action → { from: acceptable current statuses, to: next status }
+//
+// `reject` accepting active/paused is review #23: there was no active →
+// rejected transition at all, so a policy-violating ad already in front of
+// people could be paused but never actually killed. The campaign stayed
+// non-terminal for ever, no money went back, and the reports queue's Reject
+// button — which has always pointed here — returned 409 on exactly the ads
+// that most needed it. Killing a live one now also refunds the part of the
+// budget that was never delivered.
+const TRANSITIONS: Record<string, { from: string[]; to: string }> = {
+  approve: { from: ["pending_review"],            to: "active" },
+  reject:  { from: ["pending_review", "active", "paused"], to: "rejected" },
+  pause:   { from: ["active"],                    to: "paused" },
+  resume:  { from: ["paused"],                    to: "active" },
 };
 
 serve(async (req) => {
@@ -97,12 +105,17 @@ serve(async (req) => {
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
     );
 
-    const { campaign_id, action, note } = await req.json();
+    const { campaign_id, action, note, creative_updated_at } = await req.json();
 
     // withdraw is owner-gated (advertiser deletes their own unapproved ad);
     // everything else stays admins-only.
     if (action === "withdraw") {
       return await withdraw(admin, user.id, campaign_id, json);
+    }
+    // stop is the same posture for a campaign that DID go live (review #25):
+    // the advertiser's own kill switch, with the undelivered budget returned.
+    if (action === "stop") {
+      return await stopCampaign(admin, user.id, campaign_id, note, json);
     }
 
     // Admin gate — service-role read of the admins table (RLS-independent).
@@ -115,12 +128,30 @@ serve(async (req) => {
 
     const { data: c } = await admin
       .from("ad_campaigns")
-      .select("id, name, status, starts_at, ends_at, stripe_payment_intent_id, placement, split_status, budget_cents, disputed_at, advertiser_account_id, advertiser_accounts(name, contact_email), ad_creatives(headline), events(title, host_id, sponsorship_auto_accept, sponsorship_min_offer_cents)")
+      .select("id, name, status, starts_at, ends_at, stripe_payment_intent_id, placement, split_status, budget_cents, spent_cents, disputed_at, advertiser_account_id, advertiser_accounts(name, contact_email), ad_creatives(headline, updated_at), events(title, host_id, sponsorship_auto_accept, sponsorship_min_offer_cents)")
       .eq("id", campaign_id)
       .maybeSingle();
     if (!c) return json({ error: "Campaign not found" }, 404);
-    if (c.status !== t.from) {
-      return json({ error: `Campaign is ${c.status}, expected ${t.from}` }, 409);
+    if (!t.from.includes(c.status)) {
+      return json({ error: `Campaign is ${c.status}, expected ${t.from.join(" or ")}` }, 409);
+    }
+
+    // ── TOCTOU on approve (review #22) ──────────────────────────────────────
+    // Nothing stopped the advertiser editing headline or click_url while the
+    // review modal was open, so an admin could approve copy they never read.
+    // The portal sends the ad_creatives.updated_at it rendered from; if it has
+    // moved since, the approval is refused rather than silently granted to
+    // different words. Optional so an older portal build still works —
+    // omitting it just means no guard, exactly as before.
+    if (action === "approve" && typeof creative_updated_at === "string") {
+      // deno-lint-ignore no-explicit-any
+      const current = (c as any).ad_creatives?.[0]?.updated_at as string | undefined;
+      if (current && new Date(current).getTime() !== new Date(creative_updated_at).getTime()) {
+        return json({
+          error: "This ad was edited while you were reviewing it — reopen it and read it again",
+          creative_updated_at: current,
+        }, 409);
+      }
     }
 
     // A campaign paused by a chargeback (migration 0113) looks exactly like an
@@ -161,8 +192,18 @@ serve(async (req) => {
       // pi.status === "succeeded" ⇒ legacy auto-capture payment; nothing to do.
     }
 
-    if (action === "reject" && !isLobby && hasPi) {
-      await releaseHold(piId, (c as any).split_status === "split");
+    // Rejecting an ad that never went live releases the authorization; nothing
+    // was ever captured. Rejecting a LIVE one is review #23 — the money is on
+    // our balance and the part of it the advertiser never received has to go
+    // back. 0115 is what makes "never received" a number: spend follows
+    // delivered days now, so budget - spent is defensible rather than a guess.
+    let refundedCents = 0;
+    if (action === "reject" && hasPi) {
+      if (c.status === "pending_review") {
+        if (!isLobby) await releaseHold(piId, (c as any).split_status === "split");
+      } else {
+        refundedCents = await refundUndelivered(admin, c, piId, "killed", user.id, note);
+      }
     }
 
     // ── DB transition (status-guarded against races) ────────────────────────
@@ -187,7 +228,9 @@ serve(async (req) => {
       .from("ad_campaigns")
       .update(update)
       .eq("id", campaign_id)
-      .eq("status", t.from)
+      // The status we actually read and decided on, not the whole accepted set
+      // — that is what makes this a compare-and-swap.
+      .eq("status", c.status)
       .select("id, status, starts_at, ends_at")
       .single();
     if (updErr || !updated) return json({ error: "Update failed (status changed concurrently?)" }, 409);
@@ -237,12 +280,168 @@ serve(async (req) => {
       if (!decided) await notifyHostOfferCleared(admin, campaign_id);
     }
 
-    return json({ campaign: updated });
+    return json({ campaign: updated, refunded_cents: refundedCents });
   } catch (err) {
     console.error(err);
     return json({ error: String(err) }, 500);
   }
 });
+
+// Return the part of a captured budget the advertiser never received, and write
+// down that we did (migration 0116). Shared by the admin kill (#23) and the
+// advertiser's own stop (#25) — the same arithmetic either way, because the
+// question "what did they actually get" doesn't depend on who is asking.
+//
+// spent_cents is recomputed first. tally_ad_spend only runs at 03:10, so a
+// campaign stopped at noon carries yesterday's number, and refunding against a
+// stale figure means paying back delivery that already happened.
+//
+// Never throws past the Stripe call: if the refund itself fails the caller
+// should hear about it, but a failure to FILE the refund must not undo one that
+// has already left.
+// deno-lint-ignore no-explicit-any
+async function refundUndelivered(
+  admin: any,
+  // deno-lint-ignore no-explicit-any
+  c: any,
+  piId: string,
+  reason: "killed" | "stopped",
+  actorId: string,
+  note?: string,
+): Promise<number> {
+  try {
+    await admin.rpc("tally_ad_spend");
+  } catch (err) {
+    // Fall back to the stored figure. Slightly over-refunding beats blocking a
+    // brand's kill switch on a reporting job.
+    console.error("pre-refund tally failed, using stored spend:", err);
+  }
+  const { data: fresh } = await admin
+    .from("ad_campaigns")
+    .select("budget_cents, spent_cents")
+    .eq("id", c.id)
+    .maybeSingle();
+
+  const budget = Number(fresh?.budget_cents ?? c.budget_cents ?? 0);
+  const spent = Math.min(Number(fresh?.spent_cents ?? c.spent_cents ?? 0), budget);
+  const amount = Math.max(budget - spent, 0);
+  if (amount <= 0) return 0;
+
+  const isSplit = c.split_status === "split";
+  let refundId: string | null = null;
+  try {
+    const pi = await stripe.paymentIntents.retrieve(piId);
+    if (pi.status === "requires_capture") {
+      // Never captured — cancelling releases the whole hold, which is strictly
+      // better for the advertiser than refunding part of a charge that was
+      // never made.
+      await stripe.paymentIntents.cancel(piId);
+    } else if (pi.status === "succeeded") {
+      const refund = await stripe.refunds.create({
+        payment_intent: piId,
+        amount,
+        ...(isSplit ? { reverse_transfer: true, refund_application_fee: true } : {}),
+      });
+      refundId = refund.id;
+    } else {
+      return 0;
+    }
+  } catch (err) {
+    console.error("undelivered refund FAILED — manual refund owed:", piId, err);
+    throw err;
+  }
+
+  const { error } = await admin.from("ad_refunds").insert({
+    campaign_id: c.id,
+    stripe_refund_id: refundId,
+    payment_intent_id: piId,
+    amount_cents: amount,
+    reason,
+    note: typeof note === "string" && note.trim() ? note.trim().slice(0, 300) : null,
+    actor_id: actorId,
+  });
+  if (error) console.error("ad_refunds insert failed (refund DID go through):", error);
+  return amount;
+}
+
+// ── #25 · the advertiser's own kill switch ──────────────────────────────────
+// Withdraw only ever covered ads that never went live, and pause/resume are
+// admin-gated, so a brand hitting a PR crisis on day two of a fourteen-day
+// flight had to email us and wait. Stopping ends the flight now and returns the
+// undelivered budget.
+//
+// The campaign lands on 'completed' rather than a new status: every check
+// constraint, every reporting filter and every UI branch already understands
+// that one, and stopped_at (0116) is what tells "they pulled it" apart from "it
+// ran its course".
+// deno-lint-ignore no-explicit-any
+async function stopCampaign(
+  admin: any,
+  userId: string,
+  campaignId: string,
+  note: unknown,
+  json: Json,
+) {
+  if (!campaignId) return json({ error: "Invalid campaign_id" }, 400);
+
+  const { data: c } = await admin
+    .from("ad_campaigns")
+    .select("id, name, status, placement, split_status, budget_cents, spent_cents, stripe_payment_intent_id, advertiser_account_id")
+    .eq("id", campaignId)
+    .maybeSingle();
+  if (!c) return json({ error: "Campaign not found" }, 404);
+
+  const { data: owner } = await admin
+    .from("advertiser_accounts")
+    .select("id")
+    .eq("id", c.advertiser_account_id ?? "00000000-0000-0000-0000-000000000000")
+    .eq("auth_user_id", userId)
+    .maybeSingle();
+  if (!owner) return json({ error: "Not your campaign" }, 403);
+
+  if (c.status !== "active" && c.status !== "paused") {
+    return json({
+      error: `Campaign is ${c.status} — only a live or paused campaign can be stopped`,
+    }, 409);
+  }
+
+  const piId = c.stripe_payment_intent_id ?? "";
+  const refundedCents = piId.startsWith("pi_")
+    ? await refundUndelivered(admin, c, piId, "stopped", userId, note as string)
+    : 0;
+
+  const trimmed = typeof note === "string" ? note.trim().slice(0, 300) : "";
+  const { data: stopped, error: updErr } = await admin
+    .from("ad_campaigns")
+    .update({
+      status: "completed",
+      stopped_at: new Date().toISOString(),
+      review_note: trimmed || "Stopped by the advertiser.",
+    })
+    .eq("id", campaignId)
+    .eq("status", c.status)
+    .select("id, status")
+    .maybeSingle();
+  // The refund has already left by this point, so a lost race here is a data
+  // problem to shout about, not something to retry into a second refund.
+  if (updErr || !stopped) {
+    console.error("STOP: refund issued but status update failed", campaignId, updErr);
+    return json({
+      error: "The refund went through but the campaign didn't stop — contact support",
+      refunded_cents: refundedCents,
+    }, 409);
+  }
+
+  await logAudit(admin, {
+    campaign_id: campaignId,
+    campaign_name: c.name ?? null,
+    actor: userId,
+    action: "stop",
+    note: trimmed || null,
+  });
+
+  return json({ campaign: stopped, refunded_cents: refundedCents });
+}
 
 // Advertiser notification on approve/reject via a Klaviyo server-side event.
 // Env-gated on KLAVIYO_API_KEY (private pk_ key): no-ops cleanly when unset.
