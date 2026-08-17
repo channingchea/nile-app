@@ -13,7 +13,6 @@ import '../services/ad_service.dart';
 import '../services/chat_service.dart';
 import '../services/event_service.dart';
 import '../services/livekit_service.dart';
-import '../services/profile_service.dart';
 import '../services/realtime.dart';
 import '../services/share_urls.dart';
 import '../services/supabase_client.dart';
@@ -138,8 +137,6 @@ class _ViewerScreenState extends State<ViewerScreen>
   final List<ChatMessage> _chatMessages = [];
   final _chatController = TextEditingController();
   final _chatScrollController = ScrollController();
-  String? _myUsername;
-  String? _myAvatarUrl;
   bool _chatOpen = false;
   // Desktop gives chat a column of its own, so there is nothing to open or
   // close there. This stands in for "the panel is up" everywhere the open flag
@@ -369,6 +366,20 @@ class _ViewerScreenState extends State<ViewerScreen>
     if (_chatShowing && follow) _scrollChatToBottom();
   }
 
+  /// The host removed a single message. Silent by design: no "message removed"
+  /// placeholder, the line simply stops being there. A tombstone is a trophy.
+  void _onChatRemove(String messageId) {
+    if (!mounted) return;
+    setState(() => _chatMessages.removeWhere((m) => m.id == messageId));
+  }
+
+  /// The host banned someone — drop everything they said, not only the line the
+  /// host happened to be looking at.
+  void _onChatRemoveSender(String senderId) {
+    if (senderId.isEmpty || !mounted) return;
+    setState(() => _chatMessages.removeWhere((m) => m.senderId == senderId));
+  }
+
   void _onChatScroll() {
     if (!_chatScrollController.hasClients) return;
     final pos = _chatScrollController.position;
@@ -423,17 +434,25 @@ class _ViewerScreenState extends State<ViewerScreen>
     );
   }
 
+  /// Send through the `live-chat` function rather than straight onto the
+  /// channel (#16 phase 1) — that is where the rate limit, the ban check and
+  /// the server-side record are. Our own copy comes back over the broadcast
+  /// like everyone else's, so nothing is added locally.
   Future<void> _sendChat() async {
     final raw = _chatController.text.trim();
-    if (raw.isEmpty || _chatChannel == null) return;
+    final eventId = _streamEventId;
+    if (raw.isEmpty || eventId == null) return;
     final text = raw.length > 250 ? raw.substring(0, 250) : raw;
     _chatController.clear();
-    await ChatService.send(
-      _chatChannel!,
-      username: _myUsername ?? 'viewer',
-      avatarUrl: _myAvatarUrl,
-      content: text,
-    );
+    try {
+      await ChatService.send(eventId: eventId, content: text);
+    } on ChatSendException catch (e) {
+      if (!mounted) return;
+      // Give them their words back. Losing what you typed to a rate limit is a
+      // second punishment for the same thing.
+      _chatController.text = text;
+      _showSnack(e.message);
+    }
   }
 
   // ── Reactions ─────────────────────────────────────────────────────────────
@@ -703,8 +722,9 @@ class _ViewerScreenState extends State<ViewerScreen>
         ),
       );
 
-      // Open the ephemeral chat channel and resolve our username once for
-      // outgoing messages (broadcast carries no profile join).
+      // Open the chat channel. Our own username no longer needs resolving here:
+      // the server stamps it from `profiles` when it broadcasts, which is what
+      // stops one viewer chatting under another's name.
       // Chat joins a *private* channel, so the join is authorized by the
       // Realtime policy in migration 0104 rather than by knowing the slug. A
       // refused join looks exactly like a quiet room from here — nobody is
@@ -714,15 +734,13 @@ class _ViewerScreenState extends State<ViewerScreen>
         eventId,
         _onChatMessage,
         onReaction: _onReaction,
+        onRemove: _onChatRemove,
+        onRemoveSender: _onChatRemoveSender,
         onStatus: _onChatStatus,
       );
       // Server-authored announcements (tips) arrive on their own read-only
       // topic — see ChatService.subscribeSystem.
       _systemChannel = ChatService.subscribeSystem(eventId, _onChatMessage);
-      ProfileService.fetchCurrentProfile().then((p) {
-        _myUsername = p?.username;
-        _myAvatarUrl = p?.avatarUrl;
-      }).catchError((_) => null);
 
       final hostProfile = eventState?['profiles'] as Map<String, dynamic>?;
       setState(() {
@@ -1229,7 +1247,6 @@ class _ViewerScreenState extends State<ViewerScreen>
       _chatAtBottom = true;
       _pendingChatCount = 0;
       _reactions.clear();
-      _myUsername = null;
       _state = ViewerState.idle;
     });
   }

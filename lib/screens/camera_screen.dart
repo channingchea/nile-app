@@ -805,6 +805,19 @@ class _CameraScreenState extends State<CameraScreen> {
     });
   }
 
+  /// A message was removed for everyone (#16 phase 1). Silent here too — the
+  /// host who just removed it does not need a receipt in the transcript.
+  void _onChatRemove(String messageId) {
+    if (!mounted) return;
+    setState(() => _chatMessages.removeWhere((m) => m.id == messageId));
+  }
+
+  /// Somebody was banned: everything they said goes, not just the one line.
+  void _onChatRemoveSender(String senderId) {
+    if (senderId.isEmpty || !mounted) return;
+    setState(() => _chatMessages.removeWhere((m) => m.senderId == senderId));
+  }
+
   @override
   void dispose() {
     ShakeDetector.instance.resume();
@@ -1063,7 +1076,14 @@ class _CameraScreenState extends State<CameraScreen> {
       });
 
       // Join the live-chat broadcast so the host/operator can watch the room.
-      _chatChannel = ChatService.subscribe(eventId, _onChatMessage);
+      // The removal callbacks keep the Studio honest: whatever a host removes
+      // has to leave their own view too, or they will remove it twice.
+      _chatChannel = ChatService.subscribe(
+        eventId,
+        _onChatMessage,
+        onRemove: _onChatRemove,
+        onRemoveSender: _onChatRemoveSender,
+      );
       // Server-authored announcements (tips) come in on their own read-only
       // topic — the host should see them in the Studio too.
       _systemChannel = ChatService.subscribeSystem(eventId, _onChatMessage);

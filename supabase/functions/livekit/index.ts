@@ -612,8 +612,9 @@ async function setMasterAudio(body: any, userId: string, admin: any, json: Json)
 // Whether they can come straight back is decided by the gate they next fail (or
 // pass) in viewer-token / camera-token — a refunded ticket and a de-assigned
 // operator are both refused there, so for those two this is final. A viewer
-// kicked from a FREE event can rejoin; making that stick needs a persisted ban,
-// which belongs with the chat-moderation work rather than here.
+// kicked from a FREE event used to rejoin immediately; the `ban` action in the
+// `live-chat` function is the one that makes it stick, and viewer-token now
+// refuses anyone carrying a live_chat_bans row (#16 phase 1).
 async function removeParticipant(
   body: any,
   userId: string,
@@ -1079,6 +1080,26 @@ async function viewerToken(body: any, userId: string, admin: any, json: Json): P
     userId,
     admin,
   );
+
+  // Chat ban (#16 phase 1, migration 0107). remove-participant kicks someone
+  // out of the room; on a FREE event nothing then stopped them minting a new
+  // token and walking straight back in, because no other gate below applies.
+  // This is the piece #11 left open. Crew are exempt — a host cannot ban
+  // themselves, and an operator assignment is the stronger signal anyway.
+  //
+  // Deliberately worded as removal rather than "you are banned": the viewer is
+  // out either way, and the host does not need a rejoining argument.
+  if (!isCrew) {
+    const { data: chatBan } = await admin
+      .from("live_chat_bans")
+      .select("user_id")
+      .eq("event_id", event.id)
+      .eq("user_id", userId)
+      .maybeSingle();
+    if (chatBan) {
+      return json({ error: "You've been removed from this event" }, 403);
+    }
+  }
 
   // Paid events require a paid ticket — unless the viewer is the host or an
   // assigned camera operator, who both get free access. Look the ticket up

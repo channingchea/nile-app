@@ -3,10 +3,28 @@ import 'supabase_client.dart';
 
 // ── Model ─────────────────────────────────────────────────────────────────────
 
-/// An ephemeral live-chat message. Carried over Supabase Realtime broadcast —
-/// never persisted, so the sender's username travels inside the payload (no
-/// profile join is possible on a broadcast channel).
+/// A live-chat message, carried to the audience over Supabase Realtime
+/// broadcast.
+///
+/// The audience experience is still ephemeral — nobody arriving late sees what
+/// came before them, and there is no history to scroll. But since #16 phase 1
+/// every message sent through [ChatService.send] is also recorded server-side
+/// (`live_chat_messages`, migration 0107) so a host can actually remove one,
+/// a report can carry the real text as evidence, and a ban has something to
+/// sweep. That record is kept 30 days and is readable only by the event's host
+/// and platform admins.
+///
+/// The sender's username travels inside the payload because a broadcast carries
+/// no profile join. It is stamped by the server from `profiles`, not by the
+/// sending client — that is what stops one viewer chatting under another's name.
 class ChatMessage {
+  /// `live_chat_messages.id`, when the message came through the server.
+  ///
+  /// Null for two reasons, both normal: system announcements are not chat, and
+  /// builds that predate #16 still broadcast straight to the channel. A null id
+  /// simply means this line cannot be individually removed — the sender-wide
+  /// removal a ban issues still applies to it.
+  final String? id;
   final String senderId;
   final String username;
   final String? avatarUrl;
@@ -17,6 +35,7 @@ class ChatMessage {
   final String kind;
 
   const ChatMessage({
+    this.id,
     required this.senderId,
     required this.username,
     this.avatarUrl,
@@ -29,6 +48,7 @@ class ChatMessage {
   bool get isSystem => kind == 'system';
 
   Map<String, dynamic> toJson() => {
+    if (id != null) 'id': id,
     'sender_id': senderId,
     'username': username,
     if (avatarUrl != null) 'avatar_url': avatarUrl,
@@ -38,6 +58,7 @@ class ChatMessage {
   };
 
   factory ChatMessage.fromJson(Map<String, dynamic> json) => ChatMessage(
+    id: json['id'] as String?,
     senderId: json['sender_id'] as String? ?? '',
     username: json['username'] as String? ?? 'viewer',
     avatarUrl: json['avatar_url'] as String?,
@@ -62,19 +83,34 @@ class LiveReaction {
   );
 }
 
+/// A message the server refused, carrying wording already fit to show the user
+/// ("You're sending messages too quickly"). Thrown rather than returned so a
+/// caller cannot forget to check.
+class ChatSendException implements Exception {
+  final String message;
+  const ChatSendException(this.message);
+  @override
+  String toString() => message;
+}
+
 // ── Service ─────────────────────────────────────────────────────────────────
 
-/// Live-stream chat over Supabase Realtime broadcast. Messages are ephemeral:
-/// no table, no history, no RLS — they exist only for clients connected to the
-/// channel at send time. Mirrors the channel lifecycle of [EventService].
+/// Live-stream chat. Delivery is a Supabase Realtime broadcast; authorship and
+/// moderation run through the `live-chat` Edge Function.
 class ChatService {
   static const _event = 'msg';
   static const _reactEvent = 'react';
+  static const _removeEvent = 'rm';
+  static const _removeSenderEvent = 'rm_user';
+
+  /// Hard cap enforced server-side too. The composer should stop the user well
+  /// before this; it exists so a modified client cannot paste an essay.
+  static const int maxMessageLength = 500;
 
   static String _channelName(String eventId) => 'live_chat:$eventId';
 
   /// Server-authored announcements (tips today). Read-only for clients: the
-  /// Realtime Authorization policy in migration 0099 grants SELECT but no
+  /// Realtime Authorization policy in migration 0104 grants SELECT but no
   /// INSERT on this topic, so only the service role can put a message on it.
   /// That is what stops a viewer forging a "@host tipped $200 🎉" line in the
   /// distinct system style, to an audience that just paid to be in the room.
@@ -83,16 +119,25 @@ class ChatService {
   /// Opens the broadcast channel for [eventId] and invokes [onMessage] for each
   /// incoming message (and [onReaction] for each emoji burst, if provided).
   /// Returns the channel — call [RealtimeChannel.unsubscribe] to leave.
-  /// `self: true` echoes the sender's own messages/reactions back, keeping a
-  /// single render path for everything.
+  ///
+  /// [onRemove] fires when the host removes a single message, [onRemoveSender]
+  /// when a ban wipes everything one person said. Both are silent by design:
+  /// the line disappears with no "message removed" placeholder, because a
+  /// tombstone is a trophy.
+  ///
+  /// `self: true` echoes the sender's own reactions back, keeping a single
+  /// render path. Messages now arrive from the server for everyone including
+  /// their author, so they take the same path either way.
   static RealtimeChannel subscribe(
     String eventId,
     void Function(ChatMessage) onMessage, {
     void Function(LiveReaction)? onReaction,
+    void Function(String messageId)? onRemove,
+    void Function(String senderId)? onRemoveSender,
     void Function(RealtimeSubscribeStatus status, Object? error)? onStatus,
   }) {
     // private: true routes the join and every broadcast through the Realtime
-    // Authorization policies in migration 0099. Before that the only thing
+    // Authorization policies in migration 0104. Before that the only thing
     // between a stranger and a paid show's chat was knowing the slug — which is
     // in the public share URL.
     final channel = supabase.channel(
@@ -119,6 +164,24 @@ class ChatService {
           try {
             onReaction(LiveReaction.fromJson(payload));
           } catch (_) {}
+        },
+      );
+    }
+    if (onRemove != null) {
+      channel.onBroadcast(
+        event: _removeEvent,
+        callback: (payload) {
+          final id = payload['id'] as String?;
+          if (id != null && id.isNotEmpty) onRemove(id);
+        },
+      );
+    }
+    if (onRemoveSender != null) {
+      channel.onBroadcast(
+        event: _removeSenderEvent,
+        callback: (payload) {
+          final id = payload['sender_id'] as String?;
+          if (id != null && id.isNotEmpty) onRemoveSender(id);
         },
       );
     }
@@ -149,30 +212,87 @@ class ChatService {
     return channel;
   }
 
-  /// Broadcasts [content] from the current user on [channel]. Trims and ignores
-  /// empty content. [username]/[avatarUrl] are resolved once by the caller at
-  /// join time (broadcast carries no profile join).
-  static Future<void> send(
-    RealtimeChannel channel, {
-    required String username,
-    String? avatarUrl,
+  /// Sends [content] as the current user in [eventId] (the LiveKit slug).
+  ///
+  /// Goes through the `live-chat` function rather than straight onto the
+  /// channel: that is where the length cap, the rate limit, the ban check and
+  /// the server-side record live. The message reaches the room only after it is
+  /// written, which costs a round trip and buys a message that can be removed.
+  ///
+  /// The sender's own copy arrives back over the broadcast like everyone
+  /// else's, so there is nothing to echo locally.
+  ///
+  /// Throws [ChatSendException] with wording fit to show the user.
+  static Future<void> send({
+    required String eventId,
     required String content,
   }) async {
-    final uid = supabase.auth.currentUser?.id;
     final text = content.trim();
-    if (uid == null || text.isEmpty) return;
-    final msg = ChatMessage(
-      senderId: uid,
-      username: username,
-      avatarUrl: avatarUrl,
-      content: text,
-      sentAt: DateTime.now(),
-    );
-    await channel.sendBroadcastMessage(event: _event, payload: msg.toJson());
+    if (text.isEmpty) return;
+
+    try {
+      final res = await supabase.functions.invoke(
+        'live-chat',
+        body: {'action': 'send', 'eventId': eventId, 'content': text},
+      );
+      final data = res.data;
+      if (data is Map && data['error'] != null) {
+        throw ChatSendException(data['error'].toString());
+      }
+    } on FunctionException catch (e) {
+      final details = e.details;
+      final msg = details is Map ? details['error']?.toString() : null;
+      throw ChatSendException(msg ?? "Message didn't send — try again");
+    } catch (e) {
+      if (e is ChatSendException) rethrow;
+      throw const ChatSendException("Message didn't send — try again");
+    }
+  }
+
+  /// Host: remove one message for everyone. Silent — the line simply stops
+  /// being rendered. The row is soft-deleted, not destroyed, so a report filed
+  /// against it still has its text.
+  static Future<void> removeMessage({
+    required String eventId,
+    required String messageId,
+  }) => _moderate({
+    'action': 'remove',
+    'eventId': eventId,
+    'messageId': messageId,
+  });
+
+  /// Host: ban [targetId] from this event's chat. Permanent for this event —
+  /// it also wipes what they already said, disconnects them from the room, and
+  /// stops `viewer-token` letting them back in.
+  static Future<void> banSender({
+    required String eventId,
+    required String targetId,
+  }) => _moderate({
+    'action': 'ban',
+    'eventId': eventId,
+    'targetId': targetId,
+  });
+
+  static Future<void> _moderate(Map<String, dynamic> body) async {
+    try {
+      final res = await supabase.functions.invoke('live-chat', body: body);
+      final data = res.data;
+      if (data is Map && data['error'] != null) {
+        throw ChatSendException(data['error'].toString());
+      }
+    } on FunctionException catch (e) {
+      final details = e.details;
+      final msg = details is Map ? details['error']?.toString() : null;
+      throw ChatSendException(msg ?? 'That did not go through — try again');
+    }
   }
 
   /// Broadcasts a tap-to-react [emoji] on [channel]. Throttling is the caller's
   /// responsibility (the viewer coalesces taps to protect the channel).
+  ///
+  /// Still a direct broadcast, unlike [send]: a reaction carries no text to
+  /// moderate and arrives in bursts, so routing it through a function would buy
+  /// nothing and cost a round trip per tap.
   static Future<void> sendReaction(
     RealtimeChannel channel, {
     required String emoji,
