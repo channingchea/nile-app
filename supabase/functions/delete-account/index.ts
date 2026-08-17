@@ -56,17 +56,46 @@ serve(async (req) => {
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
     );
 
-    // Guard against deleting an account that still holds paid tickets which
-    // have not been refunded — surface to the user instead of silently
-    // dropping their purchase records.
-    const { count: paidCount } = await admin
+    // P3 #32. This used to 409 on ANY paid ticket, and a ticket only leaves
+    // 'paid' via a host refund — so a single purchase locked the account out of
+    // deletion forever (Guideline 5.1.1(v)). Only a show that has not happened
+    // yet is a live entitlement worth stopping for: refund it first, or it is
+    // silently forfeited. Everything already watched is anonymized below.
+    const { data: paidTickets } = await admin
       .from("tickets")
-      .select("id", { count: "exact", head: true })
+      .select(
+        "id, events!tickets_event_id_fkey(title, status, scheduled_at, end_at)"
+      )
       .eq("buyer_id", uid)
       .eq("status", "paid");
-    if ((paidCount ?? 0) > 0) {
+
+    const now = Date.now();
+    const blocking = (paidTickets ?? []).filter((t: Record<string, unknown>) => {
+      const e = t.events as {
+        title?: string;
+        status?: string;
+        scheduled_at?: string | null;
+        end_at?: string | null;
+      } | null;
+      if (!e) return false;
+      if (e.status === "live" || e.status === "soundcheck") return true;
+      if (e.status !== "scheduled") return false; // ended, cancelled, draft
+      const endsAt = e.end_at ?? e.scheduled_at;
+      // A scheduled show with no date on it can't be proven to be over.
+      return !endsAt || new Date(endsAt).getTime() > now;
+    });
+
+    if (blocking.length > 0) {
+      const first =
+        (blocking[0].events as { title?: string } | null)?.title ?? "an event";
+      const more = blocking.length - 1;
       return json(
-        { error: "You have active paid tickets. Please request refunds before deleting your account." },
+        {
+          error:
+            `You have a ticket for ${first}${
+              more > 0 ? ` and ${more} other upcoming event${more > 1 ? "s" : ""}` : ""
+            }, which hasn't happened yet. Ask the host for a refund first, or wait until it's over — then you can delete your account.`,
+        },
         409
       );
     }
@@ -107,11 +136,17 @@ serve(async (req) => {
     }
 
     // Events this user hosts — needed to clean their dependent rows + storage.
+    // livekit_room is the cover image's folder name; the old code guessed
+    // `events/<uuid>/cover.jpg`, which matched nothing and left every cover
+    // this host ever uploaded sitting in the bucket.
     const { data: hostedEvents } = await admin
       .from("events")
-      .select("id")
+      .select("id, livekit_room")
       .eq("host_id", uid);
     const eventIds = (hostedEvents ?? []).map((e) => e.id as string);
+    const eventRooms = (hostedEvents ?? [])
+      .map((e) => e.livekit_room as string | null)
+      .filter((r): r is string => !!r);
 
     // Posts authored by the user — needed to drop their cover images.
     const { data: ownPosts } = await admin
@@ -133,7 +168,15 @@ serve(async (req) => {
     await admin.from("notifications").delete().eq("actor_id", uid);
     await admin.from("device_tokens").delete().eq("user_id", uid);
     await admin.from("notification_preferences").delete().eq("user_id", uid);
-    await admin.from("tickets").delete().eq("buyer_id", uid);
+
+    // Tickets are NOT deleted (P3 #32). Migration 0118 made buyer_id nullable
+    // with ON DELETE SET NULL, so dropping the profile below severs the link
+    // while the sale stays on the host's books. This stamp is what tells the
+    // difference between "anonymized buyer" and "corrupt row".
+    await admin
+      .from("tickets")
+      .update({ buyer_deleted_at: new Date().toISOString() })
+      .eq("buyer_id", uid);
 
     // 2. Comments the user wrote, plus all comments/likes on their own posts.
     await admin.from("post_comments").delete().eq("user_id", uid);
@@ -166,11 +209,17 @@ serve(async (req) => {
       await admin.from("events").delete().in("id", eventIds);
     }
 
-    // 6. Storage: per-user folders in avatars/posts, per-event covers.
-    await removeFolder(admin, "avatars", uid);
-    await removeFolder(admin, "posts", uid);
-    for (const eid of eventIds) {
-      await admin.storage.from("events").remove([`events/${eid}/cover.jpg`]);
+    // 6. Storage (P3 #33). Only avatars, posts and (nominally) event covers
+    // were cleared before, so Currents videos, DM photos and bug-report
+    // screenshots outlived the account — a GDPR erasure failure and an
+    // unbounded storage bill. Every bucket that keys objects on the user id is
+    // now swept. Replay recordings need no entry here: deleting the events in
+    // step 5 already fired trg_delete_event_replay_objects.
+    for (const bucket of ["avatars", "posts", "currents", "messages", "feedback"]) {
+      await removeFolder(admin, bucket, uid);
+    }
+    for (const room of eventRooms) {
+      await removeFolder(admin, "events", room);
     }
 
     // 7. Stripe Connect account, if the user was an onboarded host. Best-effort:
@@ -197,14 +246,44 @@ serve(async (req) => {
   }
 });
 
-// Remove every object under `{prefix}/` in a bucket.
+// Remove every object under `{prefix}/` in a bucket, at any depth.
+//
+// The old version called list() once with no options — Supabase defaults to
+// 100 rows and does not recurse — so a user with 101 objects kept the rest,
+// and feedback screenshots (stored at `<uid>/<ts>/<n>.jpg`) were never
+// reachable at all. Pages, walks subfolders, and deletes in batches.
 // deno-lint-ignore no-explicit-any
 async function removeFolder(admin: any, bucket: string, prefix: string) {
-  const { data: files } = await admin.storage.from(bucket).list(prefix);
-  if (files && files.length) {
-    await admin.storage
+  const PAGE = 100;
+  const dirs = [prefix];
+  const objects: string[] = [];
+
+  while (dirs.length) {
+    const dir = dirs.pop()!;
+    for (let offset = 0; ; offset += PAGE) {
+      const { data: entries, error } = await admin.storage
+        .from(bucket)
+        .list(dir, { limit: PAGE, offset });
+      if (error) {
+        console.error(`list ${bucket}/${dir} failed:`, error);
+        break;
+      }
+      if (!entries?.length) break;
+      for (const e of entries as { name: string; id: string | null }[]) {
+        // A folder is synthesized by the API and carries no id; a real object
+        // always has one.
+        if (e.id === null) dirs.push(`${dir}/${e.name}`);
+        else objects.push(`${dir}/${e.name}`);
+      }
+      if (entries.length < PAGE) break;
+    }
+  }
+
+  for (let i = 0; i < objects.length; i += PAGE) {
+    const { error } = await admin.storage
       .from(bucket)
-      .remove(files.map((f: { name: string }) => `${prefix}/${f.name}`));
+      .remove(objects.slice(i, i + PAGE));
+    if (error) console.error(`remove from ${bucket} failed:`, error);
   }
 }
 

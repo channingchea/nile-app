@@ -234,12 +234,17 @@ class Attendee {
   /// revenue, and the refund action all key on this rather than on 'refunded'.
   bool get isVoid => status != 'paid';
 
+  /// True once the buyer deleted their account: migration 0118 nulls
+  /// `tickets.buyer_id` and the profile join comes back empty, while the sale
+  /// itself stays on the host's books.
+  bool get isDeletedBuyer => buyerId.isEmpty;
+
   factory Attendee.fromJson(Map<String, dynamic> j) {
     final p = (j['profiles'] as Map<String, dynamic>?) ?? const {};
     return Attendee(
       ticketId: j['id'] as String,
       buyerId: p['id'] as String? ?? '',
-      username: p['username'] as String? ?? 'unknown',
+      username: p['username'] as String? ?? 'deleted account',
       avatarUrl: p['avatar_url'] as String?,
       amountCents: (j['amount_cents'] as num).toInt(),
       status: j['status'] as String? ?? 'paid',

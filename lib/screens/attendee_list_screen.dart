@@ -116,14 +116,17 @@ class _AttendeeListScreenState extends State<AttendeeListScreen> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            ListTile(
-              leading: Icon(
-                Icons.person_outline,
-                color: NileColors.txtSecondary,
+            // No profile to open once the buyer has deleted their account —
+            // the sale stays, the person doesn't (migration 0118).
+            if (!a.isDeletedBuyer)
+              ListTile(
+                leading: Icon(
+                  Icons.person_outline,
+                  color: NileColors.txtSecondary,
+                ),
+                title: Text('View profile', style: NileTextStyles.labelLg()),
+                onTap: () => Navigator.pop(context, 'profile'),
               ),
-              title: Text('View profile', style: NileTextStyles.labelLg()),
-              onTap: () => Navigator.pop(context, 'profile'),
-            ),
             // Nothing left to refund on a refunded or charged-back ticket —
             // the bank already took the money on a dispute.
             if (!a.isVoid)
@@ -136,7 +139,8 @@ class _AttendeeListScreenState extends State<AttendeeListScreen> {
                   ),
                 ),
                 subtitle: Text(
-                  'Returns \$${(a.amountCents / 100).toStringAsFixed(2)} to @${a.username}',
+                  'Returns \$${(a.amountCents / 100).toStringAsFixed(2)} to '
+                  '${a.isDeletedBuyer ? 'the original card' : '@${a.username}'}',
                   style: NileTextStyles.caption().copyWith(
                     color: NileColors.txtTertiary,
                   ),
