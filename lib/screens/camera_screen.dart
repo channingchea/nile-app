@@ -10,6 +10,7 @@ import '../services/block_service.dart';
 import '../services/chat_service.dart';
 import '../services/crew_service.dart';
 import '../services/event_service.dart';
+import '../services/install_id.dart';
 import '../services/livekit_service.dart';
 import '../services/report_service.dart';
 import '../services/screen_capture_permission.dart';
@@ -861,7 +862,11 @@ class _CameraScreenState extends State<CameraScreen> {
     try {
       final conn = await LivekitService.cameraToken(
         eventId: eventId,
-        cameraId: DateTime.now().millisecondsSinceEpoch.toString(),
+        // Stable per install, not per launch. A crashed or force-quit app
+        // relaunches under the same LiveKit identity, so it evicts its own
+        // ghost rather than being counted as an additional camera and turned
+        // away by the camera-limit check. See InstallId.
+        cameraId: await InstallId.get(),
         cameraName: cameraName,
         // Ask for the Studio's monitor grant. Safe to ask unconditionally: we
         // connect with autoSubscribe off and subscribe only while the Studio

@@ -96,6 +96,7 @@ class _ViewerScreenState extends State<ViewerScreen>
   // ending. Only an `ended` DB status actually ends the show.
   bool _reconnecting = false;
   int _reconnectAttempt = 0;
+  Timer? _reconnectTimer;
   // Event status drives the Lobby: 'soundcheck' → Lobby, 'live' → stream.
   String? _eventStatus;
   ResilientChannel? _eventConn;
@@ -198,6 +199,9 @@ class _ViewerScreenState extends State<ViewerScreen>
     _teardownLobby();
     _viewerReconcileTimer?.cancel();
     _viewerReconcileTimer = null;
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    _reconnecting = false;
     if (_hasIncrementedViewerCount && _streamEventId != null) {
       // Reconcile excluding ourselves so the count drops even before LiveKit
       // registers our disconnect (covers the last-viewer-leaves case).
@@ -599,7 +603,12 @@ class _ViewerScreenState extends State<ViewerScreen>
       final token = conn.token;
       final wsUrl = conn.wsUrl;
 
-      room = Room();
+      // adaptiveStream sizes each subscription to the renderer showing it: the
+      // focused feed pulls the full simulcast layer while the multicam
+      // thumbnails pull a low one, and anything scrolled off screen pauses.
+      // Without it every viewer pulls top quality on every feed at once, which
+      // stalls cellular connections into the reconnect loop below.
+      room = Room(roomOptions: const RoomOptions(adaptiveStream: true));
       final listener = room.createListener();
 
       listener
@@ -921,24 +930,30 @@ class _ViewerScreenState extends State<ViewerScreen>
       return;
     }
 
-    final state = await EventService.fetchEventState(eventId);
-    if (!mounted) return;
-    if (state?['status'] == 'ended') {
-      setState(() {
-        _reconnecting = false;
-        _streamEnded = true;
-      });
-      return;
-    }
-
+    // The status poll has to be inside the try. It is the first call to fail
+    // when the network is down — the exact condition this loop exists for — and
+    // an escaping throw would leave _reconnecting stuck true for the rest of
+    // the session, pinning the viewer on "Reconnecting…" and making every
+    // later disconnect early-return, even after the network comes back.
     try {
+      final state = await EventService.fetchEventState(eventId);
+      if (!mounted) return;
+      if (state?['status'] == 'ended') {
+        setState(() {
+          _reconnecting = false;
+          _streamEnded = true;
+        });
+        return;
+      }
+
       await _rejoinRoom(eventId);
       if (mounted) setState(() => _reconnecting = false);
     } catch (_) {
       _reconnectAttempt++;
       // Back off: 2s, 4s, 6s … capped at 10s. Keep trying until the host ends.
       final delay = Duration(seconds: (2 * _reconnectAttempt).clamp(2, 10));
-      Future.delayed(delay, () {
+      _reconnectTimer?.cancel();
+      _reconnectTimer = Timer(delay, () {
         if (mounted && _reconnecting && !_streamEnded) _attemptReconnect();
       });
     }
@@ -956,7 +971,8 @@ class _ViewerScreenState extends State<ViewerScreen>
       throw Exception('Unsupported stream mode: ${conn.mode}');
     }
 
-    final room = Room();
+    // Same adaptive subscription behaviour as the first join above.
+    final room = Room(roomOptions: const RoomOptions(adaptiveStream: true));
     final listener = room.createListener();
     listener
       ..on<TrackSubscribedEvent>(_onTrackSubscribed)
