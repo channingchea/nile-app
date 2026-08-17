@@ -341,6 +341,12 @@ class BoostStats {
 /// campaign + target ids, and we hydrate the existing event/post card payloads.
 class AdService {
   /// Active campaigns to inject for the current viewer, in serving order.
+  ///
+  /// Serving order is a fresh weighted draw on every call (migration 0115), not
+  /// a stable ranking — it used to be "newest five", which meant the sixth
+  /// advertiser to buy a boost never appeared at all. Don't cache these or
+  /// assume two calls agree.
+  ///
   /// Best-effort: returns [] on any failure so the feed never breaks.
   static Future<List<FeedAd>> feedAds({int limit = 5}) async {
     try {
@@ -420,15 +426,23 @@ class AdService {
     return PostService.hydrateLikes(posts);
   }
 
-  /// Logs an ad event. Insert-only (RLS mirrors the reports policy).
+  /// Logs an ad event through `log_ad_event` (migration 0114). Clients no
+  /// longer have INSERT on `ad_events` at all — the old policy let any caller
+  /// name any campaign, and the anon key alone was enough to write, so every
+  /// impression and click number an advertiser saw was forgeable.
+  ///
+  /// The RPC decides whether the caller could plausibly have seen this ad and
+  /// returns a status instead of raising; it silently declines a click with no
+  /// impression behind it, a viewer past the daily frequency cap, a campaign
+  /// that is no longer serving, and a repeat within the same hour.
+  ///
   /// Best-effort: a logging failure must never disrupt the feed.
   static Future<void> _log(String campaignId, String kind) async {
     try {
-      await supabase.from('ad_events').insert({
-        'campaign_id': campaignId,
-        'viewer_id': supabase.auth.currentUser?.id,
-        'kind': kind,
-      });
+      await supabase.rpc(
+        'log_ad_event',
+        params: {'p_campaign_id': campaignId, 'p_kind': kind},
+      );
     } catch (_) {}
   }
 
@@ -451,8 +465,11 @@ class AdService {
   }
 
   /// A soft "not interested" signal for a sponsored card. Logged like any other
-  /// ad event (insert-only); never bills or affects spend (tally_ad_spend counts
-  /// only impressions/clicks). Best-effort.
+  /// ad event; never bills or affects spend (tally_ad_spend counts only
+  /// impressions). Unlike an impression it is still accepted for a campaign
+  /// that has stopped serving — otherwise "don't show me this again" would fail
+  /// silently on a paused ad and come back the moment it resumed.
+  /// Best-effort.
   static Future<void> logNotInterested(String campaignId) =>
       _log(campaignId, 'not_interested');
 
