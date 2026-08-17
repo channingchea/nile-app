@@ -6,6 +6,10 @@
 //   supabase secrets set STRIPE_SECRET_KEY=sk_test_...
 //   supabase functions deploy refund-ticket
 //
+// Also reads LIVEKIT_URL / LIVEKIT_API_KEY / LIVEKIT_API_SECRET (already set for
+// the `livekit` function) to disconnect a refunded viewer from a show that is
+// running. Missing credentials degrade to "refund without eject", never a 500.
+//
 // Request (POST, Bearer = user JWT):
 //   { "ticket_id": "uuid" }
 // Response:
@@ -18,12 +22,58 @@
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import Stripe from "https://esm.sh/stripe@14?target=deno";
+import { RoomServiceClient } from "https://esm.sh/livekit-server-sdk@2.9.7?target=deno";
 import { corsHeaders as corsHeadersFor } from "../_shared/cors.ts";
 
 const stripe = new Stripe(Deno.env.get("STRIPE_SECRET_KEY")!, {
   apiVersion: "2023-10-16",
   httpClient: Stripe.createFetchHttpClient(),
 });
+
+// Same LiveKit credentials the `livekit` function uses — Supabase secrets are
+// project-wide, so nothing new needs setting.
+const LIVEKIT_URL = Deno.env.get("LIVEKIT_URL") ?? "";
+const roomService = LIVEKIT_URL
+  ? new RoomServiceClient(
+    LIVEKIT_URL.replace(/^wss:/, "https:").replace(/^ws:/, "http:"),
+    Deno.env.get("LIVEKIT_API_KEY")!,
+    Deno.env.get("LIVEKIT_API_SECRET")!,
+  )
+  : null;
+
+/**
+ * Disconnect a refunded buyer from the show they no longer hold a ticket to.
+ *
+ * The ticket gate runs once, when the viewer token is minted, so refunding
+ * someone mid-show took their money back and left them watching to the end.
+ * Their identity carries a per-connection suffix and they may be on more than
+ * one device, so match on the userId in the participant metadata rather than
+ * trying to reconstruct an identity string.
+ *
+ * Best-effort throughout: the refund itself has already succeeded by the time
+ * this runs, and failing the request over a room that is not up would tell the
+ * host their refund broke when it did not.
+ */
+async function ejectFromLiveRoom(livekitRoom: string | null, buyerId: string) {
+  if (!roomService || !livekitRoom || !buyerId) return;
+  try {
+    const roomName = `nile-event-${livekitRoom}`;
+    const participants = await roomService.listParticipants(roomName);
+    await Promise.all(
+      participants
+        .filter((p) => {
+          try {
+            return JSON.parse(p.metadata || "{}").userId === buyerId;
+          } catch {
+            return false;
+          }
+        })
+        .map((p) => roomService!.removeParticipant(roomName, p.identity)),
+    );
+  } catch (err) {
+    console.error("refund-ticket: could not eject refunded viewer", String(err));
+  }
+}
 
 serve(async (req) => {
   // Per-request CORS (fix #4): allowlisted origins only — see _shared/cors.ts.
@@ -61,15 +111,19 @@ serve(async (req) => {
     // Fetch the ticket + its event's host in one query.
     const { data: ticket } = await adminClient
       .from("tickets")
-      .select("id, status, stripe_payment_intent_id, split_status, events!tickets_event_id_fkey(host_id)")
+      // Must stay one string literal — supabase-js infers the row type from it,
+      // and a concatenated expression collapses every field to `unknown`.
+      .select("id, status, buyer_id, stripe_payment_intent_id, split_status, events!tickets_event_id_fkey(host_id, status, livekit_room)")
       .eq("id", ticket_id)
       .maybeSingle();
 
     if (!ticket) return json({ error: "Ticket not found" }, 404);
 
     // Authorize: only the event host may refund.
-    const hostId = (ticket.events as { host_id?: string } | null)?.host_id;
-    if (hostId !== user.id) return json({ error: "Forbidden" }, 403);
+    const event = ticket.events as
+      | { host_id?: string; status?: string; livekit_room?: string | null }
+      | null;
+    if (event?.host_id !== user.id) return json({ error: "Forbidden" }, 403);
 
     if (ticket.status !== "paid") {
       return json({ error: `Cannot refund a ${ticket.status} ticket` }, 409);
@@ -95,6 +149,16 @@ serve(async (req) => {
       .from("tickets")
       .update({ status: "refunded" })
       .eq("id", ticket_id);
+
+    // If the show is running right now, cut them off. Refunding someone used to
+    // take the money back and leave them watching, because the ticket is only
+    // checked when their token is minted.
+    if (event?.status === "live" || event?.status === "soundcheck") {
+      await ejectFromLiveRoom(
+        event.livekit_room ?? null,
+        ticket.buyer_id as string,
+      );
+    }
 
     return json({ ok: true, refund_id: refund.id });
   } catch (err) {

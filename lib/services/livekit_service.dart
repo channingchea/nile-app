@@ -81,6 +81,20 @@ class LivekitService {
     'cameraIdentity': cameraIdentity,
   });
 
+  /// Host: disconnect one participant from the live room.
+  ///
+  /// LiveKit drops them immediately. Whether they can rejoin is decided by the
+  /// token gate they next hit — a de-assigned operator and a refunded ticket
+  /// holder are both refused there, so for those this is final.
+  static Future<void> removeParticipant({
+    required String eventId,
+    required String identity,
+  }) => _invoke<Map>({
+    'action': 'remove-participant',
+    'eventId': eventId,
+    'identity': identity,
+  });
+
   /// Crew: flag the caller's own feed as ready (or not) during Sound Check.
   /// The Edge Function matches the caller's publisher(s) by the userId in
   /// their token metadata — no identity is sent from the client.
@@ -151,10 +165,18 @@ class LivekitService {
 
   /// Viewer: ticket-gated connection descriptor. Identity comes from the JWT.
   /// Today `mode` is always "webrtc"; the seam allows "hls" at much higher scale.
+  ///
+  /// `lobbySafe` tells the server this client re-mints its token when the event
+  /// flips to 'live', so it is safe to withhold subscribe rights during Sound
+  /// Check (otherwise ticket holders can hear the rehearsal). Same
+  /// capability-flag pattern as [cameraToken]'s `monitor`: a build that predates
+  /// the re-mint doesn't send it and keeps the old behaviour, because a token
+  /// with no subscribe grant and no re-mint would leave it watching nothing.
   static Future<ViewerConnection> viewerToken({required String eventId}) async {
     final d = await _invoke<Map>({
       'action': 'viewer-token',
       'eventId': eventId,
+      'lobbySafe': true,
     });
     return ViewerConnection(
       mode: (d['mode'] as String?) ?? 'webrtc',

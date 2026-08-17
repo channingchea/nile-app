@@ -97,6 +97,10 @@ class _ViewerScreenState extends State<ViewerScreen>
   bool _reconnecting = false;
   int _reconnectAttempt = 0;
   Timer? _reconnectTimer;
+  // The same rejoin machinery also runs at Start Show — the Lobby token has no
+  // subscribe rights — and "the stream dropped" is the wrong thing to say at the
+  // moment a show begins. Only the overlay's wording depends on this.
+  bool _goingLive = false;
   // Event status drives the Lobby: 'soundcheck' → Lobby, 'live' → stream.
   String? _eventStatus;
   ResilientChannel? _eventConn;
@@ -201,7 +205,7 @@ class _ViewerScreenState extends State<ViewerScreen>
     _viewerReconcileTimer = null;
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
-    _reconnecting = false;
+    _clearReconnect();
     if (_hasIncrementedViewerCount && _streamEventId != null) {
       // Reconcile excluding ourselves so the count drops even before LiveKit
       // registers our disconnect (covers the last-viewer-leaves case).
@@ -534,6 +538,7 @@ class _ViewerScreenState extends State<ViewerScreen>
 
   void _onRealtimeUpdate(Map<String, dynamic> record) {
     if (!mounted) return;
+    final wasSoundcheck = _eventStatus == 'soundcheck';
     setState(() {
       if (record['viewer_count'] != null) {
         _viewerCount = record['viewer_count'] as int;
@@ -550,6 +555,23 @@ class _ViewerScreenState extends State<ViewerScreen>
     });
     if (record['status'] == 'live' || record['status'] == 'ended') {
       _teardownLobby();
+    }
+
+    // The token we joined the Lobby with carries no subscribe rights — Sound
+    // Check is a rehearsal and the server withholds them until the show is
+    // actually live (see LivekitService.viewerToken's `lobbySafe`). Going live
+    // therefore needs a fresh token, not just a rebuild. _attemptReconnect is
+    // exactly that job — poll status, re-mint, rejoin, back off on failure — so
+    // reuse it rather than growing a second rejoin path that can rot separately.
+    if (record['status'] == 'live' &&
+        wasSoundcheck &&
+        _state == ViewerState.watching &&
+        !_streamEnded &&
+        !_reconnecting) {
+      _reconnecting = true;
+      _goingLive = true;
+      _reconnectAttempt = 0;
+      _attemptReconnect();
     }
   }
 
@@ -919,6 +941,12 @@ class _ViewerScreenState extends State<ViewerScreen>
     _attemptReconnect();
   }
 
+  /// Both flags always clear together; a rejoin is either in flight or it isn't.
+  void _clearReconnect() {
+    _reconnecting = false;
+    _goingLive = false;
+  }
+
   /// Poll the DB status and re-join the room with a fresh token. Retries with
   /// backoff while the show is still live/soundcheck; stops (and ends) only if
   /// the DB says `ended`. The realtime channel stays subscribed throughout, so
@@ -926,7 +954,7 @@ class _ViewerScreenState extends State<ViewerScreen>
   Future<void> _attemptReconnect() async {
     final eventId = _streamEventId;
     if (!mounted || eventId == null || _streamEnded) {
-      if (mounted) setState(() => _reconnecting = false);
+      if (mounted) setState(_clearReconnect);
       return;
     }
 
@@ -940,14 +968,14 @@ class _ViewerScreenState extends State<ViewerScreen>
       if (!mounted) return;
       if (state?['status'] == 'ended') {
         setState(() {
-          _reconnecting = false;
+          _clearReconnect();
           _streamEnded = true;
         });
         return;
       }
 
       await _rejoinRoom(eventId);
-      if (mounted) setState(() => _reconnecting = false);
+      if (mounted) setState(_clearReconnect);
     } catch (_) {
       _reconnectAttempt++;
       // Back off: 2s, 4s, 6s … capped at 10s. Keep trying until the host ends.
@@ -1613,10 +1641,15 @@ class _ViewerScreenState extends State<ViewerScreen>
             children: [
               CircularProgressIndicator(color: NileColors.volt),
               const SizedBox(height: 16),
-              Text('Reconnecting…', style: NileTextStyles.headingMd()),
+              Text(
+                _goingLive ? 'Starting…' : 'Reconnecting…',
+                style: NileTextStyles.headingMd(),
+              ),
               const SizedBox(height: 8),
               Text(
-                'The stream dropped briefly. Hang tight.',
+                _goingLive
+                    ? 'The show is beginning.'
+                    : 'The stream dropped briefly. Hang tight.',
                 style: NileTextStyles.bodyMd().copyWith(
                   color: NileColors.txtSecondary,
                 ),

@@ -11,6 +11,7 @@
 //   audio-token       host    → { token, wsUrl }
 //   list-cameras      host    → { cameras: [{ identity, name, cameraName, cameraId }] }
 //   set-master-audio  host    → { success: true }
+//   remove-participant host   → { success: true }   ← ejects one participant
 //   set-ready         crew    → { success: true }   ← flags caller's feed ready
 //   start-show        host    → { success: true }   ← stamps showStartedAt anchor + starts replay egress
 //   stop-egress       host    → { success: true }   ← stops replay egress on show end
@@ -83,6 +84,18 @@ function roomNameFor(eventId: string) {
   return `nile-event-${eventId}`;
 }
 
+// How long a freshly minted token may be used to JOIN, in seconds. The SDK
+// default is six hours, which is roughly "the whole show" — a token lifted out
+// of a network log or a jailbroken client stayed good until the event was over.
+// Nothing here needs a long life: every join and rejoin path in the app mints a
+// fresh token immediately before connecting, so the token is used seconds after
+// it is issued.
+//
+// This bounds how long a leaked token lets someone IN. It does NOT disconnect a
+// session already in progress — LiveKit checks the TTL at join and never again.
+// Cutting off someone already connected is what remove-participant is for.
+const TOKEN_TTL_SECONDS = 15 * 60;
+
 /** Mint a LiveKit access token. v2 toJwt() is async. */
 function buildToken(opts: {
   identity: string;
@@ -96,6 +109,7 @@ function buildToken(opts: {
     identity: opts.identity,
     name: opts.name,
     metadata: opts.metadata,
+    ttl: TOKEN_TTL_SECONDS,
   });
   at.addGrant({
     roomJoin: true,
@@ -202,6 +216,8 @@ async function handle(req: Request, ctx: ReqCtx, json: Json): Promise<Response> 
       return await listCameras(body, user.id, admin, json);
     case "set-master-audio":
       return await setMasterAudio(body, user.id, admin, json);
+    case "remove-participant":
+      return await removeParticipant(body, user.id, admin, json);
     case "set-ready":
       return await setReady(body, user.id, admin, json);
     case "start-show":
@@ -514,6 +530,43 @@ async function setMasterAudio(body: any, userId: string, admin: any, json: Json)
       });
     }),
   );
+
+  return json({ success: true });
+}
+
+// remove-participant — eject one participant from the live room.
+//
+// Host-only. Until this existed the only moderation lever was ending the whole
+// show: the ticket gate runs once, at mint, so a refunded ticket holder kept
+// watching; a camera operator taken off the crew kept publishing; an abusive
+// viewer could not be kicked. LiveKit closes their connection immediately.
+//
+// Whether they can come straight back is decided by the gate they next fail (or
+// pass) in viewer-token / camera-token — a refunded ticket and a de-assigned
+// operator are both refused there, so for those two this is final. A viewer
+// kicked from a FREE event can rejoin; making that stick needs a persisted ban,
+// which belongs with the chat-moderation work rather than here.
+async function removeParticipant(
+  body: any,
+  userId: string,
+  admin: any,
+  json: Json,
+): Promise<Response> {
+  const { eventId, identity } = body;
+  if (!eventId || !identity) {
+    return json({ error: "eventId and identity are required" }, 400);
+  }
+
+  const gate = await requireHost(eventId, userId, admin, json);
+  if (gate instanceof Response) return gate;
+
+  try {
+    await roomService.removeParticipant(roomNameFor(eventId), identity);
+  } catch (err) {
+    // Already gone — they left, or a duplicate identity evicted them. The
+    // caller wanted them out; they are out. Not an error worth failing on.
+    log("warn", { action: "remove-participant", identity, error: String(err) });
+  }
 
   return json({ success: true });
 }
@@ -892,7 +945,7 @@ async function replayUrl(body: any, userId: string, admin: any, json: Json): Pro
 
 // viewer-token (was POST /api/viewer-token) — JWT-derived identity + mode seam
 async function viewerToken(body: any, userId: string, admin: any, json: Json): Promise<Response> {
-  const { eventId } = body;
+  const { eventId, lobbySafe } = body;
   if (!eventId) return json({ error: "eventId is required" }, 400);
 
   // userId comes from the verified JWT, NOT the body — closes the old spoofing
@@ -911,16 +964,20 @@ async function viewerToken(body: any, userId: string, admin: any, json: Json): P
     return json({ error: "Event is not currently live" }, 403);
   }
 
+  // Resolved once and used by all three gates below (ticket check, free-event
+  // seat count, and the Sound Check subscribe grant). Crew are the host and any
+  // assigned camera operator.
+  const isCrew = await isAuthorizedOperator(
+    { id: event.id, host_id: event.host_id },
+    userId,
+    admin,
+  );
+
   // Paid events require a paid ticket — unless the viewer is the host or an
   // assigned camera operator, who both get free access. Look the ticket up
   // separately so a missing ticket never nulls out the event row (an embedded
   // left-join filter on tickets.user_id did exactly that for free events).
   if (event.price && event.price > 0) {
-    const isCrew = await isAuthorizedOperator(
-      { id: event.id, host_id: event.host_id },
-      userId,
-      admin,
-    );
     if (!isCrew) {
       const { data: ticket } = await admin
         .from("tickets")
@@ -938,11 +995,6 @@ async function viewerToken(body: any, userId: string, admin: any, json: Json): P
     // free workshop got 400 viewers and no warning. Enforce it here, where the
     // seat is actually taken: count live viewers and turn away the overflow.
     // Crew are never counted or blocked.
-    const isCrew = await isAuthorizedOperator(
-      { id: event.id, host_id: event.host_id },
-      userId,
-      admin,
-    );
     if (!isCrew) {
       try {
         const participants = await roomService.listParticipants(roomNameFor(eventId));
@@ -965,6 +1017,24 @@ async function viewerToken(body: any, userId: string, admin: any, json: Json): P
   // events.livekit_room stores the bare slug, so using it here put viewers in a
   // DIFFERENT room than the publishers (viewer saw 0 participants).
   const roomName = roomNameFor(eventId);
+
+  // Sound Check is a private rehearsal, but the cameras and the host's mic are
+  // already publishing into the room — and a viewer token that could subscribe
+  // meant ticket holders heard the whole thing. The Pre-Show Lobby that is
+  // supposed to be covering it is only an overlay in our app; a stock LiveKit
+  // client ignores overlays and just pulls the tracks. So withhold the grant
+  // until the show is actually live. Crew keep it: the host previewing their
+  // own show as a viewer is the point of Sound Check.
+  //
+  // ⚠️ Gated on `lobbySafe` for the same reason camera-token gates `monitor`:
+  // a client that predates this has no re-mint step, so withholding the grant
+  // from it would leave it silently unable to watch when the show DID go live —
+  // a worse failure than the leak. Builds that re-mint on the status flip send
+  // the flag; older ones keep the behaviour they shipped with. Drop the flag
+  // and make this unconditional once the force-update floor reaches the build
+  // that introduced it.
+  const canSubscribe = event.status === "live" || isCrew || lobbySafe !== true;
+
   // E8: this was a bare `viewer-<userId>`. LiveKit treats an identity as unique
   // per room, so the same person on a phone and a laptop evicted each other
   // forever — both devices reconnecting, neither able to watch. A per-connection
@@ -975,7 +1045,7 @@ async function viewerToken(body: any, userId: string, admin: any, json: Json): P
     name: `Viewer ${userId}`,
     roomName,
     canPublish: false,
-    canSubscribe: true,
+    canSubscribe,
     metadata: JSON.stringify({ role: "viewer", userId }),
   });
 

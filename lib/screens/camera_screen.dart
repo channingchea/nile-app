@@ -396,6 +396,7 @@ class _CameraScreenState extends State<CameraScreen> {
             sublabel: isAudioOnly ? 'Stream Audio · no video' : 'No video',
             isMasterAudio: isAudioOnly || meta['isMasterAudio'] == true,
             isReady: ready,
+            isRemovable: true,
           ),
         );
         continue;
@@ -413,6 +414,10 @@ class _CameraScreenState extends State<CameraScreen> {
             isScreenShare: isShare,
             isMasterAudio: !isShare && meta['isMasterAudio'] == true,
             isReady: !isShare && ready,
+            // A share is a second feed from a participant, not a participant —
+            // removing their camera row disconnects them and takes the share
+            // with it, so offering it on both rows would only confuse.
+            isRemovable: !isShare,
           ),
         );
       }
@@ -1300,6 +1305,53 @@ class _CameraScreenState extends State<CameraScreen> {
         'You’re live, but the recording didn’t start. There may be no replay '
         'for this show.',
       );
+    }
+  }
+
+  /// Host: disconnect a crew feed from the room.
+  ///
+  /// The only lever before this was ending the whole show. An operator taken
+  /// off the crew list kept publishing until they closed the app, because the
+  /// authorization check runs when their token is minted and never again.
+  Future<void> _removeSource(NileStudioSource source) async {
+    final eventId = _eventId;
+    if (eventId == null) return;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: NileColors.bgSurface,
+        title: Text('Remove ${source.label}?', style: NileTextStyles.headingMd()),
+        content: Text(
+          'Their feed is dropped from the show immediately. They can rejoin '
+          'only if they are still on the crew list.',
+          style: NileTextStyles.bodyMd(),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text(
+              'Remove',
+              style: TextStyle(color: NileColors.error),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    try {
+      await LivekitService.removeParticipant(
+        eventId: eventId,
+        identity: source.identity,
+      );
+      _toast('${source.label} was removed from the stream.');
+    } catch (_) {
+      _toast('Couldn’t remove ${source.label}. Try again.');
     }
   }
 
@@ -2409,6 +2461,9 @@ class _CameraScreenState extends State<CameraScreen> {
       sources: sources,
       selectedIdentity: _selectedSourceId,
       onSelectSource: (id) => setState(() => _selectedSourceId = id),
+      // Ejecting someone is the host's call, not an operator's — same bar as
+      // Start Show and End Stream, and the server enforces it too.
+      onRemoveSource: widget.isHost ? _removeSource : null,
       selfIdentity: _room?.localParticipant?.identity,
       stats: NileStudioStats(
         isLive: live,

@@ -37,6 +37,7 @@ class NileStudioSource {
     this.isMasterAudio = false,
     this.isReady = false,
     this.mirror = false,
+    this.isRemovable = false,
   });
 
   /// LiveKit participant identity, plus a suffix for a participant's second
@@ -58,6 +59,12 @@ class NileStudioSource {
   final bool isMasterAudio;
   final bool isReady;
   final bool mirror;
+
+  /// Whether the host may eject this source. False for your own feed, for
+  /// roster placeholders (nobody to disconnect), and for the screen-share row —
+  /// a share isn't a participant of its own, so removing the operator's camera
+  /// row takes their share with it.
+  final bool isRemovable;
 }
 
 /// Signal strength for the top row. Mapped from LiveKit's `ConnectionQuality`
@@ -132,6 +139,7 @@ class NileStudio extends StatelessWidget {
     this.leading,
     this.trailing,
     this.meter,
+    this.onRemoveSource,
   });
 
   /// Sources in display order: your own camera first, then crew, then shares.
@@ -165,6 +173,10 @@ class NileStudio extends StatelessWidget {
   /// leaving and opening settings live here.
   final Widget? leading;
   final Widget? trailing;
+
+  /// Ejects a source from the room. Null hides the affordance entirely — only
+  /// the host gets it, and only on sources marked [NileStudioSource.isRemovable].
+  final ValueChanged<NileStudioSource>? onRemoveSource;
 
   /// This device's own audio meter, pinned under the source list. It belongs
   /// beside the roster rather than over the video: it is about the feed you are
@@ -211,6 +223,7 @@ class NileStudio extends StatelessWidget {
                   sources: sources,
                   selectedIdentity: selected?.identity,
                   onSelect: onSelectSource,
+                  onRemove: onRemoveSource,
                   selfIdentity: selfIdentity,
                   meter: meter,
                 ),
@@ -494,12 +507,14 @@ class _StudioSourceList extends StatelessWidget {
     required this.selectedIdentity,
     required this.onSelect,
     required this.selfIdentity,
+    this.onRemove,
     this.meter,
   });
 
   final List<NileStudioSource> sources;
   final String? selectedIdentity;
   final ValueChanged<String> onSelect;
+  final ValueChanged<NileStudioSource>? onRemove;
   final String? selfIdentity;
   final Widget? meter;
 
@@ -552,6 +567,9 @@ class _StudioSourceList extends StatelessWidget {
                         source: s,
                         selected: s.identity == selectedIdentity,
                         onTap: () => onSelect(s.identity),
+                        onRemove: s.isRemovable && onRemove != null
+                            ? () => onRemove!(s)
+                            : null,
                       );
                     },
                   ),
@@ -577,11 +595,13 @@ class _SourceTile extends StatelessWidget {
     required this.source,
     required this.selected,
     required this.onTap,
+    this.onRemove,
   });
 
   final NileStudioSource source;
   final bool selected;
   final VoidCallback onTap;
+  final VoidCallback? onRemove;
 
   @override
   Widget build(BuildContext context) {
@@ -650,6 +670,32 @@ class _SourceTile extends StatelessWidget {
                       ),
                     ),
                   ],
+                  if (onRemove != null)
+                    SizedBox(
+                      width: 22,
+                      height: 22,
+                      child: PopupMenuButton<void>(
+                        padding: EdgeInsets.zero,
+                        iconSize: 14,
+                        tooltip: 'Source options',
+                        color: NileColors.bgSurface,
+                        icon: Icon(
+                          Icons.more_horiz,
+                          color: NileColors.txtTertiary,
+                        ),
+                        itemBuilder: (_) => [
+                          PopupMenuItem<void>(
+                            onTap: onRemove,
+                            child: Text(
+                              'Remove from stream',
+                              style: NileTextStyles.bodySm().copyWith(
+                                color: NileColors.error,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
                 ],
               ),
               if (source.sublabel != null)

@@ -35,11 +35,13 @@ NileStudioSource _source(
   String? label,
   bool isLocal = false,
   bool isScreenShare = false,
+  bool isRemovable = false,
 }) => NileStudioSource(
   identity: identity,
   label: label ?? identity,
   isLocal: isLocal,
   isScreenShare: isScreenShare,
+  isRemovable: isRemovable,
 );
 
 ChatMessage _msg(String senderId, String username, String content) =>
@@ -297,6 +299,81 @@ void main() {
       );
       expect(find.text('Ending stream…'), findsOneWidget);
       expect(find.text('00:00 left'), findsNothing);
+      await tester.pumpWidget(const SizedBox());
+    });
+  });
+
+  group('removing a source', () {
+    // Ejecting a crew feed is the host's only lever short of ending the show,
+    // and it disconnects a real person mid-broadcast. Both halves of the guard
+    // matter: an operator must never see the control, and the host must never
+    // see it on a row where it would do nothing (their own feed, a screen
+    // share, or a crew member who hasn't connected).
+    Widget studio({
+      required List<NileStudioSource> sources,
+      ValueChanged<NileStudioSource>? onRemove,
+    }) => _wrap(
+      NileStudio(
+        sources: sources,
+        selectedIdentity: sources.first.identity,
+        onSelectSource: (_) {},
+        onRemoveSource: onRemove,
+        selfIdentity: 'camera-me',
+        stats: const NileStudioStats(isLive: true),
+        controls: const SizedBox.shrink(),
+        showChatColumn: false,
+      ),
+    );
+
+    testWidgets('an operator gets no remove control at all', (tester) async {
+      await tester.pumpWidget(
+        studio(
+          sources: [
+            _source('camera-me', label: 'You', isLocal: true),
+            _source('camera-2', label: 'Stage Right', isRemovable: true),
+          ],
+          onRemove: null, // camera_screen passes null unless isHost
+        ),
+      );
+      expect(find.byIcon(Icons.more_horiz), findsNothing);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('the host sees it only on removable sources', (tester) async {
+      await tester.pumpWidget(
+        studio(
+          sources: [
+            _source('camera-me', label: 'You', isLocal: true),
+            _source('camera-2', label: 'Stage Right', isRemovable: true),
+            _source('camera-2#share', label: 'Stage Right — screen',
+                isScreenShare: true),
+            _source('crew:abc', label: '@notyethere'),
+          ],
+          onRemove: (_) {},
+        ),
+      );
+      expect(find.byIcon(Icons.more_horiz), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('choosing Remove hands back the source, not the label', (
+      tester,
+    ) async {
+      NileStudioSource? removed;
+      await tester.pumpWidget(
+        studio(
+          sources: [
+            _source('camera-me', label: 'You', isLocal: true),
+            _source('camera-2', label: 'Stage Right', isRemovable: true),
+          ],
+          onRemove: (s) => removed = s,
+        ),
+      );
+      await tester.tap(find.byIcon(Icons.more_horiz));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Remove from stream'));
+      await tester.pumpAndSettle();
+      expect(removed?.identity, 'camera-2');
       await tester.pumpWidget(const SizedBox());
     });
   });
