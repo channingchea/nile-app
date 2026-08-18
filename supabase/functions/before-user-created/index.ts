@@ -85,6 +85,14 @@ serve(async (req) => {
     ? appMeta.provider
     : "email";
   if (provider === "google" || provider === "apple") {
+    // Exempt, but recorded: otherwise the pass rate below is computed over a
+    // population that quietly excludes most real signups.
+    auditSignup({
+      provider,
+      appCheck: "skipped_oauth",
+      age: "skipped_oauth",
+      wouldReject: false,
+    });
     return allow();
   }
 
@@ -96,18 +104,20 @@ serve(async (req) => {
   // OAuth signups returned above: their providers hand us no birthdate, and
   // the in-app compliance gate collects one before they can reach anything.
   const birthdate = typeof meta.birthdate === "string" ? meta.birthdate : null;
-  if (!isOldEnough(birthdate)) {
-    console.warn(
-      `Signup ${birthdate ? "under age" : "without a birthdate"} (email: ${
-        user.email ?? "?"
-      })`,
-    );
-    if (AGE_ENFORCE) {
-      return reject(
-        403,
-        `You must be at least ${MIN_AGE} years old to use Nile.`,
-      );
-    }
+  const ageOutcome: "ok" | "under" | "missing" = isOldEnough(birthdate)
+    ? "ok"
+    : (birthdate ? "under" : "missing");
+  if (ageOutcome !== "ok" && AGE_ENFORCE) {
+    // Rejected before attestation ran, so "not_reached" rather than a verdict
+    // we didn't actually reach.
+    auditSignup({
+      provider,
+      appCheck: "not_reached",
+      age: ageOutcome,
+      wouldReject: true,
+      detail: "age gate enforced",
+    });
+    return reject(403, `You must be at least ${MIN_AGE} years old to use Nile.`);
   }
 
   const token = typeof meta.app_check_token === "string"
@@ -115,7 +125,7 @@ serve(async (req) => {
     : null;
 
   if (!token) {
-    console.warn(`Signup without App Check token (email: ${user.email ?? "?"})`);
+    auditSignup({ provider, appCheck: "no_token", age: ageOutcome, wouldReject: true });
     return ENFORCE
       ? reject(403, "Could not verify your device. Please sign up from the Nile app.")
       : allow();
@@ -131,18 +141,47 @@ serve(async (req) => {
       .includes(`projects/${FIREBASE_PROJECT_NUMBER}`) ||
       (claims.aud ?? "").toString().includes(`projects/${FIREBASE_PROJECT_ID}`);
     if (!audOk) throw new Error("audience mismatch");
+    auditSignup({
+      provider,
+      appCheck: "pass",
+      age: ageOutcome,
+      wouldReject: ageOutcome !== "ok",
+    });
     return allow();
   } catch (e) {
     // `e` is unknown in a catch clause — reading .message off it is a type
     // error, which is why deno check has never passed on this file.
-    console.warn(
-      `App Check verification failed: ${e instanceof Error ? e.message : String(e)}`,
-    );
+    auditSignup({
+      provider,
+      appCheck: "invalid",
+      age: ageOutcome,
+      wouldReject: true,
+      detail: e instanceof Error ? e.message : String(e),
+    });
     return ENFORCE
       ? reject(403, "Could not verify your device. Please update the Nile app and try again.")
       : allow();
   }
 });
+
+// P4 #43. Both anti-abuse gates run in MONITOR mode: they log and allow. The
+// problem with the original logging is that it only fired on failure, so a
+// silent log was indistinguishable from "no signups happened" — which makes
+// flipping ENFORCE a leap of faith rather than a decision. One structured
+// line per signup, always, so the question "would enforcement have broken
+// anyone this week?" has an answer before we find out the hard way.
+//
+// Read it with:
+//   select ... where event_message like '%"gate":"signup"%'
+function auditSignup(fields: {
+  provider: string;
+  appCheck: "pass" | "no_token" | "invalid" | "skipped_oauth" | "not_reached";
+  age: "ok" | "under" | "missing" | "skipped_oauth";
+  wouldReject: boolean;
+  detail?: string;
+}) {
+  console.log(JSON.stringify({ gate: "signup", enforce_app_check: ENFORCE, enforce_age: AGE_ENFORCE, ...fields }));
+}
 
 function allow() {
   return new Response("{}", {

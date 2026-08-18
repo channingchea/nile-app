@@ -104,17 +104,30 @@
   <div id="loading" class="center">Loading…</div>
 </div>
 
+<!--
+  SUPERSEDED. The live host-boost checkout is nile-website's /boost route
+  (src/pages/boost.astro → components/BoostPortal.vue), which is what
+  links.joinnile.com/boost serves. Nothing in either repo references this
+  file. It is kept only as the reference implementation of the flow — do not
+  deploy it without checking it against BoostPortal.vue first.
+-->
 <script type="module">
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-// ── CONFIG (fill at deploy time; anon key is public-safe) ───────────────────
+// ── CONFIG (publishable key — safe to ship in a page) ──────────────────────
+// P4 #46: this used to hardcode the LEGACY anon JWT, which doesn't expire
+// until 2095 and is the same credential every other client used. Keeping a
+// copy here meant the legacy key could never be disabled at rotation without
+// silently breaking this page. The publishable key is per-key revocable and
+// matches lib/config.dart, so there is now exactly one client credential to
+// rotate.
 const CONFIG = {
   SUPABASE_URL: "https://jelmkkvyrliywcdkzhuu.supabase.co",
-  SUPABASE_ANON_KEY: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplbG1ra3Z5cmxpeXdjZGt6aHV1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk4NDM4NDMsImV4cCI6MjA5NTQxOTg0M30.fJVkmkQ699JvYZl9PySXWWiMlfMQNv1fZcYOttC5vbI",
+  SUPABASE_PUBLISHABLE_KEY: "sb_publishable_5CL1YQYinwBJrVM0FPvUsQ_eIAgrsRE",
   FUNCTION_URL: "https://jelmkkvyrliywcdkzhuu.functions.supabase.co/create-ad-payment",
 };
 
-const sb = createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_ANON_KEY);
+const sb = createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_PUBLISHABLE_KEY);
 const $ = (id) => document.getElementById(id);
 const eventId = new URL(location.href).searchParams.get("event");
 

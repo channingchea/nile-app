@@ -26,11 +26,23 @@ const String supabaseAnonKey =
     'sb_publishable_5CL1YQYinwBJrVM0FPvUsQ_eIAgrsRE'; // safe for client use
 
 // ── Cloudflare Turnstile (bot protection on auth) ─────────────────────────────
-// Site key is public (like the Supabase anon key). Create the widget at
+// Site key is public (like the Supabase publishable key). Create the widget at
 // Cloudflare Dashboard → Turnstile, mode "Invisible". The SECRET key goes in
 // Supabase Dashboard → Auth → Attack Protection (enable captcha, Turnstile).
-// While this is empty, no captcha token is sent — leave Supabase captcha
-// protection OFF until this is filled in, or all sign-ins will fail.
+//
+// ORDER MATTERS, and getting it wrong locks everyone out of sign-in:
+//   1. fill this in,
+//   2. ship a build carrying it and wait for it to reach real installs,
+//   3. only then enable captcha protection in the Supabase dashboard.
+// Between 1 and 3 nothing breaks — an unverified token is simply not sent.
+// Turning on 3 first rejects every sign-in from every build that predates 2.
+//
+// The same shape applies to APP_CHECK_ENFORCE on the before-user-created
+// function: the client half already ships (main.dart activates App Check and
+// signup_screen.dart attaches the token), so what gates enforcement is install
+// base, not code. before-user-created now logs one structured `"gate":"signup"`
+// line per signup with `wouldReject`, so that decision can be made from the
+// numbers rather than from hope.
 const String turnstileSiteKey = '';
 // Must match a hostname on the Turnstile widget's domain list.
 const String turnstileBaseUrl = 'https://joinnile.com';
