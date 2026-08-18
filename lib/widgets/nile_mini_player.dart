@@ -26,12 +26,36 @@ class NileMiniPlayerHost extends StatelessWidget {
         AnimatedBuilder(
           animation: MiniPlayer.instance,
           builder: (context, _) => MiniPlayer.instance.isActive
-              ? const _Dock()
+              ? const _DockOverlay()
               : const SizedBox.shrink(),
         ),
       ],
     );
   }
+}
+
+/// Gives the dock an `Overlay` of its own.
+///
+/// The host sits above the router, so nothing here inherits the Navigator's
+/// overlay — and `Tooltip` (and any future menu or snack bar) throws
+/// "No Overlay widget found" without one, painting an error box over whatever
+/// the dock is sitting on.
+class _DockOverlay extends StatefulWidget {
+  const _DockOverlay();
+
+  @override
+  State<_DockOverlay> createState() => _DockOverlayState();
+}
+
+class _DockOverlayState extends State<_DockOverlay> {
+  // Built once: `initialEntries` is read only on the first mount.
+  // The entry goes down with the Overlay that holds it — disposing it here
+  // would fire while it is still mounted, which asserts.
+  late final OverlayEntry _entry = OverlayEntry(builder: (_) => const _Dock());
+
+  @override
+  Widget build(BuildContext context) =>
+      Positioned.fill(child: Overlay(initialEntries: [_entry]));
 }
 
 class _Dock extends StatelessWidget {
