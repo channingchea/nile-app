@@ -34,3 +34,21 @@ jobs:
 
       - name: Test
         run: flutter test
+
+      # P4 #44: the edge functions had no tests of any kind, and `deno check`
+      # had never been clean across all 25 of them — two of which had type
+      # errors that nobody saw because nothing ran it in CI.
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Typecheck edge functions
+        run: |
+          fail=0
+          for f in supabase/functions/*/index.ts; do
+            deno check "$f" || fail=1
+          done
+          exit $fail
+
+      - name: Test edge functions
+        run: deno test --allow-env --allow-read supabase/functions/tests/
