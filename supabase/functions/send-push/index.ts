@@ -20,6 +20,7 @@
 
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { failure } from "../_shared/errors.ts";
 
 interface Payload {
   notification_id: string;
@@ -256,7 +257,6 @@ serve(async (req) => {
       status: 200,
     });
   } catch (e) {
-    console.error("send-push error:", e);
-    return new Response(JSON.stringify({ error: String(e) }), { status: 500 });
+    return new Response(JSON.stringify(failure(e, "send-push")), { status: 500 });
   }
 });

@@ -27,6 +27,7 @@ import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import Stripe from "https://esm.sh/stripe@14?target=deno";
 import { corsHeaders as corsHeadersFor } from "../_shared/cors.ts";
+import { failure } from "../_shared/errors.ts";
 // Shared with stripe-webhook's chargeback path — a revoked ticket has to leave
 // the room whether the money went back voluntarily or was pulled.
 import { ejectFromLiveRoom } from "../_shared/livekit_eject.ts";
@@ -161,7 +162,7 @@ serve(async (req) => {
     return json({ ok: true, refund_id: refund.id });
   } catch (err) {
     console.error(err);
-    return json({ error: String(err) }, 500);
+    return json(failure(err, "refund-ticket"), 500);
   }
 });
 

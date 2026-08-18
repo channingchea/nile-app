@@ -22,6 +22,7 @@ import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import Stripe from "https://esm.sh/stripe@14?target=deno";
 import { corsHeaders as corsHeadersFor } from "../_shared/cors.ts";
+import { failure } from "../_shared/errors.ts";
 import { checkoutOrigin } from "../_shared/checkout_origin.ts";
 import {
   CURRENCY, priceTaxParams, taxParams, TICKET_REFUND_POLICY,
@@ -271,7 +272,7 @@ serve(async (req) => {
     return json({ checkout_url: session.url });
   } catch (err) {
     console.error(err);
-    return json({ error: String(err) }, 500);
+    return json(failure(err, "create-payment-intent"), 500);
   }
 });
 

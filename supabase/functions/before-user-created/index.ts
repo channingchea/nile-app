@@ -133,7 +133,11 @@ serve(async (req) => {
     if (!audOk) throw new Error("audience mismatch");
     return allow();
   } catch (e) {
-    console.warn(`App Check verification failed: ${e?.message ?? e}`);
+    // `e` is unknown in a catch clause — reading .message off it is a type
+    // error, which is why deno check has never passed on this file.
+    console.warn(
+      `App Check verification failed: ${e instanceof Error ? e.message : String(e)}`,
+    );
     return ENFORCE
       ? reject(403, "Could not verify your device. Please update the Nile app and try again.")
       : allow();

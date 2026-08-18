@@ -36,6 +36,7 @@ import {
   notifyHostOfferCleared,
 } from "../_shared/sponsorship.ts";
 import { ejectFromLiveRoom } from "../_shared/livekit_eject.ts";
+import { failure } from "../_shared/errors.ts";
 
 const stripe = new Stripe(Deno.env.get("STRIPE_SECRET_KEY")!, {
   apiVersion: "2023-10-16",
@@ -97,7 +98,7 @@ serve(async (req) => {
     res = await handleEvent(event);
   } catch (err) {
     console.error("unhandled webhook error:", event.id, event.type, err);
-    return new Response(JSON.stringify({ error: String(err) }), { status: 500 });
+    return new Response(JSON.stringify(failure(err, "stripe-webhook")), { status: 500 });
   }
 
   // Only a success closes the claim. The ticket branch returns 500 on purpose

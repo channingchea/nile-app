@@ -41,6 +41,7 @@ import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { RoomServiceClient } from "https://esm.sh/livekit-server-sdk@2.9.7?target=deno";
 import { corsHeaders as corsHeadersFor } from "../_shared/cors.ts";
+import { failure } from "../_shared/errors.ts";
 
 // Long enough for a real thought, short enough that one person cannot own the
 // scrollback. The viewer's own input already truncates at 250; this is the
@@ -130,7 +131,7 @@ serve(async (req) => {
       error: String(err),
       stack: err instanceof Error ? err.stack : undefined,
     });
-    return json({ error: String(err) }, 500);
+    return json(failure(err, "live-chat"), 500);
   }
 });
 

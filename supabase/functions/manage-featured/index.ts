@@ -22,6 +22,7 @@
 
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { failure } from "../_shared/errors.ts";
 
 const ALLOWED_ORIGINS = new Set([
   "https://ads.joinnile.com",
@@ -158,7 +159,7 @@ serve(async (req) => {
     return json({ error: "Invalid action" }, 400);
   } catch (err) {
     console.error(err);
-    return json({ error: String(err) }, 500);
+    return json(failure(err, "manage-featured"), 500);
   }
 });
 
@@ -183,7 +184,11 @@ async function listEvents(admin: any) {
       "id, title, cover_image_url, status, scheduled_at, profiles!events_host_id_fkey(username)",
     )
     .in("id", ids);
-  const byId = new Map((events ?? []).map((e: any) => [e.id, e]));
+  // The explicit <string, any> matters. `admin` is any, so the mapped array
+  // is any too, and Map's constructor overloads resolve to Map<{}, {}> from
+  // it — which makes every property read off byId.get() a type error. This
+  // file has never passed deno check because of these two lines.
+  const byId = new Map<string, any>((events ?? []).map((e: any) => [e.id, e]));
   return (rows ?? []).map((r: any) => {
     const e = byId.get(r.target_id);
     return {
@@ -212,7 +217,7 @@ async function listCreators(admin: any) {
     .from("profiles")
     .select("id, username, display_name, avatar_url, follower_count")
     .in("id", ids);
-  const byId = new Map((profiles ?? []).map((p: any) => [p.id, p]));
+  const byId = new Map<string, any>((profiles ?? []).map((p: any) => [p.id, p]));
   return (rows ?? []).map((r: any) => {
     const p = byId.get(r.target_id);
     return {

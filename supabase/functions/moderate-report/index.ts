@@ -41,6 +41,7 @@
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders as corsHeadersFor } from "../_shared/cors.ts";
+import { failure } from "../_shared/errors.ts";
 
 // CORS headers are per-request, so the JSON responder is built per-request too
 // and handed to the helpers below (they run outside the handler's scope).
@@ -149,7 +150,7 @@ serve(async (req) => {
     return await unsuspendUser(admin, user.id, target_id, trimmedNote, json);
   } catch (err) {
     console.error(err);
-    return json({ error: String(err) }, 500);
+    return json(failure(err, "moderate-report"), 500);
   }
 });
 

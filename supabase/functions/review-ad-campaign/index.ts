@@ -44,6 +44,7 @@ import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import Stripe from "https://esm.sh/stripe@14?target=deno";
 import { corsHeaders as corsHeadersFor } from "../_shared/cors.ts";
+import { failure } from "../_shared/errors.ts";
 import {
   acceptSponsorshipOffer,
   dollars,
@@ -283,7 +284,7 @@ serve(async (req) => {
     return json({ campaign: updated, refunded_cents: refundedCents });
   } catch (err) {
     console.error(err);
-    return json({ error: String(err) }, 500);
+    return json(failure(err, "review-ad-campaign"), 500);
   }
 });
 

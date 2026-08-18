@@ -33,6 +33,7 @@ import {
   EgressClient,
   RoomServiceClient,
 } from "https://esm.sh/livekit-server-sdk@2.9.7?target=deno";
+import { failure } from "../_shared/errors.ts";
 
 const LIVEKIT_HTTP_URL = Deno.env.get("LIVEKIT_URL")!
   .replace(/^wss:/, "https:")
@@ -185,7 +186,7 @@ serve(async (req) => {
     });
   } catch (err) {
     log("error", { error: String(err), ms: Date.now() - t0 });
-    return new Response(JSON.stringify({ error: String(err) }), {
+    return new Response(JSON.stringify(failure(err, "livekit-sweep")), {
       status: 500,
       headers: { "Content-Type": "application/json" },
     });

@@ -68,6 +68,7 @@ import {
   formatWhen,
   klaviyoEvent,
 } from "../_shared/sponsorship.ts";
+import { failure } from "../_shared/errors.ts";
 
 const stripe = new Stripe(Deno.env.get("STRIPE_SECRET_KEY")!, {
   apiVersion: "2023-10-16",
@@ -138,7 +139,7 @@ serve(async (req) => {
     });
   } catch (err) {
     console.error(err);
-    return json({ error: String(err) }, 500);
+    return json(failure(err, "tally-ad-spend"), 500);
   }
 });
 

@@ -12,6 +12,7 @@
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders } from "../_shared/cors.ts";
+import { failure } from "../_shared/errors.ts";
 
 const SIGNED_URL_TTL_SECONDS = 3600;
 
@@ -82,6 +83,6 @@ serve(async (req) => {
     return json({ url: signed.signedUrl });
   } catch (err) {
     console.error(err);
-    return json({ error: String(err) }, 500);
+    return json(failure(err, "dm-image-url"), 500);
   }
 });

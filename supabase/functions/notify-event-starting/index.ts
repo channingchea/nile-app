@@ -28,6 +28,7 @@
 
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { failure } from "../_shared/errors.ts";
 
 // Reminder lead time and how far past due we still bother notifying.
 const LEAD_MINUTES = 15;
@@ -88,7 +89,7 @@ serve(async (req) => {
     return json({ ok: true, events_processed, notified });
   } catch (err) {
     console.error(err);
-    return json({ error: String(err) }, 500);
+    return json(failure(err, "notify-event-starting"), 500);
   }
 });
 

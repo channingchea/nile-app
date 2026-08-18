@@ -23,6 +23,7 @@
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders as corsHeadersFor } from "../_shared/cors.ts";
+import { failure } from "../_shared/errors.ts";
 import { acceptSponsorshipOffer, dollars, klaviyoEvent } from "../_shared/sponsorship.ts";
 
 // CORS headers are per-request, so the JSON responder is built per-request too.
@@ -93,7 +94,7 @@ serve(async (req) => {
     return await decline(admin, c, campaign_id, hostNote, ev?.title ?? "your event", json);
   } catch (err) {
     console.error(err);
-    return json({ error: String(err) }, 500);
+    return json(failure(err, "respond-sponsorship-offer"), 500);
   }
 });
 
