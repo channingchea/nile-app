@@ -147,12 +147,17 @@ serve(async (req) => {
 // sponsorship_refunds; the DB can't call Stripe, so the money work happens
 // here.
 //
-// The queue can now only ever receive CHARGED campaigns: sponsorship_on_event_
-// status() enqueues from status = 'active', and under the offer model a lobby
-// row only reaches 'active' by an accepted, confirmed PaymentIntent. Every
-// uncharged status (pending_payment / pending_review / pending_host /
-// payment_pending) is flipped straight to 'expired' by the same trigger with no
-// refund row, because there is nothing to give back.
+// On the STATUS paths the queue only ever receives CHARGED campaigns:
+// sponsorship_on_event_status() enqueues from status = 'active', and under the
+// offer model a lobby row only reaches 'active' by an accepted, confirmed
+// PaymentIntent. Every uncharged status (pending_payment / pending_review /
+// pending_host / payment_pending) is flipped straight to 'expired' by the same
+// trigger with no refund row, because there is nothing to give back.
+//
+// The DELETE path is the exception (0124). A hard-deleted event cascade-deletes
+// its campaign, so 'expired' has nowhere to live and review_note can never be
+// read again — the advertiser would simply never hear. Those rows arrive here
+// under reason 'event_deleted_uncharged': notify only, no Stripe call.
 //
 // The old "events that never started" block used to live here; migration 0084's
 // auto_end_expired_events cron flips those to 'ended' within five minutes, and
@@ -177,7 +182,13 @@ async function sweepSponsorships(admin: any): Promise<number> {
       let ok = true;
       let note: string | null = null;
       try {
-        if (piId?.startsWith("pi_")) {
+        if (r.reason === "event_deleted_uncharged") {
+          // 0124: the offer never reached 'active', so nothing was ever
+          // charged. The row exists only to carry the notification past the
+          // cascade that deleted the campaign along with its event — there is
+          // no Stripe object here to cancel, and asking would 404.
+          note = "no charge was made";
+        } else if (piId?.startsWith("pi_")) {
           const pi = await stripe.paymentIntents.retrieve(piId);
           if (pi.status === "requires_capture") {
             await stripe.paymentIntents.cancel(piId);
@@ -241,6 +252,8 @@ const REFUND_REASONS: Record<string, string> = {
   event_cancelled: "The event was cancelled — your payment has been refunded.",
   not_approved_in_time: "The event started before this sponsorship could be reviewed. Your card was not charged.",
   event_never_started: "The event never started — your payment has been refunded.",
+  event_deleted_uncharged:
+    "The event was removed by its host before your offer was accepted. You were not charged.",
 };
 // deno-lint-ignore no-explicit-any
 async function notifySponsorRefunded(admin: any, r: any) {

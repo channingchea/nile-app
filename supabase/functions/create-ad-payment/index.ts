@@ -58,6 +58,9 @@ import { corsHeaders as corsHeadersFor } from "../_shared/cors.ts";
 // Every caller today is the advertiser web portal, so the fallback is "web"
 // rather than "unknown" — the app links out to the portal, it never buys here.
 import { checkoutOrigin } from "../_shared/checkout_origin.ts";
+import {
+  AD_REFUND_POLICY, CURRENCY, priceTaxParams, taxParams,
+} from "../_shared/money.ts";
 
 // CORS headers are per-request, so the JSON responder is built per-request too
 // and handed to the helpers below (they run outside the handler's scope).
@@ -187,13 +190,16 @@ async function createHostBoost(
     payment_method_types: ["card"],
     line_items: [{
       price_data: {
-        currency: "usd",
+        currency: CURRENCY,
         unit_amount: budget_cents,
         product_data: { name: `Boost “${ev.title}” (${duration_days} days)` },
+        ...priceTaxParams(),
       },
       quantity: 1,
     }],
     mode: "payment",
+    ...taxParams(),
+    custom_text: { submit: { message: AD_REFUND_POLICY } },
     success_url: `${Deno.env.get("AD_SUCCESS_URL")}?campaign_id=${campaign.id}&session_id={CHECKOUT_SESSION_ID}`,
     cancel_url: `${Deno.env.get("AD_CANCEL_URL")}?event=${event_id}`,
     // standalone:"0" ⇒ webhook activates immediately.
@@ -374,13 +380,16 @@ async function createStandaloneAd(
     payment_method_types: ["card"],
     line_items: [{
       price_data: {
-        currency: "usd",
+        currency: CURRENCY,
         unit_amount: budget_cents,
         product_data: { name: `Nile ad: “${hl}” (${duration_days} days)` },
+        ...priceTaxParams(),
       },
       quantity: 1,
     }],
     mode: "payment",
+    ...taxParams(),
+    custom_text: { submit: { message: AD_REFUND_POLICY } },
     // Authorize only — the review-ad-campaign fn captures on approve or cancels
     // on reject. Host boosts (no review step) keep automatic capture.
     payment_intent_data: { capture_method: "manual" },
@@ -570,7 +579,9 @@ async function createSponsorship(admin: any, userId: string, body: any, json: Js
   // acceptance doesn't come back authentication_required.
   const session = await stripe.checkout.sessions.create({
     mode: "setup",
-    currency: "usd",
+    // Setup mode moves no money, so there is nothing to tax here — the charge
+    // that follows acceptance is made off-session by respond-sponsorship-offer.
+    currency: CURRENCY,
     customer: customerId,
     payment_method_types: ["card"],
     payment_method_options: { card: { request_three_d_secure: "any" } },

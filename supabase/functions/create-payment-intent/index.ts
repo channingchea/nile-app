@@ -23,6 +23,9 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import Stripe from "https://esm.sh/stripe@14?target=deno";
 import { corsHeaders as corsHeadersFor } from "../_shared/cors.ts";
 import { checkoutOrigin } from "../_shared/checkout_origin.ts";
+import {
+  CURRENCY, priceTaxParams, taxParams, TICKET_REFUND_POLICY,
+} from "../_shared/money.ts";
 
 const stripe = new Stripe(Deno.env.get("STRIPE_SECRET_KEY")!, {
   apiVersion: "2023-10-16",
@@ -187,14 +190,20 @@ serve(async (req) => {
       line_items: [
         {
           price_data: {
-            currency: "usd",
+            currency: CURRENCY,
             unit_amount: amount_cents,
             product_data: { name: event_title ?? "Event Ticket" },
+            ...priceTaxParams(),
           },
           quantity: 1,
         },
       ],
       mode: "payment",
+      ...taxParams(),
+      // The refund policy and the currency, immediately above the pay button.
+      // This is the one placement every buyer passes through regardless of
+      // which surface sent them to checkout (#37).
+      custom_text: { submit: { message: TICKET_REFUND_POLICY } },
       // Atomic split when the host is payable; plain charge otherwise.
       ...(destination
         ? {

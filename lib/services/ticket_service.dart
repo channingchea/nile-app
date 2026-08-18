@@ -188,9 +188,14 @@ class TicketService {
     );
   }
 
-  /// Host-initiated refund of a single ticket. The Edge Function authorizes
-  /// the caller as the event host and issues the Stripe refund; the ticket
-  /// flips to 'refunded' (optimistically server-side, confirmed by webhook).
+  /// Refund a single ticket. The Edge Function authorizes the caller as either
+  /// the event host (any time) or the buyer (only inside the disclosed
+  /// cancellation window — see services/money.dart), then issues the Stripe
+  /// refund; the ticket flips to 'refunded' (optimistically server-side,
+  /// confirmed by webhook).
+  ///
+  /// Throws with the server's own message when the window has closed, so
+  /// callers can surface it verbatim rather than inventing their own wording.
   static Future<void> refund(String ticketId) async {
     final response = await supabase.functions.invoke(
       'refund-ticket',

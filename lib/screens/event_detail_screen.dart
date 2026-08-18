@@ -14,6 +14,7 @@ import '../services/share_urls.dart';
 import '../services/event_service.dart';
 import '../services/follow_service.dart';
 import '../services/livekit_service.dart';
+import '../services/money.dart';
 import '../services/report_service.dart';
 import '../services/supabase_client.dart';
 import '../services/ticket_service.dart';
@@ -1670,9 +1671,27 @@ class _GetTicketButton extends StatelessWidget {
       ),
     );
     // Faint volt glow on the screen's single primary CTA.
-    return enabled
+    final cta = enabled
         ? DecoratedBox(decoration: NileEffects.voltGlow, child: button)
         : button;
+    // Currency and cancellation stated before the tap, not after it (#37).
+    // Stripe repeats the full policy above its own pay button; this is the
+    // version the buyer reads while still deciding.
+    if (soldOut) return cta;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        cta,
+        const SizedBox(height: NileSpacing.s8),
+        Text(
+          kTicketRefundPolicyShort,
+          textAlign: TextAlign.center,
+          style: NileTextStyles.caption().copyWith(
+            color: NileColors.txtTertiary,
+          ),
+        ),
+      ],
+    );
   }
 }
 

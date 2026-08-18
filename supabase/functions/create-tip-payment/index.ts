@@ -25,6 +25,9 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import Stripe from "https://esm.sh/stripe@14?target=deno";
 import { corsHeaders as corsHeadersFor } from "../_shared/cors.ts";
 import { checkoutOrigin } from "../_shared/checkout_origin.ts";
+import {
+  CURRENCY, priceTaxParams, taxParams, TIP_REFUND_POLICY,
+} from "../_shared/money.ts";
 
 const stripe = new Stripe(Deno.env.get("STRIPE_SECRET_KEY")!, {
   apiVersion: "2023-10-16",
@@ -116,13 +119,16 @@ serve(async (req) => {
       payment_method_types: ["card"],
       line_items: [{
         price_data: {
-          currency: "usd",
+          currency: CURRENCY,
           unit_amount: amt,
           product_data: { name: `Tip for “${ev.title}”` },
+          ...priceTaxParams(),
         },
         quantity: 1,
       }],
       mode: "payment",
+      ...taxParams(),
+      custom_text: { submit: { message: TIP_REFUND_POLICY } },
       // Atomic split: application fee to the platform, remainder to the host.
       payment_intent_data: {
         application_fee_amount: fee,
