@@ -31,6 +31,13 @@
 	<array>
 		<string>Default</string>
 	</array>
+	<!-- Declared Age Range (P4). Lets Nile ask the App Store for the user's
+	     verified age category instead of trusting a typed birthday, which is
+	     what Texas SB 2420 and the Utah and Louisiana equivalents require.
+	     Must also be enabled on the App ID in the developer portal —
+	     automatic signing will fail to produce a profile until it is. -->
+	<key>com.apple.developer.declared-age-range</key>
+	<true/>
 	<!-- Shared container between the app and the Broadcast Upload Extension —
 	     the screen-share frames travel over a socket in this group. -->
 	<key>com.apple.security.application-groups</key>
