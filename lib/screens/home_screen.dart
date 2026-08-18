@@ -1028,6 +1028,11 @@ class FeedTabState extends State<FeedTab> {
                   title: const NileLogo(size: 'small', height: 28),
                   actions: [
                     IconButton(
+                      // Count included: "Notifications" alone leaves a screen
+                      // reader user with no idea there's anything waiting.
+                      tooltip: _unreadCount > 0
+                          ? 'Notifications, $_unreadCount unread'
+                          : 'Notifications',
                       onPressed: _openNotifications,
                       icon: Badge(
                         isLabelVisible: _unreadCount > 0,

@@ -167,6 +167,7 @@ class _SignupScreenState extends State<SignupScreen> {
         leading: _submitted
             ? null
             : IconButton(
+                tooltip: 'Back',
                 icon: Icon(
                   Icons.arrow_back,
                   color: NileColors.txtSecondary,
@@ -354,6 +355,8 @@ class _SignupScreenState extends State<SignupScreen> {
                     color: NileColors.txtTertiary,
                   ),
                   suffixIcon: IconButton(
+                    tooltip:
+                        _obscurePass ? 'Show password' : 'Hide password',
                     icon: Icon(
                       _obscurePass
                           ? Icons.visibility_outlined
@@ -387,6 +390,9 @@ class _SignupScreenState extends State<SignupScreen> {
                     color: NileColors.txtTertiary,
                   ),
                   suffixIcon: IconButton(
+                    tooltip: _obscureConf
+                        ? 'Show confirmation password'
+                        : 'Hide confirmation password',
                     icon: Icon(
                       _obscureConf
                           ? Icons.visibility_outlined

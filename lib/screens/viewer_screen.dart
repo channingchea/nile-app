@@ -1782,6 +1782,7 @@ class _ViewerScreenState extends State<ViewerScreen>
               clipBehavior: Clip.none,
               children: [
                 IconButton(
+                  tooltip: _chatOpen ? 'Hide chat' : 'Show chat',
                   icon: Icon(
                     _chatOpen ? Icons.chat_bubble : Icons.chat_bubble_outline,
                   ),
@@ -2246,6 +2247,7 @@ class _ViewerScreenState extends State<ViewerScreen>
           ),
           const SizedBox(width: 8),
           IconButton(
+            tooltip: 'Send message',
             icon: const Icon(Icons.send),
             color: NileColors.volt,
             onPressed: _sendChat,
@@ -2282,6 +2284,7 @@ class _ViewerScreenState extends State<ViewerScreen>
           ),
           const Spacer(),
           IconButton(
+            tooltip: _audioEnabled ? 'Mute' : 'Unmute',
             icon: Icon(_audioEnabled ? Icons.volume_up : Icons.volume_off),
             color: _audioEnabled
                 ? NileColors.txtPrimary

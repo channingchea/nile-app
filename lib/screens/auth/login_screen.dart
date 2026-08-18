@@ -170,6 +170,9 @@ class _LoginScreenState extends State<LoginScreen> {
                             color: NileColors.txtTertiary,
                           ),
                           suffixIcon: IconButton(
+                            tooltip: _obscurePass
+                                ? 'Show password'
+                                : 'Hide password',
                             icon: Icon(
                               _obscurePass
                                   ? Icons.visibility_outlined

@@ -362,6 +362,7 @@ class CameraStepper extends StatelessWidget {
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
           IconButton(
+            tooltip: 'Remove one',
             onPressed: count > 1 ? onRemove : null,
             icon: const Icon(Icons.remove),
             color: NileColors.txtPrimary,
@@ -372,6 +373,7 @@ class CameraStepper extends StatelessWidget {
             style: NileTextStyles.headingSm().copyWith(letterSpacing: 0.5),
           ),
           IconButton(
+            tooltip: 'Add one',
             onPressed: count < max ? onAdd : null,
             icon: const Icon(Icons.add),
             color: NileColors.txtPrimary,

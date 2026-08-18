@@ -74,16 +74,34 @@ class _LikeButtonState extends State<LikeButton>
       vertical: NileSpacing.s4,
     );
 
+    // P4 #40. An unlabelled InkWell around an Icon reads to VoiceOver as
+    // "button" and nothing else, so the like/repost/share row announced as
+    // three anonymous buttons. `liked` is exposed as toggle STATE rather than
+    // baked into the label, which is what lets a screen reader say "selected"
+    // and read the same control consistently in both states.
+    final likeLabel = widget.liked ? 'Unlike' : 'Like';
+    final countLabel =
+        '${widget.count} ${widget.count == 1 ? 'like' : 'likes'}';
+
     // Single target: the whole row toggles (original behaviour).
     if (countTap == null) {
-      return InkWell(
-        onTap: widget.onTap == null ? null : _handleTap,
-        borderRadius: BorderRadius.circular(NileRadius.sm),
-        child: Padding(
-          padding: pad,
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [heart, const SizedBox(width: NileSpacing.s4), count],
+      return Semantics(
+        button: true,
+        toggled: widget.liked,
+        enabled: widget.onTap != null,
+        label: '$likeLabel, $countLabel',
+        // Without this the Icon and the count are announced as separate
+        // fragments after the label — the same information three times.
+        excludeSemantics: true,
+        child: InkWell(
+          onTap: widget.onTap == null ? null : _handleTap,
+          borderRadius: BorderRadius.circular(NileRadius.sm),
+          child: Padding(
+            padding: pad,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [heart, const SizedBox(width: NileSpacing.s4), count],
+            ),
           ),
         ),
       );
@@ -93,19 +111,31 @@ class _LikeButtonState extends State<LikeButton>
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        InkWell(
-          onTap: widget.onTap == null ? null : _handleTap,
-          borderRadius: BorderRadius.circular(NileRadius.sm),
-          child: Padding(padding: pad, child: heart),
+        Semantics(
+          button: true,
+          toggled: widget.liked,
+          enabled: widget.onTap != null,
+          label: likeLabel,
+          excludeSemantics: true,
+          child: InkWell(
+            onTap: widget.onTap == null ? null : _handleTap,
+            borderRadius: BorderRadius.circular(NileRadius.sm),
+            child: Padding(padding: pad, child: heart),
+          ),
         ),
-        InkWell(
-          onTap: countTap,
-          borderRadius: BorderRadius.circular(NileRadius.sm),
-          child: Padding(
-            padding: pad,
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(minWidth: 16),
-              child: count,
+        Semantics(
+          button: true,
+          label: 'See who liked this, $countLabel',
+          excludeSemantics: true,
+          child: InkWell(
+            onTap: countTap,
+            borderRadius: BorderRadius.circular(NileRadius.sm),
+            child: Padding(
+              padding: pad,
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(minWidth: 16),
+                child: count,
+              ),
             ),
           ),
         ),

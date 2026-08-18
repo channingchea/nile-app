@@ -709,6 +709,7 @@ class _SearchField extends StatelessWidget {
           suffixIcon: controller.text.isEmpty
               ? null
               : IconButton(
+                  tooltip: 'Clear search',
                   icon: Icon(
                     Icons.close,
                     size: 18,

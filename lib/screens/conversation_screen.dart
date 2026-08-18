@@ -802,6 +802,7 @@ class _AppBar extends StatelessWidget {
           // profile — two back arrows a few points apart is one too many.
           if (NileBreakpoints.of(context).isCompact)
             IconButton(
+              tooltip: 'Back to messages',
               icon: Icon(
                 Icons.arrow_back_ios_new,
                 size: 18,
@@ -1858,6 +1859,7 @@ class _InputBar extends StatelessWidget {
       child: Row(
         children: [
           IconButton(
+            tooltip: 'Attach a photo',
             icon: Icon(Icons.add_circle_outline_rounded,
                 color: NileColors.txtSecondary),
             onPressed: sending ? null : onAttach,

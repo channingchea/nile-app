@@ -1731,6 +1731,7 @@ class _CurrentCommentsSheetState extends State<_CurrentCommentsSheet> {
                   ),
                   const SizedBox(width: NileSpacing.s8),
                   IconButton(
+                    tooltip: 'Post comment',
                     onPressed: _sending ? null : _send,
                     icon: _sending
                         ? SizedBox(
@@ -1793,6 +1794,7 @@ class _CurrentCommentsSheetState extends State<_CurrentCommentsSheet> {
             ),
           ),
           IconButton(
+            tooltip: 'Comment options',
             visualDensity: VisualDensity.compact,
             onPressed: () => _commentMenu(c),
             icon: Icon(Icons.more_horiz,

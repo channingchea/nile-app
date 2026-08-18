@@ -194,6 +194,7 @@ class _MyCurrentsScreenState extends State<MyCurrentsScreen> {
               top: 0,
               right: 0,
               child: IconButton(
+                tooltip: 'Current options',
                 visualDensity: VisualDensity.compact,
                 onPressed: () => _delete(r),
                 icon: const Icon(Icons.more_horiz,
@@ -266,6 +267,7 @@ class _ArchivePlayerState extends State<_ArchivePlayer> {
             child: Align(
               alignment: Alignment.topLeft,
               child: IconButton(
+                tooltip: 'Close',
                 onPressed: () => Navigator.pop(context),
                 icon: const Icon(Icons.close, color: Colors.white),
               ),
@@ -314,6 +316,7 @@ class _ArchivePlayerState extends State<_ArchivePlayer> {
               child: Align(
                 alignment: Alignment.topLeft,
                 child: IconButton(
+                  tooltip: 'Close',
                   onPressed: () => Navigator.pop(context),
                   icon: const Icon(Icons.close, color: Colors.white),
                 ),

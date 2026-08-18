@@ -2860,6 +2860,7 @@ class _CameraScreenState extends State<CameraScreen> {
                       _buildCameraPickerButton()
                     else
                       IconButton(
+                        tooltip: 'Switch camera',
                         onPressed: _switchCamera,
                         icon: const Icon(Icons.flip_camera_ios),
                         color: NileColors.txtPrimary,

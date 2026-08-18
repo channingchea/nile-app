@@ -483,6 +483,7 @@ class _DiscoverScreenState extends State<DiscoverScreen>
           prefixIcon: const Icon(Icons.search, size: 20),
           suffixIcon: _controller.text.isNotEmpty
               ? IconButton(
+                  tooltip: 'Clear search',
                   icon: const Icon(Icons.close, size: 18),
                   onPressed: _clearSearch,
                 )

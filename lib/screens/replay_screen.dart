@@ -187,6 +187,7 @@ class _Controls extends StatelessWidget {
         children: [
           const Spacer(),
           IconButton(
+            tooltip: controller.value.isPlaying ? 'Pause' : 'Play',
             iconSize: 64,
             color: Colors.white,
             icon: Icon(
