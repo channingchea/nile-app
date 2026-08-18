@@ -11,6 +11,7 @@ import 'package:sentry_flutter/sentry_flutter.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'config.dart';
 import 'router.dart';
+import 'services/analytics.dart';
 import 'services/auth_gate.dart';
 import 'services/app_lifecycle.dart';
 import 'services/connectivity_service.dart';
@@ -120,6 +121,11 @@ Future<void> _bootstrap() async {
       );
     }
   }
+
+  // Product analytics (P4 #39). Inert without POSTHOG_API_KEY, and its own
+  // init already swallows failures — analytics must never be able to stop the
+  // app from starting.
+  await NileAnalytics.init();
 
   // Load the saved theme mode before the first frame paints (no flash).
   await ThemeService.instance.load();

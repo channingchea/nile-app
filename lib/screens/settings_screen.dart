@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../config.dart';
+import '../services/analytics.dart';
 import '../services/account_service.dart';
 import '../services/mac_host.dart';
 import '../services/profile_service.dart';
@@ -225,6 +226,12 @@ class SettingsScreen extends StatelessWidget {
                 ),
               ],
             ),
+            // P4 #39. Analytics is on by default (legitimate interest: we
+            // can't run the product blind), but it has to be refusable in one
+            // tap from a place people can find, and the switch has to do
+            // something real — PostHog's disable() drops queued events and
+            // stops sending, it isn't a UI placebo.
+            const _PrivacySection(),
             // App Store Guideline 1.2: the EULA (our Terms) and the content
             // policy have to be reachable from inside the app, not only from
             // the marketing site. Reviewers look for exactly this list.
@@ -295,6 +302,45 @@ class SettingsScreen extends StatelessWidget {
 /// Mac-only preferences. Absent entirely everywhere else — and also on macOS 12,
 /// where `SMAppService` does not exist and the OS cannot answer whether Nile is
 /// a login item. A switch that cannot move is worse than no switch.
+/// P4 #39. Analytics is on by default (we can't run the product blind), but
+/// it has to be refusable in one tap from somewhere findable, and the switch
+/// has to do something real — PostHog's disable() drops queued events and
+/// stops sending, it isn't a UI placebo.
+class _PrivacySection extends StatefulWidget {
+  const _PrivacySection();
+
+  @override
+  State<_PrivacySection> createState() => _PrivacySectionState();
+}
+
+class _PrivacySectionState extends State<_PrivacySection> {
+  // Shown as "share", stored as "opt out" — the switch reads as a positive
+  // permission, which is the right way round for a consent control.
+  bool _share = !NileAnalytics.isOptedOut;
+
+  Future<void> _set(bool share) async {
+    setState(() => _share = share);
+    await NileAnalytics.setOptOut(!share);
+  }
+
+  @override
+  Widget build(BuildContext context) => _SettingsSection(
+    header: 'PRIVACY',
+    rows: [
+      _SettingsRow(
+        icon: Icons.insights_outlined,
+        label: 'Share usage data',
+        onTap: () => _set(!_share),
+        trailing: Switch(
+          value: _share,
+          activeThumbColor: NileColors.volt,
+          onChanged: _set,
+        ),
+      ),
+    ],
+  );
+}
+
 class _DesktopSection extends StatefulWidget {
   const _DesktopSection();
 

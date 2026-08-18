@@ -67,6 +67,7 @@ dependencies:
   sensors_plus: ^6.1.0  # beta-only shake-to-report
   go_router: ^17.4.0
   tray_manager: ^0.5.3
+  posthog_flutter: ^5.36.4
 dependency_overrides:
   app_links: 6.4.0
 

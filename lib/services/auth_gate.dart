@@ -6,6 +6,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import '../screens/auth/feature_intro_screen.dart';
 import 'mfa_service.dart';
 import 'profile_service.dart';
+import 'analytics.dart';
 import 'push_service.dart';
 import 'theme_service.dart';
 
@@ -135,9 +136,18 @@ class AuthGate extends ChangeNotifier {
         case AuthChangeEvent.signedIn:
           PushService.onSignIn();
           ThemeService.instance.onSignIn();
+          // Analytics identity follows the session, here rather than at the
+          // call sites: sign-in happens through six different paths (email,
+          // Google, Apple, magic link, recovery, restored session) and only
+          // this listener sees all of them.
+          final uid = state.session?.user.id;
+          if (uid != null) NileAnalytics.identify(uid);
           _gate = null; // fresh signup/sign-in: re-check below
         case AuthChangeEvent.signedOut:
           PushService.onSignOut();
+          // Without this the next person to use the device inherits the
+          // previous person's analytics identity.
+          NileAnalytics.reset();
           _gate = null;
           _passwordRecovery = false;
           _introWantsSignup = false;

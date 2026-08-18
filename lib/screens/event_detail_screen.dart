@@ -8,6 +8,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../services/ad_service.dart';
+import '../services/analytics.dart';
 import '../services/calendar_ics.dart';
 import '../services/crew_service.dart';
 import '../services/share_urls.dart';
@@ -77,6 +78,11 @@ class _EventDetailScreenState extends State<EventDetailScreen>
 
   /// Re-entrancy guard on [_refreshTicketStatus] — see the lifecycle hook.
   bool _pollingTicket = false;
+
+  /// One event_viewed per screen, not per refresh. _load() also runs on
+  /// pull-to-refresh and on returning from checkout, and counting those would
+  /// make the denominator of every conversion rate meaningless.
+  bool _viewLogged = false;
 
   // Crew: assigned camera operators get free access to the event.
   bool _isOperator = false;
@@ -164,6 +170,15 @@ class _EventDetailScreenState extends State<EventDetailScreen>
         final purchased = await TicketService.hasPurchased(event.id);
         if (!mounted) return;
         if (purchased) {
+          // Only when a checkout we started actually landed. This poll also
+          // runs on plain screen-opens for a ticket bought days ago, and
+          // counting those would inflate conversion with repeat visits.
+          if (_checkoutPending) {
+            NileAnalytics.capture(NileEvent.ticketConfirmed, {
+              'event_id': event.id,
+              'price_cents': event.price ?? 0,
+            });
+          }
           _checkoutPending = false;
           setState(() => _hasTicket = true);
           _offerAddToCalendar(event);
@@ -205,6 +220,19 @@ class _EventDetailScreenState extends State<EventDetailScreen>
     try {
       _event ??= await EventService.fetchById(widget.eventId!);
       if (_event == null) throw Exception('Event not found');
+
+      // Top of the funnel. is_ticketed and price_cents ride along so the
+      // conversion rate can be read per price band — "20% buy" means nothing
+      // without knowing whether that's a $5 show or a $50 one.
+      if (!_viewLogged) {
+        _viewLogged = true;
+        NileAnalytics.capture(NileEvent.eventViewed, {
+          'event_id': _event!.id,
+          'is_ticketed': (_event!.price ?? 0) > 0,
+          'price_cents': _event!.price ?? 0,
+          'is_own_event': _isOwnEvent,
+        });
+      }
 
       // Follow state (skip for own events)
       bool following = false;
@@ -427,6 +455,18 @@ class _EventDetailScreenState extends State<EventDetailScreen>
   Future<void> _buyTicket({String kind = 'live'}) async {
     if (_event == null) return;
     setState(() => _ticketBusy = true);
+    // Fired BEFORE the network call, not after: a checkout that fails to even
+    // start is exactly the kind of drop-off this funnel exists to surface, and
+    // an event only logged on success would hide it.
+    NileAnalytics.capture(
+      kind == 'replay'
+          ? NileEvent.replayCheckoutStarted
+          : NileEvent.ticketCheckoutStarted,
+      {
+        'event_id': _event!.id,
+        'price_cents': _event!.price ?? 0,
+      },
+    );
     try {
       final url = await TicketService.createCheckoutUrl(
         eventId: _event!.id,

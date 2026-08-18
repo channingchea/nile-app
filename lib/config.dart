@@ -82,3 +82,23 @@ const int minimumAge = 13;
 //   flutter run --dart-define=SENTRY_DSN=https://...@oXXXX.ingest.sentry.io/XXXX
 // When absent (plain `flutter run`), Sentry is skipped entirely — zero overhead.
 const String sentryDsn = String.fromEnvironment('SENTRY_DSN');
+
+// ── Product analytics (PostHog) ───────────────────────────────────────────────
+// P4 #39. Empty key = analytics is entirely inert: no SDK setup, no network,
+// no events. Pass at build time alongside the Sentry DSN:
+//
+//   flutter build ipa --dart-define=POSTHOG_API_KEY=phc_xxx \
+//                     --dart-define=SENTRY_DSN=https://...
+//
+// The project API key is a WRITE-ONLY ingest key and is safe in a client
+// binary, like the Supabase publishable key. Do NOT put a personal API key
+// here — those can read and delete project data.
+//
+// Host defaults to PostHog's EU cloud. If the project lives in US cloud, pass
+// --dart-define=POSTHOG_HOST=https://us.i.posthog.com. Getting this wrong
+// fails closed: events go nowhere rather than to the wrong project.
+const String posthogApiKey = String.fromEnvironment('POSTHOG_API_KEY');
+const String posthogHost = String.fromEnvironment(
+  'POSTHOG_HOST',
+  defaultValue: 'https://eu.i.posthog.com',
+);
