@@ -29,6 +29,7 @@
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { failure } from "../_shared/errors.ts";
+import { klaviyoEvent } from "../_shared/sponsorship.ts";
 
 // Reminder lead time and how far past due we still bother notifying.
 const LEAD_MINUTES = 15;
@@ -72,6 +73,7 @@ serve(async (req) => {
     if (error) return json({ error: error.message }, 500);
 
     let notified = 0;
+    let emailed = 0;
     let events_processed = 0;
     for (const ev of events ?? []) {
       const { data: count, error: rpcErr } = await admin.rpc(
@@ -84,14 +86,66 @@ serve(async (req) => {
       }
       events_processed++;
       notified += (count as number) ?? 0;
+      emailed += await emailUnreachableTicketHolders(admin, ev.id);
     }
 
-    return json({ ok: true, events_processed, notified });
+    return json({ ok: true, events_processed, notified, emailed });
   } catch (err) {
     console.error(err);
     return json(failure(err, "notify-event-starting"), 500);
   }
 });
+
+// Email fallback (P4 #38, migration 0128). Push has always been the ONLY
+// channel for this reminder, so a buyer who denied the notification permission
+// simply misses a show they paid for — the one notification here where being
+// unreachable costs the user money.
+//
+// unreachable_ticket_holders() returns only people push cannot reach: paid
+// ticket holders, reminder not switched off, and no device token at all. An
+// email that duplicates a push they already got is how people learn to ignore
+// both.
+//
+// No-ops without KLAVIYO_API_KEY, so this is inert until the "Nile Event
+// Starting" flow exists — one addition to the flow backlog, with the event
+// already firing when it's built.
+//
+// deno-lint-ignore no-explicit-any
+async function emailUnreachableTicketHolders(admin: any, eventId: string): Promise<number> {
+  try {
+    const { data: people, error } = await admin
+      .rpc("unreachable_ticket_holders", { p_event_id: eventId });
+    if (error) {
+      console.error(`unreachable lookup failed for ${eventId}:`, error.message);
+      return 0;
+    }
+    if (!people?.length) return 0;
+
+    let sent = 0;
+    // deno-lint-ignore no-explicit-any
+    for (const p of people as any[]) {
+      // unique_id keyed on (event, user) so a retry of this cron run — or the
+      // same event caught in two overlapping windows — can't mail twice.
+      await klaviyoEvent(
+        "Nile Event Starting",
+        p.email,
+        `event-starting:${eventId}:${p.user_id}`,
+        {
+          event_title: p.event_title,
+          scheduled_at: p.scheduled_at,
+          display_name: p.display_name,
+          reason: "no_push_token",
+        },
+      );
+      sent++;
+    }
+    return sent;
+  } catch (err) {
+    // A mail failure must never stop the push fan-out for the next event.
+    console.error(`email fallback error for ${eventId}:`, err);
+    return 0;
+  }
+}
 
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {

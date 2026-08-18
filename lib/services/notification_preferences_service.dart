@@ -16,6 +16,22 @@ class NotificationPreferences {
   final bool replayPricePrompt;
   final bool feedbackResolved;
 
+  /// P4 #38: this column has existed and been honoured by the server since
+  /// tipping shipped — the switch just never made it into the screen, so a
+  /// host taking tips through a three-hour show got a push per tip and no way
+  /// to stop it.
+  final bool tipReceived;
+
+  /// Quiet hours, as local wall-clock times. Both null = off; they are only
+  /// ever set or cleared together.
+  ///
+  /// [quietHoursUtcOffsetMinutes] is a plain offset rather than an IANA zone
+  /// (see migration 0127) — the screen refreshes it on open, so a DST change
+  /// costs at most an hour of drift until the next visit.
+  final int? quietHoursStartMinutes;
+  final int? quietHoursEndMinutes;
+  final int quietHoursUtcOffsetMinutes;
+
   /// Covers BOTH `sponsorship_offer` and `sponsorship_offer_expiring` — the
   /// server's `notif_enabled` maps the two types onto this one column, so the
   /// reminder can't outlive the thing it's reminding you about.
@@ -36,7 +52,14 @@ class NotificationPreferences {
     this.replayPricePrompt = true,
     this.feedbackResolved = true,
     this.sponsorshipOffer = true,
+    this.tipReceived = true,
+    this.quietHoursStartMinutes,
+    this.quietHoursEndMinutes,
+    this.quietHoursUtcOffsetMinutes = 0,
   });
+
+  bool get quietHoursOn =>
+      quietHoursStartMinutes != null && quietHoursEndMinutes != null;
 
   factory NotificationPreferences.fromJson(Map<String, dynamic> j) =>
       NotificationPreferences(
@@ -54,7 +77,29 @@ class NotificationPreferences {
         replayPricePrompt: j['replay_price_prompt'] as bool? ?? true,
         feedbackResolved: j['feedback_resolved'] as bool? ?? true,
         sponsorshipOffer: j['sponsorship_offer'] as bool? ?? true,
+        tipReceived: j['tip_received'] as bool? ?? true,
+        quietHoursStartMinutes: _minutesFromSql(j['quiet_hours_start']),
+        quietHoursEndMinutes: _minutesFromSql(j['quiet_hours_end']),
+        quietHoursUtcOffsetMinutes:
+            j['quiet_hours_utc_offset_minutes'] as int? ?? 0,
       );
+
+  /// Postgres `time` arrives as 'HH:MM:SS'. Null stays null — that's "off",
+  /// not midnight, and conflating the two would silence every push.
+  static int? _minutesFromSql(Object? v) {
+    if (v is! String || v.isEmpty) return null;
+    final parts = v.split(':');
+    if (parts.length < 2) return null;
+    final h = int.tryParse(parts[0]);
+    final m = int.tryParse(parts[1]);
+    if (h == null || m == null) return null;
+    return h * 60 + m;
+  }
+
+  static String? _sqlFromMinutes(int? mins) => mins == null
+      ? null
+      : '${(mins ~/ 60).toString().padLeft(2, '0')}:'
+          '${(mins % 60).toString().padLeft(2, '0')}:00';
 
   NotificationPreferences copyWith({
     bool? postLike,
@@ -71,6 +116,13 @@ class NotificationPreferences {
     bool? replayPricePrompt,
     bool? feedbackResolved,
     bool? sponsorshipOffer,
+    bool? tipReceived,
+    int? quietHoursStartMinutes,
+    int? quietHoursEndMinutes,
+    int? quietHoursUtcOffsetMinutes,
+    // copyWith can't express "set this back to null" with optional params, so
+    // clearing quiet hours needs its own flag rather than a silent no-op.
+    bool clearQuietHours = false,
   }) => NotificationPreferences(
     postLike: postLike ?? this.postLike,
     postComment: postComment ?? this.postComment,
@@ -86,6 +138,15 @@ class NotificationPreferences {
     replayPricePrompt: replayPricePrompt ?? this.replayPricePrompt,
     feedbackResolved: feedbackResolved ?? this.feedbackResolved,
     sponsorshipOffer: sponsorshipOffer ?? this.sponsorshipOffer,
+    tipReceived: tipReceived ?? this.tipReceived,
+    quietHoursStartMinutes: clearQuietHours
+        ? null
+        : (quietHoursStartMinutes ?? this.quietHoursStartMinutes),
+    quietHoursEndMinutes: clearQuietHours
+        ? null
+        : (quietHoursEndMinutes ?? this.quietHoursEndMinutes),
+    quietHoursUtcOffsetMinutes:
+        quietHoursUtcOffsetMinutes ?? this.quietHoursUtcOffsetMinutes,
   );
 
   Map<String, dynamic> toColumns() => {
@@ -103,6 +164,10 @@ class NotificationPreferences {
     'replay_price_prompt': replayPricePrompt,
     'feedback_resolved': feedbackResolved,
     'sponsorship_offer': sponsorshipOffer,
+    'tip_received': tipReceived,
+    'quiet_hours_start': _sqlFromMinutes(quietHoursStartMinutes),
+    'quiet_hours_end': _sqlFromMinutes(quietHoursEndMinutes),
+    'quiet_hours_utc_offset_minutes': quietHoursUtcOffsetMinutes,
   };
 }
 

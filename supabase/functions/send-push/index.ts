@@ -22,6 +22,17 @@ import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { failure } from "../_shared/errors.ts";
 
+// Notification types that ignore quiet hours (migration 0127). The test is
+// "would this still be useful in the morning?" — a show starting in fifteen
+// minutes would not be. Keep this list short; every addition is a decision to
+// wake somebody up.
+const TIME_CRITICAL = new Set([
+  "event_starting",
+  "event_live",
+  "soundcheck_open",
+  "operator_assigned",
+]);
+
 interface Payload {
   notification_id: string;
   recipient_id: string;
@@ -213,6 +224,26 @@ serve(async (req) => {
       Deno.env.get("SUPABASE_URL")!,
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
     );
+
+    // Quiet hours (migration 0127). This holds the PUSH, never the
+    // notification — the row is already written, so it's all waiting in the
+    // app when they look. What changes is whether the phone lights up at 3am.
+    //
+    // TIME_CRITICAL is exempt on purpose and the settings screen says so. A
+    // show you bought a ticket to, or a soundcheck you're crewing, is starting
+    // *now*; holding that until morning silences the one notification that
+    // could not be acted on later. Everything social waits.
+    if (!TIME_CRITICAL.has(p.type)) {
+      const { data: quiet } = await admin.rpc("in_quiet_hours", {
+        p_user_id: p.recipient_id,
+      });
+      if (quiet === true) {
+        return new Response(
+          JSON.stringify({ sent: 0, held: "quiet_hours" }),
+          { status: 200 },
+        );
+      }
+    }
 
     const { data: tokens, error } = await admin
       .from("device_tokens")

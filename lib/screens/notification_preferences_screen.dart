@@ -153,6 +153,16 @@ class _NotificationPreferencesScreenState
           p.replayPricePrompt,
           (v) => _set(p.copyWith(replayPricePrompt: v), p),
         ),
+        _section('Earnings'),
+        // P4 #38. This column has always existed and always been honoured;
+        // the switch was simply never drawn, so a host taking tips through a
+        // three-hour show got a push per tip with no way to silence them.
+        _toggle(
+          'Tips',
+          'When someone tips you during a show',
+          p.tipReceived,
+          (v) => _set(p.copyWith(tipReceived: v), p),
+        ),
         _section('Sponsorship'),
         // One switch for both offer types: the 24-hour warning is only useful
         // to someone who wanted the offer notification in the first place.
@@ -182,7 +192,82 @@ class _NotificationPreferencesScreenState
           p.messageReaction,
           (v) => _set(p.copyWith(messageReaction: v), p),
         ),
+        _section('Quiet hours'),
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          activeThumbColor: NileColors.volt,
+          title: Text('Hold notifications overnight',
+              style: NileTextStyles.bodyMd()),
+          subtitle: Text(
+            p.quietHoursOn
+                ? 'Silent from ${_fmtMinutes(p.quietHoursStartMinutes!)} '
+                    'to ${_fmtMinutes(p.quietHoursEndMinutes!)}'
+                : 'Off',
+            style: NileTextStyles.caption()
+                .copyWith(color: NileColors.txtSecondary),
+          ),
+          value: p.quietHoursOn,
+          onChanged: (on) => _set(
+            on
+                // 22:00–07:00 is the default people expect; they can move it.
+                ? p.copyWith(
+                    quietHoursStartMinutes: 22 * 60,
+                    quietHoursEndMinutes: 7 * 60,
+                    quietHoursUtcOffsetMinutes:
+                        DateTime.now().timeZoneOffset.inMinutes,
+                  )
+                : p.copyWith(clearQuietHours: true),
+            p,
+          ),
+        ),
+        if (p.quietHoursOn) ...[
+          Row(
+            children: [
+              Expanded(
+                child: _timeField('From', p.quietHoursStartMinutes!,
+                    (m) => _set(p.copyWith(quietHoursStartMinutes: m), p)),
+              ),
+              const SizedBox(width: NileSpacing.s12),
+              Expanded(
+                child: _timeField('To', p.quietHoursEndMinutes!,
+                    (m) => _set(p.copyWith(quietHoursEndMinutes: m), p)),
+              ),
+            ],
+          ),
+          Padding(
+            padding: const EdgeInsets.only(top: NileSpacing.s8),
+            child: Text(
+              'Notifications still arrive in the app — your phone just stays '
+              'quiet. Alerts about a show starting, going live, or a '
+              'soundcheck you\'re crewing always come through.',
+              style: NileTextStyles.caption()
+                  .copyWith(color: NileColors.txtTertiary),
+            ),
+          ),
+        ],
       ],
+    );
+  }
+
+  static String _fmtMinutes(int m) =>
+      '${(m ~/ 60).toString().padLeft(2, '0')}:'
+      '${(m % 60).toString().padLeft(2, '0')}';
+
+  Widget _timeField(String label, int minutes, ValueChanged<int> onPicked) {
+    return OutlinedButton(
+      onPressed: () async {
+        final picked = await showTimePicker(
+          context: context,
+          initialTime: TimeOfDay(hour: minutes ~/ 60, minute: minutes % 60),
+        );
+        if (picked != null) onPicked(picked.hour * 60 + picked.minute);
+      },
+      style: OutlinedButton.styleFrom(
+        padding: const EdgeInsets.symmetric(vertical: NileSpacing.s12),
+        side: BorderSide(color: NileColors.border),
+      ),
+      child: Text('$label  ${_fmtMinutes(minutes)}',
+          style: NileTextStyles.bodyMd()),
     );
   }
 
