@@ -128,6 +128,16 @@ class ChatService {
   /// `self: true` echoes the sender's own reactions back, keeping a single
   /// render path. Messages now arrive from the server for everyone including
   /// their author, so they take the same path either way.
+  /// `onBroadcast` hands the callback the whole realtime envelope
+  /// (`{type, event, payload}`), not the payload the sender wrote. Reading the
+  /// fields straight off it silently yields every default — a message renders
+  /// as "viewer" with no text — so unwrap one level first. Tolerates an
+  /// already-unwrapped map so a future client change can't break it back.
+  static Map<String, dynamic> _body(Map<String, dynamic> envelope) {
+    final inner = envelope['payload'];
+    return inner is Map ? Map<String, dynamic>.from(inner) : envelope;
+  }
+
   static RealtimeChannel subscribe(
     String eventId,
     void Function(ChatMessage) onMessage, {
@@ -148,7 +158,7 @@ class ChatService {
       event: _event,
       callback: (payload) {
         try {
-          final msg = ChatMessage.fromJson(payload);
+          final msg = ChatMessage.fromJson(_body(payload));
           // A client cannot author a system message any more, and one arriving
           // on the chat topic is by definition forged — drop it rather than
           // render it in the announcement style.
@@ -162,7 +172,7 @@ class ChatService {
         event: _reactEvent,
         callback: (payload) {
           try {
-            onReaction(LiveReaction.fromJson(payload));
+            onReaction(LiveReaction.fromJson(_body(payload)));
           } catch (_) {}
         },
       );
@@ -171,7 +181,7 @@ class ChatService {
       channel.onBroadcast(
         event: _removeEvent,
         callback: (payload) {
-          final id = payload['id'] as String?;
+          final id = _body(payload)['id'] as String?;
           if (id != null && id.isNotEmpty) onRemove(id);
         },
       );
@@ -180,7 +190,7 @@ class ChatService {
       channel.onBroadcast(
         event: _removeSenderEvent,
         callback: (payload) {
-          final id = payload['sender_id'] as String?;
+          final id = _body(payload)['sender_id'] as String?;
           if (id != null && id.isNotEmpty) onRemoveSender(id);
         },
       );
@@ -204,7 +214,7 @@ class ChatService {
       event: _event,
       callback: (payload) {
         try {
-          onMessage(ChatMessage.fromJson(payload));
+          onMessage(ChatMessage.fromJson(_body(payload)));
         } catch (_) {}
       },
     );
