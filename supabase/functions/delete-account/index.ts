@@ -178,6 +178,15 @@ serve(async (req) => {
       .update({ buyer_deleted_at: new Date().toISOString() })
       .eq("buyer_id", uid);
 
+    // Tips are likewise NOT deleted. tips_tipper_id_fkey used to be ON DELETE
+    // CASCADE, so a tipper erasing themselves wiped the HOST's earnings record
+    // too — the same bug as tickets, missed in the P3 pass. Migration 0121 made
+    // tipper_id nullable with SET NULL; this stamp marks the NULL as deliberate.
+    await admin
+      .from("tips")
+      .update({ tipper_deleted_at: new Date().toISOString() })
+      .eq("tipper_id", uid);
+
     // 2. Comments the user wrote, plus all comments/likes on their own posts.
     await admin.from("post_comments").delete().eq("user_id", uid);
     if (postIds.length) {
