@@ -43,7 +43,7 @@ const String supabaseAnonKey =
 // base, not code. before-user-created now logs one structured `"gate":"signup"`
 // line per signup with `wouldReject`, so that decision can be made from the
 // numbers rather than from hope.
-const String turnstileSiteKey = '';
+const String turnstileSiteKey = '0x4AAAAAAEU7JXXvlWhXMUTl';
 // Must match a hostname on the Turnstile widget's domain list.
 const String turnstileBaseUrl = 'https://joinnile.com';
 
