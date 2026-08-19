@@ -323,10 +323,13 @@ void main() {
     });
 
     test('nileClock reads noon and midnight the way a person does', () {
-      expect(nileClock(DateTime(2026, 8, 9, 0, 5)), '12:05 AM');
-      expect(nileClock(DateTime(2026, 8, 9, 12, 0)), '12:00 PM');
-      expect(nileClock(DateTime(2026, 8, 9, 13, 30)), '1:30 PM');
-      expect(nileClock(DateTime(2026, 8, 9, 9, 7)), '9:07 AM');
+      // CLDR puts a NARROW NO-BREAK SPACE before AM/PM so it can never wrap
+      // onto its own line. Invisible in a diff, so it is named, not pasted.
+      const nb = '\u202f';
+      expect(nileClock(DateTime(2026, 8, 9, 0, 5)), '12:05${nb}AM');
+      expect(nileClock(DateTime(2026, 8, 9, 12, 0)), '12:00${nb}PM');
+      expect(nileClock(DateTime(2026, 8, 9, 13, 30)), '1:30${nb}PM');
+      expect(nileClock(DateTime(2026, 8, 9, 9, 7)), '9:07${nb}AM');
     });
 
     test('nileDayLabel names today and tomorrow, then dates', () {

@@ -14,6 +14,7 @@ import '../widgets/duration_field.dart';
 import '../widgets/payout_gate.dart';
 import '../widgets/payout_preview_card.dart';
 import '../widgets/topic_chips.dart';
+import '../services/formats.dart';
 
 /// "$25" / "$2,500" — sponsorship bounds are whole dollars, and "$2500.00" in
 /// an error string reads like a bug.
@@ -280,30 +281,10 @@ class _EditEventScreenState extends State<EditEventScreen> {
     if (mins == null) return null;
     if (_scheduledAt == null) return 'Runs ${_fmtDuration(mins)}';
     final end = _scheduledAt!.add(Duration(minutes: mins));
-    final t =
-        '${end.hour.toString().padLeft(2, '0')}:${end.minute.toString().padLeft(2, '0')}';
-    return 'Ends ${_fmtDuration(mins)} after start · $t';
+    return 'Ends ${_fmtDuration(mins)} after start · ${NileFormats.time(end)}';
   }
 
-  String _formatScheduled(DateTime dt) {
-    const months = [
-      'Jan',
-      'Feb',
-      'Mar',
-      'Apr',
-      'May',
-      'Jun',
-      'Jul',
-      'Aug',
-      'Sep',
-      'Oct',
-      'Nov',
-      'Dec',
-    ];
-    final t =
-        '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
-    return '${months[dt.month - 1]} ${dt.day}, ${dt.year} · $t';
-  }
+  String _formatScheduled(DateTime dt) => NileFormats.dayMonthYearTime(dt);
 
   // ── Actions ────────────────────────────────────────────────────────────────
 

@@ -27,6 +27,7 @@ import '../widgets/official_badge.dart';
 import '../widgets/photo_viewer.dart';
 import '../widgets/rolling_number.dart';
 import 'widgets/moderation_menu.dart';
+import '../services/formats.dart';
 
 /// Detail screen for a single event (scheduled, live, or ended).
 ///
@@ -1221,24 +1222,8 @@ class _CountdownBlock extends StatelessWidget {
         local.year == now.year &&
         local.month == now.month &&
         local.day == now.day;
-    const months = [
-      'Jan',
-      'Feb',
-      'Mar',
-      'Apr',
-      'May',
-      'Jun',
-      'Jul',
-      'Aug',
-      'Sep',
-      'Oct',
-      'Nov',
-      'Dec',
-    ];
-    final time =
-        '${local.hour.toString().padLeft(2, '0')}:${local.minute.toString().padLeft(2, '0')}';
-    if (sameDay) return 'Today at $time';
-    return '${months[local.month - 1]} ${local.day} · $time';
+    if (sameDay) return 'Today at ${NileFormats.time(local)}';
+    return NileFormats.dayMonthTime(local);
   }
 
   @override

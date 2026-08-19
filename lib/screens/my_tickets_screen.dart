@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import '../services/calendar_ics.dart';
 import '../services/event_service.dart';
+import '../services/formats.dart';
 import '../services/money.dart';
 import '../services/ticket_service.dart';
 import '../router.dart';
@@ -319,24 +320,8 @@ class _TicketCard extends StatelessWidget {
     return '${_fmtDate(when)} · by @${e.hostUsername}';
   }
 
-  static String _fmtDate(DateTime d) {
-    const m = [
-      'Jan',
-      'Feb',
-      'Mar',
-      'Apr',
-      'May',
-      'Jun',
-      'Jul',
-      'Aug',
-      'Sep',
-      'Oct',
-      'Nov',
-      'Dec',
-    ];
-    final l = d.toLocal();
-    return '${m[l.month - 1]} ${l.day}, ${l.year}';
-  }
+  static String _fmtDate(DateTime d) =>
+      NileFormats.dayMonthYear(d.toLocal());
 }
 
 class _StatusBadge extends StatelessWidget {

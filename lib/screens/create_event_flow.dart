@@ -21,6 +21,7 @@ import '../widgets/nile_desktop.dart';
 import '../widgets/payout_gate.dart';
 import '../widgets/payout_preview_card.dart';
 import '../widgets/topic_chips.dart';
+import '../services/formats.dart';
 
 /// Mutable draft carried across the create-event flow pages. Page 1 fills the
 /// event fields and creates the row; later pages attach crew + show the summary.
@@ -312,25 +313,7 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
     return slug.isNotEmpty ? '$slug-$suffix' : 'event-$suffix';
   }
 
-  String _formatScheduled(DateTime dt) {
-    const months = [
-      'Jan',
-      'Feb',
-      'Mar',
-      'Apr',
-      'May',
-      'Jun',
-      'Jul',
-      'Aug',
-      'Sep',
-      'Oct',
-      'Nov',
-      'Dec',
-    ];
-    final t =
-        '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
-    return '${months[dt.month - 1]} ${dt.day}, ${dt.year} · $t';
-  }
+  String _formatScheduled(DateTime dt) => NileFormats.dayMonthYearTime(dt);
 
   /// Parse the duration field into minutes given the current unit. Returns null
   /// if blank/invalid (validation guards the submit path separately).
@@ -1334,26 +1317,9 @@ String _fmtDuration(int mins) {
   return '${m}m';
 }
 
-String _fmtClock(DateTime dt) =>
-    '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+String _fmtClock(DateTime dt) => NileFormats.time(dt);
 
-String _fmtDateTime(DateTime dt) {
-  const months = [
-    'Jan',
-    'Feb',
-    'Mar',
-    'Apr',
-    'May',
-    'Jun',
-    'Jul',
-    'Aug',
-    'Sep',
-    'Oct',
-    'Nov',
-    'Dec',
-  ];
-  return '${months[dt.month - 1]} ${dt.day} · ${_fmtClock(dt)}';
-}
+String _fmtDateTime(DateTime dt) => NileFormats.dayMonthTime(dt);
 
 // ── Sub-widgets ───────────────────────────────────────────────────────────────
 

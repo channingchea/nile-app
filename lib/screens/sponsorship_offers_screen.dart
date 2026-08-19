@@ -4,6 +4,7 @@ import 'package:video_player/video_player.dart';
 import '../services/ad_service.dart';
 import '../theme.dart';
 import '../widgets/empty_state.dart';
+import '../services/formats.dart';
 
 /// Where a host decides who sponsors their events.
 ///
@@ -225,27 +226,7 @@ String _money(int cents) {
       : '\$${d.toStringAsFixed(2)}';
 }
 
-const _months = [
-  'Jan',
-  'Feb',
-  'Mar',
-  'Apr',
-  'May',
-  'Jun',
-  'Jul',
-  'Aug',
-  'Sep',
-  'Oct',
-  'Nov',
-  'Dec',
-];
-
-String _fmtDate(DateTime dt) {
-  final l = dt.toLocal();
-  final time =
-      '${l.hour.toString().padLeft(2, '0')}:${l.minute.toString().padLeft(2, '0')}';
-  return '${_months[l.month - 1]} ${l.day} · $time';
-}
+String _fmtDate(DateTime dt) => NileFormats.dayMonthTime(dt.toLocal());
 
 // ── Section header ────────────────────────────────────────────────────────────
 

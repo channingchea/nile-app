@@ -10,6 +10,7 @@ import 'package:go_router/go_router.dart';
 import 'package:sentry_flutter/sentry_flutter.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'config.dart';
+import 'l10n/app_localizations.dart';
 import 'router.dart';
 import 'services/analytics.dart';
 import 'services/auth_gate.dart';
@@ -281,6 +282,13 @@ class _NileAppState extends State<NileApp> with WidgetsBindingObserver {
       builder: (_, themeMode, _) => MaterialApp.router(
         title: 'Nile',
         debugShowCheckedModeBanner: false,
+        // P4 #41. GlobalMaterialLocalizations is what translates the widgets
+        // Flutter ships — date pickers, "Cancel", scrollbar semantics — none
+        // of which our own .arb can reach. Adding a locale to supportedLocales
+        // is now the only step needed to turn one on; every string that has
+        // been extracted follows automatically.
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
         theme: nileTheme(Brightness.light),
         darkTheme: nileTheme(Brightness.dark),
         themeMode: themeMode,

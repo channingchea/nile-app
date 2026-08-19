@@ -4,6 +4,7 @@ import '../services/ticket_service.dart';
 import '../router.dart';
 import '../theme.dart';
 import 'widgets/load_more_footer.dart';
+import '../services/formats.dart';
 
 /// Host-only list of paid attendees for an event.
 class AttendeeListScreen extends StatefulWidget {
@@ -472,24 +473,8 @@ class _AttendeeTile extends StatelessWidget {
     );
   }
 
-  static String _formatDate(DateTime d) {
-    const m = [
-      'Jan',
-      'Feb',
-      'Mar',
-      'Apr',
-      'May',
-      'Jun',
-      'Jul',
-      'Aug',
-      'Sep',
-      'Oct',
-      'Nov',
-      'Dec',
-    ];
-    final l = d.toLocal();
-    return '${m[l.month - 1]} ${l.day}, ${l.year}';
-  }
+  static String _formatDate(DateTime d) =>
+      NileFormats.dayMonthYear(d.toLocal());
 }
 
 class _VoidBadge extends StatelessWidget {

@@ -16,6 +16,7 @@ import '../theme.dart';
 import '../widgets/offline_banner.dart';
 import '../widgets/official_badge.dart';
 import 'messages_screen.dart' show NileAvatar;
+import '../services/formats.dart';
 
 /// The thread as a full-screen route: `/dm/:userId`, and every push from a
 /// phone. A titled frame around [ConversationView] and nothing else — the
@@ -879,12 +880,7 @@ class _MessageBubble extends StatelessWidget {
     onLongPress?.call(box.localToGlobal(Offset.zero) & box.size);
   }
 
-  String _formatTime(DateTime dt) {
-    final h = dt.hour % 12 == 0 ? 12 : dt.hour % 12;
-    final m = dt.minute.toString().padLeft(2, '0');
-    final period = dt.hour >= 12 ? 'PM' : 'AM';
-    return '$h:$m $period';
-  }
+  String _formatTime(DateTime dt) => NileFormats.time(dt);
 
   String _formatDate(DateTime dt) {
     final now = DateTime.now();
@@ -893,15 +889,7 @@ class _MessageBubble extends StatelessWidget {
     final diff = today.difference(that).inDays;
     if (diff == 0) return 'Today';
     if (diff == 1) return 'Yesterday';
-    const days = [
-      'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun',
-    ];
-    const months = [
-      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
-    ];
-    final base = '${days[dt.weekday - 1]}, ${months[dt.month - 1]} ${dt.day}';
-    return dt.year == now.year ? base : '$base, ${dt.year}';
+    return NileFormats.weekdayDayMonth(dt, withYear: dt.year != now.year);
   }
 
   @override

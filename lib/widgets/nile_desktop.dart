@@ -1,4 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
+
+import '../services/formats.dart';
 
 import '../theme.dart';
 
@@ -23,25 +26,21 @@ import '../theme.dart';
 // UTC bug came from formatting a naive timestamp, so conversion stays at the
 // call site where it is visible.
 
-String nileClock(DateTime d) {
-  final hour = d.hour % 12 == 0 ? 12 : d.hour % 12;
-  final minute = d.minute.toString().padLeft(2, '0');
-  return '$hour:$minute ${d.hour < 12 ? 'AM' : 'PM'}';
-}
+String nileClock(DateTime d) => NileFormats.time(d);
 
-/// Hour only, for a dense grid axis: "7 PM", "12 AM".
-String nileHourLabel(int hour24) {
-  final hour = hour24 % 12 == 0 ? 12 : hour24 % 12;
-  return '$hour ${hour24 < 12 ? 'AM' : 'PM'}';
-}
+/// Hour only, for a dense grid axis: "7 PM", "12 AM", or "19" on a 24h locale.
+String nileHourLabel(int hour24) =>
+    DateFormat.j().format(DateTime(2024, 1, 1, hour24));
 
+// P4 #41: these were hardcoded English abbreviation tables. intl derives them
+// from the ambient locale instead, so the desktop week strip reads correctly
+// wherever it's opened. Both take a number rather than a DateTime, so an
+// arbitrary date in the right month/weekday is enough to format from.
 String nileWeekdayAbbr(int weekday) =>
-    const ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][weekday - 1];
+    NileFormats.weekday(DateTime(2024, 1, weekday));  // 2024-01-01 was a Monday
 
-String nileMonthAbbr(int month) => const [
-  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
-][month - 1];
+String nileMonthAbbr(int month) =>
+    DateFormat.MMM().format(DateTime(2024, month));
 
 /// Midnight local on the same day as [d] — the canonical key for bucketing
 /// events into days. Anything that groups by day must go through this, or

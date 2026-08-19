@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../services/event_service.dart';
+import '../services/formats.dart';
 import '../theme.dart';
 import 'live_badge.dart';
 
@@ -10,24 +11,11 @@ class EventCoverPill extends StatelessWidget {
   final Event event;
   const EventCoverPill({super.key, required this.event});
 
-  static const _months = [
-    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
-  ];
-
   /// "Fri · 9:00 PM" for a same-week date, else "Jun 21 · 9:00 PM".
+  /// Both shapes now come from intl, so a 24-hour-clock locale gets "21:00"
+  /// instead of the AM/PM this used to hardcode for everyone.
   static String _label(DateTime dt) {
-    final h = dt.hour % 12 == 0 ? 12 : dt.hour % 12;
-    final m = dt.minute.toString().padLeft(2, '0');
-    final ampm = dt.hour < 12 ? 'AM' : 'PM';
-    final time = '$h:$m $ampm';
-    final now = DateTime.now();
-    final days = dt.difference(DateTime(now.year, now.month, now.day)).inDays;
-    if (days >= 0 && days < 7) {
-      const wd = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-      return '${wd[dt.weekday - 1]} · $time';
-    }
-    return '${_months[dt.month - 1]} ${dt.day} · $time';
+    return NileFormats.upcoming(dt);
   }
 
   @override
