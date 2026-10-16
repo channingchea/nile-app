@@ -4,9 +4,11 @@ import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../router.dart';
+import '../services/nile_badges.dart';
 import '../services/profile_service.dart';
 import '../theme.dart';
 import 'nile_command_palette.dart';
+import 'nile_nav_rail.dart' show NileCountBadge;
 
 /// The desktop top bar, sitting above the content column (never above the nav
 /// rail). Search on the left, page-specific actions in the middle, account on
@@ -48,6 +50,8 @@ class NileTopBar extends StatelessWidget {
           const SizedBox(width: NileSpacing.s16),
           ...actions,
           const Spacer(),
+          const NileNotificationsBell(),
+          const SizedBox(width: NileSpacing.s4),
           const _AccountButton(),
         ],
       ),
@@ -103,6 +107,56 @@ class _SearchPill extends StatelessWidget {
                 child: Text(shortcutLabel, style: NileTextStyles.caption()),
               ),
             ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Bell beside the avatar — Notifications' home on desktop since Studio Preview
+/// took its rail slot. Joins the shared [NileBadges] poll rather than running
+/// its own, so the count matches the Dock badge.
+class NileNotificationsBell extends StatefulWidget {
+  const NileNotificationsBell({super.key});
+
+  @override
+  State<NileNotificationsBell> createState() => _NileNotificationsBellState();
+}
+
+class _NileNotificationsBellState extends State<NileNotificationsBell> {
+  @override
+  void initState() {
+    super.initState();
+    NileBadges.listen();
+  }
+
+  @override
+  void dispose() {
+    NileBadges.release();
+    super.dispose();
+  }
+
+  void _open() {
+    NileBadges.clearNotifications();
+    nileRouter.push(NileRoutes.notifications);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<int>(
+      valueListenable: NileBadges.notifications,
+      builder: (context, count, _) => Semantics(
+        button: true,
+        label: count > 0 ? 'Notifications, $count unread' : 'Notifications',
+        excludeSemantics: true,
+        child: IconButton(
+          onPressed: _open,
+          tooltip: 'Notifications',
+          color: NileColors.txtSecondary,
+          icon: NileCountBadge(
+            count: count,
+            child: const Icon(Icons.notifications_outlined, size: 22),
           ),
         ),
       ),

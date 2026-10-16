@@ -207,7 +207,7 @@ void main() {
       expect(
         kNileRailDestinations.map((d) => d.label).toList(),
         ['Home', 'Schedule', 'Discover', 'Currents', 'Messages',
-         'Notifications', 'My Tickets'],
+         'Studio Preview', 'My Tickets'],
       );
     });
 
@@ -228,16 +228,16 @@ void main() {
           kNileRailEntries.map((e) => e.location).nonNulls.toList();
       expect(routes, [
         NileRoutes.currents,
-        NileRoutes.notifications,
+        NileRoutes.studioPreview,
         NileRoutes.settingsTickets,
       ]);
     });
 
-    test('only Messages and Notifications carry a badge', () {
+    // Notifications' badge moved to the top-bar bell with the destination.
+    test('only Messages carries a badge on the rail', () {
       for (final e in kNileRailEntries) {
         final expected = switch (e.destination.label) {
           'Messages' => NileRailBadge.messages,
-          'Notifications' => NileRailBadge.notifications,
           _ => NileRailBadge.none,
         };
         expect(e.badge, expected, reason: e.destination.label);

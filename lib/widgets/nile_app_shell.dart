@@ -45,7 +45,9 @@ class NileAppShell extends StatelessWidget {
   /// lose work. The auth gate needs no entry here — those routes are siblings
   /// of this shell and never reach it.
   static bool isBare(String location) =>
-      location.startsWith('/stream/') || location.startsWith('/create/');
+      location.startsWith('/stream/') ||
+      location.startsWith('/create/') ||
+      location == '/studio-preview';
 
   /// Routes that take the width the context rail would otherwise use.
   ///

@@ -263,6 +263,17 @@ class _NileMenuBarState extends State<NileMenuBar> {
                 label: 'Your Profile',
                 onSelected: () => _go(kNileBranchLocations[3]),
               ),
+              // Off the rail since Studio Preview took its slot, so it keeps
+              // a shortcut of its own rather than losing one.
+              PlatformMenuItem(
+                label: 'Notifications',
+                shortcut: const SingleActivator(
+                  LogicalKeyboardKey.keyN,
+                  meta: true,
+                  shift: true,
+                ),
+                onSelected: () => _go(NileRoutes.notifications, push: true),
+              ),
             ],
           ),
           const PlatformMenuItemGroup(

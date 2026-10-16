@@ -54,6 +54,7 @@ import 'screens/report_issue_screen.dart';
 import 'screens/schedule_screen.dart';
 import 'screens/settings_screen.dart';
 import 'screens/splash_screen.dart';
+import 'screens/studio_preview_screen.dart';
 import 'screens/sponsorship_offers_screen.dart';
 import 'screens/user_list_screen.dart';
 import 'screens/viewer_screen.dart';
@@ -149,6 +150,7 @@ class NileRoutes {
   static String dm(String otherUserId) => '/dm/$otherUserId';
 
   static const notifications = '/notifications';
+  static const studioPreview = '/studio-preview';
   static const currents = '/currents';
   static String currentsFrom(String userId) => '/currents?user=$userId';
   static const boost = '/boost';
@@ -530,6 +532,7 @@ final GoRouter _router = GoRouter(
 
       // ── Everything else above the shell ─────────────────────────────────────
       GoRoute(path: NileRoutes.notifications, builder: (_, _) => const NotificationsScreen()),
+      GoRoute(path: NileRoutes.studioPreview, builder: (_, _) => const StudioPreviewScreen()),
       GoRoute(
         path: NileRoutes.currents,
         builder: (_, s) =>

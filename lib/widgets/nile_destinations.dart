@@ -63,6 +63,13 @@ const NileGlassDestination kNotificationsDestination = NileGlassDestination(
   label: 'Notifications',
 );
 
+/// The host Studio, on-device only — see StudioPreviewScreen.
+const NileGlassDestination kStudioPreviewDestination = NileGlassDestination(
+  icon: Icons.videocam_outlined,
+  selectedIcon: Icons.videocam,
+  label: 'Studio Preview',
+);
+
 const NileGlassDestination kTicketsDestination = NileGlassDestination(
   icon: Icons.confirmation_number_outlined,
   selectedIcon: Icons.confirmation_number,
@@ -162,11 +169,8 @@ const List<NileRailEntry> kNileRailEntries = [
     2,
     badge: NileRailBadge.messages,
   ),
-  NileRailEntry.route(
-    kNotificationsDestination,
-    '/notifications',
-    badge: NileRailBadge.notifications,
-  ),
+  // Notifications lives on the bell in the top bar, beside the avatar.
+  NileRailEntry.route(kStudioPreviewDestination, '/studio-preview'),
   NileRailEntry.route(kTicketsDestination, '/settings/tickets'),
 ];
 

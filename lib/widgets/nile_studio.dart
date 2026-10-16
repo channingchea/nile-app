@@ -1266,3 +1266,278 @@ class _ChatRowState extends State<_ChatRow> {
     );
   }
 }
+
+// ── Control bar ──────────────────────────────────────────────────────────────
+// The buttons along the bottom of the Studio. Presentation only, like the rest
+// of this file: `camera_screen` and Studio Preview each pass their own handlers,
+// which is what lets the preview show the real button set without being able
+// to run a show. A null handler disables its button; flags decide what shows.
+
+class NileStudioControlBar extends StatelessWidget {
+  const NileStudioControlBar({
+    super.key,
+    required this.isLive,
+    required this.isHost,
+    required this.isMasterAudio,
+    required this.videoEnabled,
+    required this.onLeave,
+    this.leaveLabel = 'Leave',
+    this.leaveIcon = Icons.logout,
+    this.showChatToggle = false,
+    this.chatVisible = true,
+    this.onToggleChat,
+    this.cameraControl,
+    this.showScreenShare = false,
+    this.isSharingScreen = false,
+    this.onToggleScreenShare,
+    this.onToggleVideo,
+    this.onClaimMasterAudio,
+    this.onViewAsViewer,
+    this.onStartShow,
+    this.isReady = false,
+    this.onToggleReady,
+    this.onEndStream,
+  });
+
+  /// False means Sound Check — the bar is only ever shown in one of the two.
+  final bool isLive;
+  final bool isHost;
+  final bool isMasterAudio;
+  final bool videoEnabled;
+
+  final VoidCallback onLeave;
+  final String leaveLabel;
+  final IconData leaveIcon;
+
+  /// The chat toggle is only offered when chat has no column of its own.
+  final bool showChatToggle;
+  final bool chatVisible;
+  final VoidCallback? onToggleChat;
+
+  /// Camera picker (desktop/iPad) or flip button (phone). Null hides it.
+  final Widget? cameraControl;
+
+  final bool showScreenShare;
+  final bool isSharingScreen;
+  final VoidCallback? onToggleScreenShare;
+
+  final VoidCallback? onToggleVideo;
+  final VoidCallback? onClaimMasterAudio;
+  final VoidCallback? onViewAsViewer;
+  final VoidCallback? onStartShow;
+  final bool isReady;
+  final VoidCallback? onToggleReady;
+  final VoidCallback? onEndStream;
+
+  @override
+  Widget build(BuildContext context) {
+    final soundCheck = !isLive;
+
+    return Wrap(
+      alignment: WrapAlignment.spaceBetween,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      spacing: NileSpacing.s12,
+      runSpacing: NileSpacing.s8,
+      children: [
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (showChatToggle) ...[
+              NileStudioIconButton(
+                onPressed: onToggleChat,
+                tooltip: chatVisible ? 'Hide chat' : 'Show chat',
+                icon: chatVisible
+                    ? Icons.chat_bubble
+                    : Icons.chat_bubble_outline,
+                active: chatVisible,
+              ),
+              const SizedBox(width: NileSpacing.s8),
+            ],
+            if (cameraControl != null && videoEnabled) ...[
+              cameraControl!,
+              const SizedBox(width: NileSpacing.s8),
+            ],
+            if (showScreenShare) ...[
+              NileStudioIconButton(
+                onPressed: onToggleScreenShare,
+                tooltip: isSharingScreen
+                    ? 'Stop sharing screen'
+                    : 'Share screen',
+                icon: isSharingScreen
+                    ? Icons.stop_screen_share
+                    : Icons.screen_share,
+                active: isSharingScreen,
+              ),
+              const SizedBox(width: NileSpacing.s8),
+            ],
+            // Video off is master-audio only: a camera that isn't carrying the
+            // sound has nothing left to contribute with its lens covered. A
+            // camera that is already off (started that way from a saved
+            // setting) always gets the button back, or it could never turn on.
+            if (isMasterAudio || !videoEnabled)
+              OutlinedButton.icon(
+                onPressed: onToggleVideo,
+                icon: Icon(videoEnabled ? Icons.videocam_off : Icons.videocam),
+                label: Text(videoEnabled ? 'Video Off' : 'Video On'),
+                style: _outlined(NileColors.txtPrimary, NileColors.borderStrong),
+              ),
+            if (!isMasterAudio && soundCheck) ...[
+              if (!videoEnabled) const SizedBox(width: NileSpacing.s8),
+              OutlinedButton.icon(
+                onPressed: onClaimMasterAudio,
+                icon: const Icon(Icons.album, size: 16),
+                label: const Text('Set as Master Audio'),
+                style: _outlined(NileColors.txtPrimary, NileColors.borderStrong),
+              ),
+            ],
+          ],
+        ),
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (soundCheck && isHost) ...[
+              OutlinedButton.icon(
+                onPressed: onViewAsViewer,
+                icon: const Icon(Icons.headphones),
+                label: const Text('View as Viewer'),
+                style: _outlined(NileColors.volt, NileColors.volt),
+              ),
+              const SizedBox(width: NileSpacing.s12),
+              FilledButton.icon(
+                onPressed: onStartShow,
+                icon: const Icon(Icons.play_arrow),
+                label: const Text('Start Show'),
+                style: FilledButton.styleFrom(
+                  backgroundColor: NileColors.coral,
+                  foregroundColor: Colors.white,
+                  shape: const StadiumBorder(),
+                ),
+              ),
+              const SizedBox(width: NileSpacing.s12),
+            ],
+            if (soundCheck && !isHost) ...[
+              if (isReady)
+                FilledButton.icon(
+                  onPressed: onToggleReady,
+                  icon: const Icon(Icons.check_circle),
+                  label: const Text('Ready'),
+                  style: FilledButton.styleFrom(
+                    backgroundColor: NileColors.volt,
+                    foregroundColor: NileColors.onVolt,
+                    shape: const StadiumBorder(),
+                  ),
+                )
+              else
+                OutlinedButton.icon(
+                  onPressed: onToggleReady,
+                  icon: const Icon(Icons.check_circle_outline),
+                  label: const Text('Ready to Stream'),
+                  style: _outlined(NileColors.volt, NileColors.volt),
+                ),
+              const SizedBox(width: NileSpacing.s12),
+            ],
+            if (isLive && isHost) ...[
+              OutlinedButton.icon(
+                onPressed: onEndStream,
+                icon: const Icon(Icons.stop_circle_outlined),
+                label: const Text('End Stream'),
+                style: _outlined(NileColors.error, NileColors.error),
+              ),
+              const SizedBox(width: NileSpacing.s12),
+            ],
+            OutlinedButton.icon(
+              onPressed: onLeave,
+              icon: Icon(leaveIcon),
+              label: Text(leaveLabel),
+              style: _outlined(NileColors.txtPrimary, NileColors.border),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  static ButtonStyle _outlined(Color fg, Color border) =>
+      OutlinedButton.styleFrom(
+        foregroundColor: fg,
+        side: BorderSide(color: border),
+        shape: const StadiumBorder(),
+      );
+}
+
+/// Round icon button used along the Studio's control bar.
+class NileStudioIconButton extends StatelessWidget {
+  const NileStudioIconButton({
+    super.key,
+    required this.onPressed,
+    required this.tooltip,
+    required this.icon,
+    this.active = false,
+  });
+
+  final VoidCallback? onPressed;
+  final String tooltip;
+  final IconData icon;
+  final bool active;
+
+  @override
+  Widget build(BuildContext context) {
+    return IconButton(
+      onPressed: onPressed,
+      tooltip: tooltip,
+      icon: Icon(icon),
+      color: active ? Colors.white : NileColors.txtPrimary,
+      style: IconButton.styleFrom(
+        backgroundColor: active ? NileColors.coral : NileColors.bgRaised,
+      ),
+    );
+  }
+}
+
+/// Device menu for iPad/macOS: every attached camera plus a "Default" entry,
+/// the active one checked. [onSelected] gets null for the default.
+class NileCameraPickerButton extends StatelessWidget {
+  const NileCameraPickerButton({
+    super.key,
+    required this.devices,
+    required this.selectedId,
+    required this.onSelected,
+  });
+
+  final List<MediaDevice> devices;
+  final String? selectedId;
+  final ValueChanged<String?> onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    return PopupMenuButton<String>(
+      tooltip: 'Choose camera',
+      // PopupMenuButton swallows null selections, so '' stands in for default.
+      onSelected: (id) => onSelected(id.isEmpty ? null : id),
+      color: NileColors.bgSurface,
+      itemBuilder: (context) => [
+        CheckedPopupMenuItem<String>(
+          value: '',
+          checked: selectedId == null,
+          child: Text('Default camera', style: NileTextStyles.bodyMd()),
+        ),
+        for (final d in devices)
+          CheckedPopupMenuItem<String>(
+            value: d.deviceId,
+            checked: selectedId == d.deviceId,
+            child: Text(
+              d.label.isNotEmpty ? d.label : 'Camera',
+              style: NileTextStyles.bodyMd(),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+      ],
+      icon: const Icon(Icons.cameraswitch_outlined),
+      iconColor: NileColors.txtPrimary,
+      style: IconButton.styleFrom(
+        backgroundColor: NileColors.bgSurface.withValues(alpha: 0.8),
+        padding: const EdgeInsets.all(NileSpacing.s12),
+      ),
+    );
+  }
+}

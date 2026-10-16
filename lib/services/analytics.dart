@@ -128,7 +128,9 @@ enum NileEvent {
   streamJoined('stream_joined'),
   tipSent('tip_sent'),
   eventPublished('event_published'),
-  signUpCompleted('sign_up_completed');
+  signUpCompleted('sign_up_completed'),
+  studioPreviewOpened('studio_preview_opened'),
+  studioPreviewStarted('studio_preview_started');
 
   const NileEvent(this.name);
 

@@ -337,7 +337,7 @@ class _RailItem extends StatelessWidget {
           // In the labelled rail the count belongs at the far end of the row,
           // where the eye already is after reading the label. In the icon-only
           // rail there is no far end, so it rides the glyph.
-          labelled ? glyph : _Badged(count: badge, child: glyph),
+          labelled ? glyph : NileCountBadge(count: badge, child: glyph),
           if (labelled) ...[
             const SizedBox(width: NileSpacing.s12),
             Expanded(
@@ -401,8 +401,10 @@ class _Pill extends StatelessWidget {
   );
 }
 
-class _Badged extends StatelessWidget {
-  const _Badged({required this.count, required this.child});
+/// Unread count riding an icon. Shared by the icon-only rail and the top bar's
+/// notifications bell so both draw a count the same way.
+class NileCountBadge extends StatelessWidget {
+  const NileCountBadge({super.key, required this.count, required this.child});
   final int count;
   final Widget child;
 

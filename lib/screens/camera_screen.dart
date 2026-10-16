@@ -15,9 +15,11 @@ import '../services/livekit_service.dart';
 import '../services/report_service.dart';
 import '../services/screen_capture_permission.dart';
 import '../services/shake_detector.dart';
+import '../services/studio_prefs.dart';
 import '../widgets/audio_meter.dart';
 import '../widgets/nile_studio.dart';
 import '../widgets/screen_share_picker.dart';
+import '../widgets/studio_settings_sheet.dart';
 import '../widgets/viewer_preview_overlay.dart';
 import '../theme.dart';
 import 'widgets/moderation_menu.dart';
@@ -63,6 +65,7 @@ class _CameraScreenState extends State<CameraScreen> {
     if (widget.initialCameraName != null) {
       _cameraNameController.text = widget.initialCameraName!;
     }
+    unawaited(_prefsReady);
     _refreshMicDetection();
     _refreshVideoInputs();
     _deviceChangeSub = Hardware.instance.onDeviceChange.stream.listen((_) {
@@ -77,6 +80,30 @@ class _CameraScreenState extends State<CameraScreen> {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted && _state == CameraState.idle) _enterSoundCheck();
       });
+    }
+  }
+
+  /// Studio choices saved on this device (Studio Preview writes the same keys).
+  StudioPrefs? _prefs;
+  late final Future<void> _prefsReady = _loadPrefs();
+
+  /// Saved choices apply in the Studio only — the phone layout keeps the
+  /// defaults it shipped with. Runs after `didChangeDependencies` has set
+  /// [_studioMode], since the prefs read is never synchronous.
+  Future<void> _loadPrefs() async {
+    try {
+      final prefs = await StudioPrefs.load();
+      _prefs = prefs;
+      if (!mounted || !_studioMode) return;
+      setState(() {
+        _disableAgc = prefs.externalMicProcessing;
+        _chatVisible = prefs.chatVisible;
+        _selectedCameraId = prefs.cameraDeviceId;
+      });
+      // Falls back to the default camera if the saved one isn't plugged in.
+      await _refreshVideoInputs();
+    } catch (_) {
+      // No saved settings is the same as defaults.
     }
   }
 
@@ -187,6 +214,7 @@ class _CameraScreenState extends State<CameraScreen> {
   Future<void> _selectCamera(String? deviceId) async {
     if (deviceId == _selectedCameraId) return;
     setState(() => _selectedCameraId = deviceId);
+    if (_studioMode) _prefs?.cameraDeviceId = deviceId;
     if (_room != null && _videoEnabled) {
       try {
         await _republishCamera();
@@ -899,6 +927,7 @@ class _CameraScreenState extends State<CameraScreen> {
       _disableAgc = enabled;
       _externalMicPromptDismissed = true;
     });
+    if (_studioMode) _prefs?.externalMicProcessing = enabled;
     onDone?.call();
 
     if (_state == CameraState.idle || _room?.localParticipant == null) return;
@@ -1142,6 +1171,8 @@ class _CameraScreenState extends State<CameraScreen> {
   Future<void> _enterSoundCheck() async {
     final eventId = _eventIdController.text.trim();
     final cameraName = _cameraNameController.text.trim();
+    // The saved camera and mic mode must be in place before the first publish.
+    await _prefsReady;
 
     if (eventId.isEmpty || cameraName.isEmpty) {
       setState(() => _errorMessage = 'Please fill in all fields.');
@@ -1347,6 +1378,11 @@ class _CameraScreenState extends State<CameraScreen> {
       // Reconcile mute now that the real master-audio/Stream-Audio state is set
       // (the sync inside _applyMicProcessing ran before this setState).
       await _syncMicEnabled();
+
+      // "Start with camera off", set in the Studio's settings sheet.
+      if (_studioMode && (_prefs?.videoStartsOff ?? false)) {
+        await _toggleVideo();
+      }
 
       // Studio: pick up whoever was already in the room, and fold in the
       // people this host has already blocked so their chat never appears.
@@ -1848,96 +1884,14 @@ class _CameraScreenState extends State<CameraScreen> {
   }
 
   void _openAudioSettings() {
-    final connected = _state != CameraState.idle;
-    showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: NileColors.bgSurface,
-      isScrollControlled: true,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(
-          top: Radius.circular(NileRadius.lg),
-        ),
-      ),
-      builder: (sheetCtx) {
-        return StatefulBuilder(
-          builder: (sheetCtx, setSheetState) {
-            return ConstrainedBox(
-              constraints: BoxConstraints(
-                maxHeight: MediaQuery.of(sheetCtx).size.height * 0.85,
-              ),
-              child: SingleChildScrollView(
-                padding: EdgeInsets.fromLTRB(
-                  24,
-                  24,
-                  24,
-                  32 + MediaQuery.of(sheetCtx).viewInsets.bottom,
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text('Settings', style: NileTextStyles.headingMd()),
-                    const SizedBox(height: 24),
-                    Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Expanded(
-                          child: Text(
-                            'Use external mic processing',
-                            style: NileTextStyles.bodyLg(),
-                          ),
-                        ),
-                        Switch(
-                          value: _disableAgc,
-                          activeThumbColor: NileColors.volt,
-                          onChanged: _switchingMic
-                              ? null
-                              : (v) => _setExternalMicMode(
-                                  v,
-                                  onDone: () => setSheetState(() {}),
-                                ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      'Off by default, this leaves automatic gain control, noise '
-                      'reduction, and echo cancellation on — best for your phone\'s '
-                      'built-in mic. Turn it on when a compatible USB-C or wireless '
-                      'mic is connected: the phone\'s processing steps aside so the '
-                      'mic\'s own tuning comes through cleanly, usually improving '
-                      'audio quality.',
-                      style: NileTextStyles.bodyMd().copyWith(
-                        color: NileColors.txtSecondary,
-                      ),
-                    ),
-                    if (_externalMicConnected && !_disableAgc) ...[
-                      const SizedBox(height: 12),
-                      Text(
-                        'External mic detected — turning this on is recommended.',
-                        style: NileTextStyles.bodySm().copyWith(
-                          color: NileColors.volt,
-                        ),
-                      ),
-                    ],
-                    if (connected) ...[
-                      const SizedBox(height: 12),
-                      Text(
-                        _switchingMic
-                            ? 'Switching mic…'
-                            : 'Changes apply immediately (brief audio gap while switching).',
-                        style: NileTextStyles.bodySm().copyWith(
-                          color: NileColors.amber,
-                        ),
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-            );
-          },
-        );
-      },
+    showStudioSettingsSheet(
+      context,
+      externalMic: () => _disableAgc,
+      switchingMic: () => _switchingMic,
+      externalMicConnected: _externalMicConnected,
+      connected: _state != CameraState.idle,
+      onExternalMic: _setExternalMicMode,
+      prefs: _studioMode ? _prefs : null,
     );
   }
 
@@ -2250,37 +2204,11 @@ class _CameraScreenState extends State<CameraScreen> {
 
   /// Device menu for iPad/macOS: lists every attached camera plus a "Default"
   /// entry. The active source carries a check mark.
-  Widget _buildCameraPickerButton() {
-    return PopupMenuButton<String>(
-      tooltip: 'Choose camera',
-      // PopupMenuButton swallows null selections, so '' stands in for default.
-      onSelected: (id) => _selectCamera(id.isEmpty ? null : id),
-      color: NileColors.bgSurface,
-      itemBuilder: (context) => [
-        CheckedPopupMenuItem<String>(
-          value: '',
-          checked: _selectedCameraId == null,
-          child: Text('Default camera', style: NileTextStyles.bodyMd()),
-        ),
-        for (final d in _videoInputs)
-          CheckedPopupMenuItem<String>(
-            value: d.deviceId,
-            checked: _selectedCameraId == d.deviceId,
-            child: Text(
-              d.label.isNotEmpty ? d.label : 'Camera',
-              style: NileTextStyles.bodyMd(),
-              overflow: TextOverflow.ellipsis,
-            ),
-          ),
-      ],
-      icon: const Icon(Icons.cameraswitch_outlined),
-      iconColor: NileColors.txtPrimary,
-      style: IconButton.styleFrom(
-        backgroundColor: NileColors.bgSurface.withValues(alpha: 0.8),
-        padding: const EdgeInsets.all(NileSpacing.s12),
-      ),
-    );
-  }
+  Widget _buildCameraPickerButton() => NileCameraPickerButton(
+    devices: _videoInputs,
+    selectedId: _selectedCameraId,
+    onSelected: _selectCamera,
+  );
 
   /// Phone parity for the Studio's hover menu (#16 phase 2).
   ///
@@ -3037,174 +2965,38 @@ class _CameraScreenState extends State<CameraScreen> {
   /// the phone layout — laid out as one bar instead of stacked pills, and in a
   /// `Wrap` so a narrow window folds to two rows rather than overflowing.
   Widget _buildStudioControls(BuildContext context, bool hasChatColumn) {
-    final soundCheck = _state == CameraState.soundCheck;
-    final live = _state == CameraState.live;
-
-    return Wrap(
-      alignment: WrapAlignment.spaceBetween,
-      crossAxisAlignment: WrapCrossAlignment.center,
-      spacing: NileSpacing.s12,
-      runSpacing: NileSpacing.s8,
-      children: [
-        Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (!hasChatColumn) ...[
-              _studioIcon(
-                onPressed: () => setState(() => _chatVisible = !_chatVisible),
-                tooltip: _chatVisible ? 'Hide chat' : 'Show chat',
-                icon: _chatVisible
-                    ? Icons.chat_bubble
-                    : Icons.chat_bubble_outline,
-                active: _chatVisible,
-              ),
-              const SizedBox(width: NileSpacing.s8),
-            ],
-            if (!kIsWeb && _videoEnabled) ...[
-              if (_showCameraPicker(context))
-                _buildCameraPickerButton()
-              else
-                _studioIcon(
-                  onPressed: _switchCamera,
-                  tooltip: 'Switch camera',
-                  icon: Icons.flip_camera_ios,
-                ),
-              const SizedBox(width: NileSpacing.s8),
-            ],
-            if (_showCameraPicker(context)) ...[
-              _studioIcon(
-                onPressed: _togglingShare ? null : _toggleScreenShare,
-                tooltip: _isSharingScreen
-                    ? 'Stop sharing screen'
-                    : 'Share screen',
-                icon: _isSharingScreen
-                    ? Icons.stop_screen_share
-                    : Icons.screen_share,
-                active: _isSharingScreen,
-              ),
-              const SizedBox(width: NileSpacing.s8),
-            ],
-            // Video off is master-audio only: a camera that isn't carrying the
-            // sound has nothing left to contribute with its lens covered.
-            if (_isMasterAudio)
-              OutlinedButton.icon(
-                onPressed: _toggleVideo,
-                icon: Icon(_videoEnabled ? Icons.videocam_off : Icons.videocam),
-                label: Text(_videoEnabled ? 'Video Off' : 'Video On'),
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: NileColors.txtPrimary,
-                  side: BorderSide(color: NileColors.borderStrong),
-                  shape: const StadiumBorder(),
-                ),
-              ),
-            if (!_isMasterAudio && soundCheck)
-              OutlinedButton.icon(
-                onPressed: _claimMasterAudio,
-                icon: const Icon(Icons.album, size: 16),
-                label: const Text('Set as Master Audio'),
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: NileColors.txtPrimary,
-                  side: BorderSide(color: NileColors.borderStrong),
-                  shape: const StadiumBorder(),
-                ),
-              ),
-          ],
-        ),
-        Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (soundCheck && widget.isHost) ...[
-              OutlinedButton.icon(
-                onPressed: _openViewerPreview,
-                icon: const Icon(Icons.headphones),
-                label: const Text('View as Viewer'),
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: NileColors.volt,
-                  side: BorderSide(color: NileColors.volt),
-                  shape: const StadiumBorder(),
-                ),
-              ),
-              const SizedBox(width: NileSpacing.s12),
-              FilledButton.icon(
-                onPressed: _confirmStartShow,
-                icon: const Icon(Icons.play_arrow),
-                label: const Text('Start Show'),
-                style: FilledButton.styleFrom(
-                  backgroundColor: NileColors.coral,
-                  foregroundColor: Colors.white,
-                  shape: const StadiumBorder(),
-                ),
-              ),
-              const SizedBox(width: NileSpacing.s12),
-            ],
-            if (soundCheck && !widget.isHost) ...[
-              if (_ready)
-                FilledButton.icon(
-                  onPressed: _toggleReady,
-                  icon: const Icon(Icons.check_circle),
-                  label: const Text('Ready'),
-                  style: FilledButton.styleFrom(
-                    backgroundColor: NileColors.volt,
-                    foregroundColor: NileColors.onVolt,
-                    shape: const StadiumBorder(),
-                  ),
-                )
-              else
-                OutlinedButton.icon(
-                  onPressed: _toggleReady,
-                  icon: const Icon(Icons.check_circle_outline),
-                  label: const Text('Ready to Stream'),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: NileColors.volt,
-                    side: BorderSide(color: NileColors.volt),
-                    shape: const StadiumBorder(),
-                  ),
-                ),
-              const SizedBox(width: NileSpacing.s12),
-            ],
-            if (live && widget.isHost) ...[
-              OutlinedButton.icon(
-                onPressed: _confirmEndStream,
-                icon: const Icon(Icons.stop_circle_outlined),
-                label: const Text('End Stream'),
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: NileColors.error,
-                  side: const BorderSide(color: NileColors.error),
-                  shape: const StadiumBorder(),
-                ),
-              ),
-              const SizedBox(width: NileSpacing.s12),
-            ],
-            OutlinedButton.icon(
-              onPressed: _leaveStream,
-              icon: const Icon(Icons.logout),
-              label: const Text('Leave'),
-              style: OutlinedButton.styleFrom(
-                foregroundColor: NileColors.txtPrimary,
-                side: BorderSide(color: NileColors.border),
-                shape: const StadiumBorder(),
-              ),
+    final picker = _showCameraPicker(context);
+    return NileStudioControlBar(
+      isLive: _state == CameraState.live,
+      isHost: widget.isHost,
+      isMasterAudio: _isMasterAudio,
+      videoEnabled: _videoEnabled,
+      showChatToggle: !hasChatColumn,
+      chatVisible: _chatVisible,
+      onToggleChat: () {
+        setState(() => _chatVisible = !_chatVisible);
+        _prefs?.chatVisible = _chatVisible;
+      },
+      cameraControl: kIsWeb
+          ? null
+          : picker
+          ? _buildCameraPickerButton()
+          : NileStudioIconButton(
+              onPressed: _switchCamera,
+              tooltip: 'Switch camera',
+              icon: Icons.flip_camera_ios,
             ),
-          ],
-        ),
-      ],
-    );
-  }
-
-  Widget _studioIcon({
-    required VoidCallback? onPressed,
-    required String tooltip,
-    required IconData icon,
-    bool active = false,
-  }) {
-    return IconButton(
-      onPressed: onPressed,
-      tooltip: tooltip,
-      icon: Icon(icon),
-      color: active ? Colors.white : NileColors.txtPrimary,
-      style: IconButton.styleFrom(
-        backgroundColor: active ? NileColors.coral : NileColors.bgRaised,
-      ),
+      showScreenShare: picker,
+      isSharingScreen: _isSharingScreen,
+      onToggleScreenShare: _togglingShare ? null : _toggleScreenShare,
+      onToggleVideo: _toggleVideo,
+      onClaimMasterAudio: _claimMasterAudio,
+      onViewAsViewer: _openViewerPreview,
+      onStartShow: _confirmStartShow,
+      isReady: _ready,
+      onToggleReady: _toggleReady,
+      onEndStream: _confirmEndStream,
+      onLeave: _leaveStream,
     );
   }
 }
