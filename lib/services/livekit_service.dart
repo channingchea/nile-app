@@ -171,6 +171,31 @@ class LivekitService {
         if (studio) 'studio': true,
       });
 
+  /// RealSync clock ping: when the server received the request and when it
+  /// answered, in server ms.
+  static Future<({int receivedAt, int sentAt})> serverClock() async {
+    final d = await _invoke<Map>({'action': 'clock'});
+    return (
+      receivedAt: (d['receivedAt'] as num).toInt(),
+      sentAt: (d['sentAt'] as num).toInt(),
+    );
+  }
+
+  /// RealSync: record this publisher's clock offset (device − server) in its
+  /// metadata so viewers can put every sender on one timeline.
+  static Future<void> reportClock({
+    required String eventId,
+    required String identity,
+    required int offsetMs,
+    required int rttMs,
+  }) => _invoke<Map>({
+    'action': 'report-clock',
+    'eventId': eventId,
+    'identity': identity,
+    'offsetMs': offsetMs,
+    'rttMs': rttMs,
+  });
+
   /// Choose which publisher carries the show's sound — a camera, the Studio,
   /// or Stream Audio. The server clears the flag everywhere else.
   static Future<void> setMasterAudio({

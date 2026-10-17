@@ -3,6 +3,8 @@ import 'package:livekit_client/livekit_client.dart';
 import 'package:supabase_flutter/supabase_flutter.dart' show RealtimeChannel;
 import '../services/livekit_service.dart';
 import '../services/event_service.dart';
+import '../services/realsync.dart';
+import '../services/studio_roles.dart';
 import '../widgets/audio_meter.dart';
 import '../theme.dart';
 
@@ -45,6 +47,11 @@ class _AudioScreenState extends State<AudioScreen> {
   /// screen follows the DB status (the single source of truth) via realtime.
   RealtimeChannel? _statusChannel;
 
+  /// RealSync 7b: this feed's clock offset, reported into its metadata. Stream
+  /// Audio is usually the show's sound, so its offset matters most.
+  ClockReporter? _clock;
+  int? _seenResyncAt;
+
   @override
   void initState() {
     super.initState();
@@ -58,6 +65,7 @@ class _AudioScreenState extends State<AudioScreen> {
   @override
   void dispose() {
     _statusChannel?.unsubscribe();
+    _clock?.stop();
     _eventIdController.dispose();
     _room?.disconnect();
     super.dispose();
@@ -83,7 +91,18 @@ class _AudioScreenState extends State<AudioScreen> {
       final conn = await LivekitService.audioToken(eventId: eventId);
 
       final room = Room();
+      // A Studio resync also re-measures this device's clock.
+      room.createListener().on<RoomMetadataChangedEvent>((e) {
+        final stamp =
+            (parseParticipantMeta(e.metadata)['resyncAt'] as num?)?.toInt();
+        if (stamp != null && stamp != _seenResyncAt) {
+          _seenResyncAt = stamp;
+          _clock?.remeasure();
+        }
+      });
       await room.connect(conn.wsUrl, conn.token);
+      _seenResyncAt =
+          (parseParticipantMeta(room.metadata)['resyncAt'] as num?)?.toInt();
 
       // Line-level feed from a soundboard: disable WebRTC's auto-gain, noise
       // suppression and echo cancellation so the operator's manual gain staging
@@ -96,6 +115,11 @@ class _AudioScreenState extends State<AudioScreen> {
         ),
       );
       await room.localParticipant?.publishAudioTrack(track);
+      _clock?.stop();
+      _clock = ClockReporter(
+        eventId: eventId,
+        identity: room.localParticipant!.identity,
+      )..start();
 
       setState(() {
         _room = room;
@@ -162,13 +186,22 @@ class _AudioScreenState extends State<AudioScreen> {
   /// Leave the feed. Never ends a live show (host-only, from their camera
   /// screen). Only a HOST leaving during Sound Check reverts to scheduled.
   Future<void> _stopStreaming() async {
+    // ...and not while the host's Studio is in the room: it runs the show, and
+    // this phone stepping off Stream Audio mustn't cancel Sound Check under it.
+    final studioHere = _room?.remoteParticipants.values.any(
+          (p) => parseParticipantMeta(p.metadata)['role'] == NileRole.studio,
+        ) ??
+        false;
     if (_eventId != null &&
         widget.isHost &&
+        !studioHere &&
         _streamState == AudioStreamState.soundCheck) {
       EventService.revertToScheduled(_eventId!).catchError((_) {});
     }
     _statusChannel?.unsubscribe();
     _statusChannel = null;
+    _clock?.stop();
+    _clock = null;
     await _room?.disconnect();
     if (!mounted) return;
     setState(() {

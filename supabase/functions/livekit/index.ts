@@ -17,6 +17,8 @@
 //   set-master-audio  host    → { success: true }   ← any publisher; exactly one holds the flag
 //   set-graphics      host    → { success: true }   ← Studio pushes on-screen graphics (room metadata)
 //   resync            host    → { success, resyncAt } ← every viewer re-aligns cameras + audio
+//   clock             any     → { receivedAt, sentAt } ← RealSync clock ping (server ms)
+//   report-clock      crew    → { success: true }   ← publisher's clock offset into its metadata
 //   remove-participant host   → { success: true }   ← ejects one participant
 //   set-ready         crew    → { success: true }   ← flags caller's feed ready
 //   start-show        host    → { success: true }   ← stamps showStartedAt anchor + starts replay egress
@@ -282,6 +284,8 @@ const deviceLabel = (raw: unknown) =>
 
 interface ReqCtx {
   reqId: string;
+  /** Server time the request arrived — the RealSync clock ping's T2. */
+  receivedAt: number;
   action?: string;
   userId?: string;
 }
@@ -298,7 +302,7 @@ serve(async (req) => {
   const json = makeJson(corsHeaders);
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
-  const ctx: ReqCtx = { reqId: crypto.randomUUID().slice(0, 8) };
+  const ctx: ReqCtx = { reqId: crypto.randomUUID().slice(0, 8), receivedAt: Date.now() };
   const t0 = Date.now();
   try {
     const res = await handle(req, ctx, json);
@@ -365,6 +369,12 @@ async function handle(req: Request, ctx: ReqCtx, json: Json): Promise<Response> 
       return await listSlots(body, user.id, admin, json);
     case "rename-camera":
       return await renameCamera(body, user.id, admin, json);
+    case "clock":
+      // NTP-style: arrival and reply times bracket the auth work above, so the
+      // client can take it out of the round trip.
+      return json({ receivedAt: ctx.receivedAt, sentAt: Date.now() });
+    case "report-clock":
+      return await reportClock(body, user.id, admin, json);
     case "set-graphics":
       return await setGraphics(body, user.id, admin, json);
     case "resync":
@@ -935,6 +945,32 @@ async function setGraphics(body: any, userId: string, admin: any, json: Json): P
   const meta = await roomMetaOf(roomName);
   await roomService.updateRoomMetadata(roomName, JSON.stringify(mergeRoomMeta(meta, { graphics: result.state })));
   return json({ success: true, graphics: result.state });
+}
+
+// report-clock — a publisher records its clock offset (device − server, ms) in
+// its own metadata, for RealSync. Body: { eventId, identity, offsetMs, rttMs }.
+// The identity must be one of the CALLER's publishers (userId in its token
+// metadata) — nobody writes someone else's offset.
+async function reportClock(body: any, userId: string, admin: any, json: Json): Promise<Response> {
+  const { eventId, identity, offsetMs, rttMs } = body;
+  if (!eventId || !identity || typeof offsetMs !== "number" || !Number.isFinite(offsetMs)) {
+    return json({ error: "eventId, identity and offsetMs are required" }, 400);
+  }
+  if (Math.abs(offsetMs) > 24 * 3600_000) return json({ error: "offsetMs out of range" }, 400);
+
+  const gate = await requireOperator(eventId, userId, admin, json);
+  if (gate instanceof Response) return gate;
+
+  const roomName = roomNameFor(eventId);
+  const peer = (await peersOf(roomName)).find((p) => p.identity === identity);
+  if (!peer || !isPublisher(peer) || peer.meta.userId !== userId) {
+    return json({ error: "Not your feed" }, 403);
+  }
+  await patchPeer(roomName, peer, {
+    clockOffsetMs: Math.round(offsetMs),
+    clockRttMs: typeof rttMs === "number" && Number.isFinite(rttMs) ? Math.round(rttMs) : null,
+  });
+  return json({ success: true });
 }
 
 // resync — every viewer drops and re-picks up the camera they're watching

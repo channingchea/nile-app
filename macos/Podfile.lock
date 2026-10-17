@@ -10,6 +10,8 @@ PODS:
     - flutter_webrtc
     - FlutterMacOS
     - WebRTC-SDK (= 144.7559.01)
+  - nile_realsync (0.1.0):
+    - FlutterMacOS
   - OrderedSet (6.0.3)
   - video_compress (0.3.0):
     - FlutterMacOS
@@ -20,6 +22,7 @@ DEPENDENCIES:
   - flutter_webrtc (from `Flutter/ephemeral/.symlinks/plugins/flutter_webrtc/macos`)
   - FlutterMacOS (from `Flutter/ephemeral`)
   - livekit_client (from `Flutter/ephemeral/.symlinks/plugins/livekit_client/macos`)
+  - nile_realsync (from `Flutter/ephemeral/.symlinks/plugins/nile_realsync/macos`)
   - video_compress (from `Flutter/ephemeral/.symlinks/plugins/video_compress/macos`)
 
 SPEC REPOS:
@@ -36,6 +39,8 @@ EXTERNAL SOURCES:
     :path: Flutter/ephemeral
   livekit_client:
     :path: Flutter/ephemeral/.symlinks/plugins/livekit_client/macos
+  nile_realsync:
+    :path: Flutter/ephemeral/.symlinks/plugins/nile_realsync/macos
   video_compress:
     :path: Flutter/ephemeral/.symlinks/plugins/video_compress/macos
 
@@ -44,10 +49,11 @@ SPEC CHECKSUMS:
   flutter_webrtc: dbacf72a9bd951ccfa5997198f0a6214bb848ede
   FlutterMacOS: d0db08ddef1a9af05a5ec4b724367152bb0500b1
   livekit_client: 1860bf9a11ce01fcce4bc726f9affdb4ad2a61fb
+  nile_realsync: df45693679855d9f0f37883dc23a49774825ac60
   OrderedSet: e539b66b644ff081c73a262d24ad552a69be3a94
   video_compress: c896234f100791b5fef7f049afa38f6d2ef7b42f
   WebRTC-SDK: ab9b5319e458c2bfebdc92b3600740da35d5630d
 
-PODFILE CHECKSUM: 1e95c36afbfd1cb6423ceca4de7a8e1b256fb6ac
+PODFILE CHECKSUM: f95023cbdabb12939610ef257bf5e282146bceeb
 
 COCOAPODS: 1.16.2

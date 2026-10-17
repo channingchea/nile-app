@@ -14,6 +14,7 @@ import '../services/block_service.dart';
 import '../services/chat_service.dart';
 import '../services/event_service.dart';
 import '../services/livekit_service.dart';
+import '../services/realsync.dart';
 import '../services/realtime.dart';
 import '../services/report_service.dart';
 import '../services/share_urls.dart';
@@ -95,6 +96,13 @@ class _ViewerScreenState extends State<ViewerScreen>
   // with.
   int? _seenResyncAt;
   bool _syncing = false;
+
+  // RealSync (phase 7): holds the watched camera in step with the show audio
+  // for the whole show. Off unless the remote switch is on AND the native hook
+  // passed its self-test; while off, the joinedAt subscribe delay below is
+  // the only alignment, exactly as before.
+  RealSyncDriver? _realSync;
+  bool _realSyncOn = false;
 
   // Phase 7: viewer count + realtime
   int _viewerCount = 0;
@@ -211,6 +219,7 @@ class _ViewerScreenState extends State<ViewerScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _realSync?.dispose();
     _decrementAndCleanup();
     _eventIdController.dispose();
     _chatController.dispose();
@@ -804,6 +813,7 @@ class _ViewerScreenState extends State<ViewerScreen>
       if (_inLobby) _initLobby();
 
       _updateAudioRouting();
+      _startRealSync(room);
     } catch (e) {
       await room?.disconnect();
       if (!mounted) return;
@@ -946,7 +956,8 @@ class _ViewerScreenState extends State<ViewerScreen>
     RemoteTrackPublication publication,
   ) {
     // Screen shares aren't part of the audio-sync dance — show immediately.
-    if (publication.source == TrackSource.screenShareVideo) {
+    // With RealSync on, nothing waits: it aligns the picture continuously.
+    if (_realSyncOn || publication.source == TrackSource.screenShareVideo) {
       publication.subscribe();
       return;
     }
@@ -1022,6 +1033,7 @@ class _ViewerScreenState extends State<ViewerScreen>
     final audioId = _masterAudioIdentity;
     final audioPub = audioId == null ? null : _audioPublications[audioId];
     setState(() => _syncing = true);
+    _realSync?.reset();
     try {
       await Future.wait([
         for (final p in videoPubs) p.unsubscribe(),
@@ -1041,6 +1053,26 @@ class _ViewerScreenState extends State<ViewerScreen>
         if (mounted) setState(() => _syncing = false);
       });
     }
+  }
+
+  /// Start (or restart, after a rejoin) RealSync for [room] when it's allowed.
+  void _startRealSync(Room room) {
+    _realSync?.dispose();
+    _realSync = null;
+    RealSyncConfig.correcting().then((on) {
+      if (!mounted || _room != room) return;
+      _realSyncOn = on;
+      if (!on) return;
+      _realSync = RealSyncDriver(
+        room: room,
+        watchedCamera: () {
+          if (_cameras.isEmpty) return null;
+          final f = _cameras[_focusedIndex.clamp(0, _cameras.length - 1)];
+          return f.isScreenShare ? null : f.identity;
+        },
+        masterAudio: () => _masterAudioIdentity,
+      )..start();
+    });
   }
 
   /// The camera slot a participant is on, for per-camera graphics.
@@ -1175,6 +1207,7 @@ class _ViewerScreenState extends State<ViewerScreen>
       }
     }
     _updateAudioRouting();
+    _startRealSync(room);
   }
 
   // ── Audio management ──────────────────────────────────────────────────────
@@ -1306,6 +1339,8 @@ class _ViewerScreenState extends State<ViewerScreen>
   // ── Leave ─────────────────────────────────────────────────────────────────
 
   Future<void> _leave() async {
+    _realSync?.dispose();
+    _realSync = null;
     _decrementAndCleanup();
     await _listener?.dispose();
     await _room?.disconnect();

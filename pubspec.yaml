@@ -41,7 +41,13 @@ dependencies:
   livekit_client: ^2.7.0
   # Direct dep for desktop screen-share source picking (desktopCapturer);
   # already pulled in transitively by livekit_client.
-  flutter_webrtc: ^1.4.0
+  # PINNED: RealSync (packages/nile_realsync) calls into this exact libwebrtc
+  # (WebRTC-SDK 144.7559.01). It self-tests on iOS/macOS, but Android can't
+  # prove the layout — re-run the RealSync rig before changing this.
+  flutter_webrtc: 1.4.0
+  # RealSync's native jitter-buffer hook (Studio master host, phase 7).
+  nile_realsync:
+    path: packages/nile_realsync
   http: ^1.6.0
   permission_handler: ^12.0.1
   google_fonts: ^6.2.1

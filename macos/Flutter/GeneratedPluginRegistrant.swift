@@ -16,6 +16,7 @@ import flutter_inappwebview_macos
 import flutter_webrtc
 import google_sign_in_ios
 import livekit_client
+import nile_realsync
 import package_info_plus
 import posthog_flutter
 import sentry_flutter
@@ -39,6 +40,7 @@ func RegisterGeneratedPlugins(registry: FlutterPluginRegistry) {
   FlutterWebRTCPlugin.register(with: registry.registrar(forPlugin: "FlutterWebRTCPlugin"))
   FLTGoogleSignInPlugin.register(with: registry.registrar(forPlugin: "FLTGoogleSignInPlugin"))
   LiveKitPlugin.register(with: registry.registrar(forPlugin: "LiveKitPlugin"))
+  NileRealsyncPlugin.register(with: registry.registrar(forPlugin: "NileRealsyncPlugin"))
   FPPPackageInfoPlusPlugin.register(with: registry.registrar(forPlugin: "FPPPackageInfoPlusPlugin"))
   PosthogFlutterPlugin.register(with: registry.registrar(forPlugin: "PosthogFlutterPlugin"))
   SentryFlutterPlugin.register(with: registry.registrar(forPlugin: "SentryFlutterPlugin"))

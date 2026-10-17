@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.18.1)
+project(nile_realsync CXX)
+add_library(nile_realsync SHARED nile_realsync.cpp)
+find_library(log-lib log)
+target_link_libraries(nile_realsync ${log-lib} dl)

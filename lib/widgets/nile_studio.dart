@@ -42,6 +42,7 @@ class NileStudioSource {
     this.isRemovable = false,
     this.slotId,
     this.isRenamable = false,
+    this.lagMs,
   });
 
   /// LiveKit participant identity, plus a suffix for a participant's second
@@ -76,6 +77,10 @@ class NileStudioSource {
 
   /// Whether the host may rename this camera from the Studio.
   final bool isRenamable;
+
+  /// RealSync: how far this camera's picture trails the most current one, in
+  /// ms. Null when not measured.
+  final int? lagMs;
 }
 
 /// Signal strength for the top row. Mapped from LiveKit's `ConnectionQuality`
@@ -698,6 +703,21 @@ class _SourceTile extends StatelessWidget {
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
+                  if (source.lagMs != null) ...[
+                    Tooltip(
+                      message: 'Behind the most current camera',
+                      child: Text(
+                        '+${source.lagMs} ms',
+                        style: NileTextStyles.caption().copyWith(
+                          color: source.lagMs! > 150
+                              ? NileColors.amber
+                              : NileColors.txtTertiary,
+                          fontFeatures: const [FontFeature.tabularFigures()],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: NileSpacing.s4),
+                  ],
                   if (source.isMasterAudio)
                     Tooltip(
                       message: 'Master audio',

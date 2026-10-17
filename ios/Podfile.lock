@@ -26,6 +26,8 @@ PODS:
     - Flutter
     - flutter_webrtc
     - WebRTC-SDK (= 144.7559.01)
+  - nile_realsync (0.1.0):
+    - Flutter
   - OrderedSet (6.0.3)
   - permission_handler_apple (9.3.0):
     - Flutter
@@ -41,6 +43,7 @@ DEPENDENCIES:
   - flutter_inappwebview_ios (from `.symlinks/plugins/flutter_inappwebview_ios/ios`)
   - flutter_webrtc (from `.symlinks/plugins/flutter_webrtc/ios`)
   - livekit_client (from `.symlinks/plugins/livekit_client/ios`)
+  - nile_realsync (from `.symlinks/plugins/nile_realsync/ios`)
   - permission_handler_apple (from `.symlinks/plugins/permission_handler_apple/ios`)
   - video_compress (from `.symlinks/plugins/video_compress/ios`)
   - video_thumbnail (from `.symlinks/plugins/video_thumbnail/ios`)
@@ -60,6 +63,8 @@ EXTERNAL SOURCES:
     :path: ".symlinks/plugins/flutter_webrtc/ios"
   livekit_client:
     :path: ".symlinks/plugins/livekit_client/ios"
+  nile_realsync:
+    :path: ".symlinks/plugins/nile_realsync/ios"
   permission_handler_apple:
     :path: ".symlinks/plugins/permission_handler_apple/ios"
   video_compress:
@@ -73,12 +78,13 @@ SPEC CHECKSUMS:
   flutter_webrtc: 5aa37bfb8b834bff989a03182d1c4266a4f93377
   libwebp: 02b23773aedb6ff1fd38cec7a77b81414c6842a8
   livekit_client: e3c4fe5a12a8b70841db479ddf45e0a4e88d68c4
+  nile_realsync: 838630597ed0c66f0adaf3d4a88ff058aa81d736
   OrderedSet: e539b66b644ff081c73a262d24ad552a69be3a94
   permission_handler_apple: 9878588469a2b0d0fc1e048d9f43605f92e6cec2
   video_compress: fce97e4fb1dfd88175aa07d2ffc8a2f297f87fbe
   video_thumbnail: c4e2a3c539e247d4de13cd545344fd2d26ffafd1
   WebRTC-SDK: ab9b5319e458c2bfebdc92b3600740da35d5630d
 
-PODFILE CHECKSUM: d71a8f9d234bf288cee64b372c30c196c8075224
+PODFILE CHECKSUM: 874ac4f33c7aa7e6f6be5c3f0cf716e34cd69cc5
 
 COCOAPODS: 1.16.2

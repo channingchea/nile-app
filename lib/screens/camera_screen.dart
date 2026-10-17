@@ -12,6 +12,7 @@ import '../services/crew_service.dart';
 import '../services/event_service.dart';
 import '../services/install_id.dart';
 import '../services/livekit_service.dart';
+import '../services/realsync.dart';
 import '../services/report_service.dart';
 import '../services/screen_capture_permission.dart';
 import '../services/shake_detector.dart';
@@ -550,6 +551,8 @@ class _CameraScreenState extends State<CameraScreen> {
           isRemovable: !isShare && role != NileRole.studio,
           slotId: isShare ? null : slotId,
           isRenamable: !isShare && renamable,
+          // Only worth showing with more than one camera to compare.
+          lagMs: isShare || _lagMs.length < 2 ? null : _lagMs[p.identity],
         ),
       );
     }
@@ -1139,6 +1142,13 @@ class _CameraScreenState extends State<CameraScreen> {
   /// told apart from one joining for the first time.
   final Set<String> _seenPublishers = {};
 
+  /// RealSync 7b: this device's clock offset, reported into its metadata.
+  ClockReporter? _clock;
+
+  /// RealSync 7e (Studio): each camera's lag behind the most current one.
+  Map<String, int> _lagMs = const {};
+  Timer? _lagTimer;
+
   /// "Camera 2 reconnected · Resync?" — the Studio's nudge after a drop.
   String? _reconnectHint;
   Timer? _hintTimer;
@@ -1353,6 +1363,8 @@ class _CameraScreenState extends State<CameraScreen> {
     }
     _handover.dispose();
     _hintTimer?.cancel();
+    _lagTimer?.cancel();
+    _clock?.stop();
     _countdownTimer?.cancel();
     _statusChannel?.unsubscribe();
     _chatChannel?.unsubscribe();
@@ -1608,6 +1620,12 @@ class _CameraScreenState extends State<CameraScreen> {
       // (the sync inside _applyMicProcessing ran before this setState).
       _refreshRoomState();
       _applyRoomMetadata(room.metadata, joining: true);
+      _clock?.stop();
+      _clock = ClockReporter(
+        eventId: eventId,
+        identity: room.localParticipant!.identity,
+      )..start();
+      if (asStudio) _startLagReadout();
       _seenPublishers
         ..clear()
         ..addAll(
@@ -1767,6 +1785,34 @@ class _CameraScreenState extends State<CameraScreen> {
 
   // ── Graphics + resync ───────────────────────────────────────────────────────
 
+  /// Studio: every 2 s, read each subscribed camera's playout and show how far
+  /// it trails the most current one (needs only stats, not the native hook).
+  Future<void> _startLagReadout() async {
+    _lagTimer?.cancel();
+    if (!await RealSyncConfig.measuring() || !mounted) return;
+    _lagTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
+      final room = _room;
+      if (room == null || !_studioMode) return;
+      final readings = <String, ({double playout, int offset})>{};
+      for (final p in room.remoteParticipants.values) {
+        if (!_isPublisher(p)) continue;
+        final pub = p.videoTrackPublications
+            .where((x) => x.subscribed && x.source != TrackSource.screenShareVideo)
+            .firstOrNull;
+        final playout = await estimatedPlayout(pub?.track);
+        if (playout != null) {
+          readings[p.identity] = (playout: playout, offset: clockOffsetOf(p));
+        }
+      }
+      if (!mounted) return;
+      final lag = relativeLagMs(readings);
+      if (!mapEquals(lag, _lagMs)) {
+        _lagMs = lag;
+        _rebuildRemoteSources();
+      }
+    });
+  }
+
   void _applyRoomMetadata(String? raw, {bool joining = false}) {
     final graphics = GraphicsState.fromRoomMetadata(raw);
     if (graphics != _graphics && mounted) setState(() => _graphics = graphics);
@@ -1775,6 +1821,7 @@ class _CameraScreenState extends State<CameraScreen> {
       _seenResyncAt = stamp;
     } else if (stamp != null && stamp != _seenResyncAt) {
       _seenResyncAt = stamp;
+      _clock?.remeasure();
       _resyncMonitor();
     }
   }
@@ -2396,6 +2443,10 @@ class _CameraScreenState extends State<CameraScreen> {
     } catch (_) {}
     _screenShareTrack = null;
     _handover.reset();
+    _clock?.stop();
+    _clock = null;
+    _lagTimer?.cancel();
+    _lagMs = const {};
     await _listener?.dispose();
     await _room?.disconnect();
     if (!mounted) return;
