@@ -119,6 +119,7 @@ class _AudioScreenState extends State<AudioScreen> {
       _clock = ClockReporter(
         eventId: eventId,
         identity: room.localParticipant!.identity,
+        participant: room.localParticipant,
       )..start();
 
       setState(() {

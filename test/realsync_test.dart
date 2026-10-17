@@ -1,6 +1,6 @@
 // RealSync (Studio master host, phase 7): the arithmetic and the control loop.
-// The native hook itself can't run in a unit test — its guard is the launch
-// self-test (packages/nile_realsync) and the phase 7a hardware rig.
+// The native side can't run in a unit test — its guards are the launch
+// self-tests (packages/nile_realsync) and the macOS probes in its tool/.
 
 import 'package:flutter_test/flutter_test.dart';
 
@@ -29,26 +29,14 @@ void main() {
   });
 
   group('7c measurement', () {
-    test('drift puts both senders on one clock', () {
-      // Camera clock runs 300 ms fast; once corrected the picture is 120 ms
-      // ahead of the sound.
-      expect(
-        driftMs(
-          videoPlayoutMs: 1420,
-          cameraOffsetMs: 300,
-          audioPlayoutMs: 1000,
-          audioOffsetMs: 0,
-        ),
-        120,
-      );
+    test('drift: the newer content is ahead', () {
+      // Picture is 80 ms old when it plays, the sound 200 ms: picture ahead.
+      expect(driftMs(videoAgeMs: 80, audioAgeMs: 200), 120);
+      expect(driftMs(videoAgeMs: 300, audioAgeMs: 200), -100);
     });
 
     test('Studio lag is relative to the most current camera', () {
-      final lag = relativeLagMs({
-        'cam-a': (playout: 5000.0, offset: 0),
-        'cam-b': (playout: 4880.0, offset: 0),
-        'cam-c': (playout: 5100.0, offset: 200), // fast clock, actually 4900
-      });
+      final lag = relativeLagMs({'cam-a': 140.0, 'cam-b': 260.0, 'cam-c': 240.4});
       expect(lag, {'cam-a': 0, 'cam-b': 120, 'cam-c': 100});
       expect(relativeLagMs(const {}), isEmpty);
     });
@@ -87,14 +75,15 @@ void main() {
       expect(e.targetVideoMs, 0);
     });
 
-    test('capped at 1.5 s and garbage ignored', () {
+    test('capped at 1 s and garbage ignored', () {
       final e = SyncEngine();
       expect(e.addDrift(double.nan), isFalse);
       expect(e.addDrift(60000), isFalse);
       for (final d in [4000.0, 4000.0, 4000.0]) {
         e.addDrift(d);
       }
-      expect(e.targetVideoMs, 1500);
+      expect(e.targetVideoMs, realSyncCapMs);
+      expect(realSyncCapMs, 1000);
     });
 
     test('ramps in 50 ms steps', () {

@@ -78,7 +78,7 @@ SPEC CHECKSUMS:
   flutter_webrtc: 5aa37bfb8b834bff989a03182d1c4266a4f93377
   libwebp: 02b23773aedb6ff1fd38cec7a77b81414c6842a8
   livekit_client: e3c4fe5a12a8b70841db479ddf45e0a4e88d68c4
-  nile_realsync: 838630597ed0c66f0adaf3d4a88ff058aa81d736
+  nile_realsync: cf2ab7244eafeca598b8f0fd5df75065d678bfb6
   OrderedSet: e539b66b644ff081c73a262d24ad552a69be3a94
   permission_handler_apple: 9878588469a2b0d0fc1e048d9f43605f92e6cec2
   video_compress: fce97e4fb1dfd88175aa07d2ffc8a2f297f87fbe

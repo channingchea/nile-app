@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart' show RTCRtpReceiver;
 import 'package:livekit_client/livekit_client.dart';
 import 'package:nile_realsync/nile_realsync.dart';
 
@@ -12,19 +13,18 @@ import 'supabase_client.dart';
 // RealSync (Studio master host, phase 7): keep the camera a viewer is watching
 // in step with the show audio for the whole show, not just at subscribe time.
 //
-//   7b  Every publisher measures its clock against the server and puts the
-//       offset in its metadata (`clockOffsetMs`).
-//   7c  Each viewer reads `estimatedPlayoutTimestamp` for the watched camera and
-//       the master audio. Both are in the SENDER's clock, so subtracting each
-//       sender's offset puts them on one timeline; the difference is the drift.
+//   7b  Every publisher measures its clock against the server, puts the
+//       offset in its metadata (`clockOffsetMs`), and stamps every frame it
+//       sends with its own wall clock (nile_realsync capture stamps).
+//   7c  Each viewer reads the stamps on the watched camera and the master
+//       audio as they arrive. Arrival age + the sender's offset + the jitter
+//       buffer's current delay = how old the content playing now is, on one
+//       clock; the difference between the two is the drift.
 //   7d  Whichever stream is ahead is held back via the native jitter-buffer
 //       minimum (nile_realsync), ramped in small steps.
 //   7e  The Studio shows each camera's lag next to its tile.
 //   7f  The native hook self-tests; any failure — or the remote switch being
 //       off — leaves the old joinedAt subscribe delay in charge.
-
-/// NTP (1900) → Unix (1970) epoch, in ms. `estimatedPlayoutTimestamp` is NTP.
-const ntpToUnixMs = 2208988800000;
 
 // ── 7b. Clock alignment ─────────────────────────────────────────────────────
 
@@ -64,19 +64,47 @@ ClockSample? bestClockSample(Iterable<ClockSample> samples) {
 
 /// Publisher side: measures this device's clock against the server's and
 /// writes it to its own participant metadata — on connect, every 60 s, and
-/// whenever the Studio resyncs.
+/// whenever the Studio resyncs. With [participant], it also stamps every track
+/// that participant publishes (retrying until each sender is negotiated).
 class ClockReporter {
-  ClockReporter({required this.eventId, required this.identity});
+  ClockReporter({required this.eventId, required this.identity, this.participant});
 
   final String eventId;
   final String identity;
+  final LocalParticipant? participant;
   Timer? _timer;
   bool _running = false;
+  EventsListener<ParticipantEvent>? _events;
+  final Set<String> _stamped = {};
 
   void start() {
     _timer?.cancel();
-    _timer = Timer.periodic(const Duration(seconds: 60), (_) => remeasure());
+    _timer = Timer.periodic(const Duration(seconds: 60), (_) {
+      remeasure();
+      _stampTracks();
+    });
     remeasure();
+    _events?.dispose();
+    _events = participant?.createListener()
+      ?..on<LocalTrackPublishedEvent>((_) {
+        _stampTracks();
+        // Audio codecs settle once negotiation finishes.
+        Future.delayed(const Duration(seconds: 3), _stampTracks);
+      });
+    _stampTracks();
+  }
+
+  Future<void> _stampTracks() async {
+    final p = participant;
+    if (p == null || !await RealSyncConfig.measuring()) return;
+    for (final pub in p.trackPublications.values) {
+      final track = pub.track;
+      final id = track?.sender?.senderId;
+      if (id == null || _stamped.contains(id)) continue;
+      if (await NileRealSync.stampSender(id, audio: track is LocalAudioTrack)) {
+        _stamped.add(id);
+      }
+    }
   }
 
   Future<void> remeasure() async {
@@ -115,6 +143,12 @@ class ClockReporter {
   void stop() {
     _timer?.cancel();
     _timer = null;
+    _events?.dispose();
+    _events = null;
+    for (final id in _stamped) {
+      unawaited(NileRealSync.forget(id));
+    }
+    _stamped.clear();
   }
 }
 
@@ -131,7 +165,7 @@ class ClockReporter {
 class SyncEngine {
   SyncEngine({
     this.deadBandMs = 40,
-    this.capMs = 1500,
+    this.capMs = realSyncCapMs,
     this.stepMs = 50,
     this.window = 5,
     this.settleWindow = 3,
@@ -215,31 +249,70 @@ class SyncEngine {
   }
 }
 
-/// Drift from two playout readings and the senders' clock offsets.
-double driftMs({
-  required double videoPlayoutMs,
-  required int cameraOffsetMs,
-  required double audioPlayoutMs,
-  required int audioOffsetMs,
-}) =>
-    (videoPlayoutMs - cameraOffsetMs) - (audioPlayoutMs - audioOffsetMs);
+/// The most RealSync holds a stream back. A camera further out than this is
+/// flagged in the Studio instead of delaying everyone watching it.
+const realSyncCapMs = 1000;
 
-/// `estimatedPlayoutTimestamp` for a receiver's inbound stream, if reported.
-Future<double?> estimatedPlayout(Track? track) async {
-  final receiver = track?.receiver;
-  if (receiver == null) return null;
-  try {
-    for (final r in await receiver.getStats()) {
-      if (r.type != 'inbound-rtp') continue;
-      final v = r.values['estimatedPlayoutTimestamp'];
-      if (v is num && v > 0) return v.toDouble();
-    }
-  } catch (_) {}
-  return null;
-}
+/// How far the picture's content is ahead of the sound's, from how old each
+/// is when it plays ([ContentAgeReader]).
+double driftMs({required double videoAgeMs, required double audioAgeMs}) =>
+    audioAgeMs - videoAgeMs;
 
 int clockOffsetOf(Participant? p) =>
     (parseParticipantMeta(p?.metadata)['clockOffsetMs'] as num?)?.toInt() ?? 0;
+
+/// How old the content a remote track is playing right now is, in ms: the
+/// frames' arrival age (from their capture stamps), corrected by the sender's
+/// clock offset, plus the time they now sit in the jitter buffer. This
+/// device's own offset is left out — it's the same for every stream, so it
+/// cancels in any comparison.
+class ContentAgeReader {
+  final Set<String> _reading = {};
+  final Map<String, ({double delay, double count})> _buffer = {};
+
+  Future<double?> ageMs(Participant? sender, Track? track) async {
+    final receiver = track?.receiver;
+    final id = receiver?.receiverId;
+    if (sender == null || receiver == null || id == null) return null;
+    if (_reading.add(id) &&
+        !await NileRealSync.readReceiver(id, audio: track is AudioTrack)) {
+      _reading.remove(id);
+      return null;
+    }
+    final arrival = (await NileRealSync.ages([id]))[id]?.ageMs;
+    final buffered = await _bufferedMs(id, receiver);
+    if (arrival == null || buffered == null) return null;
+    return arrival + clockOffsetOf(sender) + buffered;
+  }
+
+  /// Average jitter-buffer delay since the last reading of this receiver.
+  Future<double?> _bufferedMs(String id, RTCRtpReceiver receiver) async {
+    try {
+      for (final r in await receiver.getStats()) {
+        if (r.type != 'inbound-rtp') continue;
+        final delay = (r.values['jitterBufferDelay'] as num?)?.toDouble();
+        final count = (r.values['jitterBufferEmittedCount'] as num?)?.toDouble();
+        if (delay == null || count == null) return null;
+        final before = _buffer[id];
+        _buffer[id] = (delay: delay, count: count);
+        if (before == null || count <= before.count) return null;
+        return (delay - before.delay) / (count - before.count) * 1000;
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  /// Stop reading every receiver not in [keep].
+  void retain(Set<String> keep) {
+    for (final id in _reading.difference(keep)) {
+      unawaited(NileRealSync.forget(id));
+      _buffer.remove(id);
+    }
+    _reading.retainAll(keep);
+  }
+
+  void dispose() => retain(const {});
+}
 
 /// Viewer side: runs the [SyncEngine] against the watched camera and the
 /// master audio. It looks the two up itself on every tick, so an angle switch
@@ -256,6 +329,7 @@ class RealSyncDriver {
   final String? Function() watchedCamera;
   final String? Function() masterAudio;
   final SyncEngine engine;
+  final ContentAgeReader _ages = ContentAgeReader();
 
   Timer? _sampler;
   Timer? _ramp;
@@ -317,17 +391,11 @@ class RealSyncDriver {
           ?.track;
       _videoReceiverId = vTrack?.receiver?.receiverId;
       _audioReceiverId = aTrack?.receiver?.receiverId;
-      final vp = await estimatedPlayout(vTrack);
-      final ap = await estimatedPlayout(aTrack);
-      if (vp != null && ap != null) {
-        engine.addDrift(
-          driftMs(
-            videoPlayoutMs: vp,
-            cameraOffsetMs: clockOffsetOf(cam),
-            audioPlayoutMs: ap,
-            audioOffsetMs: clockOffsetOf(aud),
-          ),
-        );
+      _ages.retain({?_videoReceiverId, ?_audioReceiverId});
+      final va = await _ages.ageMs(cam, vTrack);
+      final aa = await _ages.ageMs(aud, aTrack);
+      if (va != null && aa != null) {
+        engine.addDrift(driftMs(videoAgeMs: va, audioAgeMs: aa));
       }
     }
     // Quick readings while settling (~2 s to converge), then every 2 s.
@@ -367,6 +435,7 @@ class RealSyncDriver {
   void dispose() {
     _sampler?.cancel();
     _ramp?.cancel();
+    _ages.dispose();
     for (final id in [_videoReceiverId, _audioReceiverId]) {
       if (id != null) unawaited(NileRealSync.setMinimumPlayoutDelay(id, null));
     }
@@ -375,22 +444,19 @@ class RealSyncDriver {
 
 // ── 7e. Studio: each camera's lag ───────────────────────────────────────────
 
-/// Each camera's lag behind the most current one, in ms, from its playout
-/// reading and sender clock offset. Cameras without a reading are left out.
-Map<String, int> relativeLagMs(Map<String, ({double playout, int offset})> readings) {
-  if (readings.isEmpty) return const {};
-  // Content time each camera is showing now, on the shared clock.
-  final shown = {
-    for (final e in readings.entries) e.key: e.value.playout - e.value.offset,
-  };
-  final newest = shown.values.reduce(math.max);
-  return {for (final e in shown.entries) e.key: (newest - e.value).round()};
+/// Each camera's lag behind the most current one, in ms, from how old each
+/// camera's content is ([ContentAgeReader]). Cameras without a reading are
+/// left out.
+Map<String, int> relativeLagMs(Map<String, double> ageMs) {
+  if (ageMs.isEmpty) return const {};
+  final newest = ageMs.values.reduce(math.min);
+  return {for (final e in ageMs.entries) e.key: (e.value - newest).round()};
 }
 
 // ── 7f. Switches ─────────────────────────────────────────────────────────────
 
 /// RealSync runs only when the remote switch (`app_config.realsync_enabled`)
-/// is on. Correction additionally needs the native hook's self-test to pass.
+/// is on. Correction additionally needs the native self-tests to pass.
 /// Both are read once per launch.
 abstract final class RealSyncConfig {
   static Future<bool>? _flag;
@@ -411,7 +477,9 @@ abstract final class RealSyncConfig {
   /// Clock offsets and lag readings (no native hook needed).
   static Future<bool> measuring() => _remoteFlag();
 
-  /// The full loop: measuring, plus the native delay hook.
+  /// The full loop: measuring, plus both native hooks (stamps, delay).
   static Future<bool> correcting() async =>
-      await _remoteFlag() && await NileRealSync.unavailableReason() == null;
+      await _remoteFlag() &&
+      await NileRealSync.unavailableReason() == null &&
+      await NileRealSync.stampUnavailableReason() == null;
 }

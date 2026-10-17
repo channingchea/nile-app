@@ -8,6 +8,8 @@ Pod::Spec.new do |s|
   s.author           = { 'Nile' => 'support@joinnile.com' }
   s.source           = { :path => '.' }
   s.source_files     = 'Classes/**/*'
+  # The C++ headers stay private: the module umbrella is Objective-C.
+  s.public_header_files = 'Classes/NileRealsyncPlugin.h'
   s.dependency 'Flutter'
   # No dependency on flutter_webrtc / WebRTC-SDK on purpose: RealSync finds
   # both at runtime (dlsym, NSClassFromString), and a pod dependency on

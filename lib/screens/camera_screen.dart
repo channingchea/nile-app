@@ -1148,6 +1148,7 @@ class _CameraScreenState extends State<CameraScreen> {
   /// RealSync 7e (Studio): each camera's lag behind the most current one.
   Map<String, int> _lagMs = const {};
   Timer? _lagTimer;
+  final ContentAgeReader _lagAges = ContentAgeReader();
 
   /// "Camera 2 reconnected · Resync?" — the Studio's nudge after a drop.
   String? _reconnectHint;
@@ -1364,6 +1365,7 @@ class _CameraScreenState extends State<CameraScreen> {
     _handover.dispose();
     _hintTimer?.cancel();
     _lagTimer?.cancel();
+    _lagAges.dispose();
     _clock?.stop();
     _countdownTimer?.cancel();
     _statusChannel?.unsubscribe();
@@ -1624,6 +1626,7 @@ class _CameraScreenState extends State<CameraScreen> {
       _clock = ClockReporter(
         eventId: eventId,
         identity: room.localParticipant!.identity,
+        participant: room.localParticipant,
       )..start();
       if (asStudio) _startLagReadout();
       _seenPublishers
@@ -1785,27 +1788,29 @@ class _CameraScreenState extends State<CameraScreen> {
 
   // ── Graphics + resync ───────────────────────────────────────────────────────
 
-  /// Studio: every 2 s, read each subscribed camera's playout and show how far
-  /// it trails the most current one (needs only stats, not the native hook).
+  /// Studio: every 2 s, read how old each subscribed camera's picture is and
+  /// show how far it trails the most current one (capture stamps; no delay).
   Future<void> _startLagReadout() async {
     _lagTimer?.cancel();
     if (!await RealSyncConfig.measuring() || !mounted) return;
     _lagTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
       final room = _room;
       if (room == null || !_studioMode) return;
-      final readings = <String, ({double playout, int offset})>{};
+      final ages = <String, double>{};
+      final receivers = <String>{};
       for (final p in room.remoteParticipants.values) {
         if (!_isPublisher(p)) continue;
-        final pub = p.videoTrackPublications
+        final track = p.videoTrackPublications
             .where((x) => x.subscribed && x.source != TrackSource.screenShareVideo)
-            .firstOrNull;
-        final playout = await estimatedPlayout(pub?.track);
-        if (playout != null) {
-          readings[p.identity] = (playout: playout, offset: clockOffsetOf(p));
-        }
+            .firstOrNull
+            ?.track;
+        if (track?.receiver?.receiverId case final id?) receivers.add(id);
+        final age = await _lagAges.ageMs(p, track);
+        if (age != null) ages[p.identity] = age;
       }
+      _lagAges.retain(receivers);
       if (!mounted) return;
-      final lag = relativeLagMs(readings);
+      final lag = relativeLagMs(ages);
       if (!mapEquals(lag, _lagMs)) {
         _lagMs = lag;
         _rebuildRemoteSources();
@@ -2446,6 +2451,7 @@ class _CameraScreenState extends State<CameraScreen> {
     _clock?.stop();
     _clock = null;
     _lagTimer?.cancel();
+    _lagAges.dispose();
     _lagMs = const {};
     await _listener?.dispose();
     await _room?.disconnect();

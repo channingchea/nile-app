@@ -49,7 +49,7 @@ SPEC CHECKSUMS:
   flutter_webrtc: dbacf72a9bd951ccfa5997198f0a6214bb848ede
   FlutterMacOS: d0db08ddef1a9af05a5ec4b724367152bb0500b1
   livekit_client: 1860bf9a11ce01fcce4bc726f9affdb4ad2a61fb
-  nile_realsync: df45693679855d9f0f37883dc23a49774825ac60
+  nile_realsync: 0f90b9061294f87f2a1f6ef7541a9eb670ba42cb
   OrderedSet: e539b66b644ff081c73a262d24ad552a69be3a94
   video_compress: c896234f100791b5fef7f049afa38f6d2ef7b42f
   WebRTC-SDK: ab9b5319e458c2bfebdc92b3600740da35d5630d

@@ -33,6 +33,36 @@
     result(@(NileRealsyncSetMinimumDelay(receiverId, s)));
     return;
   }
+  if ([call.method isEqualToString:@"stampSelfTest"]) {
+    NSString *failure = NileRealsyncStampUnavailableReason();
+    result(@{@"ok" : @(failure == nil), @"reason" : failure ?: [NSNull null]});
+    return;
+  }
+  NSDictionary *args = [call.arguments isKindOfClass:NSDictionary.class] ? call.arguments : @{};
+  NSString *nativeId = [args[@"id"] isKindOfClass:NSString.class] ? args[@"id"] : nil;
+  BOOL audio = [args[@"audio"] boolValue];
+  if ([call.method isEqualToString:@"stampSender"]) {
+    result(@(nativeId && NileRealsyncStampSender(nativeId, audio)));
+    return;
+  }
+  if ([call.method isEqualToString:@"readReceiver"]) {
+    result(@(nativeId && NileRealsyncReadReceiver(nativeId, audio)));
+    return;
+  }
+  if ([call.method isEqualToString:@"forget"]) {
+    if (nativeId) NileRealsyncForget(nativeId);
+    result(nil);
+    return;
+  }
+  if ([call.method isEqualToString:@"ages"]) {
+    NSArray *ids = [args[@"ids"] isKindOfClass:NSArray.class] ? args[@"ids"] : @[];
+    result(NileRealsyncAges(ids, [args[@"windowMs"] intValue] ?: 1500));
+    return;
+  }
+  if ([call.method isEqualToString:@"stampedCount"]) {
+    result(@(nativeId ? NileRealsyncStampedCount(nativeId) : -1));
+    return;
+  }
   result(FlutterMethodNotImplemented);
 }
 

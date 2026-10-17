@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:livekit_client/livekit_client.dart' hide ChatMessage;
 
 import '../services/chat_service.dart';
+import '../services/realsync.dart' show realSyncCapMs;
 import '../services/studio_graphics.dart';
 import '../theme.dart';
 import 'nile_graphics_layer.dart';
@@ -703,13 +704,18 @@ class _SourceTile extends StatelessWidget {
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
-                  if (source.lagMs != null) ...[
+                  if (source.lagMs case final lag?) ...[
                     Tooltip(
-                      message: 'Behind the most current camera',
+                      message: lag > realSyncCapMs
+                          ? 'Over 1 s behind — RealSync only closes the first '
+                              'second of the gap. Check this camera’s connection.'
+                          : 'Behind the most current camera',
                       child: Text(
-                        '+${source.lagMs} ms',
+                        '+$lag ms',
                         style: NileTextStyles.caption().copyWith(
-                          color: source.lagMs! > 150
+                          color: lag > realSyncCapMs
+                              ? NileColors.error
+                              : lag > 150
                               ? NileColors.amber
                               : NileColors.txtTertiary,
                           fontFeatures: const [FontFeature.tabularFigures()],

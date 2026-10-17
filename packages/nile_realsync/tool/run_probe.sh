@@ -6,5 +6,5 @@ set -euo pipefail
 cd "$(dirname "$0")"
 FW="$(cd ../../../macos/Pods/WebRTC-SDK/WebRTC.xcframework/macos-arm64_x86_64 && pwd)"
 clang++ -std=c++17 -fobjc-arc -F"$FW" -framework WebRTC -framework Foundation -framework CoreVideo -framework QuartzCore \
-  -Wl,-rpath,"$FW" rs_probe.mm -o /tmp/nile_rs_probe
+  -I../src -Wl,-rpath,"$FW" rs_probe.mm ../src/realsync_stamp.cc -o /tmp/nile_rs_probe
 /tmp/nile_rs_probe
