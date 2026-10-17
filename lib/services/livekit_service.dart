@@ -1,4 +1,5 @@
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'studio_graphics.dart';
 import 'supabase_client.dart';
 
 /// Client for the `livekit` Supabase Edge Function (the former nile-backend).
@@ -146,6 +147,29 @@ class LivekitService {
     'slotId': ?slotId,
     'identity': ?identity,
   });
+
+  /// Studio: put graphics on (or take them off) the air. Sends the whole
+  /// on-air state; the server validates it, enforces the caps and writes it
+  /// to the room metadata every viewer reads.
+  static Future<void> setGraphics({
+    required String eventId,
+    required GraphicsState graphics,
+  }) => _invoke<Map>({
+    'action': 'set-graphics',
+    'eventId': eventId,
+    'studio': true,
+    'graphics': graphics.toJson(),
+  });
+
+  /// Re-align every viewer's camera with the show audio. Once per 10 s.
+  /// [studio]: see [startShow] — a host phone can only resync when no Studio
+  /// is in the room.
+  static Future<void> resync({required String eventId, bool studio = false}) =>
+      _invoke<Map>({
+        'action': 'resync',
+        'eventId': eventId,
+        if (studio) 'studio': true,
+      });
 
   /// Choose which publisher carries the show's sound — a camera, the Studio,
   /// or Stream Audio. The server clears the flag everywhere else.

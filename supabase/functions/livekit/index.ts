@@ -15,6 +15,8 @@
 //   rename-camera     host    → { success: true }   ← renames a slot + its live feed
 //   list-cameras      host    → { cameras: [{ identity, name, cameraName, cameraId }] }
 //   set-master-audio  host    → { success: true }   ← any publisher; exactly one holds the flag
+//   set-graphics      host    → { success: true }   ← Studio pushes on-screen graphics (room metadata)
+//   resync            host    → { success, resyncAt } ← every viewer re-aligns cameras + audio
 //   remove-participant host   → { success: true }   ← ejects one participant
 //   set-ready         crew    → { success: true }   ← flags caller's feed ready
 //   start-show        host    → { success: true }   ← stamps showStartedAt anchor + starts replay egress
@@ -53,6 +55,7 @@ import {
   studioConnected,
   studioIdentity,
 } from "../_shared/studio.ts";
+import { mergeRoomMeta, resyncWait, validateGraphics } from "../_shared/graphics.ts";
 
 // CORS headers are per-request, so the JSON responder is built per-request too
 // and handed to the helpers below (they run outside the handler's scope).
@@ -362,6 +365,10 @@ async function handle(req: Request, ctx: ReqCtx, json: Json): Promise<Response> 
       return await listSlots(body, user.id, admin, json);
     case "rename-camera":
       return await renameCamera(body, user.id, admin, json);
+    case "set-graphics":
+      return await setGraphics(body, user.id, admin, json);
+    case "resync":
+      return await resync(body, user.id, admin, json);
     case "list-cameras":
       return await listCameras(body, user.id, admin, json);
     case "set-master-audio":
@@ -895,6 +902,68 @@ async function setMasterAudio(body: any, userId: string, admin: any, json: Json)
   if (chosen.meta.isMasterAudio !== true) await patchPeer(roomName, chosen, { isMasterAudio: true });
 
   return json({ success: true });
+}
+
+// set-graphics — the Studio puts graphics on (or takes them off) the air.
+//
+// Body: { eventId, studio: true, graphics: { all: [...], bySlot: { <slotId>: [...] } } }
+// The Studio sends the whole on-air state; it is validated (shapes, caps: one
+// lower third / logo per corner / banner / slate per target, images only from
+// the studio-graphics bucket, real slots only) and written into the room
+// metadata next to showStartedAt and the rest. Viewers read it from there —
+// late joiners included — and never touch the host's library.
+async function setGraphics(body: any, userId: string, admin: any, json: Json): Promise<Response> {
+  const { eventId } = body;
+  if (!eventId) return json({ error: "eventId is required" }, 400);
+
+  const gate = await requireHost(eventId, userId, admin, json);
+  if (gate instanceof Response) return gate;
+
+  const roomName = roomNameFor(eventId);
+  if (body.studio !== true || !studioConnected(await peersOf(roomName))) {
+    return json({ error: "Graphics are run from the Studio." }, 409);
+  }
+
+  const slots = await slotsFor(gate.event.id, admin);
+  const imagePrefix = `${Deno.env.get("SUPABASE_URL")}/storage/v1/object/public/studio-graphics/`;
+  const result = validateGraphics(body.graphics, {
+    imagePrefix,
+    slotIds: new Set(slots.map((s) => s.id)),
+  });
+  if ("error" in result) return json({ error: result.error }, 400);
+
+  const meta = await roomMetaOf(roomName);
+  await roomService.updateRoomMetadata(roomName, JSON.stringify(mergeRoomMeta(meta, { graphics: result.state })));
+  return json({ success: true, graphics: result.state });
+}
+
+// resync — every viewer drops and re-picks up the camera they're watching
+// together with the show audio, re-measuring the offset between them.
+//
+// The Studio's call while it is in the room; the host's phone when it isn't.
+// Stamps `resyncAt` (server time) into room metadata; viewers act on a stamp
+// newer than their own join and ignore it otherwise, so old builds and late
+// joiners are unaffected. Once per 10 s, because each one is a visible pause.
+async function resync(body: any, userId: string, admin: any, json: Json): Promise<Response> {
+  const { eventId } = body;
+  if (!eventId) return json({ error: "eventId is required" }, 400);
+
+  const gate = await requireHost(eventId, userId, admin, json);
+  if (gate instanceof Response) return gate;
+
+  const roomName = roomNameFor(eventId);
+  if (body.studio !== true && studioConnected(await peersOf(roomName))) {
+    return json({ error: "Your Studio is running this show — resync from the Studio." }, 409);
+  }
+
+  const meta = await roomMetaOf(roomName);
+  const now = Date.now();
+  const wait = resyncWait(meta.resyncAt, now);
+  if (wait > 0) {
+    return json({ error: `Just resynced — try again in ${Math.ceil(wait / 1000)} s.` }, 429);
+  }
+  await roomService.updateRoomMetadata(roomName, JSON.stringify(mergeRoomMeta(meta, { resyncAt: now })));
+  return json({ success: true, resyncAt: now });
 }
 
 // remove-participant — eject one participant from the live room.

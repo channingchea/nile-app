@@ -16,11 +16,14 @@ import '../services/report_service.dart';
 import '../services/screen_capture_permission.dart';
 import '../services/shake_detector.dart';
 import '../services/studio_prefs.dart';
+import '../services/studio_graphics.dart';
 import '../services/studio_roles.dart';
 import '../widgets/audio_meter.dart';
 import '../widgets/nile_studio.dart';
 import '../widgets/screen_share_picker.dart';
 import '../widgets/camera_slot_sheet.dart';
+import '../widgets/nile_graphics_layer.dart';
+import '../widgets/studio_graphics_panel.dart';
 import '../widgets/studio_settings_sheet.dart';
 import '../widgets/viewer_preview_overlay.dart';
 import '../router.dart';
@@ -1124,6 +1127,22 @@ class _CameraScreenState extends State<CameraScreen> {
   /// Toolbar target: the selected source, or every camera at once.
   bool _targetAll = false;
 
+  /// Graphics on air (room metadata `graphics`). The Studio monitor and this
+  /// device's own preview draw what a viewer of that camera sees.
+  GraphicsState _graphics = GraphicsState.empty;
+
+  /// Resync stamp this device joined with; a new one makes the Studio
+  /// monitor re-pick up the feed it is showing.
+  int? _seenResyncAt;
+
+  /// Publishers seen this session, so a camera coming BACK mid-show can be
+  /// told apart from one joining for the first time.
+  final Set<String> _seenPublishers = {};
+
+  /// "Camera 2 reconnected · Resync?" — the Studio's nudge after a drop.
+  String? _reconnectHint;
+  Timer? _hintTimer;
+
   /// The mic this device publishes. Null = system default. The Studio offers a
   /// picker for a USB mixer or audio interface when it carries the show audio.
   String? _selectedMicId;
@@ -1333,6 +1352,7 @@ class _CameraScreenState extends State<CameraScreen> {
       EventService.revertToScheduled(_eventId!).catchError((_) {});
     }
     _handover.dispose();
+    _hintTimer?.cancel();
     _countdownTimer?.cancel();
     _statusChannel?.unsubscribe();
     _chatChannel?.unsubscribe();
@@ -1450,12 +1470,17 @@ class _CameraScreenState extends State<CameraScreen> {
       });
 
       listener.on<ParticipantConnectedEvent>((event) {
+        _noteReconnect(event.participant);
         setState(() => _applyReadyMeta(_metaOf(event.participant)));
         _refreshRoomState();
         _syncMicEnabled();
         _syncSubscriptions();
         _rebuildRemoteSources();
       });
+
+      listener.on<RoomMetadataChangedEvent>(
+        (e) => _applyRoomMetadata(e.metadata),
+      );
 
       // A second Studio for the same show takes over the control room —
       // LiveKit drops the older session with DUPLICATE_IDENTITY.
@@ -1582,6 +1607,14 @@ class _CameraScreenState extends State<CameraScreen> {
       // Reconcile mute now that the real master-audio/Stream-Audio state is set
       // (the sync inside _applyMicProcessing ran before this setState).
       _refreshRoomState();
+      _applyRoomMetadata(room.metadata, joining: true);
+      _seenPublishers
+        ..clear()
+        ..addAll(
+          room.remoteParticipants.values
+              .where(_isPublisher)
+              .map((p) => p.identity),
+        );
       await _syncMicEnabled();
 
       // "Start with camera off", set in the Studio's settings sheet. The
@@ -1729,6 +1762,122 @@ class _CameraScreenState extends State<CameraScreen> {
         _state = CameraState.idle;
         _errorMessage = 'Failed to connect: ${e.toString()}';
       });
+    }
+  }
+
+  // ── Graphics + resync ───────────────────────────────────────────────────────
+
+  void _applyRoomMetadata(String? raw, {bool joining = false}) {
+    final graphics = GraphicsState.fromRoomMetadata(raw);
+    if (graphics != _graphics && mounted) setState(() => _graphics = graphics);
+    final stamp = (parseParticipantMeta(raw)['resyncAt'] as num?)?.toInt();
+    if (joining) {
+      _seenResyncAt = stamp;
+    } else if (stamp != null && stamp != _seenResyncAt) {
+      _seenResyncAt = stamp;
+      _resyncMonitor();
+    }
+  }
+
+  /// The Studio monitor does what every viewer does on a resync: drop and
+  /// re-pick up the feed it is showing.
+  Future<void> _resyncMonitor() async {
+    final id = _selectedSourceId?.split('#').first;
+    final p = id == null ? null : _room?.remoteParticipants[id];
+    if (p == null || !_studioMode) return;
+    final pubs = p.videoTrackPublications.where((x) => x.subscribed).toList();
+    for (final pub in pubs) {
+      await pub.unsubscribe();
+    }
+    await Future.delayed(const Duration(milliseconds: 300));
+    for (final pub in pubs) {
+      await pub.subscribe();
+    }
+  }
+
+  /// Studio, live: a camera that had been here before just came back — its
+  /// feed restarted out of step with the others. Offer a resync.
+  void _noteReconnect(Participant p) {
+    if (!_isPublisher(p)) return;
+    final returning = !_seenPublishers.add(p.identity);
+    if (!returning || !_isStudio || _state != CameraState.live) return;
+    final meta = _metaOf(p);
+    final name = meta['role'] == NileRole.streamAudio
+        ? 'Stream Audio'
+        : (meta['cameraName'] as String?) ?? p.name;
+    setState(() => _reconnectHint = name);
+    _hintTimer?.cancel();
+    _hintTimer = Timer(const Duration(seconds: 30), () {
+      if (mounted) setState(() => _reconnectHint = null);
+    });
+  }
+
+  /// "Resync all cameras and audio?" — then every viewer re-aligns.
+  Future<void> _confirmResync() async {
+    final eventId = _eventId;
+    if (eventId == null) return;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: NileColors.bgSurface,
+        title: Text('Resync all cameras?', style: NileTextStyles.headingMd()),
+        content: Text(
+          'Resync all cameras and audio? Viewers will see a brief pause.',
+          style: NileTextStyles.bodyMd().copyWith(
+            color: NileColors.txtSecondary,
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text(
+              'Resync',
+              style: NileTextStyles.labelMd().copyWith(color: NileColors.volt),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    setState(() => _reconnectHint = null);
+    try {
+      await LivekitService.resync(eventId: eventId, studio: _isStudio);
+      _toast('Resyncing every viewer.');
+    } catch (e) {
+      _toast(e.toString().replaceFirst('Exception: ', ''));
+    }
+  }
+
+  /// Studio: open the Graphics panel for the toolbar's target.
+  Future<void> _openGraphics() async {
+    final target = _toolbarTarget;
+    final slotId = _targetAll ? null : target?.slotId;
+    if (!_targetAll && slotId == null) {
+      _toast('That feed isn’t on a camera slot — choose “All cameras”.');
+      return;
+    }
+    await showGraphicsPushPanel(
+      context,
+      current: _graphics,
+      targetSlotId: slotId,
+      targetLabel: _targetAll ? 'all cameras' : target!.label,
+      push: _pushGraphics,
+    );
+  }
+
+  Future<bool> _pushGraphics(GraphicsState next) async {
+    final eventId = _eventId;
+    if (eventId == null) return false;
+    try {
+      await LivekitService.setGraphics(eventId: eventId, graphics: next);
+      if (mounted) setState(() => _graphics = next);
+      return true;
+    } catch (_) {
+      return false;
     }
   }
 
@@ -2260,6 +2409,9 @@ class _CameraScreenState extends State<CameraScreen> {
       _slotId = null;
       _slots = const [];
       _targetAll = false;
+      _graphics = GraphicsState.empty;
+      _seenResyncAt = null;
+      _reconnectHint = null;
       _videoEnabled = true;
       _ready = false;
       _crewReady.clear();
@@ -2386,6 +2538,44 @@ class _CameraScreenState extends State<CameraScreen> {
       ),
     );
   }
+
+  Widget _buildReconnectHint() => Material(
+    color: NileColors.bgRaised,
+    child: Padding(
+      padding: const EdgeInsets.fromLTRB(
+        NileSpacing.s16,
+        NileSpacing.s8,
+        NileSpacing.s8,
+        NileSpacing.s8,
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.sync_problem, color: NileColors.amber, size: 20),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              '$_reconnectHint reconnected · its picture may be out of step.',
+              style: NileTextStyles.bodySm().copyWith(
+                color: NileColors.txtPrimary,
+              ),
+            ),
+          ),
+          TextButton(
+            onPressed: _confirmResync,
+            child: Text(
+              'Resync',
+              style: NileTextStyles.labelMd().copyWith(color: NileColors.volt),
+            ),
+          ),
+          IconButton(
+            icon: Icon(Icons.close, size: 18, color: NileColors.txtSecondary),
+            tooltip: 'Dismiss',
+            onPressed: () => setState(() => _reconnectHint = null),
+          ),
+        ],
+      ),
+    ),
+  );
 
   Widget _buildExternalMicBanner() {
     return Material(
@@ -2906,6 +3096,11 @@ class _CameraScreenState extends State<CameraScreen> {
             ),
           ),
 
+        // ── Graphics on this camera, as viewers of it see them ───────────
+        Positioned.fill(
+          child: NileGraphicsLayer(graphics: _graphics.forSlot(_slotId)),
+        ),
+
         // ── Audio meter — right edge, vertically centred ───────────────
         // Every camera shows the same meter the Stream Audio screen uses, fed
         // by this device's own mic so the operator can confirm it's picking up
@@ -3259,6 +3454,24 @@ class _CameraScreenState extends State<CameraScreen> {
                     ),
                     const SizedBox(width: 12),
                   ],
+                  // Resync — the host's phone, live, with no Studio in the room.
+                  if (_state == CameraState.live &&
+                      _runsShow &&
+                      !_isStudio) ...[
+                    IconButton(
+                      onPressed: _confirmResync,
+                      tooltip: 'Resync cameras and audio',
+                      icon: const Icon(Icons.sync),
+                      color: NileColors.txtPrimary,
+                      style: IconButton.styleFrom(
+                        backgroundColor: NileColors.bgSurface.withValues(
+                          alpha: 0.8,
+                        ),
+                        padding: const EdgeInsets.all(NileSpacing.s12),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                  ],
                   // Leave — neutral, NOT destructive. Leaving a live show no longer
                   // ends it (the show stays open); ending is an explicit action in
                   // Settings. During Sound Check this reverts to scheduled.
@@ -3307,6 +3520,8 @@ class _CameraScreenState extends State<CameraScreen> {
       onRemoveSource: widget.isHost ? _removeSource : null,
       // Renaming is a show-control, so only the Studio offers it.
       onRenameSource: _isStudio ? _renameSource : null,
+      graphicsFor: (s) =>
+          _graphics.forSlot(s.isScreenShare ? null : s.slotId),
       selfIdentity: _room?.localParticipant?.identity,
       stats: NileStudioStats(
         isLive: live,
@@ -3375,8 +3590,11 @@ class _CameraScreenState extends State<CameraScreen> {
               restrictionLabel: _chatRestrictionLabel,
             )
           : null,
-      banner:
-          _externalMicConnected && !_disableAgc && !_externalMicPromptDismissed
+      banner: _reconnectHint != null
+          ? _buildReconnectHint()
+          : _externalMicConnected &&
+                !_disableAgc &&
+                !_externalMicPromptDismissed
           ? _buildExternalMicBanner()
           : null,
     );
@@ -3458,6 +3676,17 @@ class _CameraScreenState extends State<CameraScreen> {
             : null,
         tooltip: 'Rename camera',
         icon: Icons.drive_file_rename_outline,
+      ),
+      NileStudioIconButton(
+        onPressed: _openGraphics,
+        tooltip: 'Graphics',
+        icon: Icons.layers_outlined,
+        active: !_graphics.isEmpty,
+      ),
+      NileStudioIconButton(
+        onPressed: _confirmResync,
+        tooltip: 'Resync cameras and audio',
+        icon: Icons.sync,
       ),
       NileStudioMasterAudioMenu(
         options: _audioSourceOptions,

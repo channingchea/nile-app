@@ -10,12 +10,14 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../services/analytics.dart';
 import '../services/screen_capture_permission.dart';
+import '../services/studio_graphics.dart';
 import '../services/studio_prefs.dart';
 import '../theme.dart';
 import '../widgets/audio_meter.dart';
 import '../widgets/nile_studio.dart';
 import '../widgets/screen_share_picker.dart';
 import '../widgets/studio_preview_demo.dart';
+import '../widgets/studio_graphics_panel.dart';
 import '../widgets/studio_settings_sheet.dart';
 
 /// The host Studio as a private rehearsal.
@@ -65,6 +67,10 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
   bool _togglingShare = false;
   String? _selectedSourceId;
   StreamSubscription? _deviceSub;
+
+  /// Graphics rehearsed on the monitor. Local only — a preview has no show to
+  /// put them on, so the panel's "push" is just this setState.
+  GraphicsState _graphics = GraphicsState.empty;
 
   @override
   void initState() {
@@ -548,6 +554,7 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
           selectedIdentity: _selectedSourceId,
           onSelectSource: (id) => setState(() => _selectedSourceId = id),
           selfIdentity: _selfId,
+          graphicsFor: (_) => _graphics.forSlot(null),
           stats: NileStudioStats(
             isLive: live,
             elapsed: _demo.elapsed,
@@ -613,6 +620,28 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
             onLeave: _exit,
             leaveLabel: 'Exit',
             leaveIcon: Icons.close,
+            toolbar: [
+              NileStudioIconButton(
+                onPressed: () => showGraphicsPushPanel(
+                  context,
+                  current: _graphics,
+                  targetSlotId: null,
+                  targetLabel: 'this preview',
+                  push: (next) async {
+                    setState(() => _graphics = next);
+                    return true;
+                  },
+                ),
+                tooltip: 'Graphics',
+                icon: Icons.layers_outlined,
+                active: !_graphics.isEmpty,
+              ),
+              NileStudioIconButton(
+                onPressed: () => showGraphicsLibrary(context),
+                tooltip: 'Graphics library',
+                icon: Icons.collections_bookmark_outlined,
+              ),
+            ],
           ),
           showChatColumn: hasChatColumn,
           chat: hasChatColumn ? _buildChat() : null,

@@ -2,7 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:livekit_client/livekit_client.dart' hide ChatMessage;
 
 import '../services/chat_service.dart';
+import '../services/studio_graphics.dart';
 import '../theme.dart';
+import 'nile_graphics_layer.dart';
 
 // ── Studio ───────────────────────────────────────────────────────────────────
 // The desktop face of `camera_screen`. The phone screen is one full-bleed
@@ -157,6 +159,7 @@ class NileStudio extends StatelessWidget {
     this.meter,
     this.onRemoveSource,
     this.onRenameSource,
+    this.graphicsFor,
   });
 
   /// Sources in display order: your own camera first, then crew, then shares.
@@ -197,6 +200,10 @@ class NileStudio extends StatelessWidget {
 
   /// Renames a camera. Null hides it; offered on [NileStudioSource.isRenamable].
   final ValueChanged<NileStudioSource>? onRenameSource;
+
+  /// The graphics a viewer of [source] would see right now, drawn over the
+  /// monitor so the director sees what goes out. Null draws none.
+  final List<LiveGraphic> Function(NileStudioSource source)? graphicsFor;
 
   /// This device's own audio meter, pinned under the source list. It belongs
   /// beside the roster rather than over the video: it is about the feed you are
@@ -254,6 +261,7 @@ class NileStudio extends StatelessWidget {
                 child: _StudioMonitor(
                   selected: selected,
                   self: showSelfPane ? self : null,
+                  graphicsFor: graphicsFor,
                 ),
               ),
               if (showChatColumn && chat != null) ...[
@@ -769,9 +777,14 @@ class _SourceTile extends StatelessWidget {
 // ── Monitor ──────────────────────────────────────────────────────────────────
 
 class _StudioMonitor extends StatelessWidget {
-  const _StudioMonitor({required this.selected, required this.self});
+  const _StudioMonitor({
+    required this.selected,
+    required this.self,
+    this.graphicsFor,
+  });
 
   final NileStudioSource? selected;
+  final List<LiveGraphic> Function(NileStudioSource source)? graphicsFor;
 
   /// Null when your own camera is already the monitor.
   final NileStudioSource? self;
@@ -790,6 +803,9 @@ class _StudioMonitor extends StatelessWidget {
                   ? 'MONITOR'
                   : 'MONITOR · ${selected!.label}',
               source: selected,
+              graphics: selected == null
+                  ? const []
+                  : graphicsFor?.call(selected!) ?? const [],
             ),
           ),
           if (self != null) ...[
@@ -803,6 +819,7 @@ class _StudioMonitor extends StatelessWidget {
                   child: _LabelledPane(
                     title: 'YOUR CAMERA',
                     source: self,
+                    graphics: graphicsFor?.call(self!) ?? const [],
                   ),
                 ),
               ),
@@ -815,10 +832,15 @@ class _StudioMonitor extends StatelessWidget {
 }
 
 class _LabelledPane extends StatelessWidget {
-  const _LabelledPane({required this.title, required this.source});
+  const _LabelledPane({
+    required this.title,
+    required this.source,
+    this.graphics = const [],
+  });
 
   final String title;
   final NileStudioSource? source;
+  final List<LiveGraphic> graphics;
 
   @override
   Widget build(BuildContext context) {
@@ -827,7 +849,13 @@ class _LabelledPane extends StatelessWidget {
         Positioned.fill(
           child: ClipRRect(
             borderRadius: BorderRadius.circular(NileRadius.md),
-            child: _VideoPane(source: source, compact: false),
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                _VideoPane(source: source, compact: false),
+                NileGraphicsLayer(graphics: graphics),
+              ],
+            ),
           ),
         ),
         Positioned(

@@ -17,6 +17,7 @@ import '../services/livekit_service.dart';
 import '../services/realtime.dart';
 import '../services/report_service.dart';
 import '../services/share_urls.dart';
+import '../services/studio_graphics.dart';
 import '../services/studio_roles.dart';
 import '../services/supabase_client.dart';
 import '../services/tip_service.dart';
@@ -24,6 +25,7 @@ import '../router.dart';
 import '../theme.dart';
 import 'widgets/moderation_menu.dart';
 import '../widgets/nile_desktop.dart';
+import '../widgets/nile_graphics_layer.dart';
 import '../widgets/rolling_number.dart';
 import '../widgets/share_to_sheet.dart';
 
@@ -82,6 +84,17 @@ class _ViewerScreenState extends State<ViewerScreen>
   // isn't needed for the math — offsets derive purely from joinedAt deltas.
   static const int _maxSyncDelayMs = 2000;
   int? _audioJoinedAt;
+
+  // Studio graphics on air (room metadata `graphics`), drawn over whichever
+  // angle this viewer is watching. Viewers can't hide them.
+  GraphicsState _graphics = GraphicsState.empty;
+
+  // Resync: the Studio stamps `resyncAt` into room metadata. We act on a
+  // stamp that changes after we joined — compared by value, not by clock, so
+  // a phone with a wrong clock still behaves — and ignore the one we joined
+  // with.
+  int? _seenResyncAt;
+  bool _syncing = false;
 
   // Phase 7: viewer count + realtime
   int _viewerCount = 0;
@@ -678,6 +691,7 @@ class _ViewerScreenState extends State<ViewerScreen>
         ..on<ParticipantConnectedEvent>(_onParticipantConnected)
         ..on<ParticipantDisconnectedEvent>(_onParticipantDisconnected)
         ..on<ParticipantMetadataUpdatedEvent>(_onParticipantMetadataUpdated)
+        ..on<RoomMetadataChangedEvent>((e) => _applyRoomMetadata(e.metadata))
         ..on<RoomDisconnectedEvent>(_onRoomDisconnected);
 
       // Fail loudly instead of hanging on "Joining stream…" forever.
@@ -692,6 +706,8 @@ class _ViewerScreenState extends State<ViewerScreen>
       // Read the master-audio participant's joinedAt before touching any
       // camera — it's the zero reference every camera offset is measured against.
       _audioJoinedAt = _findAudioJoinedAt(room);
+      // Graphics already on air, and the resync stamp we joined with.
+      _applyRoomMetadata(room.metadata, joining: true);
 
       for (final participant in room.remoteParticipants.values) {
         for (final publication in participant.videoTrackPublications) {
@@ -977,6 +993,61 @@ class _ViewerScreenState extends State<ViewerScreen>
     }
   }
 
+  // ── Room metadata: graphics + resync ──────────────────────────────────────
+
+  void _applyRoomMetadata(String? raw, {bool joining = false}) {
+    final graphics = GraphicsState.fromRoomMetadata(raw);
+    if (graphics != _graphics && mounted) setState(() => _graphics = graphics);
+    final stamp = (parseParticipantMeta(raw)['resyncAt'] as num?)?.toInt();
+    if (joining) {
+      _seenResyncAt = stamp;
+    } else if (stamp != null && stamp != _seenResyncAt) {
+      _seenResyncAt = stamp;
+      _resyncNow();
+    }
+  }
+
+  /// Drop and re-pick up the angle being watched together with the show
+  /// audio, re-measuring the offset between them. A brief, deliberate pause.
+  Future<void> _resyncNow() async {
+    final room = _room;
+    if (room == null || _cameras.isEmpty || _syncing) return;
+    final focused = _cameras[_focusedIndex.clamp(0, _cameras.length - 1)];
+    final cam = room.remoteParticipants[focused.identity];
+    final videoPubs = [
+      ...?cam?.videoTrackPublications.where(
+        (p) => p.subscribed && p.source != TrackSource.screenShareVideo,
+      ),
+    ];
+    final audioId = _masterAudioIdentity;
+    final audioPub = audioId == null ? null : _audioPublications[audioId];
+    setState(() => _syncing = true);
+    try {
+      await Future.wait([
+        for (final p in videoPubs) p.unsubscribe(),
+        if (audioPub != null) audioPub.unsubscribe(),
+      ]);
+      await Future.delayed(const Duration(milliseconds: 300));
+      if (!mounted || _room != room) return;
+      _audioJoinedAt = _findAudioJoinedAt(room) ?? _audioJoinedAt;
+      if (audioPub != null && _audioEnabled) await audioPub.subscribe();
+      for (final p in videoPubs) {
+        _delayedSubscribeVideo(cam!, p);
+      }
+    } catch (_) {
+      // A pub that vanished mid-resync is picked up by the normal events.
+    } finally {
+      Future.delayed(const Duration(milliseconds: 1500), () {
+        if (mounted) setState(() => _syncing = false);
+      });
+    }
+  }
+
+  /// The camera slot a participant is on, for per-camera graphics.
+  String? _slotOf(String identity) =>
+      _parseMeta(_room?.remoteParticipants[identity]?.metadata)['slotId']
+          as String?;
+
   void _onRoomDisconnected(RoomDisconnectedEvent event) {
     // The LiveKit room dropped. This is NOT the same as the show ending — the
     // room also closes when the last camera leaves (app backgrounded, network
@@ -1062,6 +1133,7 @@ class _ViewerScreenState extends State<ViewerScreen>
       ..on<ParticipantConnectedEvent>(_onParticipantConnected)
       ..on<ParticipantDisconnectedEvent>(_onParticipantDisconnected)
       ..on<ParticipantMetadataUpdatedEvent>(_onParticipantMetadataUpdated)
+      ..on<RoomMetadataChangedEvent>((e) => _applyRoomMetadata(e.metadata))
       ..on<RoomDisconnectedEvent>(_onRoomDisconnected);
 
     await room
@@ -1072,6 +1144,7 @@ class _ViewerScreenState extends State<ViewerScreen>
         );
 
     _audioJoinedAt = _findAudioJoinedAt(room);
+    _applyRoomMetadata(room.metadata, joining: true);
     setState(() {
       _cameras.clear();
       _audioPublications.clear();
@@ -2374,18 +2447,46 @@ class _ViewerScreenState extends State<ViewerScreen>
 
   Widget _buildMainCamera() {
     final focused = _cameras[_focusedIndex.clamp(0, _cameras.length - 1)];
+    final onAir = _graphics.forSlot(
+      focused.isScreenShare ? null : _slotOf(focused.identity),
+    );
+    // The angle label sits where a lower third or banner goes; graphics win.
+    final bottomTaken = onAir.any((g) => g.kind != GraphicKind.logo);
     return Stack(
       fit: StackFit.expand,
       children: [
         focused.track != null
             ? VideoTrackRenderer(focused.track!)
             : _buildCameraOffPlaceholder(large: true),
+        // Graphics follow the angle: show-wide ones plus this camera's own.
+        // A screen share carries only the show-wide ones.
+        NileGraphicsLayer(graphics: onAir),
+        if (_syncing)
+          Positioned(
+            top: 12,
+            left: 0,
+            right: 0,
+            child: Center(
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: NileSpacing.s12,
+                  vertical: NileSpacing.s6,
+                ),
+                decoration: BoxDecoration(
+                  color: NileColors.bgPage.withValues(alpha: 0.8),
+                  borderRadius: BorderRadius.circular(NileRadius.pill),
+                ),
+                child: Text('Syncing…', style: NileTextStyles.labelSm()),
+              ),
+            ),
+          ),
         if (focused.identity == _masterAudioIdentity)
           Positioned(
             top: 12,
             right: 12,
             child: Icon(Icons.album, color: NileColors.volt, size: 18),
           ),
+        if (!bottomTaken)
         Positioned(
           bottom: 12,
           left: 12,
