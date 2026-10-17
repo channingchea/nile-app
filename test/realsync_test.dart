@@ -29,12 +29,6 @@ void main() {
   });
 
   group('7c measurement', () {
-    test('drift: the newer content is ahead', () {
-      // Picture is 80 ms old when it plays, the sound 200 ms: picture ahead.
-      expect(driftMs(videoAgeMs: 80, audioAgeMs: 200), 120);
-      expect(driftMs(videoAgeMs: 300, audioAgeMs: 200), -100);
-    });
-
     test('Studio lag is relative to the most current camera', () {
       final lag = relativeLagMs({'cam-a': 140.0, 'cam-b': 260.0, 'cam-c': 240.4});
       expect(lag, {'cam-a': 0, 'cam-b': 120, 'cam-c': 100});
@@ -42,99 +36,116 @@ void main() {
     });
   });
 
-  group('7d correction', () {
-    test('a new angle converges on three readings, then needs five', () {
-      final e = SyncEngine();
-      expect(e.addDrift(200), isFalse);
-      expect(e.addDrift(220), isFalse);
-      expect(e.addDrift(210), isTrue);
-      expect(e.targetVideoMs, 210);
-      expect(e.targetAudioMs, 0);
-      expect(e.settling, isFalse);
-      for (var i = 0; i < 4; i++) {
-        expect(e.addDrift(80), isFalse);
+  group('7d correction — every stream on screen', () {
+    final t0 = DateTime(2026, 10, 17);
+
+    GroupSyncEngine feed(Map<String, double> ages, {int times = 3}) {
+      final e = GroupSyncEngine()..retain(ages.keys.toSet());
+      for (var i = 0; i < times; i++) {
+        ages.forEach((id, age) => e.add(id, age, at: t0));
       }
-      expect(e.addDrift(80), isTrue);
+      return e;
+    }
+
+    test('all cameras and the sound meet the oldest stream', () {
+      final e = feed({'cam-a': 100, 'cam-b': 250, 'audio': 180});
+      expect(e.solve(now: t0), isTrue);
+      expect(e.targetMs, {'cam-a': 150, 'audio': 70}); // cam-b is the oldest
+      expect(e.settling, isFalse);
+    });
+
+    test('nobody is held more than 1 s; the straggler is left behind', () {
+      final e = feed({'cam-a': 100, 'audio': 120, 'cam-far': 1600});
+      e.solve(now: t0);
+      expect(e.targetMs, {'cam-a': 1000, 'audio': 980}); // cam-far: not held
     });
 
     test('inside the dead-band nothing moves', () {
-      final e = SyncEngine();
-      for (final d in [30.0, -20.0, 35.0]) {
-        e.addDrift(d);
-      }
-      expect(e.targetVideoMs, 0);
-      expect(e.targetAudioMs, 0);
+      final e = feed({'cam-a': 100, 'audio': 130});
+      expect(e.solve(now: t0), isFalse);
+      expect(e.targetMs, isEmpty);
     });
 
-    test('audio ahead holds the audio back instead', () {
-      final e = SyncEngine();
-      for (final d in [-300.0, -310.0, -290.0]) {
-        e.addDrift(d);
-      }
-      expect(e.targetAudioMs, 300);
-      expect(e.targetVideoMs, 0);
+    test('a single stream has nothing to line up with', () {
+      final e = feed({'audio': 100});
+      expect(e.solve(now: t0), isFalse);
     });
 
-    test('capped at 1 s and garbage ignored', () {
-      final e = SyncEngine();
-      expect(e.addDrift(double.nan), isFalse);
-      expect(e.addDrift(60000), isFalse);
-      for (final d in [4000.0, 4000.0, 4000.0]) {
-        e.addDrift(d);
+    test('feedback: applied delays are part of the next readings', () {
+      final e = feed({'cam-a': 100, 'audio': 300});
+      e.solve(now: t0);
+      e.delayMs['cam-a'] = 200; // ramped in, and it took effect
+      for (var i = 0; i < 5; i++) {
+        e.add('cam-a', 300, at: t0);
+        e.add('audio', 300, at: t0);
       }
-      expect(e.targetVideoMs, realSyncCapMs);
-      expect(realSyncCapMs, 1000);
+      expect(e.solve(now: t0), isFalse);
+      expect(e.targetMs['cam-a'], 200);
+    });
+
+    test('a new camera settles on its own without blocking the rest', () {
+      final e = feed({'cam-a': 100, 'audio': 300});
+      e.solve(now: t0);
+      e.retain({'cam-a', 'audio', 'cam-new'});
+      e.add('cam-new', 500, at: t0); // only one reading so far
+      expect(e.settling, isTrue);
+      e.solve(now: t0);
+      expect(e.targetMs.containsKey('cam-new'), isFalse);
+      e
+        ..add('cam-new', 500, at: t0)
+        ..add('cam-new', 500, at: t0);
+      e.solve(now: t0);
+      expect(e.targetMs, {'cam-a': 400, 'audio': 200});
+    });
+
+    test('a feed that stops reporting stops counting', () {
+      final e = feed({'cam-a': 100, 'audio': 200, 'cam-paused': 900});
+      e.add('cam-a', 100, at: t0.add(const Duration(seconds: 6)));
+      e.add('audio', 200, at: t0.add(const Duration(seconds: 6)));
+      e.solve(now: t0.add(const Duration(seconds: 6)));
+      expect(e.targetMs, {'cam-a': 100});
+    });
+
+    test('dropped streams are reported so their delays get cleared', () {
+      final e = feed({'cam-a': 100, 'audio': 300});
+      e.solve(now: t0);
+      e.step();
+      expect(e.retain({'audio'}), {'cam-a'});
+      expect(e.delayMs.containsKey('cam-a'), isFalse);
     });
 
     test('ramps in 50 ms steps', () {
-      final e = SyncEngine()..targetVideoMs = 120;
-      expect(e.step().video, isTrue);
-      expect(e.videoDelayMs, 50);
-      e.step();
-      e.step();
-      expect(e.videoDelayMs, 120);
-      expect(e.step().video, isFalse);
+      final e = GroupSyncEngine()..targetMs['cam-a'] = 120;
+      expect(e.step(), {'cam-a'});
+      expect(e.delayMs['cam-a'], 50);
+      e
+        ..step()
+        ..step();
+      expect(e.delayMs['cam-a'], 120);
+      expect(e.step(), isEmpty);
     });
 
-    test('feedback: what is already applied counts toward the next target', () {
-      final e = SyncEngine()
-        ..videoDelayMs = 200
-        ..targetVideoMs = 200
-        ..addDrift(1)
-        ..addDrift(1)
-        ..addDrift(1); // settle on "in step"
-      // The buffer was already deeper than 200 ms; picture still 100 ms ahead.
-      for (var i = 0; i < 5; i++) {
-        e.addDrift(100);
-      }
-      expect(e.targetVideoMs, 300);
+    test('garbage readings are ignored', () {
+      final e = GroupSyncEngine()..retain({'cam-a'});
+      e
+        ..add('cam-a', double.nan, at: t0)
+        ..add('cam-a', 60000, at: t0);
+      expect(e.settling, isFalse); // nothing recorded
     });
 
-    test('switching from video-held to audio-held swaps sides', () {
-      final e = SyncEngine()
-        ..videoDelayMs = 100
-        ..addDrift(1)
-        ..addDrift(1)
-        ..addDrift(1);
-      for (var i = 0; i < 5; i++) {
-        e.addDrift(-250); // now the audio is 250 ms ahead even with 100 on video
-      }
-      expect(e.targetVideoMs, 0);
-      expect(e.targetAudioMs, 150);
-    });
-
-    test('restart keeps the audio, clear drops everything', () {
-      final e = SyncEngine()
-        ..videoDelayMs = 100
-        ..audioDelayMs = 80
-        ..targetAudioMs = 80;
-      e.restart();
-      expect(e.videoDelayMs, 0);
-      expect(e.audioDelayMs, 80);
-      expect(e.settling, isTrue);
+    test('restart re-measures but keeps delays; clear drops them', () {
+      final e = feed({'cam-a': 100, 'audio': 300});
+      e
+        ..solve(now: t0)
+        ..step()
+        ..restart();
+      expect(e.delayMs['cam-a'], 50);
+      expect(e.solve(now: t0), isFalse); // no readings yet
       e.clear();
-      expect(e.audioDelayMs, 0);
-      expect(e.targetAudioMs, 0);
+      expect(e.delayMs, isEmpty);
+      expect(e.targetMs, isEmpty);
     });
+
+    test('the cap is 1 s', () => expect(realSyncCapMs, 1000));
   });
 }

@@ -10,18 +10,18 @@ import 'livekit_service.dart';
 import 'studio_roles.dart';
 import 'supabase_client.dart';
 
-// RealSync (Studio master host, phase 7): keep the camera a viewer is watching
-// in step with the show audio for the whole show, not just at subscribe time.
+// RealSync (Studio master host, phase 7): keep every camera a viewer has on
+// screen and the master audio showing the same moment, for the whole show.
 //
 //   7b  Every publisher measures its clock against the server, puts the
 //       offset in its metadata (`clockOffsetMs`), and stamps every frame it
 //       sends with its own wall clock (nile_realsync capture stamps).
-//   7c  Each viewer reads the stamps on the watched camera and the master
+//   7c  Each viewer reads the stamps on every camera on screen and the master
 //       audio as they arrive. Arrival age + the sender's offset + the jitter
 //       buffer's current delay = how old the content playing now is, on one
-//       clock; the difference between the two is the drift.
-//   7d  Whichever stream is ahead is held back via the native jitter-buffer
-//       minimum (nile_realsync), ramped in small steps.
+//       clock.
+//   7d  Every stream is held back to the oldest one (at most 1 s) via the
+//       native jitter-buffer minimum (nile_realsync), ramped in small steps.
 //   7e  The Studio shows each camera's lag next to its tile.
 //   7f  The native hook self-tests; any failure — or the remote switch being
 //       off — leaves the old joinedAt subscribe delay in charge.
@@ -156,107 +156,144 @@ class ClockReporter {
 
 /// The decisions, without any I/O, so they can be tested.
 ///
-/// Drift is (videoPlayout − cameraOffset) − (audioPlayout − audioOffset): how
-/// far the picture's content is AHEAD of the sound's. Positive → hold the
-/// video back; negative → hold the audio back. Only one of the two is ever
-/// delayed. The delay set is a jitter-buffer MINIMUM — if the buffer already
-/// sits deeper, nothing changes until the minimum passes it — so corrections
-/// are fed back: the next measurement includes whatever actually took effect.
-class SyncEngine {
-  SyncEngine({
+/// Every stream on a viewer's screen — each visible camera and the master
+/// audio — reports how old its content is when it plays ([ContentAgeReader]).
+/// All of them are held back to match the oldest, so every angle and the sound
+/// show the same moment; but no stream is held more than [capMs]. A stream
+/// further behind than that is left where it is (the Studio flags it) instead
+/// of delaying everything to match it.
+///
+/// Delays are jitter-buffer MINIMUMS: each reading already includes whatever
+/// actually took effect, and subtracting the applied delay gives the stream's
+/// natural age. Streams join and settle on their own; one that stops reporting
+/// (a thumbnail scrolled off screen pauses) stops counting after [staleAfter].
+class GroupSyncEngine {
+  GroupSyncEngine({
     this.deadBandMs = 40,
     this.capMs = realSyncCapMs,
     this.stepMs = 50,
     this.window = 5,
     this.settleWindow = 3,
+    this.staleAfter = const Duration(seconds: 5),
   });
 
   final int deadBandMs;
   final int capMs;
   final int stepMs;
 
-  /// Readings in the steady-state median.
+  /// Readings in each stream's rolling median once settled.
   final int window;
 
-  /// Readings needed right after a switch, so a new angle converges fast.
+  /// Readings a new stream needs before it counts, so it converges fast.
   final int settleWindow;
+  final Duration staleAfter;
 
-  final List<double> _drifts = [];
-  bool _settling = true;
+  final Map<String, List<double>> _natural = {};
+  final Map<String, DateTime> _lastReading = {};
+  final Set<String> _settled = {};
 
-  int videoDelayMs = 0;
-  int audioDelayMs = 0;
-  int targetVideoMs = 0;
-  int targetAudioMs = 0;
+  /// Applied (ramped) and target hold-back per stream, in ms.
+  final Map<String, int> delayMs = {};
+  final Map<String, int> targetMs = {};
 
-  /// The watched camera changed (or a resync): forget old readings. Delays
-  /// stay — the new angle starts from what the audio already has.
+  /// A reporting stream hasn't settled yet (sample faster meanwhile).
+  bool get settling => _natural.entries
+      .any((e) => e.value.isNotEmpty && !_settled.contains(e.key));
+
+  /// Track exactly [ids]. Returns the streams dropped — clear their delays.
+  Set<String> retain(Set<String> ids) {
+    final gone = _natural.keys.toSet().difference(ids);
+    for (final id in gone) {
+      _natural.remove(id);
+      _lastReading.remove(id);
+      _settled.remove(id);
+      delayMs.remove(id);
+      targetMs.remove(id);
+    }
+    for (final id in ids) {
+      _natural.putIfAbsent(id, () => []);
+    }
+    return gone;
+  }
+
+  /// Resync: re-measure every stream. Delays stay until new targets land.
   void restart() {
-    _drifts.clear();
-    _settling = true;
-    targetVideoMs = 0;
-    videoDelayMs = 0;
+    for (final r in _natural.values) {
+      r.clear();
+    }
+    _settled.clear();
   }
 
   /// A full reset — nothing held back.
   void clear() {
     restart();
-    audioDelayMs = 0;
-    targetAudioMs = 0;
+    delayMs.clear();
+    targetMs.clear();
   }
 
-  bool get settling => _settling;
+  void add(String id, double ageMs, {DateTime? at}) {
+    final r = _natural[id];
+    if (r == null || !ageMs.isFinite || ageMs.abs() > 10000) return; // garbage
+    r.add(ageMs - (delayMs[id] ?? 0));
+    final keep = _settled.contains(id) ? window : settleWindow;
+    while (r.length > keep) {
+      r.removeAt(0);
+    }
+    _lastReading[id] = at ?? DateTime.now();
+  }
 
-  double? get medianDrift {
-    if (_drifts.isEmpty) return null;
-    final s = [..._drifts]..sort();
+  static double _median(List<double> v) {
+    final s = [...v]..sort();
     final m = s.length ~/ 2;
     return s.length.isOdd ? s[m] : (s[m - 1] + s[m]) / 2;
   }
 
-  /// Add a reading; returns true when it produced new targets.
-  bool addDrift(double driftMs) {
-    if (!driftMs.isFinite || driftMs.abs() > 10000) return false; // garbage
-    _drifts.add(driftMs);
-    final need = _settling ? settleWindow : window;
-    if (_drifts.length < need) return false;
-    final d = medianDrift!;
-    _drifts.clear();
-    _settling = false;
-    if (d.abs() < deadBandMs) return false;
-    // What the picture needs relative to the sound, given what is applied.
-    final relative = (videoDelayMs - audioDelayMs) + d;
-    if (relative >= 0) {
-      targetVideoMs = math.min(relative.round(), capMs);
-      targetAudioMs = 0;
-    } else {
-      targetAudioMs = math.min((-relative).round(), capMs);
-      targetVideoMs = 0;
+  /// New targets from every stream that is ready (enough fresh readings).
+  /// Returns true when any target moved.
+  bool solve({DateTime? now}) {
+    final t = now ?? DateTime.now();
+    final natural = <String, double>{};
+    for (final e in _natural.entries) {
+      final last = _lastReading[e.key];
+      if (last == null || t.difference(last) > staleAfter) continue;
+      if (e.value.length < settleWindow) continue;
+      natural[e.key] = _median(e.value);
     }
-    return true;
+    if (natural.length < 2) return false; // nothing to line up
+    final newest = natural.values.reduce(math.min);
+    final oldest = natural.values.reduce(math.max);
+    // Everyone meets the oldest stream — unless it's past the cap.
+    final meet = math.min(oldest, newest + capMs);
+    var changed = false;
+    for (final e in natural.entries) {
+      _settled.add(e.key);
+      final want = (meet - e.value).round().clamp(0, capMs);
+      final had = targetMs[e.key] ?? 0;
+      if ((want - had).abs() < deadBandMs) continue;
+      targetMs[e.key] = want;
+      changed = true;
+    }
+    return changed;
   }
 
-  /// One ramp step toward the targets. Returns which delays changed.
-  ({bool video, bool audio}) step() {
-    int toward(int from, int to) =>
-        from + (to - from).clamp(-stepMs, stepMs).toInt();
-    final v = toward(videoDelayMs, targetVideoMs);
-    final a = toward(audioDelayMs, targetAudioMs);
-    final changed = (video: v != videoDelayMs, audio: a != audioDelayMs);
-    videoDelayMs = v;
-    audioDelayMs = a;
-    return changed;
+  /// One ramp step toward the targets. Returns the streams whose delay moved.
+  Set<String> step() {
+    final moved = <String>{};
+    for (final id in {...targetMs.keys, ...delayMs.keys}) {
+      final from = delayMs[id] ?? 0;
+      final to = targetMs[id] ?? 0;
+      final next = from + (to - from).clamp(-stepMs, stepMs).toInt();
+      if (next == from) continue;
+      delayMs[id] = next;
+      moved.add(id);
+    }
+    return moved;
   }
 }
 
 /// The most RealSync holds a stream back. A camera further out than this is
 /// flagged in the Studio instead of delaying everyone watching it.
 const realSyncCapMs = 1000;
-
-/// How far the picture's content is ahead of the sound's, from how old each
-/// is when it plays ([ContentAgeReader]).
-double driftMs({required double videoAgeMs, required double audioAgeMs}) =>
-    audioAgeMs - videoAgeMs;
 
 int clockOffsetOf(Participant? p) =>
     (parseParticipantMeta(p?.metadata)['clockOffsetMs'] as num?)?.toInt() ?? 0;
@@ -314,29 +351,27 @@ class ContentAgeReader {
   void dispose() => retain(const {});
 }
 
-/// Viewer side: runs the [SyncEngine] against the watched camera and the
-/// master audio. It looks the two up itself on every tick, so an angle switch
-/// or a master-audio change is noticed without any wiring in the viewer.
+/// Viewer side: runs the [GroupSyncEngine] over every video feed on screen
+/// and the master audio. It looks them up itself on every tick, so a new
+/// camera, a closed one or a master-audio change is noticed without wiring.
 class RealSyncDriver {
   RealSyncDriver({
     required this.room,
-    required this.watchedCamera,
+    required this.feeds,
     required this.masterAudio,
-    SyncEngine? engine,
-  }) : engine = engine ?? SyncEngine();
+    GroupSyncEngine? engine,
+  }) : engine = engine ?? GroupSyncEngine();
 
   final Room room;
-  final String? Function() watchedCamera;
+
+  /// Every video feed the viewer has on screen: who sends it, and its track.
+  final List<({String identity, Track? track})> Function() feeds;
   final String? Function() masterAudio;
-  final SyncEngine engine;
+  final GroupSyncEngine engine;
   final ContentAgeReader _ages = ContentAgeReader();
 
   Timer? _sampler;
   Timer? _ramp;
-  String? _camera;
-  String? _audio;
-  String? _videoReceiverId;
-  String? _audioReceiverId;
   DateTime _ignoreUntil = DateTime.now();
 
   void start() {
@@ -344,7 +379,7 @@ class RealSyncDriver {
     _ramp = Timer.periodic(const Duration(milliseconds: 50), (_) => _applyStep());
   }
 
-  /// Resync: re-measure from scratch.
+  /// Resync: re-measure every stream from scratch.
   void reset() {
     engine.restart();
     _ignoreUntil = DateTime.now().add(const Duration(seconds: 1));
@@ -355,50 +390,38 @@ class RealSyncDriver {
     _sampler = Timer(d, _sample);
   }
 
-  RemoteTrackPublication? _videoPub(RemoteParticipant? p) => p
-      ?.videoTrackPublications
-      .where((x) => x.source != TrackSource.screenShareVideo && x.subscribed)
-      .firstOrNull;
-
   Future<void> _sample() async {
-    final camId = watchedCamera();
-    final audioId = masterAudio();
-    if (camId != _camera || audioId != _audio) {
-      // New angle or new sound source: let the old angle go, start over, and
-      // ignore readings until the new stream settles.
-      final old = _videoReceiverId;
-      if (old != null) unawaited(NileRealSync.setMinimumPlayoutDelay(old, null));
-      if (audioId != _audio && _audioReceiverId != null) {
-        unawaited(NileRealSync.setMinimumPlayoutDelay(_audioReceiverId!, null));
-        engine.clear();
-      } else {
-        engine.restart();
-      }
-      _camera = camId;
-      _audio = audioId;
-      _videoReceiverId = null;
-      _audioReceiverId = null;
-      _ignoreUntil = DateTime.now().add(const Duration(seconds: 1));
+    // receiverId → (sender, track) for every stream to line up.
+    final streams = <String, (Participant, Track)>{};
+    for (final f in feeds()) {
+      final p = room.remoteParticipants[f.identity];
+      final track = f.track;
+      final id = track?.receiver?.receiverId;
+      if (p != null && track != null && id != null) streams[id] = (p, track);
+    }
+    final audioFrom = room.remoteParticipants[masterAudio()];
+    final audio = audioFrom?.audioTrackPublications
+        .where((x) => x.subscribed)
+        .firstOrNull
+        ?.track;
+    final audioId = audio?.receiver?.receiverId;
+    if (audioFrom != null && audio != null && audioId != null) {
+      streams[audioId] = (audioFrom, audio);
     }
 
-    if (DateTime.now().isAfter(_ignoreUntil) && camId != null && audioId != null) {
-      final cam = room.remoteParticipants[camId];
-      final aud = room.remoteParticipants[audioId];
-      final vTrack = _videoPub(cam)?.track;
-      final aTrack = aud?.audioTrackPublications
-          .where((x) => x.subscribed)
-          .firstOrNull
-          ?.track;
-      _videoReceiverId = vTrack?.receiver?.receiverId;
-      _audioReceiverId = aTrack?.receiver?.receiverId;
-      _ages.retain({?_videoReceiverId, ?_audioReceiverId});
-      final va = await _ages.ageMs(cam, vTrack);
-      final aa = await _ages.ageMs(aud, aTrack);
-      if (va != null && aa != null) {
-        engine.addDrift(driftMs(videoAgeMs: va, audioAgeMs: aa));
-      }
+    for (final id in engine.retain(streams.keys.toSet())) {
+      unawaited(NileRealSync.setMinimumPlayoutDelay(id, null));
     }
-    // Quick readings while settling (~2 s to converge), then every 2 s.
+    _ages.retain(streams.keys.toSet());
+
+    if (DateTime.now().isAfter(_ignoreUntil)) {
+      for (final e in streams.entries) {
+        final age = await _ages.ageMs(e.value.$1, e.value.$2);
+        if (age != null) engine.add(e.key, age);
+      }
+      engine.solve();
+    }
+    // Quick readings while anything settles (~2 s to converge), then every 2 s.
     _schedule(
       engine.settling
           ? const Duration(milliseconds: 500)
@@ -407,26 +430,12 @@ class RealSyncDriver {
   }
 
   void _applyStep() {
-    final changed = engine.step();
-    final v = _videoReceiverId;
-    final a = _audioReceiverId;
-    if (changed.video && v != null) {
+    for (final id in engine.step()) {
+      final ms = engine.delayMs[id] ?? 0;
       unawaited(
         NileRealSync.setMinimumPlayoutDelay(
-          v,
-          engine.videoDelayMs == 0
-              ? null
-              : Duration(milliseconds: engine.videoDelayMs),
-        ),
-      );
-    }
-    if (changed.audio && a != null) {
-      unawaited(
-        NileRealSync.setMinimumPlayoutDelay(
-          a,
-          engine.audioDelayMs == 0
-              ? null
-              : Duration(milliseconds: engine.audioDelayMs),
+          id,
+          ms == 0 ? null : Duration(milliseconds: ms),
         ),
       );
     }
@@ -436,9 +445,10 @@ class RealSyncDriver {
     _sampler?.cancel();
     _ramp?.cancel();
     _ages.dispose();
-    for (final id in [_videoReceiverId, _audioReceiverId]) {
-      if (id != null) unawaited(NileRealSync.setMinimumPlayoutDelay(id, null));
+    for (final id in engine.delayMs.keys) {
+      unawaited(NileRealSync.setMinimumPlayoutDelay(id, null));
     }
+    engine.clear();
   }
 }
 

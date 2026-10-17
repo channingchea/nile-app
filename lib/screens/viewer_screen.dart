@@ -1063,13 +1063,13 @@ class _ViewerScreenState extends State<ViewerScreen>
       if (!mounted || _room != room) return;
       _realSyncOn = on;
       if (!on) return;
+      // Every feed on screen (main view and thumbnails) plus the master
+      // audio, all lined up to the same moment.
       _realSync = RealSyncDriver(
         room: room,
-        watchedCamera: () {
-          if (_cameras.isEmpty) return null;
-          final f = _cameras[_focusedIndex.clamp(0, _cameras.length - 1)];
-          return f.isScreenShare ? null : f.identity;
-        },
+        feeds: () => [
+          for (final c in _cameras) (identity: c.identity, track: c.track),
+        ],
         masterAudio: () => _masterAudioIdentity,
       )..start();
     });
