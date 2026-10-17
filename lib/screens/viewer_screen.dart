@@ -17,6 +17,7 @@ import '../services/livekit_service.dart';
 import '../services/realtime.dart';
 import '../services/report_service.dart';
 import '../services/share_urls.dart';
+import '../services/studio_roles.dart';
 import '../services/supabase_client.dart';
 import '../services/tip_service.dart';
 import '../router.dart';
@@ -886,14 +887,10 @@ class _ViewerScreenState extends State<ViewerScreen>
     }
 
     // Camera sync on (re)join: a fresh token carries a fresh server-stamped
-    // joinedAt. If the master-audio participant (re)joined, refresh the zero
+    // joinedAt. If the master-audio source (re)joined, refresh the zero
     // reference so every subsequent camera offset is measured against it.
-    final meta = _parseMeta(event.participant.metadata);
-    final role = meta['role'];
-    if (role == 'master-audio' ||
-        (role == 'camera' && meta['isMasterAudio'] == true)) {
-      final ja = (meta['joinedAt'] as num?)?.toInt();
-      if (ja != null) _audioJoinedAt = ja;
+    if (event.participant.identity == _masterAudioIdentity) {
+      _audioJoinedAt = _findAudioJoinedAt(_room) ?? _audioJoinedAt;
     }
     // Subscribe this participant's video held back to the audio timeline. Same
     // path as initial join — no special-casing.
@@ -917,20 +914,11 @@ class _ViewerScreenState extends State<ViewerScreen>
 
   /// joinedAt of the master-audio source — the zero reference for offsets.
   int? _findAudioJoinedAt(Room? room) {
-    if (room == null) return null;
-    for (final p in room.remoteParticipants.values) {
-      final meta = _parseMeta(p.metadata);
-      if (meta['role'] == 'master-audio') {
-        return (meta['joinedAt'] as num?)?.toInt();
-      }
-    }
-    for (final p in room.remoteParticipants.values) {
-      final meta = _parseMeta(p.metadata);
-      if (meta['role'] == 'camera' && meta['isMasterAudio'] == true) {
-        return (meta['joinedAt'] as num?)?.toInt();
-      }
-    }
-    return null;
+    final id = _findMasterAudioIdentity(room);
+    final p = id == null ? null : room?.remoteParticipants[id];
+    return p == null
+        ? null
+        : (_parseMeta(p.metadata)['joinedAt'] as num?)?.toInt();
   }
 
   /// Subscribe a camera's video held back so it aligns with the audio timeline.
@@ -963,6 +951,25 @@ class _ViewerScreenState extends State<ViewerScreen>
   }
 
   void _onParticipantMetadataUpdated(ParticipantMetadataUpdatedEvent event) {
+    // The Studio renamed a camera — the angle picker follows.
+    final name = _parseMeta(event.participant.metadata)['cameraName'] as String?;
+    if (name != null) {
+      final id = event.participant.identity;
+      if (_cameras.any((c) => c.identity == id && c.cameraName != name)) {
+        setState(() {
+          for (var i = 0; i < _cameras.length; i++) {
+            final c = _cameras[i];
+            if (c.identity != id) continue;
+            _cameras[i] = CameraFeed(
+              identity: c.identity,
+              cameraName: name,
+              track: c.track,
+              isScreenShare: c.isScreenShare,
+            );
+          }
+        });
+      }
+    }
     final newIdentity = _findMasterAudioIdentity(_room);
     if (newIdentity != _masterAudioIdentity) {
       setState(() => _masterAudioIdentity = newIdentity);
@@ -1103,33 +1110,21 @@ class _ViewerScreenState extends State<ViewerScreen>
     RemoteParticipant participant,
     RemoteTrackPublication publication,
   ) {
-    try {
-      final meta = jsonDecode(participant.metadata ?? '{}');
-      final role = meta['role'] as String?;
-      if (role == 'camera' || role == 'master-audio') {
-        _audioPublications[participant.identity] = publication;
-        _updateAudioRouting();
-      }
-    } catch (_) {}
+    if (NileRole.isPublisher(_parseMeta(participant.metadata)['role'])) {
+      _audioPublications[participant.identity] = publication;
+      _updateAudioRouting();
+    }
   }
 
+  /// Whose audio the show carries: the publisher flagged isMasterAudio (a
+  /// camera, the Studio, or Stream Audio — the server keeps it to one), with
+  /// Stream Audio then the earliest camera as the fallback while nobody is.
   String? _findMasterAudioIdentity(Room? room) {
     if (room == null) return null;
-    for (final p in room.remoteParticipants.values) {
-      try {
-        final meta = jsonDecode(p.metadata ?? '{}');
-        if (meta['role'] == 'master-audio') return p.identity;
-      } catch (_) {}
-    }
-    for (final p in room.remoteParticipants.values) {
-      try {
-        final meta = jsonDecode(p.metadata ?? '{}');
-        if (meta['role'] == 'camera' && meta['isMasterAudio'] == true) {
-          return p.identity;
-        }
-      } catch (_) {}
-    }
-    return null;
+    return resolveMasterAudio([
+      for (final p in room.remoteParticipants.values)
+        PublisherInfo.fromMeta(p.identity, _parseMeta(p.metadata)),
+    ]);
   }
 
   void _updateAudioRouting() {
@@ -1206,7 +1201,10 @@ class _ViewerScreenState extends State<ViewerScreen>
     } catch (_) {
       return;
     }
-    if (meta['role'] != 'camera') return;
+    // Cameras, and the Studio's own webcam / screen share.
+    if (meta['role'] != NileRole.camera && meta['role'] != NileRole.studio) {
+      return;
+    }
     if (_cameras.any(
       (c) =>
           c.identity == participant.identity &&

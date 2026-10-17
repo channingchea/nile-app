@@ -7,10 +7,14 @@
 //
 // One function, routed on `action` in the request body (section 3.1):
 //   create-room       host    → { roomName, eventName }
-//   camera-token      host    → { token, wsUrl, isMasterAudio }
+//   camera-token      host    → { token, wsUrl, isMasterAudio, slotId, cameraName }
 //   audio-token       host    → { token, wsUrl }
+//   studio-token      host    → { token, wsUrl, isMasterAudio }   ← desktop Studio joins as control room
+//   studio-camera     host    → { success, slotId, cameraName }  ← Studio turns its own webcam on/off
+//   list-slots        crew    → { slots: [...], streamAudioTaken } ← "Which camera is this?"
+//   rename-camera     host    → { success: true }   ← renames a slot + its live feed
 //   list-cameras      host    → { cameras: [{ identity, name, cameraName, cameraId }] }
-//   set-master-audio  host    → { success: true }
+//   set-master-audio  host    → { success: true }   ← any publisher; exactly one holds the flag
 //   remove-participant host   → { success: true }   ← ejects one participant
 //   set-ready         crew    → { success: true }   ← flags caller's feed ready
 //   start-show        host    → { success: true }   ← stamps showStartedAt anchor + starts replay egress
@@ -36,6 +40,19 @@ import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders as corsHeadersFor } from "../_shared/cors.ts";
 import { failure } from "../_shared/errors.ts";
+import {
+  cleanCameraName,
+  flagsToClear,
+  isPublisher,
+  joinTakesMasterAudio,
+  liveCameraCount,
+  type Peer,
+  resolveSlot,
+  type Slot,
+  slotHolders,
+  studioConnected,
+  studioIdentity,
+} from "../_shared/studio.ts";
 
 // CORS headers are per-request, so the JSON responder is built per-request too
 // and handed to the helpers below (they run outside the handler's scope).
@@ -186,6 +203,74 @@ function parseMeta(raw: string | undefined): Record<string, unknown> {
   }
 }
 
+/** Everyone in the room with their parsed metadata. Empty if the room is not up. */
+async function peersOf(roomName: string): Promise<Peer[]> {
+  try {
+    const ps = await roomService.listParticipants(roomName);
+    return ps.map((p) => ({ identity: p.identity, meta: parseMeta(p.metadata) }));
+  } catch {
+    return [];
+  }
+}
+
+async function roomMetaOf(roomName: string): Promise<Record<string, unknown>> {
+  try {
+    const rooms = await roomService.listRooms([roomName]);
+    return rooms[0] ? parseMeta(rooms[0].metadata) : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Merge [patch] into a participant's metadata (and optionally rename it). */
+async function patchPeer(roomName: string, peer: Peer, patch: Record<string, unknown>, name?: string) {
+  const metadata = JSON.stringify({ ...peer.meta, ...patch });
+  peer.meta = { ...peer.meta, ...patch };
+  await roomService.updateParticipant(roomName, peer.identity, name ? { metadata, name } : { metadata });
+}
+
+/** Exactly one publisher carries isMasterAudio — drop it from everyone but [keep]. */
+async function clearMasterFlags(roomName: string, peers: Peer[], keep: string) {
+  await Promise.all(
+    flagsToClear(peers, keep).map((p) =>
+      patchPeer(roomName, p, { isMasterAudio: false }).catch((err) =>
+        log("warn", { action: "clear-master", identity: p.identity, error: String(err) })
+      )
+    ),
+  );
+}
+
+/** Decide the master-audio flag for a publisher about to join, clearing others if it takes it. */
+async function masterFlagOnJoin(
+  roomName: string,
+  identity: string,
+  role: "camera" | "master-audio" | "studio",
+  peers: Peer[],
+): Promise<boolean> {
+  const chosen = (await roomMetaOf(roomName)).masterAudio;
+  const take = joinTakesMasterAudio({ identity, role, peers, chosen });
+  if (take) await clearMasterFlags(roomName, peers, identity);
+  return take;
+}
+
+async function slotsFor(eventPk: string, admin: any): Promise<Slot[]> {
+  const { data } = await admin
+    .from("event_cameras")
+    .select("id, slot_index, label")
+    .eq("event_id", eventPk)
+    .order("slot_index");
+  return (data ?? []) as Slot[];
+}
+
+async function usernameOf(userId: string, admin: any): Promise<string | null> {
+  const { data } = await admin.from("profiles").select("username").eq("id", userId).maybeSingle();
+  return (data?.username as string | undefined) ?? null;
+}
+
+/** "iPhone" / "iPad" / "Android" / "Mac" — a label only, so anything short goes. */
+const deviceLabel = (raw: unknown) =>
+  typeof raw === "string" && raw.length > 0 && raw.length <= 20 ? raw : null;
+
 // ── Structured logging (roadmap #4 observability) ─────────────────────────────
 //
 // One JSON line per request — searchable in the Supabase logs explorer, e.g.:
@@ -269,6 +354,14 @@ async function handle(req: Request, ctx: ReqCtx, json: Json): Promise<Response> 
       return await cameraToken(body, user.id, admin, json);
     case "audio-token":
       return await audioToken(body, user.id, admin, json);
+    case "studio-token":
+      return await studioToken(body, user.id, admin, json);
+    case "studio-camera":
+      return await studioCamera(body, user.id, admin, json);
+    case "list-slots":
+      return await listSlots(body, user.id, admin, json);
+    case "rename-camera":
+      return await renameCamera(body, user.id, admin, json);
     case "list-cameras":
       return await listCameras(body, user.id, admin, json);
     case "set-master-audio":
@@ -427,8 +520,14 @@ async function createRoom(body: any, userId: string, admin: any, json: Json): Pr
 }
 
 // camera-token (was POST /api/camera-token)
+//
+// Body: { eventId, cameraId, cameraName, monitor?, slotId?, device? }
+// `slotId` is the event_cameras row the device picked in "Which camera is
+// this?". Without it the slot comes from the caller's crew assignment, then a
+// label match on cameraName (older builds), then the first open slot — see
+// resolveSlot(). A resolved slot's label becomes the camera's name.
 async function cameraToken(body: any, userId: string, admin: any, json: Json): Promise<Response> {
-  const { eventId, cameraId, cameraName, monitor } = body;
+  const { eventId, cameraId, cameraName, monitor, slotId } = body;
   if (!eventId || !cameraId || !cameraName) {
     return json({ error: "eventId, cameraId, and cameraName are required" }, 400);
   }
@@ -441,39 +540,59 @@ async function cameraToken(body: any, userId: string, admin: any, json: Json): P
   await ensureRoom(eventId, admin);
 
   const roomName = roomNameFor(eventId);
+  const identity = `camera-${cameraId}`;
+  const peers = await peersOf(roomName);
+  const isHost = gate.event.host_id === userId;
 
   // C9: camera_count is what the host is priced on — a "free, single-camera"
   // event could run five publishers because nothing checked at mint time. Count
-  // the cameras already in the room and refuse the one that would exceed it.
-  // A publisher rejoining reuses its own cameraId, so a reconnect never counts
-  // twice.
+  // the feeds already in the room (cameras, plus the Studio's own webcam) and
+  // refuse the one that would exceed it. A publisher rejoining reuses its own
+  // cameraId, so a reconnect never counts twice.
   const { data: cfg } = await admin
     .from("events")
     .select("camera_count")
     .eq("id", gate.event.id)
     .maybeSingle();
   const cameraLimit = Math.max(1, (cfg?.camera_count as number | null) ?? 1);
-  try {
-    const participants = await roomService.listParticipants(roomName);
-    const live = new Set(
-      participants
-        .filter((p) => parseMeta(p.metadata).role === "camera")
-        .map((p) => p.identity),
+  const live = liveCameraCount(peers, identity);
+  if (live >= cameraLimit) {
+    return json(
+      {
+        error:
+          `This event is set up for ${cameraLimit} camera${cameraLimit === 1 ? "" : "s"}, ` +
+          `and ${live} ${live === 1 ? "is" : "are"} already connected.`,
+      },
+      409,
     );
-    live.delete(`camera-${cameraId}`); // this publisher reconnecting
-    if (live.size >= cameraLimit) {
-      return json(
-        {
-          error:
-            `This event is set up for ${cameraLimit} camera${cameraLimit === 1 ? "" : "s"}, ` +
-            `and ${live.size} ${live.size === 1 ? "is" : "are"} already connected.`,
-        },
-        409,
-      );
-    }
-  } catch {
-    // Room not up yet — nothing to exceed.
   }
+
+  // Slot. Crew land on the slot the host assigned them; an explicit pick is
+  // honoured or refused, never silently moved.
+  let assignedSlotId: string | null = null;
+  if (!slotId && !isHost) {
+    const { data: op } = await admin
+      .from("event_operators")
+      .select("camera_id")
+      .eq("event_id", gate.event.id)
+      .eq("operator_id", userId)
+      .maybeSingle();
+    assignedSlotId = (op?.camera_id as string | null) ?? null;
+  }
+  const picked = resolveSlot({
+    slots: await slotsFor(gate.event.id, admin),
+    peers,
+    identity,
+    slotId,
+    assignedSlotId,
+    cameraName,
+  });
+  if ("missing" in picked) return json({ error: "That camera slot no longer exists" }, 404);
+  if ("conflict" in picked) {
+    return json({ error: `${picked.conflict.label} is already in use on another device.` }, 409);
+  }
+  const slot = picked.slot;
+  const name = slot?.label ?? cameraName;
 
   // The HOST's camera may also subscribe, and only when it asks to. This feeds
   // the macOS Studio's monitor wall — a host has to see every crew feed to run
@@ -487,23 +606,13 @@ async function cameraToken(body: any, userId: string, admin: any, json: Json): P
   // host's phone, mid-show. Clients that manage their own subscriptions
   // (autoSubscribe: false + an explicit subscribe pass) send this flag; older
   // ones never do and keep exactly the behaviour they shipped with.
-  const isHost = gate.event.host_id === userId;
   const canMonitor = isHost && monitor === true;
 
-  // First camera to join becomes master audio by default.
-  let isMasterAudio = false;
-  try {
-    const participants = await roomService.listParticipants(roomName);
-    const cameras = participants.filter((p) => parseMeta(p.metadata).role === "camera");
-    isMasterAudio = cameras.length === 0;
-  } catch {
-    // Room may not exist yet — treat as first camera.
-    isMasterAudio = true;
-  }
+  const isMasterAudio = await masterFlagOnJoin(roomName, identity, "camera", peers);
 
   const token = await buildToken({
-    identity: `camera-${cameraId}`,
-    name: cameraName,
+    identity,
+    name,
     roomName,
     canPublish: true,
     canSubscribe: canMonitor,
@@ -513,10 +622,22 @@ async function cameraToken(body: any, userId: string, admin: any, json: Json): P
     // userId (from the verified JWT) lets the host's crew panel and set-ready
     // match this publisher to the assigned-operator roster. ready starts false
     // on every fresh token, so a reconnect naturally resets readiness.
-    metadata: JSON.stringify({ role: "camera", cameraId, cameraName, isMasterAudio, joinedAt: Date.now(), userId, ready: false }),
+    // slotId / username / device drive the Studio's slot-ordered source list.
+    metadata: JSON.stringify({
+      role: "camera",
+      cameraId,
+      cameraName: name,
+      isMasterAudio,
+      joinedAt: Date.now(),
+      userId,
+      ready: false,
+      slotId: slot?.id ?? null,
+      username: await usernameOf(userId, admin),
+      device: deviceLabel(body.device),
+    }),
   });
 
-  return json({ token, wsUrl: LIVEKIT_URL, isMasterAudio });
+  return json({ token, wsUrl: LIVEKIT_URL, isMasterAudio, slotId: slot?.id ?? null, cameraName: name });
 }
 
 // audio-token (was POST /api/audio-token) — audio-only master publisher
@@ -532,18 +653,186 @@ async function audioToken(body: any, userId: string, admin: any, json: Json): Pr
   await ensureRoom(eventId, admin);
 
   const roomName = roomNameFor(eventId);
+  const identity = `master-audio-${eventId}`;
+  // Stream Audio carries the show's sound unless the host picked another
+  // source that is still in the room (joinTakesMasterAudio).
+  const isMasterAudio = await masterFlagOnJoin(roomName, identity, "master-audio", await peersOf(roomName));
   const token = await buildToken({
-    identity: `master-audio-${eventId}`,
-    name: "Master Audio",
+    identity,
+    name: "Stream Audio",
     roomName,
     canPublish: true,
     canSubscribe: false,
     // joinedAt is the zero reference for camera-sync offsets (see viewer side).
     // userId + ready: see camera-token.
-    metadata: JSON.stringify({ role: "master-audio", joinedAt: Date.now(), userId, ready: false }),
+    metadata: JSON.stringify({
+      role: "master-audio",
+      joinedAt: Date.now(),
+      userId,
+      ready: false,
+      isMasterAudio,
+      username: await usernameOf(userId, admin),
+      device: deviceLabel(body.device),
+    }),
   });
 
   return json({ token, wsUrl: LIVEKIT_URL });
+}
+
+// studio-token — the host's desktop Studio joins as the show's control room.
+//
+// Not a camera: it doesn't count toward camera_count until its own webcam is
+// turned on (studio-camera). The identity is fixed per event, so opening the
+// Studio on a second Mac evicts the first (LiveKit drops the older session
+// with DUPLICATE_IDENTITY) — a show has one control room. While it is in the
+// room, the host's phones act as camera operators and start-show / stop-egress
+// are refused from anywhere else.
+async function studioToken(body: any, userId: string, admin: any, json: Json): Promise<Response> {
+  const { eventId } = body;
+  if (!eventId) return json({ error: "eventId is required" }, 400);
+
+  const gate = await requireHost(eventId, userId, admin, json);
+  if (gate instanceof Response) return gate;
+
+  await ensureRoom(eventId, admin);
+
+  const roomName = roomNameFor(eventId);
+  const identity = studioIdentity(eventId);
+  const isMasterAudio = await masterFlagOnJoin(roomName, identity, "studio", await peersOf(roomName));
+  const token = await buildToken({
+    identity,
+    name: "Studio",
+    roomName,
+    canPublish: true,
+    // The Studio's monitor wall. Studio builds connect with autoSubscribe off
+    // and subscribe per feed, so the grant never costs an old client anything.
+    canSubscribe: true,
+    metadata: JSON.stringify({
+      role: "studio",
+      cameraName: "Studio",
+      hasCamera: false,
+      isMasterAudio,
+      joinedAt: Date.now(),
+      userId,
+      username: await usernameOf(userId, admin),
+      device: deviceLabel(body.device),
+    }),
+  });
+
+  return json({ token, wsUrl: LIVEKIT_URL, isMasterAudio });
+}
+
+// studio-camera — the Studio turns its own webcam on or off.
+//
+// Body: { eventId, enabled }. Turning it on counts toward camera_count (and is
+// refused if the event is full) and takes the first open slot, so the Studio's
+// camera shows up — and can be renamed — like any other.
+async function studioCamera(body: any, userId: string, admin: any, json: Json): Promise<Response> {
+  const { eventId, enabled } = body;
+  if (!eventId || typeof enabled !== "boolean") {
+    return json({ error: "eventId and enabled (boolean) are required" }, 400);
+  }
+
+  const gate = await requireHost(eventId, userId, admin, json);
+  if (gate instanceof Response) return gate;
+
+  const roomName = roomNameFor(eventId);
+  const identity = studioIdentity(eventId);
+  const peers = await peersOf(roomName);
+  const studio = peers.find((p) => p.identity === identity);
+  if (!studio) return json({ error: "The Studio isn't connected" }, 409);
+
+  if (!enabled) {
+    await patchPeer(roomName, studio, { hasCamera: false, slotId: null, cameraName: "Studio" }, "Studio");
+    return json({ success: true, slotId: null, cameraName: "Studio" });
+  }
+
+  const { data: cfg } = await admin
+    .from("events")
+    .select("camera_count")
+    .eq("id", gate.event.id)
+    .maybeSingle();
+  const cameraLimit = Math.max(1, (cfg?.camera_count as number | null) ?? 1);
+  const live = liveCameraCount(peers, identity);
+  if (live >= cameraLimit) {
+    return json(
+      {
+        error: `All ${cameraLimit} camera${cameraLimit === 1 ? "" : "s"} for this event are in use. ` +
+          `Add a camera on the event page to use this one too.`,
+      },
+      409,
+    );
+  }
+
+  const picked = resolveSlot({ slots: await slotsFor(gate.event.id, admin), peers, identity });
+  const slot = "slot" in picked ? picked.slot : null;
+  const name = slot?.label ?? "Studio";
+  await patchPeer(roomName, studio, { hasCamera: true, slotId: slot?.id ?? null, cameraName: name }, name);
+  return json({ success: true, slotId: slot?.id ?? null, cameraName: name });
+}
+
+// list-slots — the event's camera slots and who holds each, for the host
+// phone's "Which camera is this?" sheet and the Studio's slot-ordered list.
+async function listSlots(body: any, userId: string, admin: any, json: Json): Promise<Response> {
+  const { eventId } = body;
+  if (!eventId) return json({ error: "eventId is required" }, 400);
+
+  const gate = await requireOperator(eventId, userId, admin, json);
+  if (gate instanceof Response) return gate;
+
+  const peers = await peersOf(roomNameFor(eventId));
+  const held = slotHolders(peers);
+  const slots = (await slotsFor(gate.event.id, admin)).map((s) => {
+    const p = held.get(s.id);
+    return {
+      id: s.id,
+      slotIndex: s.slot_index,
+      label: s.label,
+      heldBy: p?.identity ?? null,
+      heldByUsername: (p?.meta.username as string | undefined) ?? null,
+      heldByDevice: (p?.meta.device as string | undefined) ?? null,
+    };
+  });
+  return json({
+    slots,
+    streamAudioTaken: peers.some((p) => p.meta.role === "master-audio"),
+  });
+}
+
+// rename-camera — rename a slot (and the feed on it) on the fly.
+//
+// Body: { eventId, name, slotId? , identity? }. With a slotId the slot's label
+// is saved (it is the camera's name for the rest of the event) and whoever is
+// on it is renamed live; with only an identity, just that live feed is renamed
+// (a feed with no slot). Host only — the Studio is where it is offered.
+async function renameCamera(body: any, userId: string, admin: any, json: Json): Promise<Response> {
+  const { eventId, slotId, identity } = body;
+  const name = cleanCameraName(body.name);
+  if (!eventId || (!slotId && !identity)) {
+    return json({ error: "eventId and a slotId or identity are required" }, 400);
+  }
+  if (!name) return json({ error: "Camera names are 1 to 40 characters" }, 400);
+
+  const gate = await requireHost(eventId, userId, admin, json);
+  if (gate instanceof Response) return gate;
+
+  if (slotId) {
+    const { data, error } = await admin
+      .from("event_cameras")
+      .update({ label: name })
+      .eq("id", slotId)
+      .eq("event_id", gate.event.id)
+      .select("id");
+    if (error) throw error;
+    if (!data?.length) return json({ error: "That camera slot no longer exists" }, 404);
+  }
+
+  const roomName = roomNameFor(eventId);
+  const targets = (await peersOf(roomName)).filter((p) =>
+    isPublisher(p) && ((slotId && p.meta.slotId === slotId) || (!slotId && p.identity === identity))
+  );
+  await Promise.all(targets.map((p) => patchPeer(roomName, p, { cameraName: name }, name)));
+  return json({ success: true });
 }
 
 // list-cameras (was GET /api/event/:id/cameras) — feeds the viewer angle picker
@@ -576,29 +865,34 @@ async function listCameras(body: any, userId: string, admin: any, json: Json): P
   return json({ cameras });
 }
 
-// set-master-audio (was POST /api/set-master-audio) — re-assign master flag
+// set-master-audio — choose which publisher carries the show's sound.
+//
+// Body: { eventId, identity } (older builds send `cameraIdentity`). Any
+// publisher qualifies: a camera, the Studio, or Stream Audio. Exactly one holds
+// isMasterAudio afterwards, and the choice is written to room metadata
+// (`masterAudio`) so that publisher reclaims audio if it drops and rejoins.
+// Viewers route audio from the flag alone.
 async function setMasterAudio(body: any, userId: string, admin: any, json: Json): Promise<Response> {
-  const { eventId, cameraIdentity } = body;
-  if (!eventId || !cameraIdentity) {
-    return json({ error: "eventId and cameraIdentity are required" }, 400);
+  const { eventId } = body;
+  const target = (body.identity ?? body.cameraIdentity) as string | undefined;
+  if (!eventId || !target) {
+    return json({ error: "eventId and identity are required" }, 400);
   }
 
   const gate = await requireOperator(eventId, userId, admin, json);
   if (gate instanceof Response) return gate;
 
   const roomName = roomNameFor(eventId);
-  const participants = await roomService.listParticipants(roomName);
+  const peers = await peersOf(roomName);
+  const chosen = peers.find((p) => p.identity === target && isPublisher(p));
+  if (!chosen) return json({ error: "That source isn't connected" }, 404);
 
-  await Promise.all(
-    participants.map(async (p) => {
-      const meta = parseMeta(p.metadata);
-      if (meta.role !== "camera") return;
-      const updated = { ...meta, isMasterAudio: p.identity === cameraIdentity };
-      await roomService.updateParticipant(roomName, p.identity, {
-        metadata: JSON.stringify(updated),
-      });
-    }),
+  await roomService.updateRoomMetadata(
+    roomName,
+    JSON.stringify({ ...(await roomMetaOf(roomName)), masterAudio: target }),
   );
+  await clearMasterFlags(roomName, peers, target);
+  if (chosen.meta.isMasterAudio !== true) await patchPeer(roomName, chosen, { isMasterAudio: true });
 
   return json({ success: true });
 }
@@ -683,6 +977,12 @@ async function startShow(body: any, userId: string, admin: any, json: Json): Pro
   // operator's.
   const gate = await requireHost(eventId, userId, admin, json);
   if (gate instanceof Response) return gate;
+  // While the Studio is in the room it runs the show: a host phone (or an
+  // older build that knows nothing about the Studio) can't start or finalize
+  // it from the side. The Studio identifies itself with `studio: true`.
+  if (body.studio !== true && studioConnected(await peersOf(roomNameFor(eventId)))) {
+    return json({ error: "Your Studio is running this show — use the Studio's controls." }, 409);
+  }
 
   const roomName = roomNameFor(eventId);
   let meta: Record<string, unknown> = {};
@@ -806,6 +1106,12 @@ async function stopEgress(body: any, userId: string, admin: any, json: Json): Pr
   // truncates the replay the host later sells.
   const gate = await requireHost(eventId, userId, admin, json);
   if (gate instanceof Response) return gate;
+  // While the Studio is in the room it runs the show: a host phone (or an
+  // older build that knows nothing about the Studio) can't start or finalize
+  // it from the side. The Studio identifies itself with `studio: true`.
+  if (body.studio !== true && studioConnected(await peersOf(roomNameFor(eventId)))) {
+    return json({ error: "Your Studio is running this show — use the Studio's controls." }, 409);
+  }
 
   const { data: replay } = await admin
     .from("replays")

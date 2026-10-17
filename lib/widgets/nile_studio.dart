@@ -38,6 +38,8 @@ class NileStudioSource {
     this.isReady = false,
     this.mirror = false,
     this.isRemovable = false,
+    this.slotId,
+    this.isRenamable = false,
   });
 
   /// LiveKit participant identity, plus a suffix for a participant's second
@@ -65,6 +67,13 @@ class NileStudioSource {
   /// a share isn't a participant of its own, so removing the operator's camera
   /// row takes their share with it.
   final bool isRemovable;
+
+  /// The camera slot this row is (event_cameras.id) — set for a connected
+  /// feed on a slot and for an open slot's placeholder row.
+  final String? slotId;
+
+  /// Whether the host may rename this camera from the Studio.
+  final bool isRenamable;
 }
 
 /// Signal strength for the top row. Mapped from LiveKit's `ConnectionQuality`
@@ -147,6 +156,7 @@ class NileStudio extends StatelessWidget {
     this.trailing,
     this.meter,
     this.onRemoveSource,
+    this.onRenameSource,
   });
 
   /// Sources in display order: your own camera first, then crew, then shares.
@@ -184,6 +194,9 @@ class NileStudio extends StatelessWidget {
   /// Ejects a source from the room. Null hides the affordance entirely — only
   /// the host gets it, and only on sources marked [NileStudioSource.isRemovable].
   final ValueChanged<NileStudioSource>? onRemoveSource;
+
+  /// Renames a camera. Null hides it; offered on [NileStudioSource.isRenamable].
+  final ValueChanged<NileStudioSource>? onRenameSource;
 
   /// This device's own audio meter, pinned under the source list. It belongs
   /// beside the roster rather than over the video: it is about the feed you are
@@ -231,6 +244,7 @@ class NileStudio extends StatelessWidget {
                   selectedIdentity: selected?.identity,
                   onSelect: onSelectSource,
                   onRemove: onRemoveSource,
+                  onRename: onRenameSource,
                   selfIdentity: selfIdentity,
                   meter: meter,
                 ),
@@ -527,6 +541,7 @@ class _StudioSourceList extends StatelessWidget {
     required this.onSelect,
     required this.selfIdentity,
     this.onRemove,
+    this.onRename,
     this.meter,
   });
 
@@ -534,6 +549,7 @@ class _StudioSourceList extends StatelessWidget {
   final String? selectedIdentity;
   final ValueChanged<String> onSelect;
   final ValueChanged<NileStudioSource>? onRemove;
+  final ValueChanged<NileStudioSource>? onRename;
   final String? selfIdentity;
   final Widget? meter;
 
@@ -589,6 +605,9 @@ class _StudioSourceList extends StatelessWidget {
                         onRemove: s.isRemovable && onRemove != null
                             ? () => onRemove!(s)
                             : null,
+                        onRename: s.isRenamable && onRename != null
+                            ? () => onRename!(s)
+                            : null,
                       );
                     },
                   ),
@@ -615,12 +634,14 @@ class _SourceTile extends StatelessWidget {
     required this.selected,
     required this.onTap,
     this.onRemove,
+    this.onRename,
   });
 
   final NileStudioSource source;
   final bool selected;
   final VoidCallback onTap;
   final VoidCallback? onRemove;
+  final VoidCallback? onRename;
 
   @override
   Widget build(BuildContext context) {
@@ -689,7 +710,7 @@ class _SourceTile extends StatelessWidget {
                       ),
                     ),
                   ],
-                  if (onRemove != null)
+                  if (onRemove != null || onRename != null)
                     SizedBox(
                       width: 22,
                       height: 22,
@@ -703,15 +724,24 @@ class _SourceTile extends StatelessWidget {
                           color: NileColors.txtTertiary,
                         ),
                         itemBuilder: (_) => [
-                          PopupMenuItem<void>(
-                            onTap: onRemove,
-                            child: Text(
-                              'Remove from stream',
-                              style: NileTextStyles.bodySm().copyWith(
-                                color: NileColors.error,
+                          if (onRename != null)
+                            PopupMenuItem<void>(
+                              onTap: onRename,
+                              child: Text(
+                                'Rename camera…',
+                                style: NileTextStyles.bodySm(),
                               ),
                             ),
-                          ),
+                          if (onRemove != null)
+                            PopupMenuItem<void>(
+                              onTap: onRemove,
+                              child: Text(
+                                'Remove from stream',
+                                style: NileTextStyles.bodySm().copyWith(
+                                  color: NileColors.error,
+                                ),
+                              ),
+                            ),
                         ],
                       ),
                     ),
@@ -1297,6 +1327,9 @@ class NileStudioControlBar extends StatelessWidget {
     this.isReady = false,
     this.onToggleReady,
     this.onEndStream,
+    this.studioCameraLabel,
+    this.showClaimMasterAudio = true,
+    this.toolbar = const [],
   });
 
   /// False means Sound Check — the bar is only ever shown in one of the two.
@@ -1329,9 +1362,23 @@ class NileStudioControlBar extends StatelessWidget {
   final VoidCallback? onToggleReady;
   final VoidCallback? onEndStream;
 
+  /// The Studio's own webcam is off by default and turned on by choice, so
+  /// it gets a camera toggle of its own ("Use this Mac's camera") instead of
+  /// the master-audio-only Video Off button. Null for a camera device.
+  final String? studioCameraLabel;
+
+  /// The phone-style "Set as Master Audio" button. The Studio uses its
+  /// master-audio menu in [toolbar] instead.
+  final bool showClaimMasterAudio;
+
+  /// Show tools — target chips, rename, master audio — between the device
+  /// controls and the show controls. Empty for a camera device.
+  final List<Widget> toolbar;
+
   @override
   Widget build(BuildContext context) {
     final soundCheck = !isLive;
+    final studioCam = studioCameraLabel;
 
     return Wrap(
       alignment: WrapAlignment.spaceBetween,
@@ -1374,14 +1421,21 @@ class NileStudioControlBar extends StatelessWidget {
             // sound has nothing left to contribute with its lens covered. A
             // camera that is already off (started that way from a saved
             // setting) always gets the button back, or it could never turn on.
-            if (isMasterAudio || !videoEnabled)
+            if (studioCam != null)
+              OutlinedButton.icon(
+                onPressed: onToggleVideo,
+                icon: Icon(videoEnabled ? Icons.videocam_off : Icons.videocam),
+                label: Text(videoEnabled ? 'Camera Off' : studioCam),
+                style: _outlined(NileColors.txtPrimary, NileColors.borderStrong),
+              )
+            else if (isMasterAudio || !videoEnabled)
               OutlinedButton.icon(
                 onPressed: onToggleVideo,
                 icon: Icon(videoEnabled ? Icons.videocam_off : Icons.videocam),
                 label: Text(videoEnabled ? 'Video Off' : 'Video On'),
                 style: _outlined(NileColors.txtPrimary, NileColors.borderStrong),
               ),
-            if (!isMasterAudio && soundCheck) ...[
+            if (showClaimMasterAudio && !isMasterAudio && soundCheck) ...[
               if (!videoEnabled) const SizedBox(width: NileSpacing.s8),
               OutlinedButton.icon(
                 onPressed: onClaimMasterAudio,
@@ -1392,6 +1446,16 @@ class NileStudioControlBar extends StatelessWidget {
             ],
           ],
         ),
+        if (toolbar.isNotEmpty)
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (var i = 0; i < toolbar.length; i++) ...[
+                if (i > 0) const SizedBox(width: NileSpacing.s8),
+                toolbar[i],
+              ],
+            ],
+          ),
         Row(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -1540,4 +1604,201 @@ class NileCameraPickerButton extends StatelessWidget {
       ),
     );
   }
+}
+
+// ── Studio toolbar ───────────────────────────────────────────────────────────
+// Show tools that act on the room rather than on this device. The target chips
+// say what the tools act on — the selected camera, or every camera at once
+// (graphics, phase 5) — so the host never has to guess.
+
+/// "Camera 1 | All cameras". [targetLabel] null = nothing selectable yet.
+class NileStudioTargetChips extends StatelessWidget {
+  const NileStudioTargetChips({
+    super.key,
+    required this.targetLabel,
+    required this.allCameras,
+    required this.onChanged,
+  });
+
+  final String? targetLabel;
+  final bool allCameras;
+  final ValueChanged<bool> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    Widget chip(String label, bool selected, VoidCallback? onTap) => ChoiceChip(
+      label: Text(label, overflow: TextOverflow.ellipsis),
+      selected: selected,
+      onSelected: onTap == null ? null : (_) => onTap(),
+      showCheckmark: false,
+      labelStyle: NileTextStyles.labelSm().copyWith(
+        color: selected ? NileColors.onVolt : NileColors.txtPrimary,
+      ),
+      selectedColor: NileColors.volt,
+      backgroundColor: NileColors.bgRaised,
+      side: BorderSide(color: selected ? NileColors.volt : NileColors.border),
+      shape: const StadiumBorder(),
+    );
+
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 160),
+          child: chip(
+            targetLabel ?? 'No camera',
+            !allCameras && targetLabel != null,
+            targetLabel == null ? null : () => onChanged(false),
+          ),
+        ),
+        const SizedBox(width: NileSpacing.s6),
+        chip('All cameras', allCameras, () => onChanged(true)),
+      ],
+    );
+  }
+}
+
+/// One choice in the master-audio menu.
+@immutable
+class NileAudioSourceOption {
+  const NileAudioSourceOption({
+    required this.identity,
+    required this.label,
+    required this.icon,
+  });
+
+  final String identity;
+  final String label;
+  final IconData icon;
+}
+
+/// "Audio: Studio mic ▾" — who carries the show's sound, current one checked.
+class NileStudioMasterAudioMenu extends StatelessWidget {
+  const NileStudioMasterAudioMenu({
+    super.key,
+    required this.options,
+    required this.current,
+    required this.onSelected,
+  });
+
+  final List<NileAudioSourceOption> options;
+  final String? current;
+  final ValueChanged<String> onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    final label = options
+        .where((o) => o.identity == current)
+        .map((o) => o.label)
+        .firstOrNull;
+    return PopupMenuButton<String>(
+      tooltip: 'Master audio',
+      onSelected: onSelected,
+      color: NileColors.bgSurface,
+      itemBuilder: (_) => [
+        for (final o in options)
+          CheckedPopupMenuItem<String>(
+            value: o.identity,
+            checked: o.identity == current,
+            child: Text(
+              o.label,
+              style: NileTextStyles.bodyMd(),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+      ],
+      child: _ToolbarPill(
+        icon: Icons.album,
+        label: 'Audio: ${label ?? 'none'}',
+      ),
+    );
+  }
+}
+
+/// The Studio's audio input — a USB mixer or interface instead of the
+/// built-in mic. Shown while the Studio carries the show audio.
+class NileStudioMicMenu extends StatelessWidget {
+  const NileStudioMicMenu({
+    super.key,
+    required this.devices,
+    required this.selectedId,
+    required this.onSelected,
+  });
+
+  final List<MediaDevice> devices;
+  final String? selectedId;
+  final ValueChanged<String?> onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    final current = devices
+        .where((d) => d.deviceId == selectedId)
+        .map((d) => d.label)
+        .firstOrNull;
+    return PopupMenuButton<String>(
+      tooltip: 'Audio input',
+      // PopupMenuButton swallows null selections, so '' stands in for default.
+      onSelected: (id) => onSelected(id.isEmpty ? null : id),
+      color: NileColors.bgSurface,
+      itemBuilder: (_) => [
+        CheckedPopupMenuItem<String>(
+          value: '',
+          checked: selectedId == null,
+          child: Text('Default input', style: NileTextStyles.bodyMd()),
+        ),
+        for (final d in devices)
+          CheckedPopupMenuItem<String>(
+            value: d.deviceId,
+            checked: selectedId == d.deviceId,
+            child: Text(
+              d.label.isNotEmpty ? d.label : 'Microphone',
+              style: NileTextStyles.bodyMd(),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+      ],
+      child: _ToolbarPill(
+        icon: Icons.settings_input_component_outlined,
+        label: current == null || current.isEmpty ? 'Default input' : current,
+      ),
+    );
+  }
+}
+
+class _ToolbarPill extends StatelessWidget {
+  const _ToolbarPill({required this.icon, required this.label});
+
+  final IconData icon;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    constraints: const BoxConstraints(maxWidth: 200),
+    padding: const EdgeInsets.symmetric(
+      horizontal: NileSpacing.s12,
+      vertical: NileSpacing.s8,
+    ),
+    decoration: BoxDecoration(
+      color: NileColors.bgRaised,
+      borderRadius: BorderRadius.circular(NileRadius.pill),
+      border: Border.all(color: NileColors.border),
+    ),
+    child: Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, size: 16, color: NileColors.txtPrimary),
+        const SizedBox(width: NileSpacing.s6),
+        Flexible(
+          child: Text(
+            label,
+            style: NileTextStyles.labelSm().copyWith(
+              color: NileColors.txtPrimary,
+            ),
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+        Icon(Icons.arrow_drop_down, size: 18, color: NileColors.txtTertiary),
+      ],
+    ),
+  );
 }

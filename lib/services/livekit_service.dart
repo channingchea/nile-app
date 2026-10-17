@@ -43,7 +43,7 @@ class LivekitService {
     'eventName': eventName,
   });
 
-  /// Host: publisher token for a camera. → (token, wsUrl, isMasterAudio)
+  /// Host/crew: publisher token for a camera. → [LivekitToken]
   ///
   /// [monitor] asks for subscribe rights so the Studio can show crew feeds.
   /// The server grants it to the host only, and only when asked — a client that
@@ -51,11 +51,18 @@ class LivekitService {
   /// before the Studio relies on (they connect with LiveKit's default
   /// autoSubscribe and would otherwise start pulling feeds they cannot render).
   /// Send it only if you also connect with `autoSubscribe: false`.
+  ///
+  /// [slotId] is the camera slot picked in "Which camera is this?"; the server
+  /// refuses it (409) if another device holds it. Without it the server uses
+  /// the caller's crew assignment, then the first open slot. The token's
+  /// [LivekitToken.cameraName] is the slot's label when a slot was resolved.
   static Future<LivekitToken> cameraToken({
     required String eventId,
     required String cameraId,
     required String cameraName,
     bool monitor = false,
+    String? slotId,
+    String? device,
   }) async {
     final d = await _invoke<Map>({
       'action': 'camera-token',
@@ -63,31 +70,94 @@ class LivekitService {
       'cameraId': cameraId,
       'cameraName': cameraName,
       if (monitor) 'monitor': true,
+      'slotId': ?slotId,
+      'device': ?device,
     });
-    return LivekitToken(
-      token: d['token'] as String,
-      wsUrl: d['wsUrl'] as String,
-      isMasterAudio: d['isMasterAudio'] == true,
-    );
+    return LivekitToken.fromJson(d, fallbackName: cameraName);
   }
 
   /// Host: audio-only master publisher token. → (token, wsUrl)
-  static Future<LivekitToken> audioToken({required String eventId}) async {
-    final d = await _invoke<Map>({'action': 'audio-token', 'eventId': eventId});
-    return LivekitToken(
-      token: d['token'] as String,
-      wsUrl: d['wsUrl'] as String,
+  static Future<LivekitToken> audioToken({
+    required String eventId,
+    String? device,
+  }) async {
+    final d = await _invoke<Map>({
+      'action': 'audio-token',
+      'eventId': eventId,
+      'device': ?device,
+    });
+    return LivekitToken.fromJson(d);
+  }
+
+  /// Host: the desktop Studio joins as the show's control room — not a
+  /// camera, subscribe rights on. One per event: a second Studio evicts the
+  /// first. Connect with `autoSubscribe: false`.
+  static Future<LivekitToken> studioToken({
+    required String eventId,
+    String? device,
+  }) async {
+    final d = await _invoke<Map>({
+      'action': 'studio-token',
+      'eventId': eventId,
+      'device': ?device,
+    });
+    return LivekitToken.fromJson(d, fallbackName: 'Studio');
+  }
+
+  /// Host (Studio): turn the Studio's own webcam on or off. Turning it on
+  /// counts toward the event's cameras (refused when full) and takes the first
+  /// open slot. Call BEFORE publishing the camera; returns the slot label.
+  static Future<String> studioCamera({
+    required String eventId,
+    required bool enabled,
+  }) async {
+    final d = await _invoke<Map>({
+      'action': 'studio-camera',
+      'eventId': eventId,
+      'enabled': enabled,
+    });
+    return d['cameraName'] as String? ?? 'Studio';
+  }
+
+  /// Host/crew: the event's camera slots and who is on each.
+  static Future<CameraSlots> listSlots({required String eventId}) async {
+    final d = await _invoke<Map>({'action': 'list-slots', 'eventId': eventId});
+    return CameraSlots(
+      slots: [
+        for (final s in (d['slots'] as List? ?? const []))
+          CameraSlot.fromJson(Map<String, dynamic>.from(s as Map)),
+      ],
+      streamAudioTaken: d['streamAudioTaken'] == true,
     );
   }
 
-  /// Host: reassign the master-audio flag across cameras.
+  /// Host (Studio): rename a camera on the fly. With [slotId] the slot keeps
+  /// the name for the rest of the event; [identity] alone renames a feed that
+  /// has no slot.
+  static Future<void> renameCamera({
+    required String eventId,
+    required String name,
+    String? slotId,
+    String? identity,
+  }) => _invoke<Map>({
+    'action': 'rename-camera',
+    'eventId': eventId,
+    'name': name,
+    'slotId': ?slotId,
+    'identity': ?identity,
+  });
+
+  /// Choose which publisher carries the show's sound — a camera, the Studio,
+  /// or Stream Audio. The server clears the flag everywhere else.
   static Future<void> setMasterAudio({
     required String eventId,
-    required String cameraIdentity,
+    required String identity,
   }) => _invoke<Map>({
     'action': 'set-master-audio',
     'eventId': eventId,
-    'cameraIdentity': cameraIdentity,
+    'identity': identity,
+    // Servers before the Studio read this name.
+    'cameraIdentity': identity,
   });
 
   /// Host: report whether the replay recording actually started.
@@ -97,8 +167,18 @@ class LivekitService {
   /// host finds out now instead of after the show, with nothing to sell.
   /// Old servers omit the flag; absence is treated as "started", which is the
   /// behaviour that shipped before this existed.
-  static Future<bool> startShow({required String eventId}) async {
-    final d = await _invoke<Map>({'action': 'start-show', 'eventId': eventId});
+  ///
+  /// [studio] marks the call as coming from the desktop Studio. While a Studio
+  /// is in the room the server refuses Start Show from anywhere else.
+  static Future<bool> startShow({
+    required String eventId,
+    bool studio = false,
+  }) async {
+    final d = await _invoke<Map>({
+      'action': 'start-show',
+      'eventId': eventId,
+      if (studio) 'studio': true,
+    });
     return d['egressStarted'] != false;
   }
 
@@ -127,8 +207,15 @@ class LivekitService {
   /// Host: stop the replay egress so the recording finalizes. Call when ending
   /// the show. Best-effort — the live show already ended via EventService.end,
   /// and the server-side auto-end + stuck-row sweep cover any missed call.
-  static Future<void> stopEgress({required String eventId}) =>
-      _invoke<Map>({'action': 'stop-egress', 'eventId': eventId});
+  /// [studio]: see [startShow].
+  static Future<void> stopEgress({
+    required String eventId,
+    bool studio = false,
+  }) => _invoke<Map>({
+    'action': 'stop-egress',
+    'eventId': eventId,
+    if (studio) 'studio': true,
+  });
 
   /// Write the true live viewer count (from LiveKit participants) into the event.
   ///
@@ -213,11 +300,68 @@ class LivekitToken {
   final String token;
   final String wsUrl;
   final bool isMasterAudio;
+
+  /// Camera slot this token holds (event_cameras.id), when it has one.
+  final String? slotId;
+
+  /// The name the server gave this feed — a slot's label wins over what the
+  /// device asked for.
+  final String? cameraName;
+
   const LivekitToken({
     required this.token,
     required this.wsUrl,
     this.isMasterAudio = false,
+    this.slotId,
+    this.cameraName,
   });
+
+  factory LivekitToken.fromJson(Map d, {String? fallbackName}) => LivekitToken(
+    token: d['token'] as String,
+    wsUrl: d['wsUrl'] as String,
+    isMasterAudio: d['isMasterAudio'] == true,
+    slotId: d['slotId'] as String?,
+    cameraName: d['cameraName'] as String? ?? fallbackName,
+  );
+}
+
+/// One camera slot for "Which camera is this?" and the Studio's source list.
+class CameraSlot {
+  final String id;
+  final int slotIndex;
+  final String label;
+
+  /// LiveKit identity on this slot right now, or null when it is open.
+  final String? heldBy;
+  final String? heldByUsername;
+  final String? heldByDevice;
+
+  const CameraSlot({
+    required this.id,
+    required this.slotIndex,
+    required this.label,
+    this.heldBy,
+    this.heldByUsername,
+    this.heldByDevice,
+  });
+
+  factory CameraSlot.fromJson(Map<String, dynamic> j) => CameraSlot(
+    id: j['id'] as String,
+    slotIndex: (j['slotIndex'] as num).toInt(),
+    label: j['label'] as String,
+    heldBy: j['heldBy'] as String?,
+    heldByUsername: j['heldByUsername'] as String?,
+    heldByDevice: j['heldByDevice'] as String?,
+  );
+
+  /// Taken by some OTHER device. Your own install reconnecting keeps its slot.
+  bool takenFor(String myIdentity) => heldBy != null && heldBy != myIdentity;
+}
+
+class CameraSlots {
+  final List<CameraSlot> slots;
+  final bool streamAudioTaken;
+  const CameraSlots({required this.slots, required this.streamAudioTaken});
 }
 
 class ViewerConnection {
