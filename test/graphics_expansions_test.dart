@@ -230,6 +230,51 @@ void main() {
       );
     });
 
+    GraphicCue cueOf(StudioGraphic g, GraphicTargets t) =>
+        GraphicCue.of(g, targets: t, publicUrl: url);
+    const lt = StudioGraphic(
+      id: 'lt',
+      kind: GraphicKind.lowerThird,
+      name: 'Name',
+      payload: {'title': 'Jane'},
+    );
+    const lt2 = StudioGraphic(
+      id: 'lt2',
+      kind: GraphicKind.lowerThird,
+      name: 'Other name',
+      payload: {'title': 'Sam'},
+    );
+
+    test('several cues wait together and go on air in one Take', () {
+      final cues = CueSet.empty
+          .adding(cueOf(slate, const GraphicTargets.all()))
+          .adding(cueOf(lt, const GraphicTargets.only({'s1'})));
+      expect(cues.length, 2);
+      expect(cues.label, '2 graphics');
+      expect(cues.lands('s1'), isTrue);
+      final on = cues.take(GraphicsState.empty, DateTime(2026));
+      expect(on.all.single.id, 'cd');
+      expect(on.bySlot['s1']!.single.id, 'lt');
+    });
+
+    test('re-cueing replaces; a clash on the same spot drops the older', () {
+      var cues = CueSet.empty
+          .adding(cueOf(lt, const GraphicTargets.only({'s1'})))
+          .adding(cueOf(lt, const GraphicTargets.only({'s2'})));
+      expect(cues.items.single.targets, const GraphicTargets.only({'s2'}));
+      // Two lower thirds on different cameras can both wait…
+      cues = cues.adding(cueOf(lt2, const GraphicTargets.only({'s1'})));
+      expect(cues.length, 2);
+      // …but one for every camera would cover both.
+      cues = cues.adding(cueOf(lt2, const GraphicTargets.all()));
+      expect(cues.items.map((c) => c.id), ['lt2']);
+    });
+
+    test('a hotkey pressed twice un-cues', () {
+      final c = cueOf(lt, const GraphicTargets.all());
+      expect(CueSet.empty.toggled(c).toggled(c).isEmpty, isTrue);
+    });
+
     test('the preview stays up and sends nothing by itself', () {
       final cue = GraphicCue.of(
         slate,

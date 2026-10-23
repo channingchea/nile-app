@@ -17,8 +17,14 @@ LiveGraphic _g(String id, GraphicKind kind, {String? corner, String? title}) =>
 void main() {
   group('library payloads (mirror of the DB check)', () {
     test('lower third needs a title', () {
-      expect(StudioGraphic.validate(GraphicKind.lowerThird, {'title': 'Jane'}), isNull);
-      expect(StudioGraphic.validate(GraphicKind.lowerThird, {'title': '  '}), isNotNull);
+      expect(
+        StudioGraphic.validate(GraphicKind.lowerThird, {'title': 'Jane'}),
+        isNull,
+      );
+      expect(
+        StudioGraphic.validate(GraphicKind.lowerThird, {'title': '  '}),
+        isNotNull,
+      );
       expect(
         StudioGraphic.validate(GraphicKind.lowerThird, {
           'title': 'Jane',
@@ -30,38 +36,63 @@ void main() {
 
     test('logo needs an image and a real corner', () {
       expect(
-        StudioGraphic.validate(GraphicKind.logo, {'imagePath': 'u/a.png', 'corner': 'tr'}),
+        StudioGraphic.validate(GraphicKind.logo, {
+          'imagePath': 'u/a.png',
+          'corner': 'tr',
+        }),
         isNull,
       );
-      expect(StudioGraphic.validate(GraphicKind.logo, {'corner': 'tr'}), isNotNull);
       expect(
-        StudioGraphic.validate(GraphicKind.logo, {'imagePath': 'u/a.png', 'corner': 'mid'}),
+        StudioGraphic.validate(GraphicKind.logo, {'corner': 'tr'}),
+        isNotNull,
+      );
+      expect(
+        StudioGraphic.validate(GraphicKind.logo, {
+          'imagePath': 'u/a.png',
+          'corner': 'mid',
+        }),
         isNotNull,
       );
     });
 
     test('banner says whether it scrolls', () {
       expect(
-        StudioGraphic.validate(GraphicKind.banner, {'text': 'Hi', 'scrolling': true}),
+        StudioGraphic.validate(GraphicKind.banner, {
+          'text': 'Hi',
+          'scrolling': true,
+        }),
         isNull,
       );
-      expect(StudioGraphic.validate(GraphicKind.banner, {'text': 'Hi'}), isNotNull);
+      expect(
+        StudioGraphic.validate(GraphicKind.banner, {'text': 'Hi'}),
+        isNotNull,
+      );
     });
 
     test('slate countdown is bounded', () {
       expect(
-        StudioGraphic.validate(GraphicKind.slate, {'title': 'Soon', 'countdownSeconds': 300}),
+        StudioGraphic.validate(GraphicKind.slate, {
+          'title': 'Soon',
+          'countdownSeconds': 300,
+        }),
         isNull,
       );
       expect(
-        StudioGraphic.validate(GraphicKind.slate, {'title': 'Soon', 'countdownSeconds': 0}),
+        StudioGraphic.validate(GraphicKind.slate, {
+          'title': 'Soon',
+          'countdownSeconds': 0,
+        }),
         isNotNull,
       );
     });
 
     test('every preset is valid', () {
       for (final p in StudioGraphicPresets.all) {
-        expect(StudioGraphic.validate(p.kind, p.payload), isNull, reason: p.name);
+        expect(
+          StudioGraphic.validate(p.kind, p.payload),
+          isNull,
+          reason: p.name,
+        );
         expect(p.isPreset, isTrue);
       }
     });
@@ -75,7 +106,11 @@ void main() {
           id: 'g1',
           kind: GraphicKind.slate,
           name: 'Soon',
-          payload: {'title': 'Soon', 'imagePath': 'u/bg.png', 'countdownSeconds': 60},
+          payload: {
+            'title': 'Soon',
+            'imagePath': 'u/bg.png',
+            'countdownSeconds': 60,
+          },
         ),
         publicUrl: (p) => 'https://cdn/$p',
         now: now,
@@ -99,9 +134,15 @@ void main() {
       },
     );
 
-    test('a camera-specific graphic replaces the show-wide one of its kind', () {
-      expect(state.forSlot('s1').map((g) => g.id), unorderedEquals(['logo-tl', 'lt-cam1', 'logo-tr']));
-    });
+    test(
+      'a camera-specific graphic replaces the show-wide one of its kind',
+      () {
+        expect(
+          state.forSlot('s1').map((g) => g.id),
+          unorderedEquals(['logo-tl', 'lt-cam1', 'logo-tr']),
+        );
+      },
+    );
 
     test('other cameras and screen shares see only the show-wide ones', () {
       expect(state.forSlot('s2').map((g) => g.id), ['lt-all', 'logo-tl']);
@@ -111,12 +152,17 @@ void main() {
     test('turning one on replaces what held its place on that target', () {
       final next = state.withOn(null, _g('lt-new', GraphicKind.lowerThird));
       expect(next.all.map((g) => g.id), ['logo-tl', 'lt-new']);
-      final logos = state.withOn(null, _g('logo-br', GraphicKind.logo, corner: 'br'));
+      final logos = state.withOn(
+        null,
+        _g('logo-br', GraphicKind.logo, corner: 'br'),
+      );
       expect(logos.all.length, 3, reason: 'different corners coexist');
     });
 
     test('off and clear touch only their target', () {
-      expect(state.withOff('s1', 'lt-cam1').bySlot['s1']!.map((g) => g.id), ['logo-tr']);
+      expect(state.withOff('s1', 'lt-cam1').bySlot['s1']!.map((g) => g.id), [
+        'logo-tr',
+      ]);
       final cleared = state.cleared('s1');
       expect(cleared.bySlot.containsKey('s1'), isFalse);
       expect(cleared.all, state.all);
@@ -171,7 +217,11 @@ void main() {
             title: 'Jane Doe',
             subtitle: 'Host',
           ),
-          const LiveGraphic(id: 'b', kind: GraphicKind.banner, text: 'Tickets at joinnile.com'),
+          const LiveGraphic(
+            id: 'b',
+            kind: GraphicKind.banner,
+            text: 'Tickets at joinnile.com',
+          ),
         ]),
       );
       await t.pumpAndSettle();
@@ -216,6 +266,7 @@ void main() {
       Future<bool> Function(GraphicsState) push, {
       bool isLive = false,
       void Function(String, GraphicTargets)? used,
+      StudioGraphic? sponsor,
     }) => MaterialApp(
       home: Builder(
         builder: (context) => TextButton(
@@ -224,7 +275,8 @@ void main() {
             current: current,
             slots: slots,
             push: push,
-            cue: ValueNotifier<GraphicCue?>(null),
+            cue: ValueNotifier(CueSet.empty),
+            sponsor: sponsor,
             isLive: isLive,
             onTargetsUsed: used,
           ),
@@ -237,11 +289,15 @@ void main() {
       await t.tap(find.text('open'));
       await t.pumpAndSettle();
       final row = find.widgetWithText(ListTile, name);
-      await t.tap(find.descendant(of: row, matching: find.byType(OutlinedButton)));
+      await t.tap(
+        find.descendant(of: row, matching: find.byType(OutlinedButton)),
+      );
       await t.pumpAndSettle();
     }
 
-    testWidgets('Cameras: all but one camera, then that camera alone', (t) async {
+    testWidgets('Cameras: all but one camera, then that camera alone', (
+      t,
+    ) async {
       final pushed = <GraphicsState>[];
       final used = <String, GraphicTargets>{};
       await t.pumpWidget(
@@ -273,7 +329,11 @@ void main() {
     testWidgets('Remove from all, and Clear all confirms when live', (t) async {
       final pushed = <GraphicsState>[];
       final start = GraphicsState.empty.withTargets(
-        const LiveGraphic(id: 'preset:brb', kind: GraphicKind.slate, title: 'Be right back'),
+        const LiveGraphic(
+          id: 'preset:brb',
+          kind: GraphicKind.slate,
+          title: 'Be right back',
+        ),
         const GraphicTargets.only({'s1'}),
       );
       await t.pumpWidget(
@@ -288,10 +348,12 @@ void main() {
       expect(pushed.last.isEmpty, isTrue);
 
       // Put it back, then Clear all asks first.
-      await t.tap(find.descendant(
-        of: find.widgetWithText(ListTile, 'Thank you'),
-        matching: find.byType(OutlinedButton),
-      ));
+      await t.tap(
+        find.descendant(
+          of: find.widgetWithText(ListTile, 'Thank you'),
+          matching: find.byType(OutlinedButton),
+        ),
+      );
       await t.pumpAndSettle();
       await t.tap(find.text('Cue'));
       await t.pumpAndSettle();
@@ -306,6 +368,44 @@ void main() {
       expect(pushed.last.isEmpty, isTrue);
     });
 
+    testWidgets('several graphics cue together and one Take sends them all', (
+      t,
+    ) async {
+      // Room for the sponsor section above the presets.
+      t.view.physicalSize = const Size(1200, 2000);
+      t.view.devicePixelRatio = 1;
+      addTearDown(t.view.reset);
+      final pushed = <GraphicsState>[];
+      await t.pumpWidget(
+        opener(
+          GraphicsState.empty,
+          (next) async {
+            pushed.add(next);
+            return true;
+          },
+          sponsor: StudioGraphic.sponsor(campaignId: 'c1', sponsorName: 'Acme'),
+        ),
+      );
+      await openCameras(t, 'Be right back');
+      await t.tap(find.text('Cue'));
+      await t.pumpAndSettle();
+      await t.tap(
+        find.descendant(
+          of: find.widgetWithText(ListTile, 'Sponsor: Acme'),
+          matching: find.byType(OutlinedButton),
+        ),
+      );
+      await t.pumpAndSettle();
+      await t.tap(find.text('Cue'));
+      await t.pumpAndSettle();
+      expect(pushed, isEmpty);
+      expect(find.textContaining('Cued (2)'), findsOneWidget);
+      await t.tap(find.text('Take all'));
+      await t.pumpAndSettle();
+      expect(pushed.single.all.map((g) => g.id), ['preset:brb', 'sponsor:c1']);
+      expect(find.textContaining('Cued'), findsNothing);
+    });
+
     testWidgets('a refused push leaves it off and says so', (t) async {
       await t.pumpWidget(opener(GraphicsState.empty, (_) async => false));
       await openCameras(t, 'Be right back');
@@ -313,7 +413,10 @@ void main() {
       await t.pumpAndSettle();
       await t.tap(find.text('Take'));
       await t.pumpAndSettle();
-      expect(find.text('Couldn’t update the show’s graphics. Try again.'), findsOneWidget);
+      expect(
+        find.text('Couldn’t update the show’s graphics. Try again.'),
+        findsOneWidget,
+      );
       expect(find.text('Off'), findsWidgets);
     });
   });

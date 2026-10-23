@@ -89,7 +89,7 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
 
   /// Cue before air, the host's brand kit (edited locally only here) and a
   /// stand-in sponsor so the sponsor graphic can be rehearsed.
-  final _cue = ValueNotifier<GraphicCue?>(null);
+  final _cue = ValueNotifier<CueSet>(CueSet.empty);
   BrandKit? _brandKit;
   static final _demoSponsor = StudioGraphic.sponsor(
     campaignId: 'preview-sponsor',
@@ -126,8 +126,19 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
     if (state == AppLifecycleState.detached) _stopTracks();
   }
 
+  // Toasts live on the app-wide messenger; captured here so dispose can clear
+  // them — an alert whose action points at the dead demo must not outlive it.
+  ScaffoldMessengerState? _messenger;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _messenger = ScaffoldMessenger.maybeOf(context);
+  }
+
   @override
   void dispose() {
+    _messenger?.clearSnackBars();
     WidgetsBinding.instance.removeObserver(this);
     _hideTimer?.cancel();
     _cue.dispose();
@@ -425,12 +436,13 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
 
   void _toast(String message, {SnackBarAction? action}) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
+    _messenger
+      ?..hideCurrentSnackBar()
       ..showSnackBar(
         SnackBar(
           content: Text(message),
           action: action,
+          showCloseIcon: true,
           duration: Duration(seconds: action == null ? 4 : 8),
         ),
       );
@@ -544,27 +556,35 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
   }
 
   void _take() {
-    final cue = _cue.value;
-    if (cue == null) return;
-    _push(cue.take(_graphics, DateTime.now()));
-    _cue.value = null;
+    final cues = _cue.value;
+    if (cues.isEmpty) return;
+    _push(cues.take(_graphics, DateTime.now()));
+    _cue.value = CueSet.empty;
+  }
+
+  Widget _cueBar() {
+    final cues = _cue.value;
+    final d = cues.describe(
+      (id) => _slots.where((r) => r.id == id).firstOrNull?.label ?? 'Camera',
+      [for (final r in _slots) r.id],
+    );
+    return NileStudioCueBar(
+      name: d.name,
+      targets: d.targets,
+      count: cues.length,
+      onTake: _take,
+      onClear: () => _cue.value = CueSet.empty,
+    );
   }
 
   List<LiveGraphic> _previewFor(NileStudioSource s) {
     final slot = s.isScreenShare ? null : s.slotId;
-    final cue = _cue.value;
     final base = _graphics.withBrand(_brandKit?.style);
-    return cue == null
-        ? base.forSlot(slot)
-        : cue.preview(base, DateTime.now()).forSlot(slot);
+    return _cue.value.preview(base, DateTime.now()).forSlot(slot);
   }
 
-  bool _isCued(NileStudioSource s) {
-    final cue = _cue.value;
-    if (cue == null) return false;
-    final slot = s.isScreenShare ? null : s.slotId;
-    return slot == null ? cue.targets.all : cue.targets.includes(slot);
-  }
+  bool _isCued(NileStudioSource s) =>
+      _cue.value.lands(s.isScreenShare ? null : s.slotId);
 
   void _hotkey(int digit) {
     final action = graphicsHotkeyAction(
@@ -576,7 +596,7 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
       resolveLink: _resolveLink,
     );
     if (action != null) {
-      if (action.cue != null) _cue.value = action.cue;
+      if (action.cue != null) _cue.value = _cue.value.toggled(action.cue!);
       if (action.off != null) _push(action.off!);
     } else {
       _toast(
@@ -598,16 +618,19 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
         seconds: seconds,
       );
 
-  GraphicCue _chatCue(ChatMessage m, GraphicTargets targets, [int seconds = 10]) =>
-      GraphicCue(
-        id: _chatCard(m).id,
-        name: 'Chat · @${m.username}',
-        targets: targets,
-        build: (_) => _chatCard(m, seconds),
-      );
+  GraphicCue _chatCue(
+    ChatMessage m,
+    GraphicTargets targets, [
+    int seconds = 10,
+  ]) => GraphicCue(
+    id: _chatCard(m).id,
+    name: 'Chat · @${m.username}',
+    targets: targets,
+    build: (_) => _chatCard(m, seconds),
+  );
 
   void _showOnScreen(ChatMessage m) =>
-      _cue.value = _chatCue(m, const GraphicTargets.all());
+      _cue.value = _cue.value.adding(_chatCue(m, const GraphicTargets.all()));
 
   Future<void> _showOnScreenOptions(ChatMessage m) async {
     final id = _chatCard(m).id;
@@ -624,7 +647,9 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
     if (choice.targets.isNone) {
       await _push(_graphics.withoutEverywhere(id));
     } else {
-      _cue.value = _chatCue(m, choice.targets, choice.autoHideSeconds);
+      _cue.value = _cue.value.adding(
+        _chatCue(m, choice.targets, choice.autoHideSeconds),
+      );
     }
   }
 
@@ -942,8 +967,8 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
       // Not while a dialog (the graphics panel among them) is over the Studio.
       enabled: ModalRoute.of(context)?.isCurrent ?? true,
       onDigit: _hotkey,
-      onTake: _cue.value == null ? null : _take,
-      onClear: _cue.value == null ? null : () => _cue.value = null,
+      onTake: _cue.value.isEmpty ? null : _take,
+      onClear: _cue.value.isEmpty ? null : () => _cue.value = CueSet.empty,
       child: Stack(
         children: [
           NileStudio(
@@ -986,18 +1011,7 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
                   live: live,
                   onChanged: (v) => _demo.isLive = v,
                 ),
-                if (_cue.value case final cue?)
-                  NileStudioCueBar(
-                    name: cue.name,
-                    targets: cue.targets.summary(
-                      (id) =>
-                          _slots.where((r) => r.id == id).firstOrNull?.label ??
-                          'Camera',
-                      [for (final r in _slots) r.id],
-                    ),
-                    onTake: _take,
-                    onClear: () => _cue.value = null,
-                  ),
+                if (_cue.value.isNotEmpty) _cueBar(),
               ],
             ),
             meter: Column(

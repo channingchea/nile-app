@@ -41,8 +41,9 @@ String graphicSubtitle(StudioGraphic g) {
             : qrSources[source] ?? source,
       );
   }
-  if (g.kind == GraphicKind.banner && p['scrolling'] == true)
+  if (g.kind == GraphicKind.banner && p['scrolling'] == true) {
     parts.add('ticker');
+  }
   if (g.kind == GraphicKind.slate) {
     final cd = p['countdown'];
     final mode = cd is Map ? CountdownMode.fromWire(cd['mode']) : null;
@@ -67,7 +68,8 @@ String graphicSubtitle(StudioGraphic g) {
 // ── Hotkeys ──────────────────────────────────────────────────────────────────
 
 /// Keys 1–9 act on the first nine items of the host's library (see
-/// [graphicsHotkeyAction]); Enter takes the cue, Escape clears it. Wrap the
+/// [graphicsHotkeyAction]); Enter takes everything cued, Escape clears the
+/// cue. Wrap the
 /// Studio in this; it ignores keys while a text field has focus and any key
 /// with ⌘/Ctrl/Alt held (⌘1–⌘9 belong to the nav rail).
 class StudioGraphicsHotkeys extends StatefulWidget {
@@ -137,8 +139,9 @@ class _StudioGraphicsHotkeysState extends State<StudioGraphicsHotkeys> {
         : null;
     if (action == null) return false;
     final kb = HardwareKeyboard.instance;
-    if (kb.isMetaPressed || kb.isControlPressed || kb.isAltPressed)
+    if (kb.isMetaPressed || kb.isControlPressed || kb.isAltPressed) {
       return false;
+    }
     if (StudioGraphicsHotkeys.typing()) return false;
     // Not while a dialog sits on top (the graphics panel, a confirm): a key
     // there would change graphics behind it and leave the two out of step.
@@ -165,7 +168,8 @@ class _StudioGraphicsHotkeysState extends State<StudioGraphicsHotkeys> {
 
 /// Hotkey [digit]: library item `digit - 1`. On air anywhere → `off` is the
 /// state with it taken off everywhere (removals skip the cue). Otherwise `cue`
-/// is that item cued onto its last-used cameras (all cameras the first time).
+/// is that item cued onto its last-used cameras (all cameras the first time);
+/// callers toggle it in their [CueSet], so a second press un-cues it.
 /// Null when the key has no graphic.
 ({GraphicsState? off, GraphicCue? cue})? graphicsHotkeyAction({
   required int digit,
@@ -325,8 +329,9 @@ class _TargetsDialogState extends State<_TargetsDialog> {
                   onChanged: (v) => setState(() {
                     if (v == null) return;
                     _hide = v == -1 ? (int.tryParse(_custom.text) ?? 20) : v;
-                    if (v == -1 && _custom.text.isEmpty)
+                    if (v == -1 && _custom.text.isEmpty) {
                       _custom.text = '$_hide';
+                    }
                   }),
                 ),
               ],
@@ -388,9 +393,10 @@ class _TargetsDialogState extends State<_TargetsDialog> {
 /// ways into the library and brand kit editors. Library items 1–9 show their
 /// hotkey.
 ///
-/// Cue before air: picking cameras for a graphic that is off CUES it in [cue]
-/// (only the Studio sees it); Take — the footer button or Enter — puts it on
-/// air. Re-targeting or removing a graphic already on air is immediate.
+/// Cue before air: picking cameras for a graphic that is off adds it to [cue]
+/// (only the Studio sees it) — several can wait at once; Take — the footer
+/// button or Enter — puts them all on air together. Re-targeting or removing a
+/// graphic already on air is immediate.
 ///
 /// [push] sends a whole new [GraphicsState] (the `set-graphics` action in the
 /// real Studio, a local setState in Studio Preview) and returns whether it
@@ -404,7 +410,7 @@ Future<void> showGraphicsPushPanel(
   required GraphicsState current,
   required List<StudioSlotRef> slots,
   required Future<bool> Function(GraphicsState next) push,
-  required ValueNotifier<GraphicCue?> cue,
+  required ValueNotifier<CueSet> cue,
   void Function(String graphicId, GraphicTargets targets)? onTargetsUsed,
   ValueChanged<List<StudioGraphic>>? onLibrary,
   DateTime? showStartAt,
@@ -460,7 +466,7 @@ class _PushPanel extends StatefulWidget {
   final GraphicsState initial;
   final List<StudioSlotRef> slots;
   final Future<bool> Function(GraphicsState next) push;
-  final ValueNotifier<GraphicCue?> cue;
+  final ValueNotifier<CueSet> cue;
   final void Function(String graphicId, GraphicTargets targets)? onTargetsUsed;
   final ValueChanged<List<StudioGraphic>>? onLibrary;
   final DateTime? showStartAt;
@@ -566,36 +572,44 @@ class _PushPanelState extends State<_PushPanel> {
 
   Future<void> _chooseCameras(StudioGraphic g) async {
     final current = _state.targetsOf(g.id);
-    final cued = widget.cue.value?.id == g.id ? widget.cue.value : null;
+    final cued = widget.cue.value.byId(g.id);
     final choice = await showGraphicTargetsDialog(
       context,
       title: g.name,
       slots: widget.slots,
       initial: current.isNone ? cued?.targets ?? current : current,
       autoHideSeconds: g.autoHideSeconds,
-      canRemove: !current.isNone,
+      canRemove: !current.isNone || cued != null,
       confirmLabel: current.isNone ? 'Cue' : 'Put on air',
     );
     if (choice == null || !mounted) return;
     if (choice.targets.isNone) {
-      await _apply(_state.withoutEverywhere(g.id));
+      widget.cue.value = widget.cue.value.without(g.id);
+      if (!current.isNone) await _apply(_state.withoutEverywhere(g.id));
       return;
     }
     widget.onTargetsUsed?.call(g.id, choice.targets);
     final next = _cueOf(g, choice.targets, choice.autoHideSeconds);
-    // Off → cue it; Take puts it on air. Already on air → change it now.
+    // Off → add it to the cue; Take puts the lot on air. Already on air →
+    // change it now.
     if (current.isNone) {
-      widget.cue.value = next;
+      widget.cue.value = widget.cue.value.adding(next);
     } else {
       await _apply(next.take(_state, DateTime.now()));
     }
   }
 
+  /// Everything cued goes on air together.
   Future<void> _take() async {
-    final c = widget.cue.value;
-    if (c == null || _busy) return;
-    final ok = await _apply(c.take(_state, DateTime.now()));
-    if (ok && widget.cue.value == c) widget.cue.value = null;
+    final cues = widget.cue.value;
+    if (cues.isEmpty || _busy) return;
+    final ok = await _apply(cues.take(_state, DateTime.now()));
+    if (!ok) return;
+    // Anything cued while the push was in flight stays cued.
+    widget.cue.value = CueSet([
+      for (final c in widget.cue.value.items)
+        if (!cues.items.contains(c)) c,
+    ]);
   }
 
   Future<void> _editBrandKit() async {
@@ -647,7 +661,7 @@ class _PushPanelState extends State<_PushPanel> {
   Widget build(BuildContext context) {
     final lib = _library;
     final order = [for (final s in widget.slots) s.id];
-    final cue = widget.cue.value;
+    final cues = widget.cue.value;
     final sponsor = _sponsor;
     return CallbackShortcuts(
       bindings: {
@@ -683,8 +697,9 @@ class _PushPanelState extends State<_PushPanel> {
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s24),
               child: Text(
-                'Pick cameras to cue a graphic, then Take to put it on air. '
-                'Keys 1–9 cue your first nine; Enter takes.',
+                'Pick cameras to cue graphics — as many as you like — then '
+                'Take puts them on air together. Keys 1–9 cue your first '
+                'nine; Enter takes.',
                 style: NileTextStyles.bodySm().copyWith(
                   color: NileColors.txtSecondary,
                 ),
@@ -743,7 +758,7 @@ class _PushPanelState extends State<_PushPanel> {
               ),
             ),
             const Divider(height: 1),
-            if (cue != null)
+            if (cues.isNotEmpty)
               Container(
                 color: NileColors.bgRaised,
                 padding: const EdgeInsets.fromLTRB(
@@ -756,15 +771,19 @@ class _PushPanelState extends State<_PushPanel> {
                   children: [
                     Expanded(
                       child: Text(
-                        'Cued: ${cue.name} → ${cue.targets.summary(_labelOf, order)}',
-                        maxLines: 1,
+                        cues.length == 1
+                            ? 'Cued: ${cues.label} → '
+                                  '${cues.items.single.targets.summary(_labelOf, order)}'
+                            : 'Cued (${cues.length}): '
+                                  '${cues.items.map((c) => c.name).join(', ')}',
+                        maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                         style: NileTextStyles.bodyMd(),
                       ),
                     ),
                     TextButton(
-                      onPressed: () => widget.cue.value = null,
-                      child: const Text('Clear'),
+                      onPressed: () => widget.cue.value = CueSet.empty,
+                      child: Text(cues.length == 1 ? 'Clear' : 'Clear all'),
                     ),
                     const SizedBox(width: NileSpacing.s8),
                     FilledButton(
@@ -773,7 +792,7 @@ class _PushPanelState extends State<_PushPanel> {
                         backgroundColor: NileColors.volt,
                         foregroundColor: NileColors.onVolt,
                       ),
-                      child: const Text('Take'),
+                      child: Text(cues.length == 1 ? 'Take' : 'Take all'),
                     ),
                   ],
                 ),
@@ -837,9 +856,10 @@ class _PushPanelState extends State<_PushPanel> {
         _sponsorCorner = v.$1;
         _sponsorSize = v.$2;
       });
-      final s = _sponsor!, c = widget.cue.value;
-      if (c != null && c.id == s.id)
-        widget.cue.value = _cueOf(s, c.targets, null);
+      final s = _sponsor!, c = widget.cue.value.byId(s.id);
+      if (c != null) {
+        widget.cue.value = widget.cue.value.adding(_cueOf(s, c.targets, null));
+      }
     },
     itemBuilder: (_) => [
       for (final c in logoCorners)
@@ -882,8 +902,8 @@ class _PushPanelState extends State<_PushPanel> {
   }) {
     final targets = _state.targetsOf(g.id);
     final on = !targets.isNone;
-    final cue = widget.cue.value;
-    final cued = cue != null && cue.id == g.id;
+    final cue = widget.cue.value.byId(g.id);
+    final cued = cue != null;
     final shown = cued && !on ? cue.targets : targets;
     return ListTile(
       contentPadding: const EdgeInsets.symmetric(horizontal: NileSpacing.s24),
@@ -927,16 +947,33 @@ class _PushPanelState extends State<_PushPanel> {
           ),
           if (cued) ...[
             const SizedBox(width: NileSpacing.s8),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s4),
-              decoration: BoxDecoration(
-                border: Border.all(color: NileColors.volt),
+            // Tap to take it back out of the cue.
+            Tooltip(
+              message: 'Remove from cue',
+              child: InkWell(
+                onTap: () => widget.cue.value = widget.cue.value.without(g.id),
                 borderRadius: BorderRadius.circular(NileRadius.xs),
-              ),
-              child: Text(
-                'CUED',
-                style: NileTextStyles.labelSm().copyWith(
-                  color: NileColors.volt,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: NileSpacing.s4,
+                  ),
+                  decoration: BoxDecoration(
+                    border: Border.all(color: NileColors.volt),
+                    borderRadius: BorderRadius.circular(NileRadius.xs),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        'CUED',
+                        style: NileTextStyles.labelSm().copyWith(
+                          color: NileColors.volt,
+                        ),
+                      ),
+                      const SizedBox(width: NileSpacing.s2),
+                      Icon(Icons.close, size: 12, color: NileColors.volt),
+                    ],
+                  ),
                 ),
               ),
             ),

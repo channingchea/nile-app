@@ -161,7 +161,8 @@ class NileStudioSourceActions {
   final void Function(NileStudioSource source, String text)? onNudge;
 
   /// Remote control: flip, flashlight, zoom, focus/exposure lock.
-  final void Function(NileStudioSource source, StudioCommand command)? onCommand;
+  final void Function(NileStudioSource source, StudioCommand command)?
+  onCommand;
 
   /// Tiles dragged into a new order: the slot ids, top to bottom.
   final ValueChanged<List<String>>? onReorder;
@@ -459,73 +460,72 @@ class _StudioStatsRow extends StatelessWidget {
   List<Widget> _statChips(NileStudioStats stats, bool urgent) {
     final remaining = stats.remaining;
     return [
-          // First in the row, and in the error colour: this is the one thing
-          // here the host can still act on while the show is running.
-          if (stats.notRecording) ...[
-            const SizedBox(width: NileSpacing.s12),
-            _Stat(
-              icon: Icons.fiber_smart_record,
-              label: 'NOT RECORDING',
-              tooltip: 'The replay recording never started — there will be no '
-                  'replay to sell for this show',
-              color: NileColors.error,
-            ),
-          ],
-          if (stats.elapsed != null) ...[
-            const SizedBox(width: NileSpacing.s12),
-            _Stat(
-              icon: Icons.schedule,
-              label: NileStudioStats.formatClock(stats.elapsed!),
-              tooltip: 'Time on air',
-            ),
-          ],
-          if (remaining != null) ...[
-            const SizedBox(width: NileSpacing.s12),
-            _Stat(
-              icon: Icons.timer_outlined,
-              label: stats.autoEnding
-                  ? 'Ending stream…'
-                  : '${NileStudioStats.formatClock(remaining)} left',
-              tooltip: 'Time left in the purchased duration',
-              color: urgent ? NileColors.coral : NileColors.amber,
-            ),
-          ],
-          if (stats.isLive) ...[
-            const SizedBox(width: NileSpacing.s12),
-            _Stat(
-              icon: Icons.visibility_outlined,
-              label: '${stats.viewerCount}',
-              tooltip: 'Watching now',
-            ),
-          ],
-          const SizedBox(width: NileSpacing.s12),
-          _Stat(
-            icon: Icons.videocam_outlined,
-            label: '${stats.cameraCount}',
-            tooltip: stats.cameraCount == 1 ? 'Camera' : 'Cameras publishing',
+      // First in the row, and in the error colour: this is the one thing
+      // here the host can still act on while the show is running.
+      if (stats.notRecording) ...[
+        const SizedBox(width: NileSpacing.s12),
+        _Stat(
+          icon: Icons.fiber_smart_record,
+          label: 'NOT RECORDING',
+          tooltip:
+              'The replay recording never started — there will be no '
+              'replay to sell for this show',
+          color: NileColors.error,
+        ),
+      ],
+      if (stats.elapsed != null) ...[
+        const SizedBox(width: NileSpacing.s12),
+        _Stat(
+          icon: Icons.schedule,
+          label: NileStudioStats.formatClock(stats.elapsed!),
+          tooltip: 'Time on air',
+        ),
+      ],
+      if (remaining != null) ...[
+        const SizedBox(width: NileSpacing.s12),
+        _Stat(
+          icon: Icons.timer_outlined,
+          label: stats.autoEnding
+              ? 'Ending stream…'
+              : '${NileStudioStats.formatClock(remaining)} left',
+          tooltip: 'Time left in the purchased duration',
+          color: urgent ? NileColors.coral : NileColors.amber,
+        ),
+      ],
+      if (stats.isLive) ...[
+        const SizedBox(width: NileSpacing.s12),
+        _Stat(
+          icon: Icons.visibility_outlined,
+          label: '${stats.viewerCount}',
+          tooltip: 'Watching now',
+        ),
+      ],
+      const SizedBox(width: NileSpacing.s12),
+      _Stat(
+        icon: Icons.videocam_outlined,
+        label: '${stats.cameraCount}',
+        tooltip: stats.cameraCount == 1 ? 'Camera' : 'Cameras publishing',
+      ),
+      if (stats.crewCount > 0) ...[
+        const SizedBox(width: NileSpacing.s12),
+        _Stat(
+          icon: Icons.groups_outlined,
+          label: '${stats.readyCount}/${stats.crewCount} ready',
+          tooltip: 'Crew who have confirmed ready',
+          color: stats.readyCount == stats.crewCount ? NileColors.volt : null,
+        ),
+      ],
+      if (stats.audioSourceLabel != null) ...[
+        const SizedBox(width: NileSpacing.s12),
+        ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 200),
+          child: _Stat(
+            icon: Icons.album,
+            label: stats.audioSourceLabel!,
+            tooltip: 'Audio viewers are hearing',
           ),
-          if (stats.crewCount > 0) ...[
-            const SizedBox(width: NileSpacing.s12),
-            _Stat(
-              icon: Icons.groups_outlined,
-              label: '${stats.readyCount}/${stats.crewCount} ready',
-              tooltip: 'Crew who have confirmed ready',
-              color: stats.readyCount == stats.crewCount
-                  ? NileColors.volt
-                  : null,
-            ),
-          ],
-          if (stats.audioSourceLabel != null) ...[
-            const SizedBox(width: NileSpacing.s12),
-            ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 200),
-              child: _Stat(
-                icon: Icons.album,
-                label: stats.audioSourceLabel!,
-                tooltip: 'Audio viewers are hearing',
-              ),
-            ),
-          ],
+        ),
+      ],
     ];
   }
 }
@@ -645,10 +645,7 @@ class _QualityChip extends StatelessWidget {
         children: [
           Icon(icon, size: 16, color: color),
           const SizedBox(width: NileSpacing.s6),
-          Text(
-            label,
-            style: NileTextStyles.labelSm().copyWith(color: color),
-          ),
+          Text(label, style: NileTextStyles.labelSm().copyWith(color: color)),
         ],
       ),
     );
@@ -848,12 +845,15 @@ class _SourceTile extends StatelessWidget {
 
   List<PopupMenuEntry<_TileAction>> _menu() {
     final s = source;
-    PopupMenuItem<_TileAction> item(_TileAction a, String label, {Color? color}) =>
-        PopupMenuItem(
-          value: a,
-          height: 36,
-          child: Text(label, style: NileTextStyles.bodySm().copyWith(color: color)),
-        );
+    PopupMenuItem<_TileAction> item(
+      _TileAction a,
+      String label, {
+      Color? color,
+    }) => PopupMenuItem(
+      value: a,
+      height: 36,
+      child: Text(label, style: NileTextStyles.bodySm().copyWith(color: color)),
+    );
     final show = [
       if (onRename != null) item(_TileAction.rename, 'Rename camera…'),
       if (actions.onMakeMasterAudio != null &&
@@ -869,7 +869,10 @@ class _SourceTile extends StatelessWidget {
       if (s.isAngle && !s.isOffAir && actions.onSendEveryone != null)
         item(_TileAction.sendEveryone, 'Send everyone here'),
       if (s.isAngle && actions.onToggleOffAir != null)
-        item(_TileAction.offAir, s.isOffAir ? 'Put back on air' : 'Take off air'),
+        item(
+          _TileAction.offAir,
+          s.isOffAir ? 'Put back on air' : 'Take off air',
+        ),
     ];
     final operator = [
       if (_talkable && actions.onNudge != null)
@@ -1003,7 +1006,11 @@ class _SourceTile extends StatelessWidget {
                   if (s.isMasterAudio)
                     Tooltip(
                       message: 'Master audio',
-                      child: Icon(Icons.album, size: 14, color: NileColors.volt),
+                      child: Icon(
+                        Icons.album,
+                        size: 14,
+                        color: NileColors.volt,
+                      ),
                     ),
                   if (s.isReady) ...[
                     const SizedBox(width: NileSpacing.s4),
@@ -1189,7 +1196,10 @@ class _SourceTile extends StatelessWidget {
     if (h == null || !_talkable) return const [];
     Widget icon(IconData i, Color c, String tip) => Padding(
       padding: const EdgeInsets.only(right: NileSpacing.s4),
-      child: Tooltip(message: tip, child: Icon(i, size: 13, color: c)),
+      child: Tooltip(
+        message: tip,
+        child: Icon(i, size: 13, color: c),
+      ),
     );
     final out = <Widget>[];
     if (h.battery case final b?) {
@@ -1931,12 +1941,16 @@ class _NileStudioChatState extends State<NileStudioChat> {
               visualDensity: VisualDensity.compact,
               materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
               labelStyle: NileTextStyles.caption().copyWith(
-                color: _filter == f ? NileColors.onVolt : NileColors.txtSecondary,
+                color: _filter == f
+                    ? NileColors.onVolt
+                    : NileColors.txtSecondary,
               ),
               selectedColor: NileColors.volt,
               backgroundColor: NileColors.bgRaised,
               side: BorderSide.none,
-              labelPadding: const EdgeInsets.symmetric(horizontal: NileSpacing.s4),
+              labelPadding: const EdgeInsets.symmetric(
+                horizontal: NileSpacing.s4,
+              ),
               padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s4),
             ),
           ),
@@ -2206,10 +2220,7 @@ class _ChatRowState extends State<_ChatRow> {
   }) => PopupMenuItem(
     value: value,
     height: 36,
-    child: Text(
-      label,
-      style: NileTextStyles.bodySm().copyWith(color: color),
-    ),
+    child: Text(label, style: NileTextStyles.bodySm().copyWith(color: color)),
   );
 
   List<PopupMenuEntry<_RowAction>> _items() {
@@ -2224,7 +2235,10 @@ class _ChatRowState extends State<_ChatRow> {
       if (w.onShowOnScreen != null && !m.isSystem && !m.filtered)
         _item(_RowAction.showOnScreen, 'Show on screen'),
       if (w.onShowOnScreenOptions != null && !m.isSystem && !m.filtered)
-        _item(_RowAction.showOnScreenOptions, 'Show on screen — cameras & timer…'),
+        _item(
+          _RowAction.showOnScreenOptions,
+          'Show on screen — cameras & timer…',
+        ),
     ];
     final room = <PopupMenuEntry<_RowAction>>[
       // Remove needs a message id, and a line broadcast by a client that
@@ -2303,7 +2317,8 @@ class _ChatRowState extends State<_ChatRow> {
                                       right: NileSpacing.s4,
                                     ),
                                     child: Tooltip(
-                                      message: 'First time chatting in your shows',
+                                      message:
+                                          'First time chatting in your shows',
                                       child: Icon(
                                         Icons.waving_hand_outlined,
                                         size: 12,
@@ -2530,14 +2545,20 @@ class NileStudioControlBar extends StatelessWidget {
                 onPressed: onToggleVideo,
                 icon: Icon(videoEnabled ? Icons.videocam_off : Icons.videocam),
                 label: Text(videoEnabled ? 'Camera Off' : studioCam),
-                style: _outlined(NileColors.txtPrimary, NileColors.borderStrong),
+                style: _outlined(
+                  NileColors.txtPrimary,
+                  NileColors.borderStrong,
+                ),
               )
             else if (isMasterAudio || !videoEnabled)
               OutlinedButton.icon(
                 onPressed: onToggleVideo,
                 icon: Icon(videoEnabled ? Icons.videocam_off : Icons.videocam),
                 label: Text(videoEnabled ? 'Video Off' : 'Video On'),
-                style: _outlined(NileColors.txtPrimary, NileColors.borderStrong),
+                style: _outlined(
+                  NileColors.txtPrimary,
+                  NileColors.borderStrong,
+                ),
               ),
             if (showClaimMasterAudio && !isMasterAudio && soundCheck) ...[
               if (!videoEnabled) const SizedBox(width: NileSpacing.s8),
@@ -2545,7 +2566,10 @@ class NileStudioControlBar extends StatelessWidget {
                 onPressed: onClaimMasterAudio,
                 icon: const Icon(Icons.album, size: 16),
                 label: const Text('Set as Master Audio'),
-                style: _outlined(NileColors.txtPrimary, NileColors.borderStrong),
+                style: _outlined(
+                  NileColors.txtPrimary,
+                  NileColors.borderStrong,
+                ),
               ),
             ],
           ],
@@ -2886,8 +2910,8 @@ class NileCuedChip extends StatelessWidget {
   );
 }
 
-/// The Studio's cue strip (under the stats row): what is cued, where it will
-/// go, and Take / Clear. Enter and Esc do the same.
+/// The Studio's cue strip (under the stats row): what is cued — one graphic
+/// or several — and Take / Clear. Enter and Esc do the same.
 class NileStudioCueBar extends StatelessWidget {
   const NileStudioCueBar({
     super.key,
@@ -2895,13 +2919,18 @@ class NileStudioCueBar extends StatelessWidget {
     required this.targets,
     required this.onTake,
     required this.onClear,
+    this.count = 1,
     this.busy = false,
   });
 
+  /// One graphic's name, or "3 graphics".
   final String name;
 
-  /// "All cameras", "Cam 1, Cam 3"…
+  /// One graphic: "All cameras", "Cam 1, Cam 3"…; several: their names.
   final String targets;
+
+  /// How many are cued — they all go on air with one Take.
+  final int count;
   final VoidCallback onTake;
   final VoidCallback onClear;
   final bool busy;
@@ -2923,7 +2952,7 @@ class NileStudioCueBar extends StatelessWidget {
               children: [
                 TextSpan(text: name, style: NileTextStyles.labelLg()),
                 TextSpan(
-                  text: '  →  $targets',
+                  text: count == 1 ? '  →  $targets' : '  ·  $targets',
                   style: NileTextStyles.bodySm().copyWith(
                     color: NileColors.txtSecondary,
                   ),
@@ -2936,7 +2965,7 @@ class NileStudioCueBar extends StatelessWidget {
         ),
         TextButton(
           onPressed: busy ? null : onClear,
-          child: const Text('Clear (Esc)'),
+          child: Text(count == 1 ? 'Clear (Esc)' : 'Clear all (Esc)'),
         ),
         const SizedBox(width: NileSpacing.s8),
         FilledButton.icon(
@@ -2946,7 +2975,7 @@ class NileStudioCueBar extends StatelessWidget {
             foregroundColor: NileColors.onVolt,
           ),
           icon: const Icon(Icons.play_arrow, size: 18),
-          label: const Text('Take (Enter)'),
+          label: Text(count == 1 ? 'Take (Enter)' : 'Take all (Enter)'),
         ),
       ],
     ),

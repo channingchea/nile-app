@@ -141,14 +141,17 @@ class StudioGraphic {
   /// The graphic's saved auto-hide, in seconds; 0 = stays up.
   int get autoHideSeconds => (payload['autoHideSeconds'] as num?)?.toInt() ?? 0;
 
-  StudioGraphic copyWith({String? name, Map<String, dynamic>? payload, int? sort}) =>
-      StudioGraphic(
-        id: id,
-        kind: kind,
-        name: name ?? this.name,
-        payload: payload ?? this.payload,
-        sort: sort ?? this.sort,
-      );
+  StudioGraphic copyWith({
+    String? name,
+    Map<String, dynamic>? payload,
+    int? sort,
+  }) => StudioGraphic(
+    id: id,
+    kind: kind,
+    name: name ?? this.name,
+    payload: payload ?? this.payload,
+    sort: sort ?? this.sort,
+  );
 
   /// Why [payload] can't be saved as a [kind], or null when it can.
   static String? validate(GraphicKind kind, Map<String, dynamic> p) {
@@ -175,7 +178,9 @@ class StudioGraphic {
         return 'The sponsor logo comes from the show’s sponsorship.';
       case GraphicKind.qr:
         final source = p['source'] ?? 'custom';
-        if (!qrSources.containsKey(source)) return 'Pick where the link comes from.';
+        if (!qrSources.containsKey(source)) {
+          return 'Pick where the link comes from.';
+        }
         if (source == 'custom' && !isQrUrl(p['url'])) {
           return 'Enter a link starting with https://';
         }
@@ -287,7 +292,10 @@ abstract final class StudioGraphicPresets {
       id: 'preset:starting',
       kind: GraphicKind.slate,
       name: 'Starting soon',
-      payload: {'title': 'Starting soon', 'subtitle': 'Grab a seat — we’re about to begin.'},
+      payload: {
+        'title': 'Starting soon',
+        'subtitle': 'Grab a seat — we’re about to begin.',
+      },
     ),
     StudioGraphic(
       id: 'preset:brb',
@@ -411,8 +419,10 @@ class LiveGraphic {
 
   /// This graphic as drawn with [style] (null = Nile style). Graphics that
   /// opted out of the kit ignore it.
-  LiveGraphic withBrand(BrandStyle? style) =>
-      _copy(brand: nileStyle ? null : style, clearBrand: nileStyle || style == null);
+  LiveGraphic withBrand(BrandStyle? style) => _copy(
+    brand: nileStyle ? null : style,
+    clearBrand: nileStyle || style == null,
+  );
 
   bool expiredAt(int nowMs) => hideAt != null && hideAt! <= nowMs;
 
@@ -439,8 +449,9 @@ class LiveGraphic {
     return LiveGraphic(
       id: g.id,
       kind: g.kind,
-      title: (g.kind == GraphicKind.sponsor ? p['sponsorName'] : p['title'])
-          as String?,
+      title:
+          (g.kind == GraphicKind.sponsor ? p['sponsorName'] : p['title'])
+              as String?,
       subtitle: p['subtitle'] as String?,
       text: p['text'] as String?,
       imageUrl: g.kind == GraphicKind.sponsor
@@ -487,8 +498,11 @@ class LiveGraphic {
         : null,
   );
 
-  LiveGraphic copyWith({List<String>? except, int? hideAt, bool clearHide = false}) =>
-      _copy(except: except, hideAt: hideAt, clearHide: clearHide);
+  LiveGraphic copyWith({
+    List<String>? except,
+    int? hideAt,
+    bool clearHide = false,
+  }) => _copy(except: except, hideAt: hideAt, clearHide: clearHide);
 
   LiveGraphic _copy({
     List<String>? except,
@@ -601,10 +615,14 @@ class GraphicTargets {
   String summary(String Function(String slotId) labelOf, List<String> order) {
     if (all) {
       if (except.isEmpty) return 'All cameras';
-      return 'All but ${[for (final s in order) if (except.contains(s)) labelOf(s)].join(', ')}';
+      return 'All but ${[for (final s in order)
+        if (except.contains(s)) labelOf(s)].join(', ')}';
     }
     if (slots.isEmpty) return 'Off';
-    return [for (final s in order) if (slots.contains(s)) labelOf(s)].join(', ');
+    return [
+      for (final s in order)
+        if (slots.contains(s)) labelOf(s),
+    ].join(', ');
   }
 
   @override
@@ -615,8 +633,11 @@ class GraphicTargets {
       setEquals(other.slots, slots);
 
   @override
-  int get hashCode => Object.hash(all, Object.hashAllUnordered(except),
-      Object.hashAllUnordered(slots));
+  int get hashCode => Object.hash(
+    all,
+    Object.hashAllUnordered(except),
+    Object.hashAllUnordered(slots),
+  );
 }
 
 /// What is on air: graphics for every camera, plus per-slot extras.
@@ -626,7 +647,11 @@ class GraphicTargets {
 /// ([forSlot]), so graphics follow the camera a viewer picks.
 @immutable
 class GraphicsState {
-  const GraphicsState({this.all = const [], this.bySlot = const {}, this.brand});
+  const GraphicsState({
+    this.all = const [],
+    this.bySlot = const {},
+    this.brand,
+  });
 
   static const empty = GraphicsState();
 
@@ -694,7 +719,10 @@ class GraphicsState {
   List<LiveGraphic> forSlot(String? slotId, {int? nowMs}) {
     final now = nowMs ?? DateTime.now().millisecondsSinceEpoch;
     final own = [
-      for (final g in slotId == null ? const <LiveGraphic>[] : bySlot[slotId] ?? const <LiveGraphic>[])
+      for (final g
+          in slotId == null
+              ? const <LiveGraphic>[]
+              : bySlot[slotId] ?? const <LiveGraphic>[])
         if (!g.expiredAt(now)) g,
     ];
     final taken = {for (final g in own) g.capKey};
@@ -720,7 +748,8 @@ class GraphicsState {
       targetList(slotId).any((g) => g.id == graphicId);
 
   /// On any camera at all.
-  bool onAnywhere(String graphicId) => _everything.any((g) => g.id == graphicId);
+  bool onAnywhere(String graphicId) =>
+      _everything.any((g) => g.id == graphicId);
 
   /// Where [graphicId] is on air right now.
   GraphicTargets targetsOf(String graphicId) {
@@ -733,11 +762,10 @@ class GraphicsState {
   }
 
   /// Turn [g] on for a target, replacing whatever held its cap key there.
-  GraphicsState withOn(String? slotId, LiveGraphic g) =>
-      _withTarget(slotId, [
-        ...targetList(slotId).where((x) => x.capKey != g.capKey && x.id != g.id),
-        g,
-      ]);
+  GraphicsState withOn(String? slotId, LiveGraphic g) => _withTarget(slotId, [
+    ...targetList(slotId).where((x) => x.capKey != g.capKey && x.id != g.id),
+    g,
+  ]);
 
   GraphicsState withOff(String? slotId, String graphicId) => _withTarget(
     slotId,
@@ -749,7 +777,9 @@ class GraphicsState {
   /// Put [g] exactly on [t] — wherever it was before no longer counts.
   GraphicsState withTargets(LiveGraphic g, GraphicTargets t) {
     var s = withoutEverywhere(g.id);
-    if (t.all) return s.withOn(null, g.copyWith(except: t.except.toList()..sort()));
+    if (t.all) {
+      return s.withOn(null, g.copyWith(except: t.except.toList()..sort()));
+    }
     for (final slot in t.slots) {
       s = s.withOn(slot, g.copyWith(except: const []));
     }
@@ -764,7 +794,9 @@ class GraphicsState {
     if (g != null && !g.except.contains(slotId)) {
       s = s._withTarget(null, [
         for (final x in s.all)
-          x.id == graphicId ? x.copyWith(except: [...x.except, slotId]..sort()) : x,
+          x.id == graphicId
+              ? x.copyWith(except: [...x.except, slotId]..sort())
+              : x,
       ]);
     }
     return s;
@@ -812,7 +844,9 @@ class GraphicsState {
   }
 
   GraphicsState _withTarget(String? slotId, List<LiveGraphic> list) {
-    if (slotId == null) return GraphicsState(all: list, bySlot: bySlot, brand: brand);
+    if (slotId == null) {
+      return GraphicsState(all: list, bySlot: bySlot, brand: brand);
+    }
     final next = {...bySlot};
     if (list.isEmpty) {
       next.remove(slotId);
@@ -883,4 +917,85 @@ class GraphicCue {
   /// counting down to its hide, so the preview stays up.
   GraphicsState preview(GraphicsState current, DateTime now) =>
       current.withTargets(build(now).copyWith(clearHide: true), targets);
+}
+
+/// Everything waiting for Take — several graphics can be cued at once and go
+/// on air together. Cueing a graphic again replaces its entry; cueing one that
+/// would take another's place on screen (same spot, overlapping cameras)
+/// drops the older one, so the monitor never previews what Take won't send.
+@immutable
+class CueSet {
+  const CueSet([this.items = const []]);
+
+  static const empty = CueSet();
+
+  /// In the order they were cued; Take applies them in this order.
+  final List<GraphicCue> items;
+
+  bool get isEmpty => items.isEmpty;
+  bool get isNotEmpty => items.isNotEmpty;
+  int get length => items.length;
+
+  GraphicCue? byId(String id) => items.where((c) => c.id == id).firstOrNull;
+  bool contains(String id) => byId(id) != null;
+
+  CueSet adding(GraphicCue cue) {
+    final now = DateTime.now();
+    final key = cue.build(now).capKey;
+    return CueSet([
+      for (final c in items)
+        if (c.id != cue.id &&
+            !(c.build(now).capKey == key && _overlap(c.targets, cue.targets)))
+          c,
+      cue,
+    ]);
+  }
+
+  CueSet without(String id) => CueSet([
+    for (final c in items)
+      if (c.id != id) c,
+  ]);
+
+  /// Cued → un-cued; otherwise cue it.
+  CueSet toggled(GraphicCue cue) =>
+      contains(cue.id) ? without(cue.id) : adding(cue);
+
+  /// Every cue on air at [now].
+  GraphicsState take(GraphicsState current, DateTime now) =>
+      items.fold(current, (s, c) => c.take(s, now));
+
+  /// What the monitor shows: on air plus every cue, none of them hiding.
+  GraphicsState preview(GraphicsState current, DateTime now) =>
+      items.fold(current, (s, c) => c.preview(s, now));
+
+  /// Some cue lands on [slotId] (null = a screen share: all-camera cues).
+  bool lands(String? slotId) => items.any(
+    (c) => slotId == null ? c.targets.all : c.targets.includes(slotId),
+  );
+
+  /// "Be right back" or "3 graphics".
+  String get label => length == 1 ? items.single.name : '$length graphics';
+
+  /// For the cue strip: one cue → its name and cameras; several → "3
+  /// graphics" and their names.
+  ({String name, String targets}) describe(
+    String Function(String slotId) labelOf,
+    List<String> order,
+  ) => length == 1
+      ? (name: label, targets: items.single.targets.summary(labelOf, order))
+      : (name: label, targets: items.map((c) => c.name).join(', '));
+
+  static bool _overlap(GraphicTargets a, GraphicTargets b) {
+    if (a.all && b.all) return true;
+    if (a.all) return b.slots.any((s) => !a.except.contains(s));
+    if (b.all) return a.slots.any((s) => !b.except.contains(s));
+    return a.slots.any(b.slots.contains);
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      other is CueSet && listEquals(other.items, items);
+
+  @override
+  int get hashCode => Object.hashAll(items);
 }

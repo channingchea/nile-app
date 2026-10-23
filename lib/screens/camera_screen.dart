@@ -281,9 +281,7 @@ class _CameraScreenState extends State<CameraScreen> {
           ),
         );
         if (mounted) {
-          setState(
-            () => _screenShareTrack = pub?.track as LocalVideoTrack?,
-          );
+          setState(() => _screenShareTrack = pub?.track as LocalVideoTrack?);
         }
       } else {
         // macOS grants Screen Recording per-launch: ask before opening a picker
@@ -536,11 +534,13 @@ class _CameraScreenState extends State<CameraScreen> {
           })
         : null;
     final health = st?.health;
-    final level = st?.levelAt != null &&
+    final level =
+        st?.levelAt != null &&
             now.difference(st!.levelAt!) < StudioLink.levelStale
         ? st.level
         : null;
-    final unsupported = st != null &&
+    final unsupported =
+        st != null &&
         health == null &&
         now.difference(st.firstSeen) >= _statusGrace;
     final acked = st?.ackAt != null && now.difference(st!.ackAt!) < _ackShown;
@@ -626,9 +626,7 @@ class _CameraScreenState extends State<CameraScreen> {
         label: _isStudio
             ? (_videoEnabled ? 'Studio · $name' : 'Studio')
             : (name.isEmpty ? 'Your camera' : 'You · $name'),
-        sublabel: _isStudio && !_videoEnabled
-            ? 'Control room · $audio'
-            : audio,
+        sublabel: _isStudio && !_videoEnabled ? 'Control room · $audio' : audio,
         track: _videoEnabled ? _localVideoTrack : null,
         isLocal: true,
         isMasterAudio: _isMainAudioSource,
@@ -791,7 +789,9 @@ class _CameraScreenState extends State<CameraScreen> {
       await ChatService.banSender(eventId: eventId, targetId: m.senderId);
       _toast('@${m.username} was banned from this show.');
     } catch (e) {
-      _toast(e is ChatSendException ? e.message : 'Couldn’t ban them. Try again.');
+      _toast(
+        e is ChatSendException ? e.message : 'Couldn’t ban them. Try again.',
+      );
     }
   }
 
@@ -1289,7 +1289,7 @@ class _CameraScreenState extends State<CameraScreen> {
   /// Studio: the graphic waiting for Take (cue before air), the host's brand
   /// kit (attached to every push), the show's sponsor as a built-in graphic,
   /// and the host's username for "Your profile" QR codes.
-  final _cue = ValueNotifier<GraphicCue?>(null);
+  final _cue = ValueNotifier<CueSet>(CueSet.empty);
   bool _taking = false;
   BrandKit? _brandKit;
   StudioGraphic? _sponsorItem;
@@ -1533,7 +1533,9 @@ class _CameraScreenState extends State<CameraScreen> {
   void _onChatMessage(ChatMessage m) {
     if (!mounted) return;
     setState(() {
-      final i = m.id == null ? -1 : _chatMessages.indexWhere((x) => x.id == m.id);
+      final i = m.id == null
+          ? -1
+          : _chatMessages.indexWhere((x) => x.id == m.id);
       if (i >= 0) {
         _chatMessages[i] = m;
         return;
@@ -2142,11 +2144,11 @@ class _CameraScreenState extends State<CameraScreen> {
       SnackBar(
         content: Text(text),
         duration: const Duration(seconds: 8),
+        showCloseIcon: true,
         action: kind == CameraAlertKind.battery
             ? SnackBarAction(
                 label: 'Send ‘${NudgePresets.chargeSoon}’',
-                onPressed: () =>
-                    _sendNudge(identity, NudgePresets.chargeSoon),
+                onPressed: () => _sendNudge(identity, NudgePresets.chargeSoon),
               )
             : null,
       ),
@@ -2238,9 +2240,7 @@ class _CameraScreenState extends State<CameraScreen> {
   /// The published mic's level when it is live; otherwise the private
   /// meter's. Nothing at all when neither has a reading.
   void _sendLevel() {
-    final level = _micLive
-        ? _room?.localParticipant?.audioLevel
-        : _meterLevel;
+    final level = _micLive ? _room?.localParticipant?.audioLevel : _meterLevel;
     if (level != null) _sendStatus(LevelMessage(level));
   }
 
@@ -2452,7 +2452,9 @@ class _CameraScreenState extends State<CameraScreen> {
       for (final p in room.remoteParticipants.values) {
         if (!_isPublisher(p)) continue;
         final track = p.videoTrackPublications
-            .where((x) => x.subscribed && x.source != TrackSource.screenShareVideo)
+            .where(
+              (x) => x.subscribed && x.source != TrackSource.screenShareVideo,
+            )
             .firstOrNull
             ?.track;
         if (track?.receiver?.receiverId case final id?) receivers.add(id);
@@ -2617,7 +2619,8 @@ class _CameraScreenState extends State<CameraScreen> {
   /// QR sources that are resolved when pushed.
   String? _resolveLink(String source) => switch (source) {
     'event' => _eventId == null ? null : ShareUrls.event(_eventId!),
-    'profile' => _hostUsername == null ? null : ShareUrls.profile(_hostUsername!),
+    'profile' =>
+      _hostUsername == null ? null : ShareUrls.profile(_hostUsername!),
     _ => null,
   };
 
@@ -2639,23 +2642,27 @@ class _CameraScreenState extends State<CameraScreen> {
       resolveLink: _resolveLink,
     );
     if (action == null) return;
-    if (action.cue != null) _cue.value = action.cue;
+    if (action.cue != null) _cue.value = _cue.value.toggled(action.cue!);
     if (action.off != null && !await _pushGraphics(action.off!)) {
       _toast('Couldn’t update the show’s graphics. Try again.');
     }
   }
 
-  /// Take: the cued graphic goes on air, its countdown and auto-hide
+  /// Take: everything cued goes on air together, countdowns and auto-hides
   /// starting now.
   Future<void> _takeCue() async {
-    final cue = _cue.value;
-    if (cue == null || _taking) return;
+    final cues = _cue.value;
+    if (cues.isEmpty || _taking) return;
     setState(() => _taking = true);
-    final ok = await _pushGraphics(cue.take(_graphics, DateTime.now()));
+    final ok = await _pushGraphics(cues.take(_graphics, DateTime.now()));
     if (!mounted) return;
     setState(() => _taking = false);
     if (ok) {
-      if (_cue.value?.id == cue.id) _cue.value = null;
+      // Anything cued while the push was in flight stays cued.
+      _cue.value = CueSet([
+        for (final c in _cue.value.items)
+          if (!cues.items.contains(c)) c,
+      ]);
     } else {
       _toast('Couldn’t put that on air. Try again.');
     }
@@ -2664,33 +2671,28 @@ class _CameraScreenState extends State<CameraScreen> {
   /// What the monitor shows for a source: on air, plus the cue.
   List<LiveGraphic> _previewFor(NileStudioSource s) {
     final slot = s.isScreenShare ? null : s.slotId;
-    final cue = _cue.value;
     final base = _graphics.withBrand(_brandKit?.style);
-    return cue == null
-        ? base.forSlot(slot)
-        : cue.preview(base, DateTime.now()).forSlot(slot);
+    return _cue.value.preview(base, DateTime.now()).forSlot(slot);
   }
 
-  bool _isCued(NileStudioSource s) {
-    final cue = _cue.value;
-    if (cue == null) return false;
-    final slot = s.isScreenShare ? null : s.slotId;
-    return slot == null ? cue.targets.all : cue.targets.includes(slot);
-  }
+  bool _isCued(NileStudioSource s) =>
+      _cue.value.lands(s.isScreenShare ? null : s.slotId);
 
   Widget? _buildCueBar() {
-    final cue = _cue.value;
-    if (!_isStudio || cue == null) return null;
+    final cues = _cue.value;
+    if (!_isStudio || cues.isEmpty) return null;
     final refs = _slotRefs;
+    final d = cues.describe(
+      (id) => refs.where((r) => r.id == id).firstOrNull?.label ?? 'Camera',
+      [for (final r in refs) r.id],
+    );
     return NileStudioCueBar(
-      name: cue.name,
-      targets: cue.targets.summary(
-        (id) => refs.where((r) => r.id == id).firstOrNull?.label ?? 'Camera',
-        [for (final r in refs) r.id],
-      ),
+      name: d.name,
+      targets: d.targets,
+      count: cues.length,
       busy: _taking,
       onTake: _takeCue,
-      onClear: () => _cue.value = null,
+      onClear: () => _cue.value = CueSet.empty,
     );
   }
 
@@ -2749,7 +2751,7 @@ class _CameraScreenState extends State<CameraScreen> {
 
   /// "Show on screen": cued for every camera, 10 s.
   Future<void> _showChatOnScreen(ChatMessage m) async {
-    _cue.value = _chatCue(m, const GraphicTargets.all(), 10);
+    _cue.value = _cue.value.adding(_chatCue(m, const GraphicTargets.all(), 10));
   }
 
   /// "Show on screen" with a choice of cameras and timer.
@@ -2764,9 +2766,10 @@ class _CameraScreenState extends State<CameraScreen> {
     if (choice == null || !mounted) return;
     final cue = _chatCue(m, choice.targets, choice.autoHideSeconds);
     if (!choice.targets.isNone) {
-      _cue.value = cue;
+      _cue.value = _cue.value.adding(cue);
       return;
     }
+    _cue.value = _cue.value.without(cue.id);
     if (!await _pushGraphics(_graphics.withoutEverywhere(cue.id))) {
       _toast('Couldn’t take that off screen. Try again.');
     }
@@ -3196,7 +3199,10 @@ class _CameraScreenState extends State<CameraScreen> {
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: NileColors.bgSurface,
-        title: Text('Remove ${source.label}?', style: NileTextStyles.headingMd()),
+        title: Text(
+          'Remove ${source.label}?',
+          style: NileTextStyles.headingMd(),
+        ),
         content: Text(
           'Their feed is dropped from the show immediately. They can rejoin '
           'only if they are still on the crew list.',
@@ -3209,10 +3215,7 @@ class _CameraScreenState extends State<CameraScreen> {
           ),
           TextButton(
             onPressed: () => Navigator.pop(ctx, true),
-            child: Text(
-              'Remove',
-              style: TextStyle(color: NileColors.error),
-            ),
+            child: Text('Remove', style: TextStyle(color: NileColors.error)),
           ),
         ],
       ),
@@ -3238,7 +3241,10 @@ class _CameraScreenState extends State<CameraScreen> {
   /// Move the show's audio to [identity] — a camera, this Studio, or Stream
   /// Audio. Free during Sound Check; live, it asks first, because viewers
   /// hear the switch (and the sync reference resets with it).
-  Future<void> _setMasterAudio(String identity, {bool confirmLive = true}) async {
+  Future<void> _setMasterAudio(
+    String identity, {
+    bool confirmLive = true,
+  }) async {
     final eventId = _eventId;
     if (eventId == null || identity == _masterIdentity) return;
     if (confirmLive && _state == CameraState.live) {
@@ -3347,8 +3353,9 @@ class _CameraScreenState extends State<CameraScreen> {
           // Keep the SDK's own options honest so a later mute/unmute or
           // republish doesn't snap back to the previous position.
           track.currentOptions = CameraCaptureOptions(
-            cameraPosition:
-                nowFront ? CameraPosition.front : CameraPosition.back,
+            cameraPosition: nowFront
+                ? CameraPosition.front
+                : CameraPosition.back,
             maxFrameRate: track.currentOptions.maxFrameRate,
             params: track.currentOptions.params,
           );
@@ -3449,7 +3456,7 @@ class _CameraScreenState extends State<CameraScreen> {
     _alerts = CameraAlerts();
     _lastTargets.clear();
     _graphicsLibrary = const [];
-    _cue.value = null;
+    _cue.value = CueSet.empty;
     _sponsorItem = null;
     // Stop screen capture explicitly — disconnect unpublishes the track but
     // doesn't always halt the native capturer promptly.
@@ -3654,7 +3661,12 @@ class _CameraScreenState extends State<CameraScreen> {
     return Material(
       color: NileColors.bgRaised,
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s8, NileSpacing.s8, NileSpacing.s8),
+        padding: const EdgeInsets.fromLTRB(
+          NileSpacing.s16,
+          NileSpacing.s8,
+          NileSpacing.s8,
+          NileSpacing.s8,
+        ),
         child: Row(
           children: [
             Icon(Icons.mic_external_on, color: NileColors.volt, size: 20),
@@ -3677,11 +3689,7 @@ class _CameraScreenState extends State<CameraScreen> {
               ),
             ),
             IconButton(
-              icon: Icon(
-                Icons.close,
-                size: 18,
-                color: NileColors.txtSecondary,
-              ),
+              icon: Icon(Icons.close, size: 18, color: NileColors.txtSecondary),
               tooltip: 'Dismiss',
               onPressed: () =>
                   setState(() => _externalMicPromptDismissed = true),
@@ -4155,11 +4163,7 @@ class _CameraScreenState extends State<CameraScreen> {
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  Icon(
-                    Icons.videocam_off,
-                    size: 64,
-                    color: NileColors.border,
-                  ),
+                  Icon(Icons.videocam_off, size: 64, color: NileColors.border),
                   const SizedBox(height: 12),
                   Text(
                     'Video Off',
@@ -4212,7 +4216,10 @@ class _CameraScreenState extends State<CameraScreen> {
           top: 16,
           left: 16,
           child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s8, vertical: NileSpacing.s4),
+            padding: const EdgeInsets.symmetric(
+              horizontal: NileSpacing.s8,
+              vertical: NileSpacing.s4,
+            ),
             decoration: BoxDecoration(
               color: _state == CameraState.live
                   ? NileColors.coral
@@ -4379,7 +4386,9 @@ class _CameraScreenState extends State<CameraScreen> {
                     style: OutlinedButton.styleFrom(
                       foregroundColor: NileColors.volt,
                       side: BorderSide(color: NileColors.volt),
-                      padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
+                      padding: const EdgeInsets.symmetric(
+                        vertical: NileSpacing.s16,
+                      ),
                       textStyle: NileTextStyles.labelLg(),
                       shape: const StadiumBorder(),
                     ),
@@ -4395,7 +4404,9 @@ class _CameraScreenState extends State<CameraScreen> {
                     style: FilledButton.styleFrom(
                       backgroundColor: NileColors.coral,
                       foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
+                      padding: const EdgeInsets.symmetric(
+                        vertical: NileSpacing.s16,
+                      ),
                       textStyle: NileTextStyles.labelLg(),
                       shape: const StadiumBorder(),
                     ),
@@ -4416,7 +4427,9 @@ class _CameraScreenState extends State<CameraScreen> {
                           style: FilledButton.styleFrom(
                             backgroundColor: NileColors.volt,
                             foregroundColor: NileColors.onVolt,
-                            padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
+                            padding: const EdgeInsets.symmetric(
+                              vertical: NileSpacing.s16,
+                            ),
                             textStyle: NileTextStyles.labelLg(),
                             shape: const StadiumBorder(),
                           ),
@@ -4428,7 +4441,9 @@ class _CameraScreenState extends State<CameraScreen> {
                           style: OutlinedButton.styleFrom(
                             foregroundColor: NileColors.volt,
                             side: BorderSide(color: NileColors.volt),
-                            padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
+                            padding: const EdgeInsets.symmetric(
+                              vertical: NileSpacing.s16,
+                            ),
                             textStyle: NileTextStyles.labelLg(),
                             shape: const StadiumBorder(),
                           ),
@@ -4448,7 +4463,9 @@ class _CameraScreenState extends State<CameraScreen> {
                     style: OutlinedButton.styleFrom(
                       foregroundColor: NileColors.error,
                       side: const BorderSide(color: NileColors.error),
-                      padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
+                      padding: const EdgeInsets.symmetric(
+                        vertical: NileSpacing.s16,
+                      ),
                       textStyle: NileTextStyles.labelLg(),
                       shape: const StadiumBorder(),
                     ),
@@ -4535,10 +4552,10 @@ class _CameraScreenState extends State<CameraScreen> {
                         label: Text(_videoEnabled ? 'Video Off' : 'Video On'),
                         style: OutlinedButton.styleFrom(
                           foregroundColor: NileColors.txtPrimary,
-                          side: BorderSide(
-                            color: NileColors.borderStrong,
+                          side: BorderSide(color: NileColors.borderStrong),
+                          padding: const EdgeInsets.symmetric(
+                            vertical: NileSpacing.s16,
                           ),
-                          padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
                           shape: const StadiumBorder(),
                         ),
                       ),
@@ -4574,7 +4591,9 @@ class _CameraScreenState extends State<CameraScreen> {
                       style: OutlinedButton.styleFrom(
                         foregroundColor: NileColors.txtPrimary,
                         side: BorderSide(color: NileColors.border),
-                        padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
+                        padding: const EdgeInsets.symmetric(
+                          vertical: NileSpacing.s16,
+                        ),
                         textStyle: NileTextStyles.labelMd(),
                         shape: const StadiumBorder(),
                       ),
@@ -4667,8 +4686,7 @@ class _CameraScreenState extends State<CameraScreen> {
       onRemoveSource: widget.isHost ? _removeSource : null,
       // Renaming is a show-control, so only the Studio offers it.
       onRenameSource: _isStudio ? _renameSource : null,
-      graphicsFor: (s) =>
-          _graphics.forSlot(s.isScreenShare ? null : s.slotId),
+      graphicsFor: (s) => _graphics.forSlot(s.isScreenShare ? null : s.slotId),
       previewFor: _isStudio ? _previewFor : null,
       isCued: _isStudio ? _isCued : null,
       selfIdentity: _room?.localParticipant?.identity,
@@ -4753,21 +4771,25 @@ class _CameraScreenState extends State<CameraScreen> {
           : null,
       // The Studio's cue comes first; an operator on a desk-sized screen gets
       // nudges here.
-      banner: _buildCueBar() ?? (_nudge != null
-          ? _buildNudgeBanner()
-          : _reconnectHint != null
-          ? _buildReconnectHint()
-          : _externalMicConnected &&
-                !_disableAgc &&
-                !_externalMicPromptDismissed
-          ? _buildExternalMicBanner()
-          : null),
+      banner:
+          _buildCueBar() ??
+          (_nudge != null
+              ? _buildNudgeBanner()
+              : _reconnectHint != null
+              ? _buildReconnectHint()
+              : _externalMicConnected &&
+                    !_disableAgc &&
+                    !_externalMicPromptDismissed
+              ? _buildExternalMicBanner()
+              : null),
     );
     return _isStudio
         ? StudioGraphicsHotkeys(
             onDigit: _onGraphicsHotkey,
-            onTake: _cue.value == null ? null : _takeCue,
-            onClear: _cue.value == null ? null : () => _cue.value = null,
+            onTake: _cue.value.isEmpty ? null : _takeCue,
+            onClear: _cue.value.isEmpty
+                ? null
+                : () => _cue.value = CueSet.empty,
             child: studio,
           )
         : studio;
