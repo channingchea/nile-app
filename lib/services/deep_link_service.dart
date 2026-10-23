@@ -63,6 +63,21 @@ class DeepLinkService {
     return null;
   }
 
+  /// A Nile share link tapped inside the app (a QR code on screen): opened on
+  /// top of where the user is, not in place of it. False when it isn't one of
+  /// ours.
+  static Future<bool> openInApp(Uri uri) async {
+    final parsed = _parse(uri);
+    if (parsed == null) return false;
+    final destination = await Destinations.forLink(
+      kind: parsed.kind,
+      value: parsed.value,
+    );
+    if (destination == null) return false;
+    nileRouter.push(destination.location, extra: destination.extra);
+    return true;
+  }
+
   static Future<void> _route(Uri uri) async {
     final parsed = _parse(uri);
     if (parsed == null) return;

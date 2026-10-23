@@ -3,7 +3,43 @@
 // `graphics`. Mirrors GraphicsState / LiveGraphic in
 // lib/services/studio_graphics.dart. Pure, so it can be unit tested.
 
-const KINDS = new Set(["lower_third", "logo", "banner", "slate", "chat"]);
+const KINDS = new Set(["lower_third", "logo", "banner", "slate", "chat", "qr", "sponsor"]);
+
+/** Brand-kit fonts — mirrors brandFonts in lib/services/brand_kit.dart and migration 0135. */
+export const BRAND_FONTS = new Set([
+  "Inter", "Montserrat", "Poppins", "Oswald", "Bebas Neue", "Playfair Display",
+  "Merriweather", "Space Grotesk", "DM Serif Display", "Archivo Black", "Roboto Slab", "Caveat",
+]);
+const HEX = /^#[0-9A-Fa-f]{6}$/;
+const HTTPS = /^https:\/\/[^\s/$.?#][^\s]*$/i;
+
+export interface BrandStyle {
+  accent: string;
+  panel: string;
+  text: string;
+  /** Text on the accent (the banner); absent = text. */
+  onAccent?: string;
+  font?: string;
+}
+
+/** A brand kit as viewers draw it, or null when anything is off. */
+export function cleanBrand(raw: unknown): BrandStyle | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const ok = (v: unknown): v is string => typeof v === "string" && HEX.test(v);
+  if (!ok(r.accent) || !ok(r.panel) || !ok(r.text)) return null;
+  const b: BrandStyle = { accent: r.accent.toUpperCase(), panel: r.panel.toUpperCase(), text: r.text.toUpperCase() };
+  if (ok(r.onAccent)) b.onAccent = r.onAccent.toUpperCase();
+  if (typeof r.font === "string" && BRAND_FONTS.has(r.font)) b.font = r.font;
+  return b;
+}
+
+/** The event's sponsor, looked up by the server — the only source of a sponsor graphic's image and name. */
+export interface SponsorInfo {
+  campaignId: string;
+  name: string;
+  logoUrl?: string;
+}
 const CORNERS = new Set(["tl", "tr", "bl", "br"]);
 const SIZES = new Set(["s", "m", "l"]);
 
@@ -25,6 +61,10 @@ export interface LiveGraphic {
   showsClock?: true;
   hideAt?: number;
   except?: string[];
+  url?: string;
+  caption?: string;
+  campaignId?: string;
+  nileStyle?: true;
 }
 
 export interface GraphicOpts {
@@ -32,18 +72,22 @@ export interface GraphicOpts {
   imagePrefix: string;
   /** This project's public storage prefix — chat avatars must live here. */
   avatarPrefix?: string;
+  /** This event's accepted sponsor; sponsor graphics for anything else are dropped. */
+  sponsor?: SponsorInfo | null;
 }
 
 export interface GraphicsState {
   all: LiveGraphic[];
   bySlot: Record<string, LiveGraphic[]>;
+  brand?: BrandStyle;
 }
 
 const str = (v: unknown, max: number) =>
   typeof v === "string" && v.length <= max ? v : undefined;
 
 /** One cap key per target: one lower third, one logo per corner, one banner, one slate. */
-export const capKey = (g: LiveGraphic) => (g.kind === "logo" ? `logo:${g.corner}` : g.kind);
+export const capKey = (g: LiveGraphic) =>
+  g.kind === "logo" || g.kind === "sponsor" ? `logo:${g.corner}` : g.kind === "qr" ? `qr:${g.corner}` : g.kind;
 
 /**
  * Normalize one graphic, or null if it can't be drawn. Images must come from
@@ -51,7 +95,9 @@ export const capKey = (g: LiveGraphic) => (g.kind === "logo" ? `logo:${g.corner}
  * make every viewer's app fetch an arbitrary URL.
  */
 export function cleanGraphic(raw: unknown, opts: GraphicOpts | string): LiveGraphic | null {
-  const { imagePrefix, avatarPrefix } = typeof opts === "string" ? { imagePrefix: opts, avatarPrefix: undefined } : opts;
+  const { imagePrefix, avatarPrefix, sponsor } = typeof opts === "string"
+    ? { imagePrefix: opts, avatarPrefix: undefined, sponsor: undefined }
+    : opts;
   if (!raw || typeof raw !== "object") return null;
   const r = raw as Record<string, unknown>;
   const id = str(r.id, 80);
@@ -62,8 +108,9 @@ export function cleanGraphic(raw: unknown, opts: GraphicOpts | string): LiveGrap
   const title = str(r.title, 60);
   const subtitle = str(r.subtitle, 120);
   const text = str(r.text, kind === "chat" ? 200 : 140);
-  const imageUrl = str(r.imageUrl, 500);
-  if (title) g.title = title;
+  // A sponsor's image and name come from the campaign, never from the Studio.
+  const imageUrl = kind === "sponsor" ? undefined : str(r.imageUrl, 500);
+  if (title && kind !== "sponsor") g.title = title;
   if (subtitle) g.subtitle = subtitle;
   if (text) g.text = text;
   if (imageUrl) {
@@ -73,6 +120,7 @@ export function cleanGraphic(raw: unknown, opts: GraphicOpts | string): LiveGrap
   // Auto-hide: when it comes down by itself. Viewers stop drawing it then even
   // if the Studio is slow to take it out of the metadata.
   if (typeof r.hideAt === "number" && Number.isFinite(r.hideAt)) g.hideAt = Math.round(r.hideAt);
+  if (r.nileStyle === true) g.nileStyle = true;
 
   switch (kind) {
     case "chat": {
@@ -90,6 +138,26 @@ export function cleanGraphic(raw: unknown, opts: GraphicOpts | string): LiveGrap
       g.corner = r.corner;
       if (typeof r.size === "string" && SIZES.has(r.size)) g.size = r.size;
       return g;
+    case "qr": {
+      const url = str(r.url, 500);
+      if (!url || !HTTPS.test(url) || typeof r.corner !== "string" || !CORNERS.has(r.corner)) return null;
+      g.url = url;
+      g.corner = r.corner;
+      if (typeof r.size === "string" && SIZES.has(r.size)) g.size = r.size;
+      const caption = str(r.caption, 40);
+      if (caption) g.caption = caption;
+      return g;
+    }
+    case "sponsor": {
+      if (!sponsor || r.campaignId !== sponsor.campaignId) return null;
+      if (typeof r.corner !== "string" || !CORNERS.has(r.corner)) return null;
+      g.campaignId = sponsor.campaignId;
+      g.corner = r.corner;
+      g.title = sponsor.name.slice(0, 60);
+      if (sponsor.logoUrl) g.imageUrl = sponsor.logoUrl;
+      if (typeof r.size === "string" && SIZES.has(r.size)) g.size = r.size;
+      return g;
+    }
     case "banner":
       if (!g.text) return null;
       if (r.scrolling === true) g.scrolling = true;
@@ -145,6 +213,8 @@ export function validateGraphics(
     return except.length ? { ...g, except } : g;
   });
   const state: GraphicsState = { all, bySlot: {} };
+  const brand = cleanBrand(r.brand);
+  if (brand) state.brand = brand;
   if (r.bySlot && typeof r.bySlot === "object") {
     for (const [slotId, list] of Object.entries(r.bySlot as Record<string, unknown>)) {
       if (!opts.slotIds.has(slotId)) continue;

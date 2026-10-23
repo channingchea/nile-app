@@ -2,6 +2,8 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 
+import 'brand_kit.dart';
+
 /// Studio graphics (Studio master host, phases 4-5).
 ///
 /// Two shapes of the same thing:
@@ -19,6 +21,14 @@ enum GraphicKind {
   banner('banner', 'Banner'),
   slate('slate', 'Full-screen slate'),
 
+  /// A link as a QR code in a corner; viewers on a phone can tap it.
+  qr('qr', 'QR code'),
+
+  /// This event's accepted sponsor's logo (or a "Sponsored by" badge). Built
+  /// in from the sponsorship — never saved in a library. The server fills in
+  /// the image and name from the campaign.
+  sponsor('sponsor', 'Sponsor logo'),
+
   /// A viewer's chat message put on screen from the Studio chat ("Show on
   /// screen"). Push-only — never saved in a library.
   chat('chat', 'Chat message');
@@ -31,7 +41,7 @@ enum GraphicKind {
       GraphicKind.values.where((k) => k.wire == s).firstOrNull;
 
   /// Kinds a library can hold (the `studio_graphic_kind` enum).
-  static const library = [lowerThird, logo, banner, slate];
+  static const library = [lowerThird, logo, banner, slate, qr];
 }
 
 /// Auto-hide choices offered in the library editor and the Cameras menu.
@@ -53,6 +63,20 @@ enum CountdownMode {
   static CountdownMode? fromWire(Object? s) =>
       CountdownMode.values.where((k) => k.wire == s).firstOrNull;
 }
+
+/// Where a QR code's link comes from. `event` and `profile` are resolved when
+/// pushed, so one saved QR works for every show.
+const qrSources = {
+  'custom': 'Any link',
+  'event': 'This show’s page',
+  'profile': 'Your profile',
+};
+
+final _https = RegExp(r'^https://[^\s/$.?#][^\s]*$', caseSensitive: false);
+
+/// A link a QR code may carry: https only, 500 characters at most.
+bool isQrUrl(Object? url) =>
+    url is String && url.length <= 500 && _https.hasMatch(url);
 
 /// Logo corners, in their wire form.
 const logoCorners = ['tl', 'tr', 'bl', 'br'];
@@ -87,7 +111,32 @@ class StudioGraphic {
   final Map<String, dynamic> payload;
   final int sort;
 
+  /// The show's sponsor as a built-in item ("Sponsor: Acme"). [logoUrl] is
+  /// only for the Studio's own preview — the server looks the logo up itself.
+  factory StudioGraphic.sponsor({
+    required String campaignId,
+    required String sponsorName,
+    String? logoUrl,
+    String corner = 'tr',
+    String size = 'm',
+  }) => StudioGraphic(
+    id: 'sponsor:$campaignId',
+    kind: GraphicKind.sponsor,
+    name: 'Sponsor: $sponsorName',
+    payload: {
+      'campaignId': campaignId,
+      'sponsorName': sponsorName,
+      'logoUrl': ?logoUrl,
+      'corner': corner,
+      'size': size,
+    },
+  );
+
   bool get isPreset => id.startsWith('preset:');
+  bool get isBuiltIn => isPreset || kind == GraphicKind.sponsor;
+
+  /// Drawn in Nile's own style even when a brand kit is set.
+  bool get nileStyle => payload['nileStyle'] == true;
 
   /// The graphic's saved auto-hide, in seconds; 0 = stays up.
   int get autoHideSeconds => (payload['autoHideSeconds'] as num?)?.toInt() ?? 0;
@@ -111,6 +160,9 @@ class StudioGraphic {
       return null;
     }
 
+    if (p['nileStyle'] != null && p['nileStyle'] is! bool) {
+      return 'Style choice is malformed.';
+    }
     final hide = p['autoHideSeconds'];
     if (hide != null && (hide is! num || hide < 1 || hide > 3600)) {
       return 'Auto-hide is 1 second to an hour.';
@@ -119,6 +171,19 @@ class StudioGraphic {
     switch (kind) {
       case GraphicKind.chat:
         return 'Chat messages are put on screen from the chat.';
+      case GraphicKind.sponsor:
+        return 'The sponsor logo comes from the show’s sponsorship.';
+      case GraphicKind.qr:
+        final source = p['source'] ?? 'custom';
+        if (!qrSources.containsKey(source)) return 'Pick where the link comes from.';
+        if (source == 'custom' && !isQrUrl(p['url'])) {
+          return 'Enter a link starting with https://';
+        }
+        if (!logoCorners.contains(p['corner'])) return 'Pick a corner.';
+        if (p['size'] != null && !['s', 'm', 'l'].contains(p['size'])) {
+          return 'Pick a size.';
+        }
+        return text('caption', 0, 40, 'Caption');
       case GraphicKind.lowerThird:
         return text('title', 1, 60, 'Title') ??
             text('subtitle', 0, 80, 'Subtitle');
@@ -277,6 +342,11 @@ class LiveGraphic {
     this.showsClock = false,
     this.hideAt,
     this.except = const [],
+    this.url,
+    this.caption,
+    this.campaignId,
+    this.nileStyle = false,
+    this.brand,
   });
 
   /// [StudioGraphic.id] it came from — what the panel keys on. Chat graphics
@@ -311,9 +381,38 @@ class LiveGraphic {
   /// Graphics on every camera: slots it has been taken off ("All but Cam 2").
   final List<String> except;
 
+  /// QR codes: the link.
+  final String? url;
+
+  /// QR codes: the short line under the code.
+  final String? caption;
+
+  /// Sponsor logos: the campaign (the server fills [imageUrl] and [title]).
+  final String? campaignId;
+
+  /// Opted out of the brand kit.
+  final bool nileStyle;
+
+  /// The brand kit to draw with — attached by [GraphicsState.forSlot], never
+  /// sent. Null = Nile style.
+  final BrandStyle? brand;
+
   /// Graphics of the same cap key can't be on screen together: one lower
   /// third, one logo per corner, one banner, one slate, one chat message.
-  String get capKey => kind == GraphicKind.logo ? 'logo:$corner' : kind.wire;
+  /// A sponsor logo is a logo; a QR code has its own spot in each corner.
+  String get capKey => switch (kind) {
+    GraphicKind.logo || GraphicKind.sponsor => 'logo:$corner',
+    GraphicKind.qr => 'qr:$corner',
+    _ => kind.wire,
+  };
+
+  /// Viewers on a phone can tap it.
+  bool get tappable => kind == GraphicKind.qr && url != null;
+
+  /// This graphic as drawn with [style] (null = Nile style). Graphics that
+  /// opted out of the kit ignore it.
+  LiveGraphic withBrand(BrandStyle? style) =>
+      _copy(brand: nileStyle ? null : style, clearBrand: nileStyle || style == null);
 
   bool expiredAt(int nowMs) => hideAt != null && hideAt! <= nowMs;
 
@@ -322,12 +421,14 @@ class LiveGraphic {
   ///
   /// [autoHideSeconds] overrides the graphic's saved auto-hide (0 = off);
   /// null keeps the saved one. [showStartAt] feeds "count down to show start".
+  /// [resolveLink] turns a QR source (`event`, `profile`) into its link.
   factory LiveGraphic.snapshot(
     StudioGraphic g, {
     required String Function(String path) publicUrl,
     required DateTime now,
     int? autoHideSeconds,
     DateTime? showStartAt,
+    String? Function(String source)? resolveLink,
   }) {
     final p = g.payload;
     final path = p['imagePath'] as String?;
@@ -338,10 +439,15 @@ class LiveGraphic {
     return LiveGraphic(
       id: g.id,
       kind: g.kind,
-      title: p['title'] as String?,
+      title: (g.kind == GraphicKind.sponsor ? p['sponsorName'] : p['title'])
+          as String?,
       subtitle: p['subtitle'] as String?,
       text: p['text'] as String?,
-      imageUrl: path == null || path.isEmpty ? null : publicUrl(path),
+      imageUrl: g.kind == GraphicKind.sponsor
+          ? p['logoUrl'] as String?
+          : path == null || path.isEmpty
+          ? null
+          : publicUrl(path),
       corner: p['corner'] as String?,
       size: p['size'] as String?,
       scrolling: p['scrolling'] == true,
@@ -350,6 +456,14 @@ class LiveGraphic {
       hideAt: hide > 0
           ? now.add(Duration(seconds: hide)).millisecondsSinceEpoch
           : null,
+      url: g.kind == GraphicKind.qr
+          ? (p['source'] ?? 'custom') == 'custom'
+                ? p['url'] as String?
+                : resolveLink?.call(p['source'] as String)
+          : null,
+      caption: p['caption'] as String?,
+      campaignId: p['campaignId'] as String?,
+      nileStyle: g.nileStyle,
     );
   }
 
@@ -374,22 +488,35 @@ class LiveGraphic {
   );
 
   LiveGraphic copyWith({List<String>? except, int? hideAt, bool clearHide = false}) =>
-      LiveGraphic(
-        id: id,
-        kind: kind,
-        title: title,
-        subtitle: subtitle,
-        text: text,
-        imageUrl: imageUrl,
-        avatarUrl: avatarUrl,
-        corner: corner,
-        size: size,
-        scrolling: scrolling,
-        endsAt: endsAt,
-        showsClock: showsClock,
-        hideAt: clearHide ? null : hideAt ?? this.hideAt,
-        except: except ?? this.except,
-      );
+      _copy(except: except, hideAt: hideAt, clearHide: clearHide);
+
+  LiveGraphic _copy({
+    List<String>? except,
+    int? hideAt,
+    bool clearHide = false,
+    BrandStyle? brand,
+    bool clearBrand = false,
+  }) => LiveGraphic(
+    id: id,
+    kind: kind,
+    title: title,
+    subtitle: subtitle,
+    text: text,
+    imageUrl: imageUrl,
+    avatarUrl: avatarUrl,
+    corner: corner,
+    size: size,
+    scrolling: scrolling,
+    endsAt: endsAt,
+    showsClock: showsClock,
+    hideAt: clearHide ? null : hideAt ?? this.hideAt,
+    except: except ?? this.except,
+    url: url,
+    caption: caption,
+    campaignId: campaignId,
+    nileStyle: nileStyle,
+    brand: clearBrand ? null : brand ?? this.brand,
+  );
 
   static LiveGraphic? fromJson(Object? j) {
     if (j is! Map) return null;
@@ -412,6 +539,10 @@ class LiveGraphic {
       showsClock: j['showsClock'] == true,
       hideAt: (j['hideAt'] as num?)?.toInt(),
       except: except is List ? except.whereType<String>().toList() : const [],
+      url: j['url'] as String?,
+      caption: j['caption'] as String?,
+      campaignId: j['campaignId'] as String?,
+      nileStyle: j['nileStyle'] == true,
     );
   }
 
@@ -430,6 +561,10 @@ class LiveGraphic {
     if (showsClock) 'showsClock': true,
     'hideAt': ?hideAt,
     if (except.isNotEmpty) 'except': except,
+    'url': ?url,
+    'caption': ?caption,
+    'campaignId': ?campaignId,
+    if (nileStyle) 'nileStyle': true,
   };
 
   @override
@@ -491,12 +626,19 @@ class GraphicTargets {
 /// ([forSlot]), so graphics follow the camera a viewer picks.
 @immutable
 class GraphicsState {
-  const GraphicsState({this.all = const [], this.bySlot = const {}});
+  const GraphicsState({this.all = const [], this.bySlot = const {}, this.brand});
 
   static const empty = GraphicsState();
 
   final List<LiveGraphic> all;
   final Map<String, List<LiveGraphic>> bySlot;
+
+  /// The host's brand kit, drawn on every graphic that didn't opt out. Null =
+  /// Nile style. The Studio attaches it to every push.
+  final BrandStyle? brand;
+
+  GraphicsState withBrand(BrandStyle? style) =>
+      GraphicsState(all: all, bySlot: bySlot, brand: style);
 
   bool get isEmpty => all.isEmpty && bySlot.values.every((l) => l.isEmpty);
 
@@ -528,7 +670,11 @@ class GraphicsState {
         if (k is String && l.isNotEmpty) bySlot[k] = l;
       });
     }
-    return GraphicsState(all: list(j['all']), bySlot: bySlot);
+    return GraphicsState(
+      all: list(j['all']),
+      bySlot: bySlot,
+      brand: BrandStyle.fromJson(j['brand']),
+    );
   }
 
   Map<String, dynamic> toJson() => {
@@ -537,6 +683,7 @@ class GraphicsState {
       for (final e in bySlot.entries)
         if (e.value.isNotEmpty) e.key: [for (final g in e.value) g.toJson()],
     },
+    if (brand != null) 'brand': brand!.toJson(),
   };
 
   /// What a viewer watching [slotId] sees: everything pushed to all cameras
@@ -552,13 +699,16 @@ class GraphicsState {
     ];
     final taken = {for (final g in own) g.capKey};
     return [
-      ...all.where(
-        (g) =>
-            !taken.contains(g.capKey) &&
-            !g.expiredAt(now) &&
-            !(slotId != null && g.except.contains(slotId)),
-      ),
-      ...own,
+      for (final g in [
+        ...all.where(
+          (g) =>
+              !taken.contains(g.capKey) &&
+              !g.expiredAt(now) &&
+              !(slotId != null && g.except.contains(slotId)),
+        ),
+        ...own,
+      ])
+        g.withBrand(brand),
     ];
   }
 
@@ -629,6 +779,7 @@ class GraphicsState {
     return GraphicsState(
       all: all.where((g) => g.id != graphicId).toList(),
       bySlot: next,
+      brand: brand,
     );
   }
 
@@ -646,6 +797,7 @@ class GraphicsState {
     return GraphicsState(
       all: all.where((g) => !g.expiredAt(nowMs)).toList(),
       bySlot: next,
+      brand: brand,
     );
   }
 
@@ -660,14 +812,14 @@ class GraphicsState {
   }
 
   GraphicsState _withTarget(String? slotId, List<LiveGraphic> list) {
-    if (slotId == null) return GraphicsState(all: list, bySlot: bySlot);
+    if (slotId == null) return GraphicsState(all: list, bySlot: bySlot, brand: brand);
     final next = {...bySlot};
     if (list.isEmpty) {
       next.remove(slotId);
     } else {
       next[slotId] = list;
     }
-    return GraphicsState(all: all, bySlot: next);
+    return GraphicsState(all: all, bySlot: next, brand: brand);
   }
 
   @override
@@ -677,4 +829,58 @@ class GraphicsState {
 
   @override
   int get hashCode => jsonEncode(toJson()).hashCode;
+}
+
+/// A graphic waiting in the Studio for "Take" (cue before air). Lives only in
+/// the Studio — nothing is sent until [take]. [build] snapshots the graphic at
+/// the moment it is called, so a countdown or auto-hide starts at Take, not
+/// when it was cued.
+@immutable
+class GraphicCue {
+  const GraphicCue({
+    required this.id,
+    required this.name,
+    required this.targets,
+    required this.build,
+  });
+
+  /// The graphic's id ([StudioGraphic.id], `chat:<id>`…).
+  final String id;
+  final String name;
+  final GraphicTargets targets;
+  final LiveGraphic Function(DateTime now) build;
+
+  /// Cue a library item, preset or the sponsor onto [targets].
+  factory GraphicCue.of(
+    StudioGraphic g, {
+    required GraphicTargets targets,
+    required String Function(String path) publicUrl,
+    int? autoHideSeconds,
+    DateTime? showStartAt,
+    String? Function(String source)? resolveLink,
+  }) => GraphicCue(
+    id: g.id,
+    name: g.name,
+    targets: targets,
+    build: (now) => LiveGraphic.snapshot(
+      g,
+      publicUrl: publicUrl,
+      now: now,
+      autoHideSeconds: autoHideSeconds,
+      showStartAt: showStartAt,
+      resolveLink: resolveLink,
+    ),
+  );
+
+  GraphicCue withTargets(GraphicTargets t) =>
+      GraphicCue(id: id, name: name, targets: t, build: build);
+
+  /// The state that goes on air when it is taken at [now].
+  GraphicsState take(GraphicsState current, DateTime now) =>
+      current.withTargets(build(now), targets);
+
+  /// What the Studio's monitor shows while it is cued: [take] with nothing
+  /// counting down to its hide, so the preview stays up.
+  GraphicsState preview(GraphicsState current, DateTime now) =>
+      current.withTargets(build(now).copyWith(clearHide: true), targets);
 }

@@ -249,6 +249,8 @@ class NileStudio extends StatelessWidget {
     this.onRemoveSource,
     this.onRenameSource,
     this.graphicsFor,
+    this.previewFor,
+    this.isCued,
     this.sourceActions = const NileStudioSourceActions(),
   });
 
@@ -297,6 +299,13 @@ class NileStudio extends StatelessWidget {
   /// The graphics a viewer of [source] would see right now, drawn over the
   /// monitor so the director sees what goes out. Null draws none.
   final List<LiveGraphic> Function(NileStudioSource source)? graphicsFor;
+
+  /// Cue before air: what the monitor shows for a source — on-air graphics
+  /// plus the cued one. Falls back to [graphicsFor].
+  final List<LiveGraphic> Function(NileStudioSource source)? previewFor;
+
+  /// The cued graphic would land on this source (CUED badge / outline).
+  final bool Function(NileStudioSource source)? isCued;
 
   /// This device's own audio meter, pinned under the source list. It belongs
   /// beside the roster rather than over the video: it is about the feed you are
@@ -349,6 +358,7 @@ class NileStudio extends StatelessWidget {
                   meter: meter,
                   actions: sourceActions,
                   graphicsFor: graphicsFor,
+                  isCued: isCued,
                 ),
               ),
               const _StudioDivider(),
@@ -362,7 +372,8 @@ class NileStudio extends StatelessWidget {
                       child: _StudioMonitor(
                         selected: selected,
                         self: showSelfPane ? self : null,
-                        graphicsFor: graphicsFor,
+                        graphicsFor: previewFor ?? graphicsFor,
+                        isCued: isCued,
                       ),
                     ),
                     _StudioControlBar(child: controls),
@@ -657,6 +668,7 @@ class _StudioSourceList extends StatelessWidget {
     this.onRename,
     this.meter,
     this.graphicsFor,
+    this.isCued,
   });
 
   final List<NileStudioSource> sources;
@@ -668,6 +680,7 @@ class _StudioSourceList extends StatelessWidget {
   final Widget? meter;
   final NileStudioSourceActions actions;
   final List<LiveGraphic> Function(NileStudioSource source)? graphicsFor;
+  final bool Function(NileStudioSource source)? isCued;
 
   /// Slot ids in the order the tiles now show, after dragging [from] to [to].
   static List<String> slotOrderAfter(
@@ -699,6 +712,7 @@ class _StudioSourceList extends StatelessWidget {
         onRename: s.isRenamable && onRename != null ? () => onRename!(s) : null,
         actions: actions,
         graphics: graphicsFor?.call(s) ?? const [],
+        cued: isCued?.call(s) ?? false,
       ),
     );
   }
@@ -787,6 +801,8 @@ IconData graphicKindIcon(GraphicKind k) => switch (k) {
   GraphicKind.banner => Icons.view_day_outlined,
   GraphicKind.slate => Icons.fullscreen,
   GraphicKind.chat => Icons.chat_bubble_outline,
+  GraphicKind.qr => Icons.qr_code_2,
+  GraphicKind.sponsor => Icons.handshake_outlined,
 };
 
 enum _TileAction {
@@ -809,12 +825,14 @@ class _SourceTile extends StatelessWidget {
     required this.onTap,
     required this.actions,
     required this.graphics,
+    this.cued = false,
     this.onRemove,
     this.onRename,
   });
 
   final NileStudioSource source;
   final int index;
+  final bool cued;
   final bool reorderable;
   final bool selected;
   final VoidCallback onTap;
@@ -1126,6 +1144,12 @@ class _SourceTile extends StatelessWidget {
                 ),
               ),
             ),
+          if (cued)
+            const Positioned(
+              left: NileSpacing.s4,
+              bottom: NileSpacing.s4,
+              child: NileCuedChip(),
+            ),
           if (s.health != null && _talkable)
             Positioned(
               top: NileSpacing.s4,
@@ -1338,10 +1362,12 @@ class _StudioMonitor extends StatelessWidget {
     required this.selected,
     required this.self,
     this.graphicsFor,
+    this.isCued,
   });
 
   final NileStudioSource? selected;
   final List<LiveGraphic> Function(NileStudioSource source)? graphicsFor;
+  final bool Function(NileStudioSource source)? isCued;
 
   /// Null when your own camera is already the monitor.
   final NileStudioSource? self;
@@ -1363,6 +1389,7 @@ class _StudioMonitor extends StatelessWidget {
               graphics: selected == null
                   ? const []
                   : graphicsFor?.call(selected!) ?? const [],
+              cued: selected != null && (isCued?.call(selected!) ?? false),
             ),
           ),
           if (self != null) ...[
@@ -1377,6 +1404,7 @@ class _StudioMonitor extends StatelessWidget {
                     title: 'YOUR CAMERA',
                     source: self,
                     graphics: graphicsFor?.call(self!) ?? const [],
+                    cued: isCued?.call(self!) ?? false,
                   ),
                 ),
               ),
@@ -1393,11 +1421,15 @@ class _LabelledPane extends StatelessWidget {
     required this.title,
     required this.source,
     this.graphics = const [],
+    this.cued = false,
   });
 
   final String title;
   final NileStudioSource? source;
   final List<LiveGraphic> graphics;
+
+  /// Showing a cued graphic viewers don't see yet: volt outline + CUED.
+  final bool cued;
 
   @override
   Widget build(BuildContext context) {
@@ -1415,6 +1447,23 @@ class _LabelledPane extends StatelessWidget {
             ),
           ),
         ),
+        if (cued) ...[
+          Positioned.fill(
+            child: IgnorePointer(
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  border: Border.all(color: NileColors.volt, width: 2),
+                  borderRadius: BorderRadius.circular(NileRadius.md),
+                ),
+              ),
+            ),
+          ),
+          const Positioned(
+            top: NileSpacing.s8,
+            right: NileSpacing.s8,
+            child: NileCuedChip(),
+          ),
+        ],
         Positioned(
           top: NileSpacing.s8,
           left: NileSpacing.s8,
@@ -2806,6 +2855,99 @@ class _ToolbarPill extends StatelessWidget {
           ),
         ),
         Icon(Icons.arrow_drop_down, size: 18, color: NileColors.txtTertiary),
+      ],
+    ),
+  );
+}
+
+// ── Cue before air ───────────────────────────────────────────────────────────
+
+/// "CUED" — a graphic waiting for Take, seen only in the Studio.
+class NileCuedChip extends StatelessWidget {
+  const NileCuedChip({super.key});
+
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.symmetric(
+      horizontal: NileSpacing.s6,
+      vertical: NileSpacing.s2,
+    ),
+    decoration: BoxDecoration(
+      color: NileColors.volt,
+      borderRadius: BorderRadius.circular(NileRadius.xs),
+    ),
+    child: Text(
+      'CUED',
+      style: NileTextStyles.labelSm().copyWith(
+        color: NileColors.onVolt,
+        letterSpacing: 1.2,
+      ),
+    ),
+  );
+}
+
+/// The Studio's cue strip (under the stats row): what is cued, where it will
+/// go, and Take / Clear. Enter and Esc do the same.
+class NileStudioCueBar extends StatelessWidget {
+  const NileStudioCueBar({
+    super.key,
+    required this.name,
+    required this.targets,
+    required this.onTake,
+    required this.onClear,
+    this.busy = false,
+  });
+
+  final String name;
+
+  /// "All cameras", "Cam 1, Cam 3"…
+  final String targets;
+  final VoidCallback onTake;
+  final VoidCallback onClear;
+  final bool busy;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    color: NileColors.bgRaised,
+    padding: const EdgeInsets.symmetric(
+      horizontal: NileSpacing.s16,
+      vertical: NileSpacing.s8,
+    ),
+    child: Row(
+      children: [
+        const NileCuedChip(),
+        const SizedBox(width: NileSpacing.s12),
+        Expanded(
+          child: Text.rich(
+            TextSpan(
+              children: [
+                TextSpan(text: name, style: NileTextStyles.labelLg()),
+                TextSpan(
+                  text: '  →  $targets',
+                  style: NileTextStyles.bodySm().copyWith(
+                    color: NileColors.txtSecondary,
+                  ),
+                ),
+              ],
+            ),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+        TextButton(
+          onPressed: busy ? null : onClear,
+          child: const Text('Clear (Esc)'),
+        ),
+        const SizedBox(width: NileSpacing.s8),
+        FilledButton.icon(
+          onPressed: busy ? null : onTake,
+          style: FilledButton.styleFrom(
+            backgroundColor: NileColors.volt,
+            foregroundColor: NileColors.onVolt,
+          ),
+          icon: const Icon(Icons.play_arrow, size: 18),
+          label: const Text('Take (Enter)'),
+        ),
       ],
     ),
   );

@@ -11,9 +11,11 @@ import 'package:url_launcher/url_launcher.dart';
 import '../services/analytics.dart';
 import '../services/camera_status.dart';
 import '../services/chat_service.dart' show ChatMessage;
+import '../services/brand_kit.dart';
 import '../services/chat_tools_service.dart';
 import '../services/graphics_service.dart';
 import '../services/screen_capture_permission.dart';
+import '../services/share_urls.dart';
 import '../services/studio_graphics.dart';
 import '../services/studio_prefs.dart';
 import '../theme.dart';
@@ -85,6 +87,15 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
   List<StudioGraphic> _library = const [];
   final Map<String, GraphicTargets> _lastTargets = {};
 
+  /// Cue before air, the host's brand kit (edited locally only here) and a
+  /// stand-in sponsor so the sponsor graphic can be rehearsed.
+  final _cue = ValueNotifier<GraphicCue?>(null);
+  BrandKit? _brandKit;
+  static final _demoSponsor = StudioGraphic.sponsor(
+    campaignId: 'preview-sponsor',
+    sponsorName: 'Your sponsor',
+  );
+
   /// Fiction for "count down to show start": ten minutes after you start.
   DateTime? _showStartAt;
 
@@ -98,6 +109,13 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
       ..addListener(_onDemo)
       ..onAlert = _onAlert;
     StudioPrefs.load().then<void>((p) => _prefs = p, onError: (_) {});
+    _cue.addListener(() {
+      if (mounted) setState(() {});
+    });
+    // Rehearse in the real kit; edits here stay in the preview.
+    BrandKitService.load().then<void>((k) {
+      if (mounted) setState(() => _brandKit = k);
+    }, onError: (_) {});
     NileAnalytics.capture(NileEvent.studioPreviewOpened);
   }
 
@@ -112,6 +130,7 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _hideTimer?.cancel();
+    _cue.dispose();
     _demo
       ..removeListener(_onDemo)
       ..dispose();
@@ -467,7 +486,7 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
   }
 
   Future<bool> _push(GraphicsState next) async {
-    setState(() => _graphics = next);
+    setState(() => _graphics = next.withBrand(_brandKit?.style));
     _scheduleHide();
     return true;
   }
@@ -491,30 +510,74 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
     current: _graphics,
     slots: _slots,
     push: _push,
+    cue: _cue,
     onTargetsUsed: (id, targets) => _lastTargets[id] = targets,
     onLibrary: (items) {
       if (mounted) setState(() => _library = items);
     },
     showStartAt: _showStartAt,
     isLive: _demo.isLive,
+    sponsor: _demoSponsor,
+    resolveLink: _resolveLink,
+    brandKit: _brandKit,
+    onBrandKit: (k) {
+      setState(() => _brandKit = k);
+      _push(_graphics);
+    },
+    brandKitDemo: true,
   );
 
+  /// Stand-in links: the real ones only exist for a real show.
+  static String? _resolveLink(String source) => switch (source) {
+    'event' => ShareUrls.event('preview'),
+    'profile' => ShareUrls.profile('you'),
+    _ => null,
+  };
+
   Future<void> _openLibrary() async {
-    await showGraphicsLibrary(context);
+    await showGraphicsLibrary(
+      context,
+      brandKit: _brandKit,
+      resolveLink: _resolveLink,
+    );
     await _loadLibrary();
   }
 
+  void _take() {
+    final cue = _cue.value;
+    if (cue == null) return;
+    _push(cue.take(_graphics, DateTime.now()));
+    _cue.value = null;
+  }
+
+  List<LiveGraphic> _previewFor(NileStudioSource s) {
+    final slot = s.isScreenShare ? null : s.slotId;
+    final cue = _cue.value;
+    final base = _graphics.withBrand(_brandKit?.style);
+    return cue == null
+        ? base.forSlot(slot)
+        : cue.preview(base, DateTime.now()).forSlot(slot);
+  }
+
+  bool _isCued(NileStudioSource s) {
+    final cue = _cue.value;
+    if (cue == null) return false;
+    final slot = s.isScreenShare ? null : s.slotId;
+    return slot == null ? cue.targets.all : cue.targets.includes(slot);
+  }
+
   void _hotkey(int digit) {
-    final next = graphicsAfterHotkey(
+    final action = graphicsHotkeyAction(
       digit: digit,
       library: _library,
       current: _graphics,
       lastTargets: _lastTargets,
-      now: DateTime.now(),
       showStartAt: _showStartAt,
+      resolveLink: _resolveLink,
     );
-    if (next != null) {
-      _push(next);
+    if (action != null) {
+      if (action.cue != null) _cue.value = action.cue;
+      if (action.off != null) _push(action.off!);
     } else {
       _toast(
         _library.isEmpty
@@ -535,8 +598,16 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
         seconds: seconds,
       );
 
+  GraphicCue _chatCue(ChatMessage m, GraphicTargets targets, [int seconds = 10]) =>
+      GraphicCue(
+        id: _chatCard(m).id,
+        name: 'Chat · @${m.username}',
+        targets: targets,
+        build: (_) => _chatCard(m, seconds),
+      );
+
   void _showOnScreen(ChatMessage m) =>
-      _push(_graphics.withTargets(_chatCard(m), const GraphicTargets.all()));
+      _cue.value = _chatCue(m, const GraphicTargets.all());
 
   Future<void> _showOnScreenOptions(ChatMessage m) async {
     final id = _chatCard(m).id;
@@ -550,14 +621,11 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
       canRemove: !current.isNone,
     );
     if (choice == null || !mounted) return;
-    await _push(
-      choice.targets.isNone
-          ? _graphics.withoutEverywhere(id)
-          : _graphics.withTargets(
-              _chatCard(m, choice.autoHideSeconds),
-              choice.targets,
-            ),
-    );
+    if (choice.targets.isNone) {
+      await _push(_graphics.withoutEverywhere(id));
+    } else {
+      _cue.value = _chatCue(m, choice.targets, choice.autoHideSeconds);
+    }
   }
 
   // ── Tiles ──────────────────────────────────────────────────────────────────
@@ -874,6 +942,8 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
       // Not while a dialog (the graphics panel among them) is over the Studio.
       enabled: ModalRoute.of(context)?.isCurrent ?? true,
       onDigit: _hotkey,
+      onTake: _cue.value == null ? null : _take,
+      onClear: _cue.value == null ? null : () => _cue.value = null,
       child: Stack(
         children: [
           NileStudio(
@@ -883,6 +953,8 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
             selfIdentity: _selfId,
             graphicsFor: (s) =>
                 _graphics.forSlot(s.isScreenShare ? null : s.slotId),
+            previewFor: _previewFor,
+            isCued: _isCued,
             sourceActions: _sourceActions,
             stats: NileStudioStats(
               isLive: live,
@@ -906,9 +978,27 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
               color: NileColors.txtPrimary,
               tooltip: 'Audio settings',
             ),
-            banner: StudioPreviewBanner(
-              live: live,
-              onChanged: (v) => _demo.isLive = v,
+            banner: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                StudioPreviewBanner(
+                  live: live,
+                  onChanged: (v) => _demo.isLive = v,
+                ),
+                if (_cue.value case final cue?)
+                  NileStudioCueBar(
+                    name: cue.name,
+                    targets: cue.targets.summary(
+                      (id) =>
+                          _slots.where((r) => r.id == id).firstOrNull?.label ??
+                          'Camera',
+                      [for (final r in _slots) r.id],
+                    ),
+                    onTake: _take,
+                    onClear: () => _cue.value = null,
+                  ),
+              ],
             ),
             meter: Column(
               mainAxisSize: MainAxisSize.min,

@@ -236,6 +236,8 @@ type Creative = {
   videoPath: string | null;
   thumbPath: string | null;
   durMs: number;
+  /** Sponsorships only: optional square logo for the in-show sponsor graphic (0137). */
+  logoPath: string | null;
 };
 function validateCreative(accountId: string, body: any, json: Json): Creative | Response {
   const { headline, body: adBody, click_url, image_url, creative_kind, video_url, thumb_url, duration_ms } = body;
@@ -283,7 +285,16 @@ function validateCreative(accountId: string, body: any, json: Json): Creative | 
     return json({ error: "Creative image must be uploaded through the portal" }, 400);
   }
 
-  return { isVideo, hl, bd, click_url, image_url: isVideo ? null : image_url, videoPath, thumbPath, durMs };
+  // Bucket-relative, in this account's folder — same rule as the 0137 CHECK + trigger.
+  let logoPath: string | null = null;
+  if (body.placement === "lobby" && body.logo_path != null) {
+    const ok = typeof body.logo_path === "string" &&
+      new RegExp(`^${accountId}/[0-9A-Za-z_-]+\\.(png|jpg|jpeg|webp)$`).test(body.logo_path);
+    if (!ok) return json({ error: "Sponsor logo must be uploaded through the portal" }, 400);
+    logoPath = body.logo_path;
+  }
+
+  return { isVideo, hl, bd, click_url, image_url: isVideo ? null : image_url, videoPath, thumbPath, durMs, logoPath };
 }
 
 // Insert the ad_creatives row for a validated creative. Returns the insert error.
@@ -300,6 +311,7 @@ function insertCreative(admin: any, campaignId: string, cr: Creative) {
           headline: cr.hl,
           body: cr.bd || null,
           click_url: cr.click_url,
+          logo_path: cr.logoPath,
         }
       : {
           campaign_id: campaignId,
@@ -307,6 +319,7 @@ function insertCreative(admin: any, campaignId: string, cr: Creative) {
           headline: cr.hl,
           body: cr.bd,
           click_url: cr.click_url,
+          logo_path: cr.logoPath,
         },
   );
 }

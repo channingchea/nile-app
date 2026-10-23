@@ -12,6 +12,7 @@ import 'package:video_player/video_player.dart';
 import '../services/ad_service.dart';
 import '../services/block_service.dart';
 import '../services/chat_service.dart';
+import '../services/deep_link_service.dart';
 import '../services/event_service.dart';
 import '../services/livekit_service.dart';
 import '../services/realsync.dart';
@@ -96,6 +97,10 @@ class _ViewerScreenState extends State<ViewerScreen>
   // Studio graphics on air (room metadata `graphics`), drawn over whichever
   // angle this viewer is watching. Viewers can't hide them.
   GraphicsState _graphics = GraphicsState.empty;
+
+  /// In-show sponsor logos already counted for this viewer (the server
+  /// dedupes too; this just saves the calls).
+  final Set<String> _sponsorSeen = {};
 
   // Show control (room metadata `show`): off-air angles, where new viewers
   // start, the camera order and "Send everyone here".
@@ -1094,6 +1099,53 @@ class _ViewerScreenState extends State<ViewerScreen>
   }
 
   // ── Room metadata: graphics + show control + resync ───────────────────────
+
+  /// The sponsor's logo is on this viewer's screen: one impression per show.
+  void _countSponsor(List<LiveGraphic> onAir) {
+    final eventId = _eventDbId;
+    if (eventId == null) return;
+    for (final g in onAir) {
+      final id = g.campaignId;
+      if (g.kind == GraphicKind.sponsor && id != null && _sponsorSeen.add(id)) {
+        unawaited(
+          AdService.logInShowSponsorImpression(campaignId: id, eventId: eventId),
+        );
+      }
+    }
+  }
+
+  /// A QR code tapped on screen: Nile links open in the app; anything else
+  /// asks first, since it leaves Nile.
+  Future<void> _openGraphicLink(LiveGraphic g) async {
+    final uri = Uri.tryParse(g.url ?? '');
+    if (uri == null || uri.scheme != 'https') return;
+    if (await DeepLinkService.openInApp(uri)) return;
+    if (!mounted) return;
+    final go = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: NileColors.bgSurface,
+        title: Text('Leave Nile?', style: NileTextStyles.headingMd()),
+        content: Text(
+          'This opens ${uri.host} in your browser. The show keeps playing here.',
+          style: NileTextStyles.bodyMd(),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Open'),
+          ),
+        ],
+      ),
+    );
+    if (go == true) {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    }
+  }
 
   void _applyRoomMetadata(String? raw, {bool joining = false}) {
     final graphics = GraphicsState.fromRoomMetadata(raw);
@@ -2818,7 +2870,12 @@ class _ViewerScreenState extends State<ViewerScreen>
       focused.isScreenShare ? null : _slotOf(focused.identity),
     );
     // The angle label sits where a lower third or banner goes; graphics win.
-    final bottomTaken = onAir.any((g) => g.kind != GraphicKind.logo);
+    // Corner graphics (logos, sponsor, QR codes) leave it be.
+    final bottomTaken = onAir.any(
+      (g) => !const {GraphicKind.logo, GraphicKind.sponsor, GraphicKind.qr}
+          .contains(g.kind),
+    );
+    _countSponsor(onAir);
     return Stack(
       fit: StackFit.expand,
       children: [
@@ -2827,7 +2884,7 @@ class _ViewerScreenState extends State<ViewerScreen>
             : _buildCameraOffPlaceholder(large: true),
         // Graphics follow the angle: show-wide ones plus this camera's own.
         // A screen share carries only the show-wide ones.
-        NileGraphicsLayer(graphics: onAir),
+        NileGraphicsLayer(graphics: onAir, onTapLink: _openGraphicLink),
         if (_syncing)
           Positioned(
             top: 12,

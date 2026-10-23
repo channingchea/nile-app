@@ -126,7 +126,8 @@ void main() {
       expect(s.isEmpty, isTrue);
     });
 
-    test('graphicsAfterHotkey: a key past the library does nothing', () {
+    test('graphicsHotkeyAction: cues an off graphic, takes an on one off, '
+        'ignores keys past the library', () {
       const lib = [
         StudioGraphic(
           id: 'g1',
@@ -135,22 +136,29 @@ void main() {
           payload: {'title': 'One'},
         ),
       ];
-      final now = DateTime(2026, 1, 1, 12);
-      final on = graphicsAfterHotkey(
+      final cued = graphicsHotkeyAction(
         digit: 1,
         library: lib,
         current: GraphicsState.empty,
         lastTargets: const {},
-        now: now,
-      );
-      expect(on!.targetsOf('g1').all, isTrue);
+      )!;
+      expect(cued.off, isNull);
+      expect(cued.cue!.targets.all, isTrue);
+      final onAir = cued.cue!.take(GraphicsState.empty, DateTime(2026));
+      final off = graphicsHotkeyAction(
+        digit: 1,
+        library: lib,
+        current: onAir,
+        lastTargets: const {},
+      )!;
+      expect(off.cue, isNull);
+      expect(off.off!.isEmpty, isTrue);
       expect(
-        graphicsAfterHotkey(
+        graphicsHotkeyAction(
           digit: 2,
           library: lib,
           current: GraphicsState.empty,
           lastTargets: const {},
-          now: now,
         ),
         isNull,
       );

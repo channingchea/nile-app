@@ -224,6 +224,7 @@ void main() {
             current: current,
             slots: slots,
             push: push,
+            cue: ValueNotifier<GraphicCue?>(null),
             isLive: isLive,
             onTargetsUsed: used,
           ),
@@ -253,7 +254,12 @@ void main() {
       // All cameras is the starting point; untick Camera 2.
       await t.tap(find.widgetWithText(CheckboxListTile, 'Camera 2'));
       await t.pump();
-      await t.tap(find.text('Put on air'));
+      // Cue before air: nothing goes out until Take.
+      await t.tap(find.text('Cue'));
+      await t.pumpAndSettle();
+      expect(pushed, isEmpty);
+      expect(find.text('CUED'), findsWidgets);
+      await t.tap(find.text('Take'));
       await t.pumpAndSettle();
       final brb = pushed.single.all.single;
       expect(brb.id, 'preset:brb');
@@ -287,7 +293,9 @@ void main() {
         matching: find.byType(OutlinedButton),
       ));
       await t.pumpAndSettle();
-      await t.tap(find.text('Put on air'));
+      await t.tap(find.text('Cue'));
+      await t.pumpAndSettle();
+      await t.tap(find.text('Take'));
       await t.pumpAndSettle();
       expect(pushed.last.all.single.id, 'preset:thanks');
       await t.tap(find.text('Clear all'));
@@ -301,7 +309,9 @@ void main() {
     testWidgets('a refused push leaves it off and says so', (t) async {
       await t.pumpWidget(opener(GraphicsState.empty, (_) async => false));
       await openCameras(t, 'Be right back');
-      await t.tap(find.text('Put on air'));
+      await t.tap(find.text('Cue'));
+      await t.pumpAndSettle();
+      await t.tap(find.text('Take'));
       await t.pumpAndSettle();
       expect(find.text('Couldn’t update the show’s graphics. Try again.'), findsOneWidget);
       expect(find.text('Off'), findsWidgets);

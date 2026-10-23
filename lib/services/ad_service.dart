@@ -43,6 +43,10 @@ class LobbySponsorship {
   /// ever shown to the host — to a viewer it's a disclaimer about a decision
   /// that wasn't theirs.
   final bool autoAccepted;
+
+  /// The advertiser's square logo (`ad-creatives` bucket, migration 0137) —
+  /// what the in-show sponsor graphic shows. Null = a "Sponsored by" badge.
+  final String? logoUrl;
   const LobbySponsorship({
     required this.campaignId,
     required this.kind,
@@ -54,6 +58,7 @@ class LobbySponsorship {
     required this.clickUrl,
     required this.advertiserName,
     this.autoAccepted = false,
+    this.logoUrl,
   });
 
   /// A `get_lobby_sponsorship` row. Video/thumb arrive as bucket-relative paths
@@ -79,6 +84,11 @@ class LobbySponsorship {
       // Absent on a client talking to the pre-0098 RPC. Defaulting to false
       // matters: the label claims a decision the host didn't make.
       autoAccepted: r['auto_accepted'] as bool? ?? false,
+      logoUrl: r['logo_path'] != null
+          ? supabase.storage
+                .from('ad-creatives')
+                .getPublicUrl(r['logo_path'] as String)
+          : null,
     );
   }
 }
@@ -447,6 +457,21 @@ class AdService {
   }
 
   static Future<void> logImpression(String campaignId) => _log(campaignId, 'impression');
+
+  /// The in-show sponsor logo was on this viewer's screen (0137). Once per
+  /// viewer per show — the RPC dedupes, so calling again is harmless.
+  /// Best-effort.
+  static Future<void> logInShowSponsorImpression({
+    required String campaignId,
+    required String eventId,
+  }) async {
+    try {
+      await supabase.rpc(
+        'log_in_show_sponsor_impression',
+        params: {'p_campaign_id': campaignId, 'p_event_id': eventId},
+      );
+    } catch (_) {}
+  }
   static Future<void> logClick(String campaignId) => _log(campaignId, 'click');
 
   /// The active sponsorship for an event's Pre-Show lobby, if any (0079

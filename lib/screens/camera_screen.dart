@@ -13,7 +13,11 @@ import '../services/chat_service.dart';
 import '../services/chat_tools_service.dart';
 import '../services/crew_service.dart';
 import '../services/event_service.dart';
+import '../services/ad_service.dart';
+import '../services/brand_kit.dart';
 import '../services/graphics_service.dart';
+import '../services/profile_service.dart';
+import '../services/share_urls.dart';
 import '../services/install_id.dart';
 import '../services/livekit_service.dart';
 import '../services/realsync.dart';
@@ -73,6 +77,10 @@ class _CameraScreenState extends State<CameraScreen> {
     // A phone acting as a camera gets knocked constantly — never let a shake
     // throw the report form over a live shot.
     ShakeDetector.instance.pause();
+    // The cue bar, monitor preview and Enter/Esc follow the cue.
+    _cue.addListener(() {
+      if (mounted) setState(() {});
+    });
     if (widget.initialEventId != null) {
       _eventIdController.text = widget.initialEventId!;
     }
@@ -1277,6 +1285,15 @@ class _CameraScreenState extends State<CameraScreen> {
   /// library itself (keys 1–9), and the auto-hide timer for [_graphics].
   final Map<String, GraphicTargets> _lastTargets = {};
   List<StudioGraphic> _graphicsLibrary = const [];
+
+  /// Studio: the graphic waiting for Take (cue before air), the host's brand
+  /// kit (attached to every push), the show's sponsor as a built-in graphic,
+  /// and the host's username for "Your profile" QR codes.
+  final _cue = ValueNotifier<GraphicCue?>(null);
+  bool _taking = false;
+  BrandKit? _brandKit;
+  StudioGraphic? _sponsorItem;
+  String? _hostUsername;
   Timer? _hideTimer;
   int? _hideArmedFor;
 
@@ -1553,6 +1570,7 @@ class _CameraScreenState extends State<CameraScreen> {
 
   @override
   void dispose() {
+    _cue.dispose();
     ShakeDetector.instance.resume();
     // A drop or back-swipe never ends a live show anymore — the show stays
     // 'live' and viewers' resilience logic treats it as reconnect-and-wait.
@@ -1874,6 +1892,7 @@ class _CameraScreenState extends State<CameraScreen> {
         GraphicsService.list()
             .then((l) => _graphicsLibrary = l)
             .catchError((_) => _graphicsLibrary);
+        _loadGraphicsExtras(eventId);
         _angleTimer?.cancel();
         _angleTimer = Timer.periodic(AngleWatchers.poll, (_) => _pollAngles());
         _pollAngles();
@@ -2561,30 +2580,124 @@ class _CameraScreenState extends State<CameraScreen> {
     current: _graphics,
     slots: _slotRefs,
     push: _pushGraphics,
+    cue: _cue,
     onTargetsUsed: (id, targets) => _lastTargets[id] = targets,
     onLibrary: (library) => _graphicsLibrary = library,
     showStartAt: _scheduledAt,
     isLive: _state == CameraState.live,
+    sponsor: _sponsorItem,
+    resolveLink: _resolveLink,
+    brandKit: _brandKit,
+    onBrandKit: _onBrandKit,
   );
 
-  /// Studio: keys 1–9 toggle library items on their last cameras.
+  /// Studio: the brand kit, the show's sponsor and the host's username —
+  /// each best-effort; graphics work without them.
+  void _loadGraphicsExtras(String eventId) {
+    BrandKitService.load()
+        .then((k) {
+          if (mounted) setState(() => _brandKit = k);
+        })
+        .catchError((_) {});
+    AdService.lobbySponsorship(eventId).then((sp) {
+      if (!mounted || sp == null) return;
+      setState(
+        () => _sponsorItem = StudioGraphic.sponsor(
+          campaignId: sp.campaignId,
+          sponsorName: sp.advertiserName,
+          logoUrl: sp.logoUrl,
+        ),
+      );
+    });
+    ProfileService.fetchCurrentProfile()
+        .then((p) => _hostUsername = p?.username)
+        .catchError((_) => null);
+  }
+
+  /// QR sources that are resolved when pushed.
+  String? _resolveLink(String source) => switch (source) {
+    'event' => _eventId == null ? null : ShareUrls.event(_eventId!),
+    'profile' => _hostUsername == null ? null : ShareUrls.profile(_hostUsername!),
+    _ => null,
+  };
+
+  /// The kit was saved or removed: re-push so viewers redraw in it now.
+  void _onBrandKit(BrandKit? kit) {
+    setState(() => _brandKit = kit);
+    if (!_graphics.isEmpty) _pushGraphics(_graphics);
+  }
+
+  /// Studio: keys 1–9 cue library items onto their last cameras (or take an
+  /// on-air one off at once).
   Future<void> _onGraphicsHotkey(int digit) async {
-    final next = graphicsAfterHotkey(
+    final action = graphicsHotkeyAction(
       digit: digit,
       library: _graphicsLibrary,
       current: _graphics,
       lastTargets: _lastTargets,
-      now: DateTime.now(),
       showStartAt: _scheduledAt,
+      resolveLink: _resolveLink,
     );
-    if (next != null && !await _pushGraphics(next)) {
+    if (action == null) return;
+    if (action.cue != null) _cue.value = action.cue;
+    if (action.off != null && !await _pushGraphics(action.off!)) {
       _toast('Couldn’t update the show’s graphics. Try again.');
     }
+  }
+
+  /// Take: the cued graphic goes on air, its countdown and auto-hide
+  /// starting now.
+  Future<void> _takeCue() async {
+    final cue = _cue.value;
+    if (cue == null || _taking) return;
+    setState(() => _taking = true);
+    final ok = await _pushGraphics(cue.take(_graphics, DateTime.now()));
+    if (!mounted) return;
+    setState(() => _taking = false);
+    if (ok) {
+      if (_cue.value?.id == cue.id) _cue.value = null;
+    } else {
+      _toast('Couldn’t put that on air. Try again.');
+    }
+  }
+
+  /// What the monitor shows for a source: on air, plus the cue.
+  List<LiveGraphic> _previewFor(NileStudioSource s) {
+    final slot = s.isScreenShare ? null : s.slotId;
+    final cue = _cue.value;
+    final base = _graphics.withBrand(_brandKit?.style);
+    return cue == null
+        ? base.forSlot(slot)
+        : cue.preview(base, DateTime.now()).forSlot(slot);
+  }
+
+  bool _isCued(NileStudioSource s) {
+    final cue = _cue.value;
+    if (cue == null) return false;
+    final slot = s.isScreenShare ? null : s.slotId;
+    return slot == null ? cue.targets.all : cue.targets.includes(slot);
+  }
+
+  Widget? _buildCueBar() {
+    final cue = _cue.value;
+    if (!_isStudio || cue == null) return null;
+    final refs = _slotRefs;
+    return NileStudioCueBar(
+      name: cue.name,
+      targets: cue.targets.summary(
+        (id) => refs.where((r) => r.id == id).firstOrNull?.label ?? 'Camera',
+        [for (final r in refs) r.id],
+      ),
+      busy: _taking,
+      onTake: _takeCue,
+      onClear: () => _cue.value = null,
+    );
   }
 
   Future<bool> _pushGraphics(GraphicsState next) async {
     final eventId = _eventId;
     if (eventId == null) return false;
+    next = next.withBrand(_brandKit?.style);
     try {
       await LivekitService.setGraphics(eventId: eventId, graphics: next);
       if (mounted) setState(() => _graphics = next);
@@ -2625,15 +2738,18 @@ class _CameraScreenState extends State<CameraScreen> {
         seconds: seconds,
       );
 
-  /// "Show on screen": every camera, 10 s.
+  /// A chat line, cued for Take; its timer starts when it goes on air.
+  GraphicCue _chatCue(ChatMessage m, GraphicTargets targets, int seconds) =>
+      GraphicCue(
+        id: _chatGraphic(m, seconds).id,
+        name: 'Chat · @${m.username}',
+        targets: targets,
+        build: (_) => _chatGraphic(m, seconds),
+      );
+
+  /// "Show on screen": cued for every camera, 10 s.
   Future<void> _showChatOnScreen(ChatMessage m) async {
-    final next = _graphics.withTargets(
-      _chatGraphic(m, 10),
-      const GraphicTargets.all(),
-    );
-    if (!await _pushGraphics(next)) {
-      _toast('Couldn’t put that on screen. Try again.');
-    }
+    _cue.value = _chatCue(m, const GraphicTargets.all(), 10);
   }
 
   /// "Show on screen" with a choice of cameras and timer.
@@ -2646,12 +2762,13 @@ class _CameraScreenState extends State<CameraScreen> {
       autoHideSeconds: 10,
     );
     if (choice == null || !mounted) return;
-    final g = _chatGraphic(m, choice.autoHideSeconds);
-    final next = choice.targets.isNone
-        ? _graphics.withoutEverywhere(g.id)
-        : _graphics.withTargets(g, choice.targets);
-    if (!await _pushGraphics(next)) {
-      _toast('Couldn’t put that on screen. Try again.');
+    final cue = _chatCue(m, choice.targets, choice.autoHideSeconds);
+    if (!choice.targets.isNone) {
+      _cue.value = cue;
+      return;
+    }
+    if (!await _pushGraphics(_graphics.withoutEverywhere(cue.id))) {
+      _toast('Couldn’t take that off screen. Try again.');
     }
   }
 
@@ -3332,6 +3449,8 @@ class _CameraScreenState extends State<CameraScreen> {
     _alerts = CameraAlerts();
     _lastTargets.clear();
     _graphicsLibrary = const [];
+    _cue.value = null;
+    _sponsorItem = null;
     // Stop screen capture explicitly — disconnect unpublishes the track but
     // doesn't always halt the native capturer promptly.
     try {
@@ -4550,6 +4669,8 @@ class _CameraScreenState extends State<CameraScreen> {
       onRenameSource: _isStudio ? _renameSource : null,
       graphicsFor: (s) =>
           _graphics.forSlot(s.isScreenShare ? null : s.slotId),
+      previewFor: _isStudio ? _previewFor : null,
+      isCued: _isStudio ? _isCued : null,
       selfIdentity: _room?.localParticipant?.identity,
       stats: NileStudioStats(
         isLive: live,
@@ -4630,8 +4751,9 @@ class _CameraScreenState extends State<CameraScreen> {
                   : null,
             )
           : null,
-      // An operator on a desk-sized screen gets nudges here.
-      banner: _nudge != null
+      // The Studio's cue comes first; an operator on a desk-sized screen gets
+      // nudges here.
+      banner: _buildCueBar() ?? (_nudge != null
           ? _buildNudgeBanner()
           : _reconnectHint != null
           ? _buildReconnectHint()
@@ -4639,10 +4761,15 @@ class _CameraScreenState extends State<CameraScreen> {
                 !_disableAgc &&
                 !_externalMicPromptDismissed
           ? _buildExternalMicBanner()
-          : null,
+          : null),
     );
     return _isStudio
-        ? StudioGraphicsHotkeys(onDigit: _onGraphicsHotkey, child: studio)
+        ? StudioGraphicsHotkeys(
+            onDigit: _onGraphicsHotkey,
+            onTake: _cue.value == null ? null : _takeCue,
+            onClear: _cue.value == null ? null : () => _cue.value = null,
+            child: studio,
+          )
         : studio;
   }
 

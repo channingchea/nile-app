@@ -57,7 +57,7 @@ import {
   studioConnected,
   studioIdentity,
 } from "../_shared/studio.ts";
-import { mergeRoomMeta, resyncWait, validateGraphics } from "../_shared/graphics.ts";
+import { mergeRoomMeta, resyncWait, type SponsorInfo, validateGraphics } from "../_shared/graphics.ts";
 import { cleanShowPatch, planReorder } from "../_shared/show.ts";
 
 // CORS headers are per-request, so the JSON responder is built per-request too
@@ -941,16 +941,41 @@ async function setGraphics(body: any, userId: string, admin: any, json: Json): P
 
   const slots = await slotsFor(gate.event.id, admin);
   const storage = `${Deno.env.get("SUPABASE_URL")}/storage/v1/object/public/`;
+  const wantsSponsor = JSON.stringify(body.graphics ?? {}).includes('"sponsor"');
   const result = validateGraphics(body.graphics, {
     imagePrefix: `${storage}studio-graphics/`,
     avatarPrefix: storage,
     slotIds: new Set(slots.map((s) => s.id)),
+    sponsor: wantsSponsor ? await sponsorFor(gate.event.id, admin, storage) : null,
   });
   if ("error" in result) return json({ error: result.error }, 400);
 
   const meta = await roomMetaOf(roomName);
   await roomService.updateRoomMetadata(roomName, JSON.stringify(mergeRoomMeta(meta, { graphics: result.state })));
   return json({ success: true, graphics: result.state });
+}
+
+// The event's accepted Pre-Show sponsor — the only sponsor a Studio may put on
+// screen, with its logo (ad-creatives bucket) and name looked up here so the
+// image can't come from the Studio.
+async function sponsorFor(eventId: string, admin: any, storage: string): Promise<SponsorInfo | null> {
+  const { data } = await admin
+    .from("ad_campaigns")
+    .select("id, advertiser_accounts(name), ad_creatives(logo_path)")
+    .eq("event_id", eventId)
+    .eq("placement", "lobby")
+    .in("status", ["active", "completed"])
+    .limit(1)
+    .maybeSingle();
+  if (!data) return null;
+  const acct = Array.isArray(data.advertiser_accounts) ? data.advertiser_accounts[0] : data.advertiser_accounts;
+  const cr = Array.isArray(data.ad_creatives) ? data.ad_creatives[0] : data.ad_creatives;
+  const logo = cr?.logo_path as string | undefined;
+  return {
+    campaignId: data.id,
+    name: (acct?.name as string | undefined) ?? "our sponsor",
+    logoUrl: logo ? `${storage}ad-creatives/${logo}` : undefined,
+  };
 }
 
 // set-show — off-air angles, the default angle, and "Send everyone here".
