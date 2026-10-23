@@ -9,6 +9,13 @@
 //   remove    moderator  → { success: true } ← soft-delete one message, silently
 //   ban       moderator  → { success: true, removed } ← ban for this event + eject
 //   settings  host       → { success: true } ← slow mode / who may speak / crew
+//   pin       moderator  → { success: true, pinned } ← one pinned message
+//   unpin     moderator  → { success: true }
+//   release   moderator  → { success: true } ← show a blocked-word line anyway
+//
+// The host's own blocked words (chat_blocked_terms, migration 0133) don't
+// refuse a message: it is recorded with filtered_at, sent back to the sender as
+// their own copy, and shown only to moderators on the live_mod:<slug> topic.
 //
 // Auth: verify-jwt is ON at the gateway. The sender is always derived from the
 // JWT, never from the body — and so is the display name: `send` reads the
@@ -162,6 +169,12 @@ async function handle(req: Request, json: Json): Promise<Response> {
       return await ban(body, user.id, admin, json);
     case "settings":
       return await settings(body, user.id, admin, json);
+    case "pin":
+      return await pin(body, user.id, admin, json);
+    case "unpin":
+      return await unpin(body, user.id, admin, json);
+    case "release":
+      return await release(body, user.id, admin, json);
     default:
       return json({ error: `Unknown action: ${body.action}` }, 400);
   }
@@ -333,8 +346,15 @@ async function send(
   if (allowed !== true) return json({ error: "You don't have access to this chat" }, 403);
 
   // Crew and the host are exempt from every restriction below — a host cannot
-  // lock themselves out of their own show by turning slow mode on.
-  const privileged = event.host_id === userId || await isCrew(event.id, userId, admin);
+  // lock themselves out of their own show by turning slow mode on. Their role
+  // also rides on the message: the host's name is drawn in coral, and only
+  // host and crew messages get tappable links.
+  const senderRole = event.host_id === userId
+    ? "host"
+    : await isCrew(event.id, userId, admin)
+    ? "crew"
+    : null;
+  const privileged = senderRole !== null;
 
   if (!privileged) {
     const denied = await accessDenial(event, userId, admin);
@@ -397,28 +417,183 @@ async function send(
     .eq("id", userId)
     .maybeSingle();
 
+  // The host's own blocked words. Unlike the platform list above this isn't a
+  // refusal: the line is kept, the sender sees their own copy, and only the
+  // show's moderators see it — greyed, with "Show anyway".
+  let filtered = false;
+  let firstTime = false;
+  if (!privileged) {
+    const { data: hostHit } = await admin.rpc("host_blocked_term_hit", {
+      p_host: event.host_id,
+      p_text: text,
+    });
+    filtered = typeof hostHit === "string" && hostHit.length > 0;
+    // Asked before the insert, or every first message would find itself.
+    const { data: chatted } = await admin.rpc("live_chat_has_chatted", {
+      p_host: event.host_id,
+      p_user: userId,
+    });
+    firstTime = chatted === false;
+  }
+
   const { data: row, error: insertError } = await admin
     .from("live_chat_messages")
-    .insert({ event_id: event.id, sender_id: userId, body: text })
+    .insert({
+      event_id: event.id,
+      sender_id: userId,
+      body: text,
+      filtered_at: filtered ? new Date().toISOString() : null,
+    })
     .select("id, created_at")
     .single();
   if (insertError || !row) return json({ error: "Could not send message" }, 500);
+
+  const payload = {
+    id: row.id,
+    sender_id: userId,
+    username: profile?.username ?? "viewer",
+    avatar_url: profile?.avatar_url ?? null,
+    content: text,
+    sent_at: row.created_at,
+    kind: "user",
+    ...(senderRole ? { sender_role: senderRole } : {}),
+    ...(firstTime ? { first_time: true } : {}),
+  };
+
+  if (filtered) {
+    await broadcast([{
+      topic: `live_mod:${slug}`,
+      event: "msg",
+      payload: { ...payload, filtered: true },
+    }]);
+    return json({ id: row.id, filtered: true, message: payload });
+  }
+
+  await broadcast([{ topic: `live_chat:${slug}`, event: "msg", payload }]);
+
+  return json({ id: row.id });
+}
+
+/** "host" / "crew" / null for [userId] on this event. */
+// deno-lint-ignore no-explicit-any
+async function roleOf(event: EventRow, userId: string, admin: any): Promise<string | null> {
+  if (!userId) return null;
+  if (event.host_id === userId) return "host";
+  return await isCrew(event.id, userId, admin) ? "crew" : null;
+}
+
+/**
+ * pin — one message at the top of everyone's chat until a moderator unpins it.
+ *
+ * A snapshot goes into events.chat_pinned (so late joiners see it) and out on
+ * the server-only system topic (so nobody can forge a pin). When the line came
+ * through this function its text and author are read back from the record
+ * rather than trusted from the body; a line without an id (system / older
+ * build) is taken as given, capped.
+ */
+// deno-lint-ignore no-explicit-any
+async function pin(body: any, userId: string, admin: any, json: Json): Promise<Response> {
+  const slug = body.eventId as string | undefined;
+  const gate = await requireModerator(slug ?? "", userId, admin, json);
+  if (gate instanceof Response) return gate;
+
+  let senderId = String(body.senderId ?? "");
+  let text = String(body.body ?? "").trim().slice(0, MAX_MESSAGE_LENGTH);
+  let username = String(body.username ?? "").slice(0, 40) || "viewer";
+  const messageId = typeof body.messageId === "string" ? body.messageId : null;
+
+  if (messageId) {
+    const { data: msg } = await admin
+      .from("live_chat_messages")
+      .select("sender_id, body, removed_at")
+      .eq("id", messageId)
+      .eq("event_id", gate.id)
+      .maybeSingle();
+    if (!msg || msg.removed_at) return json({ error: "That message is gone" }, 404);
+    senderId = msg.sender_id;
+    text = msg.body;
+    const { data: profile } = await admin
+      .from("profiles")
+      .select("username")
+      .eq("id", senderId)
+      .maybeSingle();
+    username = profile?.username ?? username;
+  }
+  if (!text) return json({ error: "Nothing to pin" }, 400);
+
+  const pinned = {
+    messageId: messageId ?? `local:${crypto.randomUUID()}`,
+    senderId,
+    username,
+    body: text,
+    pinnedAt: new Date().toISOString(),
+    senderRole: await roleOf(gate, senderId, admin),
+  };
+  const { error } = await admin.from("events").update({ chat_pinned: pinned }).eq("id", gate.id);
+  if (error) return json({ error: "Could not pin the message" }, 500);
+
+  await broadcast([{ topic: `live_system:${slug}`, event: "pin", payload: { pinned } }]);
+  return json({ success: true, pinned });
+}
+
+// deno-lint-ignore no-explicit-any
+async function unpin(body: any, userId: string, admin: any, json: Json): Promise<Response> {
+  const slug = body.eventId as string | undefined;
+  const gate = await requireModerator(slug ?? "", userId, admin, json);
+  if (gate instanceof Response) return gate;
+
+  const { error } = await admin.from("events").update({ chat_pinned: null }).eq("id", gate.id);
+  if (error) return json({ error: "Could not unpin" }, 500);
+
+  await broadcast([{ topic: `live_system:${slug}`, event: "pin", payload: { pinned: null } }]);
+  return json({ success: true });
+}
+
+/**
+ * release — a moderator decides a blocked-word line was fine after all: it is
+ * un-filtered and goes out to the room like any other message.
+ */
+// deno-lint-ignore no-explicit-any
+async function release(body: any, userId: string, admin: any, json: Json): Promise<Response> {
+  const slug = body.eventId as string | undefined;
+  const messageId = body.messageId as string | undefined;
+  if (!messageId) return json({ error: "messageId is required" }, 400);
+
+  const gate = await requireModerator(slug ?? "", userId, admin, json);
+  if (gate instanceof Response) return gate;
+
+  const { data: row, error } = await admin
+    .from("live_chat_messages")
+    .update({ filtered_at: null })
+    .eq("id", messageId)
+    .eq("event_id", gate.id)
+    .is("removed_at", null)
+    .not("filtered_at", "is", null)
+    .select("id, sender_id, body, created_at")
+    .maybeSingle();
+  if (error) return json({ error: "Could not release the message" }, 500);
+  if (!row) return json({ error: "That message isn't held back any more" }, 404);
+
+  const { data: profile } = await admin
+    .from("profiles")
+    .select("username, avatar_url")
+    .eq("id", row.sender_id)
+    .maybeSingle();
 
   await broadcast([{
     topic: `live_chat:${slug}`,
     event: "msg",
     payload: {
       id: row.id,
-      sender_id: userId,
+      sender_id: row.sender_id,
       username: profile?.username ?? "viewer",
       avatar_url: profile?.avatar_url ?? null,
-      content: text,
+      content: row.body,
       sent_at: row.created_at,
       kind: "user",
     },
   }]);
-
-  return json({ id: row.id });
+  return json({ success: true });
 }
 
 /**

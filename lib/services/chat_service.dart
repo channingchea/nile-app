@@ -34,6 +34,18 @@ class ChatMessage {
   // (e.g. a tip), rendered without an author and styled distinctly.
   final String kind;
 
+  /// 'host' or 'crew', stamped by the server — never by the sender. Null for
+  /// viewers. Drives the host's coral name and which messages may carry
+  /// tappable links.
+  final String? senderRole;
+
+  /// The server's "never chatted in any of this host's shows before" flag.
+  final bool firstTime;
+
+  /// Caught by the host's blocked words: only the sender (their own copy) and
+  /// the show's moderators ever see it.
+  final bool filtered;
+
   const ChatMessage({
     this.id,
     required this.senderId,
@@ -42,10 +54,36 @@ class ChatMessage {
     required this.content,
     required this.sentAt,
     this.kind = 'user',
+    this.senderRole,
+    this.firstTime = false,
+    this.filtered = false,
   });
 
   bool get isMine => senderId == supabase.auth.currentUser?.id;
   bool get isSystem => kind == 'system';
+  bool get isHost => senderRole == 'host';
+
+  /// Host and crew links are tappable; everyone else's stay plain text.
+  bool get mayLink => senderRole == 'host' || senderRole == 'crew';
+
+  /// The "Questions" filter: anything with a question mark in it.
+  bool get isQuestion => !isSystem && content.contains('?');
+
+  /// The "Tips" filter: tip announcements are the only system lines today.
+  bool get isTip => isSystem;
+
+  ChatMessage copyWith({bool? filtered}) => ChatMessage(
+    id: id,
+    senderId: senderId,
+    username: username,
+    avatarUrl: avatarUrl,
+    content: content,
+    sentAt: sentAt,
+    kind: kind,
+    senderRole: senderRole,
+    firstTime: firstTime,
+    filtered: filtered ?? this.filtered,
+  );
 
   Map<String, dynamic> toJson() => {
     if (id != null) 'id': id,
@@ -55,6 +93,9 @@ class ChatMessage {
     'content': content,
     'sent_at': sentAt.toUtc().toIso8601String(),
     'kind': kind,
+    'sender_role': ?senderRole,
+    if (firstTime) 'first_time': true,
+    if (filtered) 'filtered': true,
   };
 
   factory ChatMessage.fromJson(Map<String, dynamic> json) => ChatMessage(
@@ -66,7 +107,75 @@ class ChatMessage {
     sentAt:
         DateTime.tryParse(json['sent_at'] as String? ?? '') ?? DateTime.now(),
     kind: json['kind'] as String? ?? 'user',
+    senderRole: switch (json['sender_role']) {
+      'host' => 'host',
+      'crew' => 'crew',
+      _ => null,
+    },
+    firstTime: json['first_time'] == true,
+    filtered: json['filtered'] == true,
   );
+}
+
+/// The one message pinned to the top of a show's chat (`events.chat_pinned`).
+/// A snapshot, so it survives the original being scrolled away.
+class PinnedMessage {
+  final String messageId;
+  final String senderId;
+  final String username;
+  final String body;
+  final DateTime pinnedAt;
+  final String? senderRole;
+
+  const PinnedMessage({
+    required this.messageId,
+    required this.senderId,
+    required this.username,
+    required this.body,
+    required this.pinnedAt,
+    this.senderRole,
+  });
+
+  static PinnedMessage? fromJson(Object? j) {
+    if (j is! Map) return null;
+    final id = j['messageId'];
+    final body = j['body'];
+    if (id is! String || body is! String) return null;
+    return PinnedMessage(
+      messageId: id,
+      senderId: j['senderId'] as String? ?? '',
+      username: j['username'] as String? ?? 'viewer',
+      body: body,
+      pinnedAt:
+          DateTime.tryParse(j['pinnedAt'] as String? ?? '') ?? DateTime.now(),
+      senderRole: switch (j['senderRole']) {
+        'host' => 'host',
+        'crew' => 'crew',
+        _ => null,
+      },
+    );
+  }
+
+  bool get isHost => senderRole == 'host';
+  bool get mayLink => senderRole == 'host' || senderRole == 'crew';
+}
+
+/// The Studio chat's filter chips.
+enum ChatFilter {
+  all('All'),
+  questions('Questions'),
+  tips('Tips'),
+  firstTime('First-time');
+
+  const ChatFilter(this.label);
+  final String label;
+
+  bool matches(ChatMessage m) => switch (this) {
+    ChatFilter.all => true,
+    ChatFilter.questions => m.isQuestion,
+    ChatFilter.tips => m.isTip,
+    ChatFilter.firstTime => m.firstTime && !m.isSystem,
+  };
 }
 
 /// An ephemeral tap-to-react emoji, broadcast on the same channel as chat.
@@ -102,6 +211,7 @@ class ChatService {
   static const _reactEvent = 'react';
   static const _removeEvent = 'rm';
   static const _removeSenderEvent = 'rm_user';
+  static const _pinEvent = 'pin';
 
   /// Hard cap enforced server-side too. The composer should stop the user well
   /// before this; it exists so a modified client cannot paste an essay.
@@ -115,6 +225,10 @@ class ChatService {
   /// That is what stops a viewer forging a "@host tipped $200 🎉" line in the
   /// distinct system style, to an audience that just paid to be in the room.
   static String _systemChannelName(String eventId) => 'live_system:$eventId';
+
+  /// Moderators only (host, plus crew when crew moderation is on): messages
+  /// the host's blocked words held back. Realtime policy in migration 0133.
+  static String _modChannelName(String eventId) => 'live_mod:$eventId';
 
   /// Opens the broadcast channel for [eventId] and invokes [onMessage] for each
   /// incoming message (and [onReaction] for each emoji burst, if provided).
@@ -202,10 +316,14 @@ class ChatService {
   /// Opens the read-only system-announcement channel for [eventId]. Separate
   /// from [subscribe] so the caller can tear both down; nothing is ever sent on
   /// it from the client.
+  ///
+  /// [onPin] fires when the pinned message changes — with null when it is
+  /// unpinned. Late joiners read the current one with [fetchPinned].
   static RealtimeChannel subscribeSystem(
     String eventId,
-    void Function(ChatMessage) onMessage,
-  ) {
+    void Function(ChatMessage) onMessage, {
+    void Function(PinnedMessage? pinned)? onPin,
+  }) {
     final channel = supabase.channel(
       _systemChannelName(eventId),
       opts: const RealtimeChannelConfig(private: true),
@@ -218,9 +336,81 @@ class ChatService {
         } catch (_) {}
       },
     );
+    if (onPin != null) {
+      channel.onBroadcast(
+        event: _pinEvent,
+        callback: (payload) =>
+            onPin(PinnedMessage.fromJson(_body(payload)['pinned'])),
+      );
+    }
     channel.subscribe();
     return channel;
   }
+
+  /// Moderators: lines held back by the host's blocked words, as they are
+  /// sent. Only a moderator can join this topic; anyone else is refused by
+  /// the Realtime policy and simply hears nothing.
+  static RealtimeChannel subscribeModeration(
+    String eventId,
+    void Function(ChatMessage) onFiltered,
+  ) {
+    final channel = supabase.channel(
+      _modChannelName(eventId),
+      opts: const RealtimeChannelConfig(private: true),
+    );
+    channel.onBroadcast(
+      event: _event,
+      callback: (payload) {
+        try {
+          onFiltered(ChatMessage.fromJson(_body(payload)).copyWith(filtered: true));
+        } catch (_) {}
+      },
+    );
+    channel.subscribe();
+    return channel;
+  }
+
+  /// The message pinned in [eventId] (the LiveKit slug) right now, if any.
+  static Future<PinnedMessage?> fetchPinned(String eventId) async {
+    try {
+      final row = await supabase
+          .from('events')
+          .select('chat_pinned')
+          .eq('livekit_room', eventId)
+          .maybeSingle();
+      return PinnedMessage.fromJson(row?['chat_pinned']);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Moderator: pin [message] for everyone (replacing whatever was pinned).
+  static Future<void> pin({
+    required String eventId,
+    required ChatMessage message,
+  }) => _moderate({
+    'action': 'pin',
+    'eventId': eventId,
+    'messageId': ?message.id,
+    'senderId': message.senderId,
+    'username': message.username,
+    'body': message.content,
+    'senderRole': ?message.senderRole,
+  });
+
+  /// Moderator: clear the pinned message.
+  static Future<void> unpin({required String eventId}) =>
+      _moderate({'action': 'unpin', 'eventId': eventId});
+
+  /// Moderator: show a line the blocked words held back to everyone after all.
+  static Future<void> release({
+    required String eventId,
+    required String messageId,
+  }) => _moderate({
+    'action': 'release',
+    'eventId': eventId,
+    'messageId': messageId,
+  });
 
   /// Sends [content] as the current user in [eventId] (the LiveKit slug).
   ///
@@ -230,15 +420,19 @@ class ChatService {
   /// written, which costs a round trip and buys a message that can be removed.
   ///
   /// The sender's own copy arrives back over the broadcast like everyone
-  /// else's, so there is nothing to echo locally.
+  /// else's, so there is nothing to echo locally — EXCEPT when the host's
+  /// blocked words held it back. Then nobody else sees it, and the return
+  /// value is the sender's own copy to show: they see their message, the room
+  /// doesn't, and nothing tells them so (a filter that announces itself gets
+  /// probed).
   ///
   /// Throws [ChatSendException] with wording fit to show the user.
-  static Future<void> send({
+  static Future<ChatMessage?> send({
     required String eventId,
     required String content,
   }) async {
     final text = content.trim();
-    if (text.isEmpty) return;
+    if (text.isEmpty) return null;
 
     try {
       final res = await supabase.functions.invoke(
@@ -249,6 +443,12 @@ class ChatService {
       if (data is Map && data['error'] != null) {
         throw ChatSendException(data['error'].toString());
       }
+      if (data is Map && data['filtered'] == true && data['message'] is Map) {
+        return ChatMessage.fromJson(
+          Map<String, dynamic>.from(data['message'] as Map),
+        ).copyWith(filtered: false);
+      }
+      return null;
     } on FunctionException catch (e) {
       final details = e.details;
       final msg = details is Map ? details['error']?.toString() : null;

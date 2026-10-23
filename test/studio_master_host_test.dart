@@ -198,7 +198,7 @@ void main() {
       expect(find.text('Use this Mac’s camera'), findsNothing);
     });
 
-    testWidgets('toolbar: target chips and the master-audio menu', (t) async {
+    testWidgets('toolbar: the master-audio menu', (t) async {
       String? picked;
       await t.pumpWidget(
         _host(
@@ -208,11 +208,6 @@ void main() {
               studioCameraLabel: 'Use this Mac’s camera',
               showClaim: false,
               toolbar: [
-                NileStudioTargetChips(
-                  targetLabel: 'Camera 1',
-                  allCameras: false,
-                  onChanged: (_) {},
-                ),
                 NileStudioMasterAudioMenu(
                   options: const [
                     NileAudioSourceOption(
@@ -234,7 +229,6 @@ void main() {
           ),
         ),
       );
-      expect(find.text('All cameras'), findsOneWidget);
       expect(find.text('Audio: Studio mic'), findsOneWidget);
       await t.tap(find.text('Audio: Studio mic'));
       await t.pumpAndSettle();

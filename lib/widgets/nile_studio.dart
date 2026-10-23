@@ -1,11 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:livekit_client/livekit_client.dart' hide ChatMessage;
 
+import '../services/camera_status.dart';
 import '../services/chat_service.dart';
+import '../services/chat_tools_service.dart' show QuickMessage;
 import '../services/realsync.dart' show realSyncCapMs;
 import '../services/studio_graphics.dart';
 import '../theme.dart';
 import 'nile_graphics_layer.dart';
+import 'nile_link_text.dart';
+import 'studio_tile_dialogs.dart';
 
 // ── Studio ───────────────────────────────────────────────────────────────────
 // The desktop face of `camera_screen`. The phone screen is one full-bleed
@@ -44,6 +48,14 @@ class NileStudioSource {
     this.slotId,
     this.isRenamable = false,
     this.lagMs,
+    this.isOffAir = false,
+    this.isDefaultAngle = false,
+    this.viewers,
+    this.level,
+    this.health,
+    this.statusUnsupported = false,
+    this.nudgeAcked = false,
+    this.connectionQuality = NileStudioQuality.unknown,
   });
 
   /// LiveKit participant identity, plus a suffix for a participant's second
@@ -82,6 +94,77 @@ class NileStudioSource {
   /// RealSync: how far this camera's picture trails the most current one, in
   /// ms. Null when not measured.
   final int? lagMs;
+
+  /// Viewers can't see this angle right now (tile dims, OFF AIR badge).
+  final bool isOffAir;
+
+  /// New viewers start here (★).
+  final bool isDefaultAngle;
+
+  /// Signed-in viewers on this angle (👁 N). Null = not counted.
+  final int? viewers;
+
+  /// The phone's mic level, 0-1, from the status link. Null = no fresh level
+  /// ("No signal"); only meaningful when [health] has ever arrived.
+  final double? level;
+
+  /// The phone's last health report. Null = none yet.
+  final CameraHealth? health;
+
+  /// A connected camera on a build too old to report status.
+  final bool statusUnsupported;
+
+  /// The operator just 👍'd a nudge — the tile says "Read" for a few seconds.
+  final bool nudgeAcked;
+
+  /// This feed's own connection, from LiveKit.
+  final NileStudioQuality connectionQuality;
+
+  /// An open slot or an absent crew member's row — nobody to talk to.
+  bool get isPlaceholder =>
+      identity.startsWith('slot:') || identity.startsWith('crew:');
+
+  /// A slot-holding camera the show controls (off air, default, order) apply to.
+  bool get isAngle => slotId != null && !isScreenShare;
+}
+
+/// What the host can do from a source tile. Every callback is optional: null
+/// hides its menu item, so the caller decides authority (host vs crew, Studio
+/// vs phone) and the tile only decides whether an item applies to that feed.
+@immutable
+class NileStudioSourceActions {
+  const NileStudioSourceActions({
+    this.onToggleOffAir,
+    this.onSetDefault,
+    this.onSendEveryone,
+    this.onMakeMasterAudio,
+    this.onRemoveGraphic,
+    this.onNudge,
+    this.onCommand,
+    this.onReorder,
+  });
+
+  final ValueChanged<NileStudioSource>? onToggleOffAir;
+  final ValueChanged<NileStudioSource>? onSetDefault;
+  final ValueChanged<NileStudioSource>? onSendEveryone;
+  final ValueChanged<NileStudioSource>? onMakeMasterAudio;
+
+  /// A graphic's icon menu on the tile: off this camera, or off every camera.
+  final void Function(
+    NileStudioSource source,
+    LiveGraphic graphic, {
+    required bool everywhere,
+  })?
+  onRemoveGraphic;
+
+  /// Send the operator a nudge (a preset or custom text).
+  final void Function(NileStudioSource source, String text)? onNudge;
+
+  /// Remote control: flip, flashlight, zoom, focus/exposure lock.
+  final void Function(NileStudioSource source, StudioCommand command)? onCommand;
+
+  /// Tiles dragged into a new order: the slot ids, top to bottom.
+  final ValueChanged<List<String>>? onReorder;
 }
 
 /// Signal strength for the top row. Mapped from LiveKit's `ConnectionQuality`
@@ -166,7 +249,11 @@ class NileStudio extends StatelessWidget {
     this.onRemoveSource,
     this.onRenameSource,
     this.graphicsFor,
+    this.sourceActions = const NileStudioSourceActions(),
   });
+
+  /// Off air, default angle, nudges, remote controls, reorder…
+  final NileStudioSourceActions sourceActions;
 
   /// Sources in display order: your own camera first, then crew, then shares.
   final List<NileStudioSource> sources;
@@ -260,6 +347,8 @@ class NileStudio extends StatelessWidget {
                   onRename: onRenameSource,
                   selfIdentity: selfIdentity,
                   meter: meter,
+                  actions: sourceActions,
+                  graphicsFor: graphicsFor,
                 ),
               ),
               const _StudioDivider(),
@@ -554,9 +643,11 @@ class _StudioSourceList extends StatelessWidget {
     required this.selectedIdentity,
     required this.onSelect,
     required this.selfIdentity,
+    required this.actions,
     this.onRemove,
     this.onRename,
     this.meter,
+    this.graphicsFor,
   });
 
   final List<NileStudioSource> sources;
@@ -566,9 +657,51 @@ class _StudioSourceList extends StatelessWidget {
   final ValueChanged<NileStudioSource>? onRename;
   final String? selfIdentity;
   final Widget? meter;
+  final NileStudioSourceActions actions;
+  final List<LiveGraphic> Function(NileStudioSource source)? graphicsFor;
+
+  /// Slot ids in the order the tiles now show, after dragging [from] to [to].
+  static List<String> slotOrderAfter(
+    List<NileStudioSource> sources,
+    int from,
+    int to,
+  ) {
+    final next = [...sources];
+    next.insert(to, next.removeAt(from));
+    final seen = <String>{};
+    return [
+      for (final s in next)
+        if (s.isAngle && seen.add(s.slotId!)) s.slotId!,
+    ];
+  }
+
+  Widget _tile(BuildContext context, int i) {
+    final s = sources[i];
+    return Padding(
+      key: ValueKey(s.identity),
+      padding: const EdgeInsets.only(bottom: NileSpacing.s8),
+      child: _SourceTile(
+        source: s,
+        index: i,
+        reorderable: actions.onReorder != null && s.isAngle,
+        selected: s.identity == selectedIdentity,
+        onTap: () => onSelect(s.identity),
+        onRemove: s.isRemovable && onRemove != null ? () => onRemove!(s) : null,
+        onRename: s.isRenamable && onRename != null ? () => onRename!(s) : null,
+        actions: actions,
+        graphics: graphicsFor?.call(s) ?? const [],
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
+    final padding = const EdgeInsets.fromLTRB(
+      NileSpacing.s12,
+      0,
+      NileSpacing.s12,
+      NileSpacing.s8,
+    );
     return Container(
       color: NileColors.bgSurface,
       child: Column(
@@ -600,30 +733,21 @@ class _StudioSourceList extends StatelessWidget {
                       ),
                     ),
                   )
-                : ListView.separated(
-                    padding: const EdgeInsets.fromLTRB(
-                      NileSpacing.s12,
-                      0,
-                      NileSpacing.s12,
-                      NileSpacing.s16,
-                    ),
+                : actions.onReorder == null
+                ? ListView.builder(
+                    padding: padding,
                     itemCount: sources.length,
-                    separatorBuilder: (_, _) =>
-                        const SizedBox(height: NileSpacing.s8),
-                    itemBuilder: (context, i) {
-                      final s = sources[i];
-                      return _SourceTile(
-                        source: s,
-                        selected: s.identity == selectedIdentity,
-                        onTap: () => onSelect(s.identity),
-                        onRemove: s.isRemovable && onRemove != null
-                            ? () => onRemove!(s)
-                            : null,
-                        onRename: s.isRenamable && onRename != null
-                            ? () => onRename!(s)
-                            : null,
-                      );
+                    itemBuilder: _tile,
+                  )
+                : ReorderableListView.builder(
+                    padding: padding,
+                    buildDefaultDragHandles: false,
+                    itemCount: sources.length,
+                    onReorderItem: (from, to) {
+                      if (from == to) return;
+                      actions.onReorder!(slotOrderAfter(sources, from, to));
                     },
+                    itemBuilder: _tile,
                   ),
           ),
           if (meter != null) ...[
@@ -642,27 +766,138 @@ class _StudioSourceList extends StatelessWidget {
   }
 }
 
+/// A short name for a graphic on a tile: its title, else its text, else kind.
+String graphicLabel(LiveGraphic g) => switch (g.kind) {
+  GraphicKind.chat => 'Chat · @${g.title ?? ''}',
+  _ => g.title ?? g.text ?? g.kind.label,
+};
+
+IconData graphicKindIcon(GraphicKind k) => switch (k) {
+  GraphicKind.lowerThird => Icons.subtitles_outlined,
+  GraphicKind.logo => Icons.branding_watermark_outlined,
+  GraphicKind.banner => Icons.view_day_outlined,
+  GraphicKind.slate => Icons.fullscreen,
+  GraphicKind.chat => Icons.chat_bubble_outline,
+};
+
+enum _TileAction {
+  rename,
+  masterAudio,
+  setDefault,
+  sendEveryone,
+  offAir,
+  nudge,
+  controls,
+  remove,
+}
+
 class _SourceTile extends StatelessWidget {
   const _SourceTile({
     required this.source,
+    required this.index,
+    required this.reorderable,
     required this.selected,
     required this.onTap,
+    required this.actions,
+    required this.graphics,
     this.onRemove,
     this.onRename,
   });
 
   final NileStudioSource source;
+  final int index;
+  final bool reorderable;
   final bool selected;
   final VoidCallback onTap;
   final VoidCallback? onRemove;
   final VoidCallback? onRename;
+  final NileStudioSourceActions actions;
+  final List<LiveGraphic> graphics;
+
+  static const _maxIcons = 6;
+
+  bool get _talkable =>
+      !source.isLocal && !source.isScreenShare && !source.isPlaceholder;
+
+  List<PopupMenuEntry<_TileAction>> _menu() {
+    final s = source;
+    PopupMenuItem<_TileAction> item(_TileAction a, String label, {Color? color}) =>
+        PopupMenuItem(
+          value: a,
+          height: 36,
+          child: Text(label, style: NileTextStyles.bodySm().copyWith(color: color)),
+        );
+    final show = [
+      if (onRename != null) item(_TileAction.rename, 'Rename camera…'),
+      if (actions.onMakeMasterAudio != null &&
+          !s.isMasterAudio &&
+          !s.isScreenShare &&
+          !s.isPlaceholder)
+        item(_TileAction.masterAudio, 'Make master audio'),
+      if (s.isAngle && actions.onSetDefault != null)
+        item(
+          _TileAction.setDefault,
+          s.isDefaultAngle ? 'Default angle ✓ (clear)' : 'Set as default angle',
+        ),
+      if (s.isAngle && !s.isOffAir && actions.onSendEveryone != null)
+        item(_TileAction.sendEveryone, 'Send everyone here'),
+      if (s.isAngle && actions.onToggleOffAir != null)
+        item(_TileAction.offAir, s.isOffAir ? 'Put back on air' : 'Take off air'),
+    ];
+    final operator = [
+      if (_talkable && actions.onNudge != null)
+        item(_TileAction.nudge, 'Nudge operator…'),
+      if (_talkable && actions.onCommand != null)
+        item(_TileAction.controls, 'Remote controls…'),
+    ];
+    final danger = [
+      if (onRemove != null)
+        item(_TileAction.remove, 'Remove from stream', color: NileColors.error),
+    ];
+    final groups = [show, operator, danger].where((g) => g.isNotEmpty).toList();
+    return [
+      for (var i = 0; i < groups.length; i++) ...[
+        if (i > 0) const PopupMenuDivider(height: 8),
+        ...groups[i],
+      ],
+    ];
+  }
+
+  Future<void> _run(BuildContext context, _TileAction a) async {
+    final s = source;
+    switch (a) {
+      case _TileAction.rename:
+        onRename?.call();
+      case _TileAction.masterAudio:
+        actions.onMakeMasterAudio?.call(s);
+      case _TileAction.setDefault:
+        actions.onSetDefault?.call(s);
+      case _TileAction.sendEveryone:
+        actions.onSendEveryone?.call(s);
+      case _TileAction.offAir:
+        actions.onToggleOffAir?.call(s);
+      case _TileAction.nudge:
+        final text = await showNudgeDialog(context, s.label);
+        if (text != null) actions.onNudge?.call(s, text);
+      case _TileAction.controls:
+        await showRemoteControls(
+          context,
+          source: s,
+          onCommand: (c) => actions.onCommand?.call(s, c),
+        );
+      case _TileAction.remove:
+        onRemove?.call();
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
+    final s = source;
+    final menu = _menu();
     return Semantics(
       selected: selected,
       button: true,
-      label: source.label,
+      label: s.isOffAir ? '${s.label}, off air' : s.label,
       child: InkWell(
         borderRadius: BorderRadius.circular(NileRadius.md),
         onTap: onTap,
@@ -680,35 +915,48 @@ class _SourceTile extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              AspectRatio(
-                aspectRatio: 16 / 9,
-                child: _VideoPane(source: source, compact: true),
-              ),
+              AspectRatio(aspectRatio: 16 / 9, child: _preview()),
               const SizedBox(height: NileSpacing.s6),
               Row(
                 children: [
-                  Icon(
-                    source.isScreenShare
-                        ? Icons.screen_share_outlined
-                        : Icons.videocam_outlined,
-                    size: 14,
-                    color: NileColors.txtTertiary,
-                  ),
+                  if (reorderable)
+                    ReorderableDragStartListener(
+                      index: index,
+                      child: MouseRegion(
+                        cursor: SystemMouseCursors.grab,
+                        child: Tooltip(
+                          message: 'Drag to reorder',
+                          child: Icon(
+                            Icons.drag_indicator,
+                            size: 14,
+                            color: NileColors.txtTertiary,
+                          ),
+                        ),
+                      ),
+                    )
+                  else
+                    Icon(
+                      s.isScreenShare
+                          ? Icons.screen_share_outlined
+                          : Icons.videocam_outlined,
+                      size: 14,
+                      color: NileColors.txtTertiary,
+                    ),
                   const SizedBox(width: NileSpacing.s4),
                   Expanded(
                     child: Text(
-                      source.label,
+                      s.label,
                       style: NileTextStyles.labelSm().copyWith(
                         color: NileColors.txtPrimary,
                       ),
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
-                  if (source.lagMs case final lag?) ...[
+                  if (s.lagMs case final lag?) ...[
                     Tooltip(
                       message: lag > realSyncCapMs
                           ? 'Over 1 s behind — RealSync only closes the first '
-                              'second of the gap. Check this camera’s connection.'
+                                'second of the gap. Check this camera’s connection.'
                           : 'Behind the most current camera',
                       child: Text(
                         '+$lag ms',
@@ -724,16 +972,13 @@ class _SourceTile extends StatelessWidget {
                     ),
                     const SizedBox(width: NileSpacing.s4),
                   ],
-                  if (source.isMasterAudio)
+                  ..._healthIcons(),
+                  if (s.isMasterAudio)
                     Tooltip(
                       message: 'Master audio',
-                      child: Icon(
-                        Icons.album,
-                        size: 14,
-                        color: NileColors.volt,
-                      ),
+                      child: Icon(Icons.album, size: 14, color: NileColors.volt),
                     ),
-                  if (source.isReady) ...[
+                  if (s.isReady) ...[
                     const SizedBox(width: NileSpacing.s4),
                     Tooltip(
                       message: 'Ready to stream',
@@ -744,11 +989,11 @@ class _SourceTile extends StatelessWidget {
                       ),
                     ),
                   ],
-                  if (onRemove != null || onRename != null)
+                  if (menu.isNotEmpty)
                     SizedBox(
                       width: 22,
                       height: 22,
-                      child: PopupMenuButton<void>(
+                      child: PopupMenuButton<_TileAction>(
                         padding: EdgeInsets.zero,
                         iconSize: 14,
                         tooltip: 'Source options',
@@ -757,35 +1002,22 @@ class _SourceTile extends StatelessWidget {
                           Icons.more_horiz,
                           color: NileColors.txtTertiary,
                         ),
-                        itemBuilder: (_) => [
-                          if (onRename != null)
-                            PopupMenuItem<void>(
-                              onTap: onRename,
-                              child: Text(
-                                'Rename camera…',
-                                style: NileTextStyles.bodySm(),
-                              ),
-                            ),
-                          if (onRemove != null)
-                            PopupMenuItem<void>(
-                              onTap: onRemove,
-                              child: Text(
-                                'Remove from stream',
-                                style: NileTextStyles.bodySm().copyWith(
-                                  color: NileColors.error,
-                                ),
-                              ),
-                            ),
-                        ],
+                        onSelected: (a) => _run(context, a),
+                        itemBuilder: (_) => menu,
                       ),
                     ),
                 ],
               ),
-              if (source.sublabel != null)
+              if (graphics.isNotEmpty) _graphicIcons(),
+              if (s.sublabel != null || s.statusUnsupported)
                 Padding(
                   padding: const EdgeInsets.only(top: NileSpacing.s2),
                   child: Text(
-                    source.sublabel!,
+                    s.statusUnsupported
+                        ? 'Update app for status'
+                        : s.health?.resolutionLabel == null
+                        ? s.sublabel!
+                        : '${s.sublabel ?? ''}${s.sublabel == null ? '' : ' · '}${s.health!.resolutionLabel}',
                     style: NileTextStyles.caption().copyWith(
                       color: NileColors.txtTertiary,
                     ),
@@ -796,6 +1028,296 @@ class _SourceTile extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+
+  Widget _preview() {
+    final s = source;
+    final badge = BoxDecoration(
+      color: Colors.black.withValues(alpha: 0.6),
+      borderRadius: BorderRadius.circular(NileRadius.xs),
+    );
+    final badgeText = NileTextStyles.caption().copyWith(color: Colors.white);
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(NileRadius.sm),
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          AnimatedOpacity(
+            opacity: s.isOffAir ? 0.35 : 1,
+            duration: NileMotion.fast,
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                _VideoPane(source: s, compact: true),
+                // What a viewer of this angle sees, scaled to the tile.
+                NileGraphicsLayer(graphics: graphics),
+              ],
+            ),
+          ),
+          if (s.isOffAir)
+            Center(
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: NileSpacing.s6,
+                  vertical: NileSpacing.s2,
+                ),
+                decoration: BoxDecoration(
+                  color: NileColors.coral,
+                  borderRadius: BorderRadius.circular(NileRadius.xs),
+                ),
+                child: Text(
+                  'OFF AIR',
+                  style: NileTextStyles.labelSm().copyWith(
+                    color: Colors.white,
+                    letterSpacing: 1.2,
+                  ),
+                ),
+              ),
+            ),
+          if (s.isDefaultAngle)
+            Positioned(
+              top: NileSpacing.s4,
+              left: NileSpacing.s4,
+              child: Tooltip(
+                message: 'Default angle — new viewers start here',
+                child: Container(
+                  padding: const EdgeInsets.all(NileSpacing.s2),
+                  decoration: badge,
+                  child: Icon(Icons.star, size: 12, color: NileColors.amber),
+                ),
+              ),
+            ),
+          if (s.viewers case final n?)
+            Positioned(
+              top: NileSpacing.s4,
+              right: NileSpacing.s4,
+              child: Tooltip(
+                message: n == 1
+                    ? '1 viewer on this angle'
+                    : '$n viewers on this angle',
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: NileSpacing.s4,
+                    vertical: NileSpacing.s2,
+                  ),
+                  decoration: badge,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(
+                        Icons.visibility_outlined,
+                        size: 11,
+                        color: Colors.white,
+                      ),
+                      const SizedBox(width: NileSpacing.s2),
+                      Text('$n', style: badgeText),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          if (s.health != null && _talkable)
+            Positioned(
+              top: NileSpacing.s4,
+              bottom: NileSpacing.s4,
+              right: s.viewers == null ? NileSpacing.s4 : null,
+              left: s.viewers == null ? null : NileSpacing.s4,
+              child: _TileMeter(level: s.level),
+            ),
+          if (s.nudgeAcked)
+            Positioned(
+              bottom: NileSpacing.s4,
+              left: NileSpacing.s4,
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: NileSpacing.s6,
+                  vertical: NileSpacing.s2,
+                ),
+                decoration: BoxDecoration(
+                  color: NileColors.volt,
+                  borderRadius: BorderRadius.circular(NileRadius.pill),
+                ),
+                child: Text(
+                  '👍 Read',
+                  style: NileTextStyles.caption().copyWith(
+                    color: NileColors.onVolt,
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  List<Widget> _healthIcons() {
+    final h = source.health;
+    if (h == null || !_talkable) return const [];
+    Widget icon(IconData i, Color c, String tip) => Padding(
+      padding: const EdgeInsets.only(right: NileSpacing.s4),
+      child: Tooltip(message: tip, child: Icon(i, size: 13, color: c)),
+    );
+    final out = <Widget>[];
+    if (h.battery case final b?) {
+      out.add(
+        icon(
+          h.charging
+              ? Icons.battery_charging_full
+              : b < 15
+              ? Icons.battery_alert
+              : b < 50
+              ? Icons.battery_3_bar
+              : Icons.battery_full,
+          b < 15 && !h.charging ? NileColors.error : NileColors.txtTertiary,
+          'Battery $b%${h.charging ? ' · charging' : ''}',
+        ),
+      );
+    }
+    if (h.thermal case final t? when t != ThermalLevel.nominal) {
+      out.add(
+        icon(
+          Icons.thermostat,
+          t.isHot ? NileColors.error : NileColors.amber,
+          switch (t) {
+            ThermalLevel.fair => 'Phone is warm',
+            ThermalLevel.serious => 'Phone is hot — it may lower quality',
+            _ => 'Phone is overheating',
+          },
+        ),
+      );
+    }
+    final q = source.connectionQuality;
+    if (q == NileStudioQuality.poor || q == NileStudioQuality.lost) {
+      out.add(
+        icon(
+          Icons.signal_cellular_connected_no_internet_4_bar,
+          q == NileStudioQuality.lost ? NileColors.error : NileColors.amber,
+          q == NileStudioQuality.lost ? 'Connection lost' : 'Poor connection',
+        ),
+      );
+    }
+    return out;
+  }
+
+  Widget _graphicIcons() {
+    final shown = graphics.take(_maxIcons).toList();
+    final more = graphics.length - shown.length;
+    return Padding(
+      padding: const EdgeInsets.only(top: NileSpacing.s4),
+      child: Wrap(
+        spacing: NileSpacing.s2,
+        runSpacing: NileSpacing.s2,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          for (final g in shown) _graphicChip(g),
+          if (more > 0)
+            Text(
+              '+$more',
+              style: NileTextStyles.caption().copyWith(
+                color: NileColors.txtTertiary,
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _graphicChip(LiveGraphic g) {
+    final remove = actions.onRemoveGraphic;
+    return SizedBox(
+      width: 24,
+      height: 20,
+      child: PopupMenuButton<bool>(
+        tooltip: graphicLabel(g),
+        padding: EdgeInsets.zero,
+        enabled: remove != null,
+        color: NileColors.bgSurface,
+        style: IconButton.styleFrom(
+          minimumSize: const Size(24, 20),
+          padding: EdgeInsets.zero,
+          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          backgroundColor: NileColors.bgRaised,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(NileRadius.xs),
+          ),
+        ),
+        icon: Icon(graphicKindIcon(g.kind), size: 12, color: NileColors.volt),
+        onSelected: (everywhere) =>
+            remove?.call(source, g, everywhere: everywhere),
+        itemBuilder: (_) => [
+          PopupMenuItem<bool>(
+            enabled: false,
+            height: 32,
+            child: Text(
+              graphicLabel(g),
+              style: NileTextStyles.labelSm().copyWith(
+                color: NileColors.txtSecondary,
+              ),
+            ),
+          ),
+          // A screen share isn't a camera slot: what's on it is the
+          // all-cameras set, so the only thing to do is take it off all.
+          if (source.isAngle)
+            PopupMenuItem<bool>(
+              value: false,
+              height: 36,
+              child: Text(
+                'Remove from this camera',
+                style: NileTextStyles.bodySm(),
+              ),
+            ),
+          PopupMenuItem<bool>(
+            value: true,
+            height: 36,
+            child: Text(
+              'Remove from all cameras',
+              style: NileTextStyles.bodySm().copyWith(color: NileColors.error),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// A slim vertical level bar on a camera tile. Visual only — the Studio can't
+/// listen to a single camera. Greys with "No signal" when the phone stops
+/// sending levels.
+class _TileMeter extends StatelessWidget {
+  const _TileMeter({required this.level});
+
+  final double? level;
+
+  @override
+  Widget build(BuildContext context) {
+    final l = level;
+    final bar = Container(
+      width: 4,
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.5),
+        borderRadius: BorderRadius.circular(2),
+      ),
+      alignment: Alignment.bottomCenter,
+      child: l == null
+          ? null
+          : FractionallySizedBox(
+              heightFactor: l.clamp(0.0, 1.0),
+              child: Container(
+                decoration: BoxDecoration(
+                  color: l > 0.9
+                      ? NileColors.error
+                      : l > 0.7
+                      ? NileColors.amber
+                      : NileColors.success,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+            ),
+    );
+    return Tooltip(
+      message: l == null ? 'No signal' : 'Mic level',
+      child: l == null ? Opacity(opacity: 0.5, child: bar) : bar,
     );
   }
 }
@@ -995,8 +1517,9 @@ class _StudioControlBar extends StatelessWidget {
 // already said and disconnects them. Report sends it to the review queue with
 // the message text attached as evidence.
 
-/// The Studio's right-hand column.
-class NileStudioChat extends StatelessWidget {
+/// The Studio's right-hand column: pinned message, filter chips, the chat
+/// itself (holding still while you scroll back), and the host's composer.
+class NileStudioChat extends StatefulWidget {
   const NileStudioChat({
     super.key,
     required this.messages,
@@ -1011,9 +1534,20 @@ class NileStudioChat extends StatelessWidget {
     this.onBan,
     this.onSettings,
     this.restrictionLabel,
+    this.onSend,
+    this.quickMessages = const [],
+    this.onEditQuickMessages,
+    this.pinned,
+    this.onPin,
+    this.onUnpin,
+    this.onShowOnScreen,
+    this.onShowOnScreenOptions,
+    this.onRelease,
   });
 
   /// Newest first — the list renders reversed, matching the phone overlay.
+  /// Lines the host's blocked words held back ([ChatMessage.filtered]) are
+  /// drawn greyed with "Show anyway".
   final List<ChatMessage> messages;
 
   /// Sender ids muted for this session only — "Show all" clears these.
@@ -1049,82 +1583,123 @@ class NileStudioChat extends StatelessWidget {
   /// otherwise read the silence as the chat being broken.
   final String? restrictionLabel;
 
+  /// Sends a message as this user. Returns an error to show under the field,
+  /// or null when it went. Null hides the composer.
+  final Future<String?> Function(String text)? onSend;
+
+  /// The ⚡ menu: picking one fills the field, Enter sends it.
+  final List<QuickMessage> quickMessages;
+  final VoidCallback? onEditQuickMessages;
+
+  /// The pinned message, drawn above the chat.
+  final PinnedMessage? pinned;
+  final void Function(ChatMessage message)? onPin;
+  final VoidCallback? onUnpin;
+
+  /// "Show on screen": the message as a graphic on every camera for 10 s.
+  /// [onShowOnScreenOptions] opens the cameras/timer choice instead.
+  final void Function(ChatMessage message)? onShowOnScreen;
+  final void Function(ChatMessage message)? onShowOnScreenOptions;
+
+  /// "Show anyway" on a line the blocked words held back.
+  final void Function(ChatMessage message)? onRelease;
+
+  @override
+  State<NileStudioChat> createState() => _NileStudioChatState();
+}
+
+class _NileStudioChatState extends State<NileStudioChat> {
+  final _scroll = ScrollController();
+  final _field = TextEditingController();
+  final _focus = FocusNode();
+  ChatFilter _filter = ChatFilter.all;
+  String? _sendError;
+  bool _sending = false;
+
+  /// While scrolled back, the newest message at the moment of pausing. The
+  /// list shows only it and older, so new arrivals don't move what you're
+  /// reading; the "↓ N new" chip jumps back.
+  ChatMessage? _anchor;
+
+  @override
+  void initState() {
+    super.initState();
+    _scroll.addListener(_onScroll);
+  }
+
+  @override
+  void dispose() {
+    _scroll.dispose();
+    _field.dispose();
+    _focus.dispose();
+    super.dispose();
+  }
+
+  void _onScroll() {
+    if (!_scroll.hasClients) return;
+    final off = _scroll.offset;
+    if (_anchor == null && off > 40) {
+      final first = _visible(widget.messages).firstOrNull;
+      if (first != null) setState(() => _anchor = first);
+    } else if (_anchor != null && off < 8) {
+      setState(() => _anchor = null);
+    }
+  }
+
+  void _jumpToNewest() {
+    setState(() => _anchor = null);
+    if (_scroll.hasClients) {
+      _scroll.animateTo(0, duration: NileMotion.base, curve: NileMotion.curve);
+    }
+  }
+
+  List<ChatMessage> _visible(List<ChatMessage> all) => [
+    for (final m in all)
+      if ((m.isSystem ||
+              !(widget.hiddenSenders.contains(m.senderId) ||
+                  widget.blockedSenders.contains(m.senderId))) &&
+          _filter.matches(m))
+        m,
+  ];
+
+  Future<void> _send() async {
+    final text = _field.text.trim();
+    final send = widget.onSend;
+    if (text.isEmpty || send == null || _sending) return;
+    setState(() {
+      _sending = true;
+      _sendError = null;
+    });
+    final error = await send(text);
+    if (!mounted) return;
+    setState(() {
+      _sending = false;
+      _sendError = error;
+      if (error == null) _field.clear();
+    });
+    _focus.requestFocus();
+    if (error == null) _jumpToNewest();
+  }
+
   @override
   Widget build(BuildContext context) {
-    final visible = [
-      for (final m in messages)
-        if (m.isSystem ||
-            !(hiddenSenders.contains(m.senderId) ||
-                blockedSenders.contains(m.senderId)))
-          m,
-    ];
+    final all = _visible(widget.messages);
+    // Paused: everything from the anchor down. If the anchor has gone (it was
+    // removed), there is nothing to hold still for.
+    final anchorAt = _anchor == null
+        ? -1
+        : all.indexWhere((m) => identical(m, _anchor));
+    final paused = anchorAt >= 0;
+    final shown = paused ? all.sublist(anchorAt) : all;
+    final unseen = paused ? anchorAt : 0;
 
     return Container(
       color: NileColors.bgSurface,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(
-              NileSpacing.s16,
-              NileSpacing.s16,
-              NileSpacing.s16,
-              NileSpacing.s8,
-            ),
-            child: Row(
-              children: [
-                Text(
-                  'CHAT',
-                  style: NileTextStyles.labelSm().copyWith(
-                    color: NileColors.txtTertiary,
-                    letterSpacing: 1.5,
-                  ),
-                ),
-                const Spacer(),
-                // Flexible, not bare: the column is a fixed 320 pt and the
-                // label grows with the count.
-                if (hiddenSenders.isNotEmpty)
-                  Flexible(
-                    child: TextButton(
-                      onPressed: onShowAll,
-                      style: TextButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: NileSpacing.s8,
-                        ),
-                        minimumSize: Size.zero,
-                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                      ),
-                      child: Text(
-                        '${hiddenSenders.length} hidden · Show all',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: NileTextStyles.caption().copyWith(
-                          color: NileColors.volt,
-                        ),
-                      ),
-                    ),
-                  ),
-                if (onSettings != null)
-                  IconButton(
-                    onPressed: onSettings,
-                    tooltip: 'Chat settings',
-                    iconSize: 16,
-                    padding: EdgeInsets.zero,
-                    constraints: const BoxConstraints(
-                      minWidth: 28,
-                      minHeight: 28,
-                    ),
-                    icon: Icon(
-                      Icons.tune,
-                      color: restrictionLabel != null
-                          ? NileColors.volt
-                          : NileColors.txtTertiary,
-                    ),
-                  ),
-              ],
-            ),
-          ),
-          if (restrictionLabel != null)
+          _header(),
+          if (widget.restrictionLabel != null)
             Padding(
               padding: const EdgeInsets.fromLTRB(
                 NileSpacing.s16,
@@ -1133,53 +1708,374 @@ class NileStudioChat extends StatelessWidget {
                 NileSpacing.s8,
               ),
               child: Text(
-                restrictionLabel!,
+                widget.restrictionLabel!,
                 style: NileTextStyles.caption().copyWith(
                   color: NileColors.volt,
                 ),
               ),
             ),
+          if (widget.pinned case final pin?)
+            _PinnedBar(pinned: pin, onUnpin: widget.onUnpin),
+          _filters(),
           Expanded(
-            child: visible.isEmpty
-                ? Padding(
+            child: Stack(
+              children: [
+                if (shown.isEmpty)
+                  Padding(
                     padding: const EdgeInsets.symmetric(
                       horizontal: NileSpacing.s16,
                     ),
                     child: Text(
-                      'Chat is quiet — messages from viewers appear here.',
+                      _filter == ChatFilter.all
+                          ? 'Chat is quiet — messages from viewers appear here.'
+                          : 'Nothing matches “${_filter.label}” yet.',
                       style: NileTextStyles.bodySm().copyWith(
                         color: NileColors.txtTertiary,
                       ),
                     ),
                   )
-                : ListView.builder(
+                else
+                  ListView.builder(
+                    controller: _scroll,
                     reverse: true,
                     padding: const EdgeInsets.fromLTRB(
                       NileSpacing.s16,
                       0,
                       NileSpacing.s8,
-                      NileSpacing.s16,
+                      NileSpacing.s8,
                     ),
-                    itemCount: visible.length,
+                    itemCount: shown.length,
                     itemBuilder: (context, i) => _ChatRow(
-                      message: visible[i],
-                      selfId: selfId,
-                      onHide: onHide,
-                      onBlock: onBlock,
-                      onReport: onReport,
-                      onRemove: onRemove,
-                      onBan: onBan,
+                      key: ObjectKey(shown[i]),
+                      message: shown[i],
+                      selfId: widget.selfId,
+                      onHide: widget.onHide,
+                      onBlock: widget.onBlock,
+                      onReport: widget.onReport,
+                      onRemove: widget.onRemove,
+                      onBan: widget.onBan,
+                      onPin: widget.onPin,
+                      onShowOnScreen: widget.onShowOnScreen,
+                      onShowOnScreenOptions: widget.onShowOnScreenOptions,
+                      onRelease: widget.onRelease,
                     ),
                   ),
+                if (paused)
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    bottom: NileSpacing.s8,
+                    child: Center(
+                      child: ActionChip(
+                        onPressed: _jumpToNewest,
+                        backgroundColor: NileColors.volt,
+                        side: BorderSide.none,
+                        avatar: const Icon(
+                          Icons.arrow_downward,
+                          size: 14,
+                          color: NileColors.onVolt,
+                        ),
+                        label: Text(
+                          unseen == 0
+                              ? 'Back to newest'
+                              : unseen == 1
+                              ? '1 new message'
+                              : '$unseen new messages',
+                          style: NileTextStyles.labelSm().copyWith(
+                            color: NileColors.onVolt,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
           ),
+          if (widget.onSend != null) _composer(),
         ],
       ),
     );
   }
+
+  Widget _header() => Padding(
+    padding: const EdgeInsets.fromLTRB(
+      NileSpacing.s16,
+      NileSpacing.s16,
+      NileSpacing.s16,
+      NileSpacing.s8,
+    ),
+    child: Row(
+      children: [
+        Text(
+          'CHAT',
+          style: NileTextStyles.labelSm().copyWith(
+            color: NileColors.txtTertiary,
+            letterSpacing: 1.5,
+          ),
+        ),
+        const Spacer(),
+        // Flexible, not bare: the column is a fixed 320 pt and the label grows
+        // with the count.
+        if (widget.hiddenSenders.isNotEmpty)
+          Flexible(
+            child: TextButton(
+              onPressed: widget.onShowAll,
+              style: TextButton.styleFrom(
+                padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s8),
+                minimumSize: Size.zero,
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+              child: Text(
+                '${widget.hiddenSenders.length} hidden · Show all',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: NileTextStyles.caption().copyWith(
+                  color: NileColors.volt,
+                ),
+              ),
+            ),
+          ),
+        if (widget.onSettings != null)
+          IconButton(
+            onPressed: widget.onSettings,
+            tooltip: 'Chat settings',
+            iconSize: 16,
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+            icon: Icon(
+              Icons.tune,
+              color: widget.restrictionLabel != null
+                  ? NileColors.volt
+                  : NileColors.txtTertiary,
+            ),
+          ),
+      ],
+    ),
+  );
+
+  Widget _filters() => SizedBox(
+    height: 30,
+    child: ListView(
+      scrollDirection: Axis.horizontal,
+      padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s12),
+      children: [
+        for (final f in ChatFilter.values)
+          Padding(
+            padding: const EdgeInsets.only(right: NileSpacing.s4),
+            child: ChoiceChip(
+              label: Text(f.label),
+              selected: _filter == f,
+              onSelected: (_) => setState(() {
+                _filter = f;
+                _anchor = null;
+              }),
+              showCheckmark: false,
+              visualDensity: VisualDensity.compact,
+              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              labelStyle: NileTextStyles.caption().copyWith(
+                color: _filter == f ? NileColors.onVolt : NileColors.txtSecondary,
+              ),
+              selectedColor: NileColors.volt,
+              backgroundColor: NileColors.bgRaised,
+              side: BorderSide.none,
+              labelPadding: const EdgeInsets.symmetric(horizontal: NileSpacing.s4),
+              padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s4),
+            ),
+          ),
+      ],
+    ),
+  );
+
+  Widget _composer() => Container(
+    padding: const EdgeInsets.fromLTRB(
+      NileSpacing.s12,
+      NileSpacing.s8,
+      NileSpacing.s12,
+      NileSpacing.s12,
+    ),
+    decoration: BoxDecoration(
+      border: Border(top: BorderSide(color: NileColors.border)),
+    ),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Row(
+          children: [
+            if (widget.quickMessages.isNotEmpty ||
+                widget.onEditQuickMessages != null)
+              PopupMenuButton<Object>(
+                tooltip: 'Quick messages',
+                color: NileColors.bgRaised,
+                padding: EdgeInsets.zero,
+                iconSize: 18,
+                icon: Icon(Icons.bolt, color: NileColors.volt),
+                onSelected: (v) {
+                  if (v is QuickMessage) {
+                    _field.text = v.body;
+                    _field.selection = TextSelection.collapsed(
+                      offset: v.body.length,
+                    );
+                    _focus.requestFocus();
+                  } else {
+                    widget.onEditQuickMessages?.call();
+                  }
+                },
+                itemBuilder: (_) => [
+                  for (final q in widget.quickMessages)
+                    PopupMenuItem<Object>(
+                      value: q,
+                      child: Text(
+                        q.body,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: NileTextStyles.bodySm(),
+                      ),
+                    ),
+                  if (widget.quickMessages.isEmpty)
+                    PopupMenuItem<Object>(
+                      enabled: false,
+                      child: Text(
+                        'No quick messages yet',
+                        style: NileTextStyles.bodySm().copyWith(
+                          color: NileColors.txtTertiary,
+                        ),
+                      ),
+                    ),
+                  if (widget.onEditQuickMessages != null) ...[
+                    const PopupMenuDivider(),
+                    PopupMenuItem<Object>(
+                      value: 'edit',
+                      child: Text(
+                        'Edit quick messages…',
+                        style: NileTextStyles.bodySm(),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            Expanded(
+              child: TextField(
+                controller: _field,
+                focusNode: _focus,
+                maxLength: ChatService.maxMessageLength,
+                minLines: 1,
+                maxLines: 3,
+                textInputAction: TextInputAction.send,
+                onSubmitted: (_) => _send(),
+                style: NileTextStyles.bodySm(),
+                decoration: InputDecoration(
+                  hintText: 'Message the chat…',
+                  counterText: '',
+                  isDense: true,
+                  filled: true,
+                  fillColor: NileColors.bgRaised,
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: NileSpacing.s12,
+                    vertical: NileSpacing.s8,
+                  ),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(NileRadius.pill),
+                    borderSide: BorderSide.none,
+                  ),
+                ),
+              ),
+            ),
+            IconButton(
+              onPressed: _sending ? null : _send,
+              tooltip: 'Send',
+              iconSize: 18,
+              icon: Icon(Icons.send, color: NileColors.volt),
+            ),
+          ],
+        ),
+        if (_sendError != null)
+          Padding(
+            padding: const EdgeInsets.only(top: NileSpacing.s4),
+            child: Text(
+              _sendError!,
+              style: NileTextStyles.caption().copyWith(color: NileColors.error),
+            ),
+          ),
+      ],
+    ),
+  );
+}
+
+class _PinnedBar extends StatelessWidget {
+  const _PinnedBar({required this.pinned, this.onUnpin});
+
+  final PinnedMessage pinned;
+  final VoidCallback? onUnpin;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    margin: const EdgeInsets.fromLTRB(
+      NileSpacing.s12,
+      0,
+      NileSpacing.s12,
+      NileSpacing.s8,
+    ),
+    padding: const EdgeInsets.fromLTRB(
+      NileSpacing.s8,
+      NileSpacing.s6,
+      NileSpacing.s4,
+      NileSpacing.s6,
+    ),
+    decoration: BoxDecoration(
+      color: NileColors.bgRaised,
+      borderRadius: BorderRadius.circular(NileRadius.sm),
+      border: Border.all(color: NileColors.volt.withValues(alpha: 0.4)),
+    ),
+    child: Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(top: 2),
+          child: Icon(Icons.push_pin, size: 14, color: NileColors.volt),
+        ),
+        const SizedBox(width: NileSpacing.s6),
+        Expanded(
+          child: NileLinkText(
+            pinned.body,
+            linkify: pinned.mayLink,
+            maxLines: 3,
+            style: NileTextStyles.bodySm().copyWith(
+              color: NileColors.txtPrimary,
+            ),
+            prefix: TextSpan(
+              text: '@${pinned.username}  ',
+              style: TextStyle(
+                color: nileChatNameColor(
+                  pinned.senderId,
+                  isHost: pinned.senderRole == 'host',
+                ),
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+        ),
+        if (onUnpin != null)
+          TextButton(
+            onPressed: onUnpin,
+            style: TextButton.styleFrom(
+              padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s6),
+              minimumSize: Size.zero,
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+            child: Text(
+              'Unpin',
+              style: NileTextStyles.caption().copyWith(color: NileColors.volt),
+            ),
+          ),
+      ],
+    ),
+  );
 }
 
 class _ChatRow extends StatefulWidget {
   const _ChatRow({
+    super.key,
     required this.message,
     required this.selfId,
     required this.onHide,
@@ -1187,6 +2083,10 @@ class _ChatRow extends StatefulWidget {
     required this.onReport,
     this.onRemove,
     this.onBan,
+    this.onPin,
+    this.onShowOnScreen,
+    this.onShowOnScreenOptions,
+    this.onRelease,
   });
 
   final ChatMessage message;
@@ -1196,44 +2096,126 @@ class _ChatRow extends StatefulWidget {
   final void Function(ChatMessage message) onReport;
   final void Function(ChatMessage message)? onRemove;
   final void Function(ChatMessage message)? onBan;
+  final void Function(ChatMessage message)? onPin;
+  final void Function(ChatMessage message)? onShowOnScreen;
+  final void Function(ChatMessage message)? onShowOnScreenOptions;
+  final void Function(ChatMessage message)? onRelease;
 
   @override
   State<_ChatRow> createState() => _ChatRowState();
 }
 
-enum _ModAction { remove, ban, hide, block, report }
+enum _RowAction {
+  pin,
+  showOnScreen,
+  showOnScreenOptions,
+  remove,
+  ban,
+  hide,
+  block,
+  report,
+}
 
 class _ChatRowState extends State<_ChatRow> {
   bool _hovering = false;
 
-  void _run(_ModAction action) {
+  void _run(_RowAction action) {
+    final m = widget.message;
     switch (action) {
-      case _ModAction.remove:
-        widget.onRemove?.call(widget.message);
-      case _ModAction.ban:
-        widget.onBan?.call(widget.message);
-      case _ModAction.hide:
-        widget.onHide(widget.message);
-      case _ModAction.block:
-        widget.onBlock(widget.message);
-      case _ModAction.report:
-        widget.onReport(widget.message);
+      case _RowAction.pin:
+        widget.onPin?.call(m);
+      case _RowAction.showOnScreen:
+        widget.onShowOnScreen?.call(m);
+      case _RowAction.showOnScreenOptions:
+        widget.onShowOnScreenOptions?.call(m);
+      case _RowAction.remove:
+        widget.onRemove?.call(m);
+      case _RowAction.ban:
+        widget.onBan?.call(m);
+      case _RowAction.hide:
+        widget.onHide(m);
+      case _RowAction.block:
+        widget.onBlock(m);
+      case _RowAction.report:
+        widget.onReport(m);
     }
+  }
+
+  PopupMenuItem<_RowAction> _item(
+    _RowAction value,
+    String label, {
+    Color? color,
+  }) => PopupMenuItem(
+    value: value,
+    height: 36,
+    child: Text(
+      label,
+      style: NileTextStyles.bodySm().copyWith(color: color),
+    ),
+  );
+
+  List<PopupMenuEntry<_RowAction>> _items() {
+    final m = widget.message;
+    final w = widget;
+    // System lines are the app talking (a tip landed) and mine are mine —
+    // neither has anyone to moderate. Both can still be pinned and shown.
+    final moderatable =
+        !m.isSystem && m.senderId.isNotEmpty && m.senderId != w.selfId;
+    final show = <PopupMenuEntry<_RowAction>>[
+      if (w.onPin != null && !m.filtered) _item(_RowAction.pin, 'Pin message'),
+      if (w.onShowOnScreen != null && !m.isSystem && !m.filtered)
+        _item(_RowAction.showOnScreen, 'Show on screen'),
+      if (w.onShowOnScreenOptions != null && !m.isSystem && !m.filtered)
+        _item(_RowAction.showOnScreenOptions, 'Show on screen — cameras & timer…'),
+    ];
+    final room = <PopupMenuEntry<_RowAction>>[
+      // Remove needs a message id, and a line broadcast by a client that
+      // predates #16 has none — rather than offer an item that would quietly
+      // do nothing, drop it. Ban still reaches those lines (it clears by
+      // sender).
+      if (moderatable && w.onRemove != null && m.id != null)
+        _item(_RowAction.remove, 'Remove this message'),
+      if (moderatable && w.onBan != null)
+        _item(
+          _RowAction.ban,
+          'Ban @${m.username} from this show',
+          color: NileColors.error,
+        ),
+    ];
+    // Below the line: only what this host sees. The labels say so.
+    final mine = <PopupMenuEntry<_RowAction>>[
+      if (moderatable) ...[
+        _item(_RowAction.hide, 'Hide @${m.username} for me'),
+        _item(_RowAction.block, 'Block @${m.username} for me'),
+        _item(
+          _RowAction.report,
+          m.id != null ? 'Report this message' : 'Report @${m.username}',
+          color: NileColors.error,
+        ),
+      ],
+    ];
+    final groups = [show, room, mine].where((g) => g.isNotEmpty).toList();
+    return [
+      for (var i = 0; i < groups.length; i++) ...[
+        if (i > 0) const PopupMenuDivider(height: 8),
+        ...groups[i],
+      ],
+    ];
   }
 
   @override
   Widget build(BuildContext context) {
     final m = widget.message;
-    // System lines are the app talking (a tip landed, someone joined) and mine
-    // are mine — neither has anyone to moderate.
-    final moderatable =
-        !m.isSystem && m.senderId.isNotEmpty && m.senderId != widget.selfId;
+    final items = _items();
+    final body = NileTextStyles.bodySm().copyWith(
+      color: m.filtered ? NileColors.txtTertiary : NileColors.txtPrimary,
+    );
 
     return MouseRegion(
       onEnter: (_) => setState(() => _hovering = true),
       onExit: (_) => setState(() => _hovering = false),
       child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: NileSpacing.s4),
+        padding: const EdgeInsets.symmetric(vertical: NileSpacing.s2),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -1246,103 +2228,112 @@ class _ChatRowState extends State<_ChatRow> {
                         fontStyle: FontStyle.italic,
                       ),
                     )
-                  : Text.rich(
-                      TextSpan(
-                        children: [
-                          TextSpan(
-                            text: '@${m.username}  ',
-                            style: NileTextStyles.bodySm().copyWith(
-                              color: NileColors.volt,
-                              fontWeight: FontWeight.w700,
-                            ),
+                  : Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        NileLinkText(
+                          m.content,
+                          linkify: m.mayLink && !m.filtered,
+                          style: body,
+                          prefix: TextSpan(
+                            children: [
+                              if (m.firstTime)
+                                WidgetSpan(
+                                  alignment: PlaceholderAlignment.middle,
+                                  child: Padding(
+                                    padding: const EdgeInsets.only(
+                                      right: NileSpacing.s4,
+                                    ),
+                                    child: Tooltip(
+                                      message: 'First time chatting in your shows',
+                                      child: Icon(
+                                        Icons.waving_hand_outlined,
+                                        size: 12,
+                                        color: NileColors.amber,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              TextSpan(
+                                text: '@${m.username}  ',
+                                style: TextStyle(
+                                  color: m.filtered
+                                      ? NileColors.txtTertiary
+                                      : nileChatNameColor(
+                                          m.senderId,
+                                          isHost: m.isHost,
+                                        ),
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ],
                           ),
-                          TextSpan(
-                            text: m.content,
-                            style: NileTextStyles.bodySm().copyWith(
-                              color: NileColors.txtPrimary,
-                            ),
+                        ),
+                        if (m.filtered)
+                          Wrap(
+                            crossAxisAlignment: WrapCrossAlignment.center,
+                            children: [
+                              Text(
+                                'Hidden by your blocked words',
+                                style: NileTextStyles.caption().copyWith(
+                                  color: NileColors.txtTertiary,
+                                  fontStyle: FontStyle.italic,
+                                ),
+                              ),
+                              if (widget.onRelease != null && m.id != null)
+                                TextButton(
+                                  onPressed: () => widget.onRelease!(m),
+                                  style: TextButton.styleFrom(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: NileSpacing.s6,
+                                    ),
+                                    minimumSize: Size.zero,
+                                    tapTargetSize:
+                                        MaterialTapTargetSize.shrinkWrap,
+                                  ),
+                                  child: Text(
+                                    'Show anyway',
+                                    style: NileTextStyles.caption().copyWith(
+                                      color: NileColors.volt,
+                                    ),
+                                  ),
+                                ),
+                            ],
                           ),
-                        ],
-                      ),
+                      ],
                     ),
             ),
+            const SizedBox(width: NileSpacing.s4),
+            // A fixed 20 pt box: PopupMenuButton's default 48 pt hit area is
+            // what made every row tall.
             SizedBox(
-              width: 32,
-              child: moderatable
-                  ? Opacity(
+              width: 20,
+              height: 20,
+              child: items.isEmpty
+                  ? null
+                  : Opacity(
                       opacity: _hovering ? 1 : 0.25,
-                      child: PopupMenuButton<_ModAction>(
-                        tooltip: 'Moderate @${m.username}',
+                      child: PopupMenuButton<_RowAction>(
+                        tooltip: m.isSystem
+                            ? 'Message options'
+                            : 'Options for @${m.username}',
                         color: NileColors.bgRaised,
                         padding: EdgeInsets.zero,
                         iconSize: 16,
+                        style: IconButton.styleFrom(
+                          minimumSize: const Size(20, 20),
+                          maximumSize: const Size(20, 20),
+                          padding: EdgeInsets.zero,
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        ),
                         icon: Icon(
                           Icons.more_horiz,
                           color: NileColors.txtTertiary,
                         ),
                         onSelected: _run,
-                        itemBuilder: (_) => <PopupMenuEntry<_ModAction>>[
-                          // Room-wide first: when a host opens this menu
-                          // mid-show it is almost always because everyone can
-                          // see something they want gone.
-                          //
-                          // Remove needs a message id, and a line broadcast by
-                          // a client that predates #16 has none. Rather than
-                          // offer an item that would quietly do nothing, drop
-                          // it — Ban still reaches those lines, because it
-                          // clears by sender.
-                          if (widget.onRemove != null && m.id != null)
-                            PopupMenuItem(
-                              value: _ModAction.remove,
-                              child: Text(
-                                'Remove this message',
-                                style: NileTextStyles.bodySm(),
-                              ),
-                            ),
-                          if (widget.onBan != null)
-                            PopupMenuItem(
-                              value: _ModAction.ban,
-                              child: Text(
-                                'Ban @${m.username} from this show',
-                                style: NileTextStyles.bodySm().copyWith(
-                                  color: NileColors.error,
-                                ),
-                              ),
-                            ),
-                          if (widget.onRemove != null || widget.onBan != null)
-                            const PopupMenuDivider(),
-                          // Below the line: only what this host sees. The
-                          // labels say so — the old menu let "Block" read as
-                          // moderation when it only ever changed one view.
-                          PopupMenuItem(
-                            value: _ModAction.hide,
-                            child: Text(
-                              'Hide @${m.username} for me',
-                              style: NileTextStyles.bodySm(),
-                            ),
-                          ),
-                          PopupMenuItem(
-                            value: _ModAction.block,
-                            child: Text(
-                              'Block @${m.username} for me',
-                              style: NileTextStyles.bodySm(),
-                            ),
-                          ),
-                          PopupMenuItem(
-                            value: _ModAction.report,
-                            child: Text(
-                              m.id != null
-                                  ? 'Report this message'
-                                  : 'Report @${m.username}',
-                              style: NileTextStyles.bodySm().copyWith(
-                                color: NileColors.error,
-                              ),
-                            ),
-                          ),
-                        ],
+                        itemBuilder: (_) => items,
                       ),
-                    )
-                  : null,
+                    ),
             ),
           ],
         ),
@@ -1665,55 +2656,6 @@ class NileCameraPickerButton extends StatelessWidget {
 // say what the tools act on — the selected camera, or every camera at once
 // (graphics, phase 5) — so the host never has to guess.
 
-/// "Camera 1 | All cameras". [targetLabel] null = nothing selectable yet.
-class NileStudioTargetChips extends StatelessWidget {
-  const NileStudioTargetChips({
-    super.key,
-    required this.targetLabel,
-    required this.allCameras,
-    required this.onChanged,
-  });
-
-  final String? targetLabel;
-  final bool allCameras;
-  final ValueChanged<bool> onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    Widget chip(String label, bool selected, VoidCallback? onTap) => ChoiceChip(
-      label: Text(label, overflow: TextOverflow.ellipsis),
-      selected: selected,
-      onSelected: onTap == null ? null : (_) => onTap(),
-      showCheckmark: false,
-      labelStyle: NileTextStyles.labelSm().copyWith(
-        color: selected ? NileColors.onVolt : NileColors.txtPrimary,
-      ),
-      selectedColor: NileColors.volt,
-      backgroundColor: NileColors.bgRaised,
-      side: BorderSide(color: selected ? NileColors.volt : NileColors.border),
-      shape: const StadiumBorder(),
-    );
-
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 160),
-          child: chip(
-            targetLabel ?? 'No camera',
-            !allCameras && targetLabel != null,
-            targetLabel == null ? null : () => onChanged(false),
-          ),
-        ),
-        const SizedBox(width: NileSpacing.s6),
-        chip('All cameras', allCameras, () => onChanged(true)),
-      ],
-    );
-  }
-}
-
-/// One choice in the master-audio menu.
-@immutable
 class NileAudioSourceOption {
   const NileAudioSourceOption({
     required this.identity,

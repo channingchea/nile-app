@@ -58,6 +58,7 @@ import {
   studioIdentity,
 } from "../_shared/studio.ts";
 import { mergeRoomMeta, resyncWait, validateGraphics } from "../_shared/graphics.ts";
+import { cleanShowPatch, planReorder } from "../_shared/show.ts";
 
 // CORS headers are per-request, so the JSON responder is built per-request too
 // and handed to the helpers below (they run outside the handler's scope).
@@ -377,6 +378,10 @@ async function handle(req: Request, ctx: ReqCtx, json: Json): Promise<Response> 
       return await reportClock(body, user.id, admin, json);
     case "set-graphics":
       return await setGraphics(body, user.id, admin, json);
+    case "set-show":
+      return await setShow(body, user.id, admin, json);
+    case "reorder-cameras":
+      return await reorderCameras(body, user.id, admin, json);
     case "resync":
       return await resync(body, user.id, admin, json);
     case "list-cameras":
@@ -935,9 +940,10 @@ async function setGraphics(body: any, userId: string, admin: any, json: Json): P
   }
 
   const slots = await slotsFor(gate.event.id, admin);
-  const imagePrefix = `${Deno.env.get("SUPABASE_URL")}/storage/v1/object/public/studio-graphics/`;
+  const storage = `${Deno.env.get("SUPABASE_URL")}/storage/v1/object/public/`;
   const result = validateGraphics(body.graphics, {
-    imagePrefix,
+    imagePrefix: `${storage}studio-graphics/`,
+    avatarPrefix: storage,
     slotIds: new Set(slots.map((s) => s.id)),
   });
   if ("error" in result) return json({ error: result.error }, 400);
@@ -945,6 +951,81 @@ async function setGraphics(body: any, userId: string, admin: any, json: Json): P
   const meta = await roomMetaOf(roomName);
   await roomService.updateRoomMetadata(roomName, JSON.stringify(mergeRoomMeta(meta, { graphics: result.state })));
   return json({ success: true, graphics: result.state });
+}
+
+// set-show — off-air angles, the default angle, and "Send everyone here".
+//
+// Body: { eventId, offAir?: [slotId], defaultSlot?: slotId|null, sendAll?: slotId }.
+// Partial: only the keys sent change. Written into room metadata, which every
+// viewer already follows: an off-air angle leaves their picker (anyone on it
+// moves to the default), new viewers start on the default, and a new sendAll
+// nonce moves everyone once. Host only — the Studio, or the host's phone.
+async function setShow(body: any, userId: string, admin: any, json: Json): Promise<Response> {
+  const { eventId } = body;
+  if (!eventId) return json({ error: "eventId is required" }, 400);
+
+  const gate = await requireHost(eventId, userId, admin, json);
+  if (gate instanceof Response) return gate;
+
+  const roomName = roomNameFor(eventId);
+  const slots = await slotsFor(gate.event.id, admin);
+  const meta = await roomMetaOf(roomName);
+  const result = cleanShowPatch(body, new Set(slots.map((s) => s.id)), meta, Date.now());
+  if ("error" in result) return json({ error: result.error }, 400);
+
+  await roomService.updateRoomMetadata(roomName, JSON.stringify(mergeRoomMeta(meta, result.patch)));
+  return json({ success: true, ...result.patch });
+}
+
+// reorder-cameras — the host drags the Studio's camera tiles into a new order.
+//
+// Body: { eventId, order: [slotId] } naming every slot once. Rewrites
+// event_cameras.slot_index in two passes (the (event_id, slot_index) unique
+// constraint isn't deferrable, so everything moves out of the way first),
+// renumbers default "Camera N" names, renames the feeds live, and writes
+// `slotOrder` into room metadata so viewer pickers follow without a refetch.
+async function reorderCameras(body: any, userId: string, admin: any, json: Json): Promise<Response> {
+  const { eventId } = body;
+  if (!eventId) return json({ error: "eventId is required" }, 400);
+
+  const gate = await requireHost(eventId, userId, admin, json);
+  if (gate instanceof Response) return gate;
+
+  const slots = await slotsFor(gate.event.id, admin);
+  const plan = planReorder(body.order, slots);
+  if ("error" in plan) return json({ error: plan.error }, 400);
+
+  // Pass 1: park every slot on a negative index. Pass 2: the real order.
+  for (const [i, row] of plan.rows.entries()) {
+    const { error } = await admin.from("event_cameras").update({ slot_index: -(i + 1) })
+      .eq("id", row.id).eq("event_id", gate.event.id);
+    if (error) throw error;
+  }
+  for (const row of plan.rows) {
+    const { error } = await admin.from("event_cameras")
+      .update({ slot_index: row.slot_index, label: row.label })
+      .eq("id", row.id).eq("event_id", gate.event.id);
+    if (error) throw error;
+  }
+
+  const roomName = roomNameFor(eventId);
+  const before = new Map(slots.map((s) => [s.id, s.label]));
+  const renamed = new Map(plan.rows.filter((r) => before.get(r.id) !== r.label).map((r) => [r.id, r.label]));
+  const peers = await peersOf(roomName);
+  await Promise.all(
+    peers
+      .filter((p) => isPublisher(p) && typeof p.meta.slotId === "string" && renamed.has(p.meta.slotId))
+      .map((p) => {
+        const name = renamed.get(p.meta.slotId as string)!;
+        return patchPeer(roomName, p, { cameraName: name }, name);
+      }),
+  );
+  const meta = await roomMetaOf(roomName);
+  await roomService.updateRoomMetadata(
+    roomName,
+    JSON.stringify(mergeRoomMeta(meta, { slotOrder: plan.rows.map((r) => r.id) })),
+  );
+  return json({ success: true, slots: plan.rows });
 }
 
 // report-clock — a publisher records its clock offset (device − server, ms) in

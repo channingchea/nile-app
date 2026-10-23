@@ -102,6 +102,9 @@ void main() {
         'supabase',
         'publishVideoTrack',
         'publishAudioTrack',
+        'publishData',
+        'AngleWatchers',
+        'setShow',
       ];
       for (final path in [
         'lib/screens/studio_preview_screen.dart',
@@ -187,12 +190,14 @@ void main() {
       demo.dispose();
     });
 
-    test('one crew camera is ready, one is not connected', () {
+    test('two demo crew cameras, one ready', () {
       final demo = StudioPreviewDemo();
       expect(demo.readyCount, 1);
       expect(demo.crewCount, 2);
+      // "demo:" not "crew:" — the Studio treats crew: rows as absent, and
+      // these rehearse a connected camera's meter, health and remote controls.
       expect(
-        StudioPreviewDemo.crew.every((c) => c.identity.startsWith('crew:')),
+        StudioPreviewDemo.crew.every((c) => c.identity.startsWith('demo:')),
         isTrue,
       );
       demo.dispose();

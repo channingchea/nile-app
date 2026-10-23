@@ -1,44 +1,373 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../services/graphics_service.dart';
 import '../services/studio_graphics.dart';
 import '../theme.dart';
 import 'nile_graphics_layer.dart';
+import 'nile_studio.dart' show graphicKindIcon;
 
-IconData graphicIcon(GraphicKind k) => switch (k) {
-  GraphicKind.lowerThird => Icons.subtitles_outlined,
-  GraphicKind.logo => Icons.branding_watermark_outlined,
-  GraphicKind.banner => Icons.view_day_outlined,
-  GraphicKind.slate => Icons.fullscreen,
-};
+IconData graphicIcon(GraphicKind k) => graphicKindIcon(k);
+
+/// A camera slot as the graphics panel lists it: every slot of the event,
+/// connected or not, in display order.
+typedef StudioSlotRef = ({String id, String label});
+
+/// "Lower third · 8 s", "Logo · Top right, Large", "Slate · countdown"…
+String graphicSubtitle(StudioGraphic g) {
+  final p = g.payload;
+  final parts = <String>[g.kind.label];
+  if (g.kind == GraphicKind.logo) {
+    final size = switch (p['size']) {
+      's' => 'Small',
+      'l' => 'Large',
+      _ => 'Medium',
+    };
+    parts.add('${logoCornerLabels[p['corner']] ?? 'Top right'}, $size');
+  }
+  if (g.kind == GraphicKind.banner && p['scrolling'] == true) parts.add('ticker');
+  if (g.kind == GraphicKind.slate) {
+    final cd = p['countdown'];
+    final mode = cd is Map ? CountdownMode.fromWire(cd['mode']) : null;
+    if (mode == CountdownMode.clock) {
+      parts.add('counts to ${cd['at']}');
+    } else if (mode == CountdownMode.showStart) {
+      parts.add('counts to show start');
+    } else if (mode == CountdownMode.duration || p['countdownSeconds'] != null) {
+      final secs = ((cd is Map ? cd['seconds'] : p['countdownSeconds']) as num?)
+              ?.toInt() ??
+          0;
+      parts.add('${(secs / 60).round()} min countdown');
+    }
+  }
+  if (g.autoHideSeconds > 0) parts.add('hides after ${g.autoHideSeconds} s');
+  return parts.join(' · ');
+}
+
+// ── Hotkeys ──────────────────────────────────────────────────────────────────
+
+/// Keys 1–9 toggle the first nine items of the host's library on the cameras
+/// each was last put on (all cameras the first time). Wrap the Studio in this;
+/// it ignores keys while a text field has focus and any key with ⌘/Ctrl/Alt
+/// held (⌘1–⌘9 belong to the nav rail).
+class StudioGraphicsHotkeys extends StatefulWidget {
+  const StudioGraphicsHotkeys({
+    super.key,
+    required this.onDigit,
+    required this.child,
+    this.enabled = true,
+  });
+
+  /// 1-9.
+  final ValueChanged<int> onDigit;
+  final Widget child;
+  final bool enabled;
+
+  /// True when typing would go to a text field right now.
+  static bool typing() =>
+      FocusManager.instance.primaryFocus?.context
+          ?.findAncestorStateOfType<EditableTextState>() !=
+      null;
+
+  @override
+  State<StudioGraphicsHotkeys> createState() => _StudioGraphicsHotkeysState();
+}
+
+class _StudioGraphicsHotkeysState extends State<StudioGraphicsHotkeys> {
+  static final _digits = {
+    LogicalKeyboardKey.digit1: 1,
+    LogicalKeyboardKey.digit2: 2,
+    LogicalKeyboardKey.digit3: 3,
+    LogicalKeyboardKey.digit4: 4,
+    LogicalKeyboardKey.digit5: 5,
+    LogicalKeyboardKey.digit6: 6,
+    LogicalKeyboardKey.digit7: 7,
+    LogicalKeyboardKey.digit8: 8,
+    LogicalKeyboardKey.digit9: 9,
+    LogicalKeyboardKey.numpad1: 1,
+    LogicalKeyboardKey.numpad2: 2,
+    LogicalKeyboardKey.numpad3: 3,
+    LogicalKeyboardKey.numpad4: 4,
+    LogicalKeyboardKey.numpad5: 5,
+    LogicalKeyboardKey.numpad6: 6,
+    LogicalKeyboardKey.numpad7: 7,
+    LogicalKeyboardKey.numpad8: 8,
+    LogicalKeyboardKey.numpad9: 9,
+  };
+
+  bool _onKey(KeyEvent e) {
+    if (!widget.enabled || e is! KeyDownEvent) return false;
+    final digit = _digits[e.logicalKey];
+    if (digit == null) return false;
+    final kb = HardwareKeyboard.instance;
+    if (kb.isMetaPressed || kb.isControlPressed || kb.isAltPressed) return false;
+    if (StudioGraphicsHotkeys.typing()) return false;
+    // Not while a dialog sits on top (the graphics panel, a confirm): a key
+    // there would change graphics behind it and leave the two out of step.
+    if (!mounted || !(ModalRoute.of(context)?.isCurrent ?? true)) return false;
+    widget.onDigit(digit);
+    return true;
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    HardwareKeyboard.instance.addHandler(_onKey);
+  }
+
+  @override
+  void dispose() {
+    HardwareKeyboard.instance.removeHandler(_onKey);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
+}
+
+/// The state after pressing hotkey [digit]: library item `digit - 1` toggled
+/// on its last-used cameras ([lastTargets], all cameras the first time).
+/// Null when that key has no graphic.
+GraphicsState? graphicsAfterHotkey({
+  required int digit,
+  required List<StudioGraphic> library,
+  required GraphicsState current,
+  required Map<String, GraphicTargets> lastTargets,
+  required DateTime now,
+  DateTime? showStartAt,
+}) {
+  if (digit < 1 || digit > library.length || digit > 9) return null;
+  final g = library[digit - 1];
+  final live = LiveGraphic.snapshot(
+    g,
+    publicUrl: GraphicsService.publicUrl,
+    now: now,
+    showStartAt: showStartAt,
+  );
+  return current.toggled(live, lastTargets[g.id] ?? const GraphicTargets.all());
+}
+
+// ── Cameras / timer chooser ──────────────────────────────────────────────────
+
+/// What the Cameras checklist came back with.
+typedef GraphicTargetsChoice = ({
+  GraphicTargets targets,
+  int autoHideSeconds,
+});
+
+/// The checklist behind each graphic's "Cameras" button (and chat's "Show on
+/// screen — cameras & timer…"): All cameras, each slot, and how long it stays
+/// up. Returns null when cancelled; `GraphicTargets.none` means "Remove from
+/// all".
+Future<GraphicTargetsChoice?> showGraphicTargetsDialog(
+  BuildContext context, {
+  required String title,
+  required List<StudioSlotRef> slots,
+  required GraphicTargets initial,
+  required int autoHideSeconds,
+  bool canRemove = false,
+}) => showDialog<GraphicTargetsChoice>(
+  context: context,
+  builder: (_) => _TargetsDialog(
+    title: title,
+    slots: slots,
+    initial: initial.isNone ? const GraphicTargets.all() : initial,
+    autoHide: autoHideSeconds,
+    canRemove: canRemove,
+  ),
+);
+
+class _TargetsDialog extends StatefulWidget {
+  const _TargetsDialog({
+    required this.title,
+    required this.slots,
+    required this.initial,
+    required this.autoHide,
+    required this.canRemove,
+  });
+
+  final String title;
+  final List<StudioSlotRef> slots;
+  final GraphicTargets initial;
+  final int autoHide;
+  final bool canRemove;
+
+  @override
+  State<_TargetsDialog> createState() => _TargetsDialogState();
+}
+
+class _TargetsDialogState extends State<_TargetsDialog> {
+  late bool _all = widget.initial.all;
+  late final Set<String> _on = {
+    for (final s in widget.slots)
+      if (widget.initial.includes(s.id)) s.id,
+  };
+  late int _hide = widget.autoHide;
+  late final _custom = TextEditingController(
+    text: autoHideChoices.contains(widget.autoHide) ? '' : '${widget.autoHide}',
+  );
+
+  @override
+  void dispose() {
+    _custom.dispose();
+    super.dispose();
+  }
+
+  GraphicTargets get _targets => _all
+      ? GraphicTargets.all(
+          except: {
+            for (final s in widget.slots)
+              if (!_on.contains(s.id)) s.id,
+          },
+        )
+      : GraphicTargets.only({..._on});
+
+  @override
+  Widget build(BuildContext context) {
+    final isCustom = !autoHideChoices.contains(_hide);
+    return AlertDialog(
+      backgroundColor: NileColors.bgSurface,
+      title: Text(widget.title, style: NileTextStyles.headingMd()),
+      content: SizedBox(
+        width: 360,
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            CheckboxListTile(
+              contentPadding: EdgeInsets.zero,
+              title: Text('All cameras', style: NileTextStyles.bodyMd()),
+              subtitle: Text(
+                'Includes cameras that join later',
+                style: NileTextStyles.caption().copyWith(
+                  color: NileColors.txtTertiary,
+                ),
+              ),
+              value: _all,
+              activeColor: NileColors.volt,
+              checkColor: NileColors.onVolt,
+              onChanged: (v) => setState(() {
+                _all = v ?? false;
+                if (_all) _on.addAll(widget.slots.map((s) => s.id));
+              }),
+            ),
+            const Divider(height: 1),
+            for (final s in widget.slots)
+              CheckboxListTile(
+                contentPadding: const EdgeInsets.only(left: NileSpacing.s16),
+                dense: true,
+                title: Text(s.label, style: NileTextStyles.bodyMd()),
+                value: _on.contains(s.id),
+                activeColor: NileColors.volt,
+                checkColor: NileColors.onVolt,
+                onChanged: (v) => setState(() {
+                  v == true ? _on.add(s.id) : _on.remove(s.id);
+                }),
+              ),
+            const SizedBox(height: NileSpacing.s12),
+            Row(
+              children: [
+                Text('Hide after', style: NileTextStyles.bodyMd()),
+                const Spacer(),
+                DropdownButton<int>(
+                  value: isCustom ? -1 : _hide,
+                  dropdownColor: NileColors.bgRaised,
+                  items: [
+                    for (final c in autoHideChoices)
+                      DropdownMenuItem(value: c, child: Text(autoHideLabel(c))),
+                    const DropdownMenuItem(value: -1, child: Text('Custom…')),
+                  ],
+                  onChanged: (v) => setState(() {
+                    if (v == null) return;
+                    _hide = v == -1 ? (int.tryParse(_custom.text) ?? 20) : v;
+                    if (v == -1 && _custom.text.isEmpty) _custom.text = '$_hide';
+                  }),
+                ),
+              ],
+            ),
+            if (isCustom)
+              TextField(
+                controller: _custom,
+                keyboardType: TextInputType.number,
+                inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                decoration: const InputDecoration(
+                  labelText: 'Seconds (1–3600)',
+                ),
+                onChanged: (v) => setState(
+                  () => _hide = (int.tryParse(v) ?? 1).clamp(1, 3600),
+                ),
+              ),
+          ],
+        ),
+      ),
+      actions: [
+        if (widget.canRemove)
+          TextButton(
+            onPressed: () => Navigator.pop(context, (
+              targets: GraphicTargets.none,
+              autoHideSeconds: _hide,
+            )),
+            child: Text(
+              'Remove from all',
+              style: TextStyle(color: NileColors.error),
+            ),
+          ),
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: _targets.isNone
+              ? null
+              : () => Navigator.pop(context, (
+                  targets: _targets,
+                  autoHideSeconds: _hide,
+                )),
+          style: FilledButton.styleFrom(
+            backgroundColor: NileColors.volt,
+            foregroundColor: NileColors.onVolt,
+          ),
+          child: const Text('Put on air'),
+        ),
+      ],
+    );
+  }
+}
 
 // ── Push panel ───────────────────────────────────────────────────────────────
 
-/// The Studio toolbar's Graphics panel: every preset and library item with an
-/// on/off switch for the current target (one camera, or all of them), plus
-/// Clear all and a way into the library editor.
+/// The Studio toolbar's Graphics panel: every preset and library item with a
+/// "Cameras" button saying where it is on air (Off / All cameras / All but
+/// Cam 2 / Cam 1, Cam 3), plus Clear all and a way into the library editor.
+/// Library items 1–9 show their hotkey.
 ///
 /// [push] sends a whole new [GraphicsState] (the `set-graphics` action in the
 /// real Studio, a local setState in Studio Preview) and returns whether it
-/// stuck; the switches follow what was actually accepted.
+/// stuck. [onTargetsUsed] remembers where each graphic last went, for its
+/// hotkey. [onLibrary] hands back the library once loaded (hotkeys need it).
 Future<void> showGraphicsPushPanel(
   BuildContext context, {
   required GraphicsState current,
-  required String? targetSlotId,
-  required String targetLabel,
+  required List<StudioSlotRef> slots,
   required Future<bool> Function(GraphicsState next) push,
+  void Function(String graphicId, GraphicTargets targets)? onTargetsUsed,
+  ValueChanged<List<StudioGraphic>>? onLibrary,
+  DateTime? showStartAt,
+  bool isLive = false,
 }) => showDialog<void>(
   context: context,
   builder: (_) => Dialog(
     backgroundColor: NileColors.bgSurface,
     insetPadding: const EdgeInsets.all(NileSpacing.s24),
     child: ConstrainedBox(
-      constraints: const BoxConstraints(maxWidth: 520, maxHeight: 640),
+      constraints: const BoxConstraints(maxWidth: 560, maxHeight: 680),
       child: _PushPanel(
         initial: current,
-        slotId: targetSlotId,
-        targetLabel: targetLabel,
+        slots: slots,
         push: push,
+        onTargetsUsed: onTargetsUsed,
+        onLibrary: onLibrary,
+        showStartAt: showStartAt,
+        isLive: isLive,
       ),
     ),
   ),
@@ -47,15 +376,21 @@ Future<void> showGraphicsPushPanel(
 class _PushPanel extends StatefulWidget {
   const _PushPanel({
     required this.initial,
-    required this.slotId,
-    required this.targetLabel,
+    required this.slots,
     required this.push,
+    required this.isLive,
+    this.onTargetsUsed,
+    this.onLibrary,
+    this.showStartAt,
   });
 
   final GraphicsState initial;
-  final String? slotId;
-  final String targetLabel;
+  final List<StudioSlotRef> slots;
   final Future<bool> Function(GraphicsState next) push;
+  final void Function(String graphicId, GraphicTargets targets)? onTargetsUsed;
+  final ValueChanged<List<StudioGraphic>>? onLibrary;
+  final DateTime? showStartAt;
+  final bool isLive;
 
   @override
   State<_PushPanel> createState() => _PushPanelState();
@@ -76,7 +411,9 @@ class _PushPanelState extends State<_PushPanel> {
   Future<void> _loadLibrary() async {
     try {
       final items = await GraphicsService.list();
-      if (mounted) setState(() => _library = items);
+      if (!mounted) return;
+      setState(() => _library = items);
+      widget.onLibrary?.call(items);
     } catch (_) {
       if (mounted) {
         setState(() {
@@ -89,6 +426,9 @@ class _PushPanelState extends State<_PushPanel> {
 
   Future<void> _apply(GraphicsState next) async {
     if (_busy) return;
+    // The panel holds a copy from when it opened; anything that auto-hid in
+    // the meantime must not go back up with this push.
+    next = next.withoutExpired(DateTime.now().millisecondsSinceEpoch);
     setState(() => _busy = true);
     final ok = await widget.push(next);
     if (!mounted) return;
@@ -103,25 +443,71 @@ class _PushPanelState extends State<_PushPanel> {
     });
   }
 
-  void _toggle(StudioGraphic g, bool on) {
-    _apply(
-      on
-          ? _state.withOn(
-              widget.slotId,
-              LiveGraphic.snapshot(
-                g,
-                publicUrl: GraphicsService.publicUrl,
-                now: DateTime.now(),
-              ),
-            )
-          : _state.withOff(widget.slotId, g.id),
+  String _labelOf(String slotId) =>
+      widget.slots.where((s) => s.id == slotId).firstOrNull?.label ?? 'Camera';
+
+  Future<void> _chooseCameras(StudioGraphic g) async {
+    final current = _state.targetsOf(g.id);
+    final choice = await showGraphicTargetsDialog(
+      context,
+      title: g.name,
+      slots: widget.slots,
+      initial: current,
+      autoHideSeconds: g.autoHideSeconds,
+      canRemove: !current.isNone,
     );
+    if (choice == null || !mounted) return;
+    if (choice.targets.isNone) {
+      await _apply(_state.withoutEverywhere(g.id));
+      return;
+    }
+    widget.onTargetsUsed?.call(g.id, choice.targets);
+    await _apply(
+      _state.withTargets(
+        LiveGraphic.snapshot(
+          g,
+          publicUrl: GraphicsService.publicUrl,
+          now: DateTime.now(),
+          autoHideSeconds: choice.autoHideSeconds,
+          showStartAt: widget.showStartAt,
+        ),
+        choice.targets,
+      ),
+    );
+  }
+
+  Future<void> _clearAll() async {
+    if (widget.isLive) {
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: NileColors.bgSurface,
+          title: Text('Clear every graphic?', style: NileTextStyles.headingMd()),
+          content: Text(
+            'Everything comes off every camera, for every viewer.',
+            style: NileTextStyles.bodyMd(),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: Text('Clear all', style: TextStyle(color: NileColors.error)),
+            ),
+          ],
+        ),
+      );
+      if (ok != true) return;
+    }
+    await _apply(GraphicsState.empty);
   }
 
   @override
   Widget build(BuildContext context) {
     final lib = _library;
-    final onAir = _state.targetList(widget.slotId);
+    final order = [for (final s in widget.slots) s.id];
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -149,8 +535,8 @@ class _PushPanelState extends State<_PushPanel> {
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s24),
           child: Text(
-            'On ${widget.targetLabel}. Viewers see graphics on the angle '
-            'they’re watching.',
+            'Pick the cameras for each graphic. Viewers see graphics on the '
+            'angle they’re watching. Keys 1–9 toggle your first nine.',
             style: NileTextStyles.bodySm().copyWith(
               color: NileColors.txtSecondary,
             ),
@@ -174,7 +560,7 @@ class _PushPanelState extends State<_PushPanel> {
           child: ListView(
             children: [
               _header('NILE PRESETS'),
-              for (final g in StudioGraphicPresets.all) _row(g),
+              for (final g in StudioGraphicPresets.all) _row(g, order, null),
               _header('YOUR LIBRARY'),
               if (lib == null)
                 const Padding(
@@ -196,7 +582,8 @@ class _PushPanelState extends State<_PushPanel> {
                   ),
                 )
               else
-                for (final g in lib) _row(g),
+                for (var i = 0; i < lib.length; i++)
+                  _row(lib[i], order, i < 9 ? i + 1 : null),
             ],
           ),
         ),
@@ -215,13 +602,11 @@ class _PushPanelState extends State<_PushPanel> {
               ),
               const Spacer(),
               TextButton(
-                onPressed: onAir.isEmpty || _busy
-                    ? null
-                    : () => _apply(_state.cleared(widget.slotId)),
+                onPressed: _state.isEmpty || _busy ? null : _clearAll,
                 child: Text(
                   'Clear all',
                   style: NileTextStyles.labelMd().copyWith(
-                    color: onAir.isEmpty
+                    color: _state.isEmpty
                         ? NileColors.txtTertiary
                         : NileColors.error,
                   ),
@@ -250,19 +635,67 @@ class _PushPanelState extends State<_PushPanel> {
     ),
   );
 
-  Widget _row(StudioGraphic g) {
-    final on = _state.isOn(widget.slotId, g.id);
-    return SwitchListTile(
-      value: on,
-      onChanged: _busy ? null : (v) => _toggle(g, v),
-      secondary: Icon(graphicIcon(g.kind), color: NileColors.txtSecondary),
+  Widget _row(StudioGraphic g, List<String> order, int? hotkey) {
+    final targets = _state.targetsOf(g.id);
+    final on = !targets.isNone;
+    return ListTile(
+      contentPadding: const EdgeInsets.symmetric(horizontal: NileSpacing.s24),
+      leading: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          Icon(
+            graphicIcon(g.kind),
+            color: on ? NileColors.volt : NileColors.txtSecondary,
+          ),
+          if (hotkey != null)
+            Positioned(
+              right: -8,
+              bottom: -6,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 4),
+                decoration: BoxDecoration(
+                  color: NileColors.bgRaised,
+                  border: Border.all(color: NileColors.borderStrong),
+                  borderRadius: BorderRadius.circular(NileRadius.xs),
+                ),
+                child: Text(
+                  '$hotkey',
+                  style: NileTextStyles.caption().copyWith(
+                    color: NileColors.txtPrimary,
+                    fontFeatures: const [FontFeature.tabularFigures()],
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
       title: Text(g.name, style: NileTextStyles.bodyMd()),
       subtitle: Text(
-        g.kind.label,
+        graphicSubtitle(g),
         style: NileTextStyles.bodySm().copyWith(color: NileColors.txtTertiary),
       ),
-      contentPadding: const EdgeInsets.symmetric(horizontal: NileSpacing.s24),
-      activeThumbColor: NileColors.volt,
+      trailing: OutlinedButton.icon(
+        onPressed: _busy ? null : () => _chooseCameras(g),
+        icon: Icon(
+          on ? Icons.videocam : Icons.videocam_off_outlined,
+          size: 16,
+          color: on ? NileColors.volt : NileColors.txtTertiary,
+        ),
+        label: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 150),
+          child: Text(
+            targets.summary(_labelOf, order),
+            overflow: TextOverflow.ellipsis,
+            style: NileTextStyles.labelSm().copyWith(
+              color: on ? NileColors.txtPrimary : NileColors.txtTertiary,
+            ),
+          ),
+        ),
+        style: OutlinedButton.styleFrom(
+          side: BorderSide(color: on ? NileColors.volt : NileColors.border),
+          padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s8),
+        ),
+      ),
     );
   }
 }
@@ -324,6 +757,37 @@ class _LibraryEditorState extends State<_LibraryEditor> {
     ),
   );
 
+  /// A copy of [g] saved straight away, right after the original.
+  Future<void> _duplicate(StudioGraphic g) async {
+    final items = [...?_items];
+    final at = items.indexWhere((x) => x.id == g.id) + 1;
+    try {
+      final name = g.name.length > 53 ? g.name.substring(0, 53) : g.name;
+      final copy = await GraphicsService.create(
+        kind: g.kind,
+        name: '$name (copy)',
+        payload: {...g.payload},
+        sort: at,
+      );
+      items.insert(at, copy);
+      await GraphicsService.reorder(items);
+      if (!mounted) return;
+      setState(() {
+        _items = [
+          for (var i = 0; i < items.length; i++) items[i].copyWith(sort: i),
+        ];
+        _editing = copy;
+      });
+    } catch (e) {
+      if (mounted) {
+        setState(
+          () => _error =
+              'Couldn’t duplicate it.${e is ArgumentError ? ' ${e.message}' : ''}',
+        );
+      }
+    }
+  }
+
   Future<void> _reorder(int from, int to) async {
     final items = [...?_items];
     items.insert(to, items.removeAt(from));
@@ -364,6 +828,9 @@ class _LibraryEditorState extends State<_LibraryEditor> {
                 nextSort: _items?.length ?? 0,
                 onSaved: _saved,
                 onCancel: () => setState(() => _editing = null),
+                onDuplicate: _editing!.id.isEmpty
+                    ? null
+                    : () => _duplicate(_editing!),
               );
         if (!wide) return _editing == null ? list : editor;
         return Row(
@@ -463,7 +930,9 @@ class _LibraryEditorState extends State<_LibraryEditor> {
                         overflow: TextOverflow.ellipsis,
                       ),
                       subtitle: Text(
-                        g.kind.label,
+                        graphicSubtitle(g),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
                         style: NileTextStyles.bodySm().copyWith(
                           color: NileColors.txtTertiary,
                         ),
@@ -489,7 +958,12 @@ class _LibraryEditorState extends State<_LibraryEditor> {
       id: '',
       kind: GraphicKind.lowerThird,
       name: 'Lower third',
-      payload: {'title': 'Name', 'subtitle': 'Title or handle'},
+      // New lower thirds come down by themselves; everything else stays up.
+      payload: {
+        'title': 'Name',
+        'subtitle': 'Title or handle',
+        'autoHideSeconds': 8,
+      },
     ),
     StudioGraphic(
       id: '',
@@ -519,7 +993,10 @@ class _LibraryEditorState extends State<_LibraryEditor> {
       id: '',
       kind: GraphicKind.slate,
       name: 'Countdown slate',
-      payload: {'title': 'Starting in', 'countdownSeconds': 300},
+      payload: {
+        'title': 'Starting in',
+        'countdown': {'mode': 'duration', 'seconds': 300},
+      },
     ),
   ];
 }
@@ -531,12 +1008,14 @@ class _GraphicEditor extends StatefulWidget {
     required this.nextSort,
     required this.onSaved,
     required this.onCancel,
+    this.onDuplicate,
   });
 
   final StudioGraphic graphic;
   final int nextSort;
   final VoidCallback onSaved;
   final VoidCallback onCancel;
+  final VoidCallback? onDuplicate;
 
   @override
   State<_GraphicEditor> createState() => _GraphicEditorState();
@@ -550,11 +1029,27 @@ class _GraphicEditorState extends State<_GraphicEditor> {
     text: _p['subtitle'] as String? ?? '',
   );
   late final _text = TextEditingController(text: _p['text'] as String? ?? '');
+
+  // Countdown (slates). Older items carry countdownSeconds; it reads as a
+  // length and is saved back in the new shape.
+  late CountdownMode? _cdMode = switch (_p['countdown']) {
+    Map cd => CountdownMode.fromWire(cd['mode']),
+    _ => _p['countdownSeconds'] == null ? null : CountdownMode.duration,
+  };
   late final _minutes = TextEditingController(
-    text: _p['countdownSeconds'] == null
-        ? ''
-        : ((_p['countdownSeconds'] as num) / 60).toStringAsFixed(0),
+    text: switch (_p['countdown']) {
+      {'seconds': final num s} => (s / 60).toStringAsFixed(0),
+      _ =>
+        _p['countdownSeconds'] == null
+            ? '5'
+            : ((_p['countdownSeconds'] as num) / 60).toStringAsFixed(0),
+    },
   );
+  late String _clockAt = switch (_p['countdown']) {
+    {'at': final String at} => at,
+    _ => '19:00',
+  };
+  late int _autoHide = (_p['autoHideSeconds'] as num?)?.toInt() ?? 0;
   bool _busy = false;
   String? _error;
 
@@ -569,10 +1064,31 @@ class _GraphicEditorState extends State<_GraphicEditor> {
     super.dispose();
   }
 
+  Map<String, dynamic>? get _countdown => switch (_cdMode) {
+    CountdownMode.duration => {
+      'mode': 'duration',
+      'seconds': ((int.tryParse(_minutes.text.trim()) ?? 0) * 60).clamp(
+        0,
+        86400,
+      ),
+    },
+    CountdownMode.clock => {'mode': 'clock', 'at': _clockAt},
+    CountdownMode.showStart => {'mode': 'showStart'},
+    null => null,
+  };
+
   Map<String, dynamic> get _payload {
     String? opt(TextEditingController c) =>
         c.text.trim().isEmpty ? null : c.text.trim();
+    return {
+      ..._kindPayload(opt),
+      if (_autoHide > 0) 'autoHideSeconds': _autoHide,
+    };
+  }
+
+  Map<String, dynamic> _kindPayload(String? Function(TextEditingController) opt) {
     return switch (_kind) {
+      GraphicKind.chat => const {},
       GraphicKind.lowerThird => {
         'title': _title.text.trim(),
         'subtitle': ?opt(_subtitle),
@@ -590,11 +1106,116 @@ class _GraphicEditorState extends State<_GraphicEditor> {
         'title': _title.text.trim(),
         'subtitle': ?opt(_subtitle),
         'imagePath': ?_p['imagePath'],
-        if (int.tryParse(_minutes.text.trim()) case final m? when m > 0)
-          'countdownSeconds': m * 60,
+        'countdown': ?_countdown,
       },
     };
   }
+
+  Future<void> _pickClock() async {
+    final hm = parseClock(_clockAt) ?? (19, 0);
+    final t = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay(hour: hm.$1, minute: hm.$2),
+    );
+    if (t == null) return;
+    setState(
+      () => _clockAt =
+          '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}',
+    );
+  }
+
+  Widget _countdownEditor() {
+    final hm = parseClock(_clockAt);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('Countdown', style: NileTextStyles.labelMd()),
+        const SizedBox(height: NileSpacing.s8),
+        SegmentedButton<CountdownMode?>(
+          segments: const [
+            ButtonSegment(value: null, label: Text('None')),
+            ButtonSegment(value: CountdownMode.duration, label: Text('Length')),
+            ButtonSegment(value: CountdownMode.clock, label: Text('Time of day')),
+            ButtonSegment(value: CountdownMode.showStart, label: Text('Show start')),
+          ],
+          selected: {_cdMode},
+          onSelectionChanged: (s) => setState(() => _cdMode = s.first),
+        ),
+        const SizedBox(height: NileSpacing.s12),
+        switch (_cdMode) {
+          CountdownMode.duration => _field(
+            _minutes,
+            'Minutes',
+            keyboard: TextInputType.number,
+          ),
+          CountdownMode.clock => Padding(
+            padding: const EdgeInsets.only(bottom: NileSpacing.s12),
+            child: Row(
+              children: [
+                OutlinedButton.icon(
+                  onPressed: _pickClock,
+                  icon: const Icon(Icons.schedule),
+                  label: Text(
+                    hm == null
+                        ? 'Pick a time'
+                        : TimeOfDay(hour: hm.$1, minute: hm.$2).format(context),
+                  ),
+                ),
+                const SizedBox(width: NileSpacing.s12),
+                Expanded(
+                  child: Text(
+                    'Counts to the next time your clock shows this. Viewers '
+                    'see the time in their own time zone.',
+                    style: NileTextStyles.bodySm().copyWith(
+                      color: NileColors.txtTertiary,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          CountdownMode.showStart => Padding(
+            padding: const EdgeInsets.only(bottom: NileSpacing.s12),
+            child: Text(
+              'Counts to the show’s scheduled start time.',
+              style: NileTextStyles.bodySm().copyWith(
+                color: NileColors.txtTertiary,
+              ),
+            ),
+          ),
+          null => const SizedBox.shrink(),
+        },
+      ],
+    );
+  }
+
+  Widget _autoHideRow() => Padding(
+    padding: const EdgeInsets.only(bottom: NileSpacing.s12),
+    child: Row(
+      children: [
+        Text('Hide after', style: NileTextStyles.bodyMd()),
+        const SizedBox(width: NileSpacing.s12),
+        DropdownButton<int>(
+          value: autoHideChoices.contains(_autoHide) ? _autoHide : 0,
+          dropdownColor: NileColors.bgRaised,
+          items: [
+            for (final c in autoHideChoices)
+              DropdownMenuItem(value: c, child: Text(autoHideLabel(c))),
+          ],
+          onChanged: (v) => setState(() => _autoHide = v ?? 0),
+        ),
+        const SizedBox(width: NileSpacing.s12),
+        Expanded(
+          child: Text(
+            'You can change it each time you put it on.',
+            style: NileTextStyles.bodySm().copyWith(
+              color: NileColors.txtTertiary,
+            ),
+          ),
+        ),
+      ],
+    ),
+  );
 
   Future<void> _upload() async {
     setState(() {
@@ -690,6 +1311,8 @@ class _GraphicEditorState extends State<_GraphicEditor> {
       StudioGraphic(id: 'preview', kind: _kind, name: '', payload: _payload),
       publicUrl: GraphicsService.publicUrl,
       now: DateTime.now(),
+      // The preview stays up while you edit, whatever the auto-hide says.
+      autoHideSeconds: 0,
     );
     return ListView(
       padding: const EdgeInsets.all(NileSpacing.s24),
@@ -756,14 +1379,13 @@ class _GraphicEditorState extends State<_GraphicEditor> {
           GraphicKind.slate => [
             _field(_title, 'Title', max: 60),
             _field(_subtitle, 'Subtitle (optional)', max: 120),
-            _field(
-              _minutes,
-              'Countdown minutes (optional)',
-              keyboard: TextInputType.number,
-            ),
+            _countdownEditor(),
             _imageRow(required: false),
           ],
+          GraphicKind.chat => const <Widget>[],
         },
+        const SizedBox(height: NileSpacing.s12),
+        _autoHideRow(),
         if (_error != null) ...[
           const SizedBox(height: NileSpacing.s12),
           Text(
@@ -778,6 +1400,12 @@ class _GraphicEditorState extends State<_GraphicEditor> {
               TextButton(
                 onPressed: _busy ? null : _delete,
                 child: Text('Delete', style: TextStyle(color: NileColors.error)),
+              ),
+            if (widget.onDuplicate != null)
+              TextButton.icon(
+                onPressed: _busy ? null : widget.onDuplicate,
+                icon: const Icon(Icons.copy_outlined, size: 16),
+                label: const Text('Duplicate'),
               ),
             const Spacer(),
             TextButton(

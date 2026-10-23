@@ -259,6 +259,30 @@ class NileColors {
   static const Color success = Color(0xFF22C55E);
   static const Color warning = Color(0xFFF59E0B);
   static const Color error = Color(0xFFEF4444);
+
+  /// Live-chat name colours: one per person, stable for the whole show.
+  /// Every entry clears 3:1 on both themes' `bgSurface`. The host is not in
+  /// here — the host's name is always [coral].
+  static const List<Color> chatNames = [
+    Color(0xFFE8590C),
+    Color(0xFF1C7ED6),
+    Color(0xFF8B5CF6),
+    Color(0xFFD6336C),
+    Color(0xFF2F9E44),
+    Color(0xFF0C8599),
+    Color(0xFFB07D10),
+  ];
+}
+
+/// A chat sender's name colour: the same person gets the same colour on every
+/// device (a stable hash of their id, not Dart's per-run `hashCode`).
+Color nileChatNameColor(String senderId, {bool isHost = false}) {
+  if (isHost) return NileColors.coral;
+  var h = 0;
+  for (final c in senderId.codeUnits) {
+    h = (h * 31 + c) & 0x7fffffff;
+  }
+  return NileColors.chatNames[h % NileColors.chatNames.length];
 }
 
 // ── Border radii ──────────────────────────────────────────────────────────────

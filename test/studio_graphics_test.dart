@@ -206,72 +206,105 @@ void main() {
   });
 
   group('Graphics panel', () {
-    testWidgets('presets toggle on for the target and push the new state', (t) async {
-      final pushed = <GraphicsState>[];
-      await t.pumpWidget(
-        MaterialApp(
-          home: Builder(
-            builder: (context) => TextButton(
-              onPressed: () => showGraphicsPushPanel(
-                context,
-                current: GraphicsState.empty,
-                targetSlotId: 's1',
-                targetLabel: 'Camera 1',
-                push: (next) async {
-                  pushed.add(next);
-                  return true;
-                },
-              ),
-              child: const Text('open'),
-            ),
+    const slots = <StudioSlotRef>[
+      (id: 's1', label: 'Camera 1'),
+      (id: 's2', label: 'Camera 2'),
+    ];
+
+    Widget opener(
+      GraphicsState current,
+      Future<bool> Function(GraphicsState) push, {
+      bool isLive = false,
+      void Function(String, GraphicTargets)? used,
+    }) => MaterialApp(
+      home: Builder(
+        builder: (context) => TextButton(
+          onPressed: () => showGraphicsPushPanel(
+            context,
+            current: current,
+            slots: slots,
+            push: push,
+            isLive: isLive,
+            onTargetsUsed: used,
           ),
+          child: const Text('open'),
         ),
-      );
+      ),
+    );
+
+    Future<void> openCameras(WidgetTester t, String name) async {
       await t.tap(find.text('open'));
       await t.pumpAndSettle();
-      expect(find.text('On Camera 1. Viewers see graphics on the angle they’re watching.'), findsOneWidget);
-
-      await t.tap(find.text('Be right back'));
+      final row = find.widgetWithText(ListTile, name);
+      await t.tap(find.descendant(of: row, matching: find.byType(OutlinedButton)));
       await t.pumpAndSettle();
-      expect(pushed.single.bySlot['s1']!.single.id, 'preset:brb');
-      expect(pushed.single.all, isEmpty);
+    }
 
-      // A second slate replaces the first on that camera.
-      await t.tap(find.text('Thank you'));
+    testWidgets('Cameras: all but one camera, then that camera alone', (t) async {
+      final pushed = <GraphicsState>[];
+      final used = <String, GraphicTargets>{};
+      await t.pumpWidget(
+        opener(GraphicsState.empty, (next) async {
+          pushed.add(next);
+          return true;
+        }, used: (id, tg) => used[id] = tg),
+      );
+      await openCameras(t, 'Be right back');
+      // All cameras is the starting point; untick Camera 2.
+      await t.tap(find.widgetWithText(CheckboxListTile, 'Camera 2'));
+      await t.pump();
+      await t.tap(find.text('Put on air'));
       await t.pumpAndSettle();
-      expect(pushed.last.bySlot['s1']!.map((g) => g.id), ['preset:thanks']);
+      final brb = pushed.single.all.single;
+      expect(brb.id, 'preset:brb');
+      expect(brb.except, ['s2']);
+      expect(used['preset:brb'], const GraphicTargets.all(except: {'s2'}));
+      expect(find.text('All but Camera 2'), findsOneWidget);
+      expect(pushed.single.forSlot('s2'), isEmpty);
+      expect(pushed.single.forSlot('s1').single.id, 'preset:brb');
+    });
 
+    testWidgets('Remove from all, and Clear all confirms when live', (t) async {
+      final pushed = <GraphicsState>[];
+      final start = GraphicsState.empty.withTargets(
+        const LiveGraphic(id: 'preset:brb', kind: GraphicKind.slate, title: 'Be right back'),
+        const GraphicTargets.only({'s1'}),
+      );
+      await t.pumpWidget(
+        opener(start, (next) async {
+          pushed.add(next);
+          return true;
+        }, isLive: true),
+      );
+      await openCameras(t, 'Be right back');
+      await t.tap(find.text('Remove from all'));
+      await t.pumpAndSettle();
+      expect(pushed.last.isEmpty, isTrue);
+
+      // Put it back, then Clear all asks first.
+      await t.tap(find.descendant(
+        of: find.widgetWithText(ListTile, 'Thank you'),
+        matching: find.byType(OutlinedButton),
+      ));
+      await t.pumpAndSettle();
+      await t.tap(find.text('Put on air'));
+      await t.pumpAndSettle();
+      expect(pushed.last.all.single.id, 'preset:thanks');
       await t.tap(find.text('Clear all'));
+      await t.pumpAndSettle();
+      expect(find.text('Clear every graphic?'), findsOneWidget);
+      await t.tap(find.text('Clear all').last);
       await t.pumpAndSettle();
       expect(pushed.last.isEmpty, isTrue);
     });
 
-    testWidgets('a refused push leaves the switch off and says so', (t) async {
-      await t.pumpWidget(
-        MaterialApp(
-          home: Builder(
-            builder: (context) => TextButton(
-              onPressed: () => showGraphicsPushPanel(
-                context,
-                current: GraphicsState.empty,
-                targetSlotId: null,
-                targetLabel: 'all cameras',
-                push: (_) async => false,
-              ),
-              child: const Text('open'),
-            ),
-          ),
-        ),
-      );
-      await t.tap(find.text('open'));
-      await t.pumpAndSettle();
-      await t.tap(find.text('Be right back'));
+    testWidgets('a refused push leaves it off and says so', (t) async {
+      await t.pumpWidget(opener(GraphicsState.empty, (_) async => false));
+      await openCameras(t, 'Be right back');
+      await t.tap(find.text('Put on air'));
       await t.pumpAndSettle();
       expect(find.text('Couldn’t update the show’s graphics. Try again.'), findsOneWidget);
-      final sw = t.widget<SwitchListTile>(
-        find.widgetWithText(SwitchListTile, 'Be right back'),
-      );
-      expect(sw.value, isFalse);
+      expect(find.text('Off'), findsWidgets);
     });
   });
 }

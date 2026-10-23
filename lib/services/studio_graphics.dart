@@ -17,7 +17,11 @@ enum GraphicKind {
   lowerThird('lower_third', 'Lower third'),
   logo('logo', 'Logo / image'),
   banner('banner', 'Banner'),
-  slate('slate', 'Full-screen slate');
+  slate('slate', 'Full-screen slate'),
+
+  /// A viewer's chat message put on screen from the Studio chat ("Show on
+  /// screen"). Push-only — never saved in a library.
+  chat('chat', 'Chat message');
 
   const GraphicKind(this.wire, this.label);
   final String wire;
@@ -25,6 +29,29 @@ enum GraphicKind {
 
   static GraphicKind? fromWire(Object? s) =>
       GraphicKind.values.where((k) => k.wire == s).firstOrNull;
+
+  /// Kinds a library can hold (the `studio_graphic_kind` enum).
+  static const library = [lowerThird, logo, banner, slate];
+}
+
+/// Auto-hide choices offered in the library editor and the Cameras menu.
+/// 0 = stays up until turned off.
+const autoHideChoices = [0, 5, 8, 10, 15, 30];
+
+String autoHideLabel(int seconds) => seconds <= 0 ? 'Off' : '$seconds s';
+
+/// How a countdown slate counts: a fixed length, to a time of day, or to the
+/// show's scheduled start.
+enum CountdownMode {
+  duration('duration'),
+  clock('clock'),
+  showStart('showStart');
+
+  const CountdownMode(this.wire);
+  final String wire;
+
+  static CountdownMode? fromWire(Object? s) =>
+      CountdownMode.values.where((k) => k.wire == s).firstOrNull;
 }
 
 /// Logo corners, in their wire form.
@@ -62,6 +89,9 @@ class StudioGraphic {
 
   bool get isPreset => id.startsWith('preset:');
 
+  /// The graphic's saved auto-hide, in seconds; 0 = stays up.
+  int get autoHideSeconds => (payload['autoHideSeconds'] as num?)?.toInt() ?? 0;
+
   StudioGraphic copyWith({String? name, Map<String, dynamic>? payload, int? sort}) =>
       StudioGraphic(
         id: id,
@@ -81,7 +111,14 @@ class StudioGraphic {
       return null;
     }
 
+    final hide = p['autoHideSeconds'];
+    if (hide != null && (hide is! num || hide < 1 || hide > 3600)) {
+      return 'Auto-hide is 1 second to an hour.';
+    }
+
     switch (kind) {
+      case GraphicKind.chat:
+        return 'Chat messages are put on screen from the chat.';
       case GraphicKind.lowerThird:
         return text('title', 1, 60, 'Title') ??
             text('subtitle', 0, 80, 'Subtitle');
@@ -102,10 +139,79 @@ class StudioGraphic {
         if (c != null && (c is! num || c < 1 || c > 86400)) {
           return 'Countdown is 1 second to 24 hours.';
         }
+        if (p['countdown'] case final Object cd) {
+          final err = countdownError(cd);
+          if (err != null) return err;
+        }
         return text('title', 1, 60, 'Title') ??
             text('subtitle', 0, 120, 'Subtitle');
     }
   }
+}
+
+/// Why a slate's `countdown` value is unusable, or null when it is fine.
+///   {mode: duration, seconds: 1-86400} · {mode: clock, at: "HH:MM"} ·
+///   {mode: showStart}
+String? countdownError(Object? cd) {
+  if (cd is! Map) return 'Countdown is malformed.';
+  switch (CountdownMode.fromWire(cd['mode'])) {
+    case CountdownMode.duration:
+      final s = cd['seconds'];
+      return s is num && s >= 1 && s <= 86400
+          ? null
+          : 'Countdown is 1 second to 24 hours.';
+    case CountdownMode.clock:
+      return parseClock(cd['at']) == null ? 'Pick a time of day.' : null;
+    case CountdownMode.showStart:
+      return null;
+    case null:
+      return 'Pick how the countdown counts.';
+  }
+}
+
+/// "HH:MM" (24 h) → (hour, minute), or null.
+(int, int)? parseClock(Object? at) {
+  if (at is! String) return null;
+  final m = RegExp(r'^([01]\d|2[0-3]):([0-5]\d)$').firstMatch(at);
+  return m == null ? null : (int.parse(m[1]!), int.parse(m[2]!));
+}
+
+/// When a countdown described by [payload] ends, given the moment it is
+/// pushed. A clock time is the next time the host's own clock shows it; the
+/// show start falls back to "no countdown" when the show has no start time.
+/// Returns (endsAtMs, showsClock) or null for a slate without a countdown.
+(int, bool)? countdownEnd(
+  Map<String, dynamic> payload, {
+  required DateTime now,
+  DateTime? showStartAt,
+}) {
+  final cd = payload['countdown'];
+  if (cd is Map) {
+    switch (CountdownMode.fromWire(cd['mode'])) {
+      case CountdownMode.duration:
+        final s = (cd['seconds'] as num?)?.toInt();
+        return s == null
+            ? null
+            : (now.add(Duration(seconds: s)).millisecondsSinceEpoch, false);
+      case CountdownMode.clock:
+        final hm = parseClock(cd['at']);
+        if (hm == null) return null;
+        final local = now.toLocal();
+        var at = DateTime(local.year, local.month, local.day, hm.$1, hm.$2);
+        if (!at.isAfter(local)) at = at.add(const Duration(days: 1));
+        return (at.millisecondsSinceEpoch, true);
+      case CountdownMode.showStart:
+        return showStartAt == null
+            ? null
+            : (showStartAt.millisecondsSinceEpoch, true);
+      case null:
+        return null;
+    }
+  }
+  final legacy = (payload['countdownSeconds'] as num?)?.toInt();
+  return legacy == null
+      ? null
+      : (now.add(Duration(seconds: legacy)).millisecondsSinceEpoch, false);
 }
 
 /// Built-in graphics every host has without saving anything: the four slates
@@ -134,14 +240,26 @@ abstract final class StudioGraphicPresets {
       id: 'preset:countdown',
       kind: GraphicKind.slate,
       name: 'Countdown (5 min)',
-      payload: {'title': 'Starting in', 'countdownSeconds': 300},
+      payload: {
+        'title': 'Starting in',
+        'countdown': {'mode': 'duration', 'seconds': 300},
+      },
+    ),
+    StudioGraphic(
+      id: 'preset:until-start',
+      kind: GraphicKind.slate,
+      name: 'Countdown to show start',
+      payload: {
+        'title': 'Starting in',
+        'countdown': {'mode': 'showStart'},
+      },
     ),
   ];
 }
 
 /// A graphic as pushed live: everything needed to draw it, nothing that needs
 /// a lookup. Image paths are already public URLs; a countdown already has its
-/// end time.
+/// end time; an auto-hide already has the moment it comes down.
 @immutable
 class LiveGraphic {
   const LiveGraphic({
@@ -151,19 +269,31 @@ class LiveGraphic {
     this.subtitle,
     this.text,
     this.imageUrl,
+    this.avatarUrl,
     this.corner,
     this.size,
     this.scrolling = false,
     this.endsAt,
+    this.showsClock = false,
+    this.hideAt,
+    this.except = const [],
   });
 
-  /// [StudioGraphic.id] it came from — what the push panel's switches key on.
+  /// [StudioGraphic.id] it came from — what the panel keys on. Chat graphics
+  /// use `chat:<message id>`.
   final String id;
   final GraphicKind kind;
+
+  /// Lower third / slate title; a chat graphic's username.
   final String? title;
   final String? subtitle;
+
+  /// Banner text; a chat graphic's message.
   final String? text;
   final String? imageUrl;
+
+  /// Chat graphics: the sender's avatar.
+  final String? avatarUrl;
   final String? corner;
   final String? size;
   final bool scrolling;
@@ -171,20 +301,40 @@ class LiveGraphic {
   /// Countdown slates: epoch ms when the countdown reaches zero.
   final int? endsAt;
 
+  /// The countdown runs to a time of day (or the show's start): the slate
+  /// also says the time, in each viewer's own time zone.
+  final bool showsClock;
+
+  /// Epoch ms when it comes down by itself. Null = stays up.
+  final int? hideAt;
+
+  /// Graphics on every camera: slots it has been taken off ("All but Cam 2").
+  final List<String> except;
+
   /// Graphics of the same cap key can't be on screen together: one lower
-  /// third, one logo per corner, one banner, one slate.
+  /// third, one logo per corner, one banner, one slate, one chat message.
   String get capKey => kind == GraphicKind.logo ? 'logo:$corner' : kind.wire;
 
+  bool expiredAt(int nowMs) => hideAt != null && hideAt! <= nowMs;
+
   /// Snapshot a library item for pushing. [publicUrl] turns a storage path
-  /// into a URL; [now] stamps a countdown's end.
+  /// into a URL; [now] stamps a countdown's end and the auto-hide.
+  ///
+  /// [autoHideSeconds] overrides the graphic's saved auto-hide (0 = off);
+  /// null keeps the saved one. [showStartAt] feeds "count down to show start".
   factory LiveGraphic.snapshot(
     StudioGraphic g, {
     required String Function(String path) publicUrl,
     required DateTime now,
+    int? autoHideSeconds,
+    DateTime? showStartAt,
   }) {
     final p = g.payload;
     final path = p['imagePath'] as String?;
-    final countdown = (p['countdownSeconds'] as num?)?.toInt();
+    final countdown = g.kind == GraphicKind.slate
+        ? countdownEnd(p, now: now, showStartAt: showStartAt)
+        : null;
+    final hide = autoHideSeconds ?? g.autoHideSeconds;
     return LiveGraphic(
       id: g.id,
       kind: g.kind,
@@ -195,17 +345,58 @@ class LiveGraphic {
       corner: p['corner'] as String?,
       size: p['size'] as String?,
       scrolling: p['scrolling'] == true,
-      endsAt: countdown == null
-          ? null
-          : now.add(Duration(seconds: countdown)).millisecondsSinceEpoch,
+      endsAt: countdown?.$1,
+      showsClock: countdown?.$2 ?? false,
+      hideAt: hide > 0
+          ? now.add(Duration(seconds: hide)).millisecondsSinceEpoch
+          : null,
     );
   }
+
+  /// A chat message as an on-screen card ("Show on screen"), up for
+  /// [seconds] (0 = until taken down).
+  factory LiveGraphic.chatMessage({
+    required String messageId,
+    required String username,
+    required String message,
+    String? avatarUrl,
+    required DateTime now,
+    int seconds = 10,
+  }) => LiveGraphic(
+    id: 'chat:$messageId',
+    kind: GraphicKind.chat,
+    title: username.length > 40 ? username.substring(0, 40) : username,
+    text: message.length > 200 ? '${message.substring(0, 199)}…' : message,
+    avatarUrl: avatarUrl,
+    hideAt: seconds > 0
+        ? now.add(Duration(seconds: seconds)).millisecondsSinceEpoch
+        : null,
+  );
+
+  LiveGraphic copyWith({List<String>? except, int? hideAt, bool clearHide = false}) =>
+      LiveGraphic(
+        id: id,
+        kind: kind,
+        title: title,
+        subtitle: subtitle,
+        text: text,
+        imageUrl: imageUrl,
+        avatarUrl: avatarUrl,
+        corner: corner,
+        size: size,
+        scrolling: scrolling,
+        endsAt: endsAt,
+        showsClock: showsClock,
+        hideAt: clearHide ? null : hideAt ?? this.hideAt,
+        except: except ?? this.except,
+      );
 
   static LiveGraphic? fromJson(Object? j) {
     if (j is! Map) return null;
     final kind = GraphicKind.fromWire(j['kind']);
     final id = j['id'];
     if (kind == null || id is! String) return null;
+    final except = j['except'];
     return LiveGraphic(
       id: id,
       kind: kind,
@@ -213,10 +404,14 @@ class LiveGraphic {
       subtitle: j['subtitle'] as String?,
       text: j['text'] as String?,
       imageUrl: j['imageUrl'] as String?,
+      avatarUrl: j['avatarUrl'] as String?,
       corner: j['corner'] as String?,
       size: j['size'] as String?,
       scrolling: j['scrolling'] == true,
       endsAt: (j['endsAt'] as num?)?.toInt(),
+      showsClock: j['showsClock'] == true,
+      hideAt: (j['hideAt'] as num?)?.toInt(),
+      except: except is List ? except.whereType<String>().toList() : const [],
     );
   }
 
@@ -227,10 +422,14 @@ class LiveGraphic {
     'subtitle': ?subtitle,
     'text': ?text,
     'imageUrl': ?imageUrl,
+    'avatarUrl': ?avatarUrl,
     'corner': ?corner,
     'size': ?size,
     if (scrolling) 'scrolling': true,
     'endsAt': ?endsAt,
+    if (showsClock) 'showsClock': true,
+    'hideAt': ?hideAt,
+    if (except.isNotEmpty) 'except': except,
   };
 
   @override
@@ -240,6 +439,49 @@ class LiveGraphic {
 
   @override
   int get hashCode => jsonEncode(toJson()).hashCode;
+}
+
+/// Where one graphic is on air: every camera (minus [except]), or just
+/// [slots]. What the panel's "Cameras" button summarises and edits.
+@immutable
+class GraphicTargets {
+  const GraphicTargets.all({this.except = const {}})
+    : all = true,
+      slots = const {};
+  const GraphicTargets.only(this.slots) : all = false, except = const {};
+
+  static const none = GraphicTargets.only({});
+
+  final bool all;
+  final Set<String> except;
+  final Set<String> slots;
+
+  bool get isNone => !all && slots.isEmpty;
+
+  bool includes(String slotId) =>
+      all ? !except.contains(slotId) : slots.contains(slotId);
+
+  /// "Off", "All cameras", "All but Cam 2", "Cam 1, Cam 3". [labelOf] names a
+  /// slot; [order] lists slots in display order.
+  String summary(String Function(String slotId) labelOf, List<String> order) {
+    if (all) {
+      if (except.isEmpty) return 'All cameras';
+      return 'All but ${[for (final s in order) if (except.contains(s)) labelOf(s)].join(', ')}';
+    }
+    if (slots.isEmpty) return 'Off';
+    return [for (final s in order) if (slots.contains(s)) labelOf(s)].join(', ');
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      other is GraphicTargets &&
+      other.all == all &&
+      setEquals(other.except, except) &&
+      setEquals(other.slots, slots);
+
+  @override
+  int get hashCode => Object.hash(all, Object.hashAllUnordered(except),
+      Object.hashAllUnordered(slots));
 }
 
 /// What is on air: graphics for every camera, plus per-slot extras.
@@ -257,6 +499,11 @@ class GraphicsState {
   final Map<String, List<LiveGraphic>> bySlot;
 
   bool get isEmpty => all.isEmpty && bySlot.values.every((l) => l.isEmpty);
+
+  Iterable<LiveGraphic> get _everything => [
+    ...all,
+    for (final l in bySlot.values) ...l,
+  ];
 
   /// Read from raw room metadata. Anything malformed is dropped, never thrown.
   factory GraphicsState.fromRoomMetadata(String? raw) {
@@ -292,14 +539,25 @@ class GraphicsState {
     },
   };
 
-  /// What a viewer watching [slotId] sees: everything pushed to all cameras,
-  /// with a per-slot graphic replacing an "all" one of the same cap key (the
-  /// camera-specific lower third wins over the show-wide one).
-  List<LiveGraphic> forSlot(String? slotId) {
-    final own = slotId == null ? const <LiveGraphic>[] : bySlot[slotId] ?? const [];
+  /// What a viewer watching [slotId] sees: everything pushed to all cameras
+  /// (except the ones taken off this camera), with a per-slot graphic
+  /// replacing an "all" one of the same cap key (the camera-specific lower
+  /// third wins over the show-wide one). Anything past its auto-hide is gone
+  /// already, even before the Studio takes it out of the metadata.
+  List<LiveGraphic> forSlot(String? slotId, {int? nowMs}) {
+    final now = nowMs ?? DateTime.now().millisecondsSinceEpoch;
+    final own = [
+      for (final g in slotId == null ? const <LiveGraphic>[] : bySlot[slotId] ?? const <LiveGraphic>[])
+        if (!g.expiredAt(now)) g,
+    ];
     final taken = {for (final g in own) g.capKey};
     return [
-      ...all.where((g) => !taken.contains(g.capKey)),
+      ...all.where(
+        (g) =>
+            !taken.contains(g.capKey) &&
+            !g.expiredAt(now) &&
+            !(slotId != null && g.except.contains(slotId)),
+      ),
       ...own,
     ];
   }
@@ -310,6 +568,19 @@ class GraphicsState {
 
   bool isOn(String? slotId, String graphicId) =>
       targetList(slotId).any((g) => g.id == graphicId);
+
+  /// On any camera at all.
+  bool onAnywhere(String graphicId) => _everything.any((g) => g.id == graphicId);
+
+  /// Where [graphicId] is on air right now.
+  GraphicTargets targetsOf(String graphicId) {
+    final inAll = all.where((g) => g.id == graphicId).firstOrNull;
+    if (inAll != null) return GraphicTargets.all(except: inAll.except.toSet());
+    return GraphicTargets.only({
+      for (final e in bySlot.entries)
+        if (e.value.any((g) => g.id == graphicId)) e.key,
+    });
+  }
 
   /// Turn [g] on for a target, replacing whatever held its cap key there.
   GraphicsState withOn(String? slotId, LiveGraphic g) =>
@@ -324,6 +595,69 @@ class GraphicsState {
   );
 
   GraphicsState cleared(String? slotId) => _withTarget(slotId, const []);
+
+  /// Put [g] exactly on [t] — wherever it was before no longer counts.
+  GraphicsState withTargets(LiveGraphic g, GraphicTargets t) {
+    var s = withoutEverywhere(g.id);
+    if (t.all) return s.withOn(null, g.copyWith(except: t.except.toList()..sort()));
+    for (final slot in t.slots) {
+      s = s.withOn(slot, g.copyWith(except: const []));
+    }
+    return s;
+  }
+
+  /// Take [graphicId] off one camera only. An all-cameras graphic stays on
+  /// every other camera ("All but Cam 2").
+  GraphicsState withoutOnSlot(String graphicId, String slotId) {
+    var s = withOff(slotId, graphicId);
+    final g = s.all.where((x) => x.id == graphicId).firstOrNull;
+    if (g != null && !g.except.contains(slotId)) {
+      s = s._withTarget(null, [
+        for (final x in s.all)
+          x.id == graphicId ? x.copyWith(except: [...x.except, slotId]..sort()) : x,
+      ]);
+    }
+    return s;
+  }
+
+  GraphicsState withoutEverywhere(String graphicId) {
+    final next = <String, List<LiveGraphic>>{};
+    for (final e in bySlot.entries) {
+      final l = e.value.where((g) => g.id != graphicId).toList();
+      if (l.isNotEmpty) next[e.key] = l;
+    }
+    return GraphicsState(
+      all: all.where((g) => g.id != graphicId).toList(),
+      bySlot: next,
+    );
+  }
+
+  /// Hotkey: off everywhere if it is on anywhere, else on [last].
+  GraphicsState toggled(LiveGraphic g, GraphicTargets last) =>
+      onAnywhere(g.id) ? withoutEverywhere(g.id) : withTargets(g, last);
+
+  /// Everything still up at [nowMs].
+  GraphicsState withoutExpired(int nowMs) {
+    final next = <String, List<LiveGraphic>>{};
+    for (final e in bySlot.entries) {
+      final l = e.value.where((g) => !g.expiredAt(nowMs)).toList();
+      if (l.isNotEmpty) next[e.key] = l;
+    }
+    return GraphicsState(
+      all: all.where((g) => !g.expiredAt(nowMs)).toList(),
+      bySlot: next,
+    );
+  }
+
+  /// The next auto-hide due, epoch ms — when the Studio should tidy up.
+  int? get nextHideAt {
+    int? next;
+    for (final g in _everything) {
+      final h = g.hideAt;
+      if (h != null && (next == null || h < next)) next = h;
+    }
+    return next;
+  }
 
   GraphicsState _withTarget(String? slotId, List<LiveGraphic> list) {
     if (slotId == null) return GraphicsState(all: list, bySlot: bySlot);

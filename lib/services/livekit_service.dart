@@ -161,6 +161,33 @@ class LivekitService {
     'graphics': graphics.toJson(),
   });
 
+  /// Show control: off-air angles, the default angle, "Send everyone here".
+  /// Partial — pass only what changes. Host only.
+  static Future<void> setShow({
+    required String eventId,
+    List<String>? offAir,
+    String? defaultSlot,
+    bool clearDefault = false,
+    String? sendAll,
+  }) => _invoke<Map>({
+    'action': 'set-show',
+    'eventId': eventId,
+    'offAir': ?offAir,
+    if (defaultSlot != null || clearDefault) 'defaultSlot': defaultSlot,
+    'sendAll': ?sendAll,
+  });
+
+  /// New camera order (every slot id once). Default "Camera N" names follow
+  /// their new position. Host only.
+  static Future<void> reorderCameras({
+    required String eventId,
+    required List<String> order,
+  }) => _invoke<Map>({
+    'action': 'reorder-cameras',
+    'eventId': eventId,
+    'order': order,
+  });
+
   /// Re-align every viewer's camera with the show audio. Once per 10 s.
   /// [studio]: see [startShow] — a host phone can only resync when no Studio
   /// is in the room.

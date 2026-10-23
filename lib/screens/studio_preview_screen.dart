@@ -9,6 +9,10 @@ import 'package:livekit_client/livekit_client.dart' hide ChatMessage;
 import 'package:url_launcher/url_launcher.dart';
 
 import '../services/analytics.dart';
+import '../services/camera_status.dart';
+import '../services/chat_service.dart' show ChatMessage;
+import '../services/chat_tools_service.dart';
+import '../services/graphics_service.dart';
 import '../services/screen_capture_permission.dart';
 import '../services/studio_graphics.dart';
 import '../services/studio_prefs.dart';
@@ -16,6 +20,7 @@ import '../theme.dart';
 import '../widgets/audio_meter.dart';
 import '../widgets/nile_studio.dart';
 import '../widgets/screen_share_picker.dart';
+import '../widgets/studio_chat_tools.dart';
 import '../widgets/studio_preview_demo.dart';
 import '../widgets/studio_graphics_panel.dart';
 import '../widgets/studio_settings_sheet.dart';
@@ -25,7 +30,10 @@ import '../widgets/studio_settings_sheet.dart';
 /// Your camera, mic and screen share are real; everyone else — chat, crew,
 /// viewers, the show clock — is [StudioPreviewDemo]. Nothing here joins a
 /// room, touches an event, or sends a byte: tracks are created locally and
-/// never published, which `studio_preview_safety_test.dart` holds this file to.
+/// never published, which `studio_preview_test.dart` holds this file to.
+/// Every production tool — graphics, tile controls, nudges, chat tools — acts
+/// on the demo or on local state. The only account data it reads is your own
+/// graphics library and quick messages, which belong to you, not a show.
 ///
 /// What it does change is [StudioPrefs], on purpose — the camera, mic mode and
 /// chat column picked here are what the next real Sound Check opens with.
@@ -38,7 +46,7 @@ class StudioPreviewScreen extends StatefulWidget {
 
 class _StudioPreviewScreenState extends State<StudioPreviewScreen>
     with WidgetsBindingObserver {
-  static const _selfId = 'preview:self';
+  static const _selfId = StudioPreviewDemo.selfId;
   static const _shareId = 'preview:self#share';
 
   final _demo = StudioPreviewDemo();
@@ -68,15 +76,27 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
   String? _selectedSourceId;
   StreamSubscription? _deviceSub;
 
-  /// Graphics rehearsed on the monitor. Local only — a preview has no show to
-  /// put them on, so the panel's "push" is just this setState.
+  /// Graphics rehearsed on the tiles and monitor. Local only — a preview has
+  /// no show to put them on, so the panel's "push" is just a setState.
   GraphicsState _graphics = GraphicsState.empty;
+  Timer? _hideTimer;
+
+  /// Your saved library, for hotkeys 1–9, and where each graphic last went.
+  List<StudioGraphic> _library = const [];
+  final Map<String, GraphicTargets> _lastTargets = {};
+
+  /// Fiction for "count down to show start": ten minutes after you start.
+  DateTime? _showStartAt;
+
+  List<QuickMessage> _quickMessages = const [];
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _demo.addListener(_onDemo);
+    _demo
+      ..addListener(_onDemo)
+      ..onAlert = _onAlert;
     StudioPrefs.load().then<void>((p) => _prefs = p, onError: (_) {});
     NileAnalytics.capture(NileEvent.studioPreviewOpened);
   }
@@ -91,6 +111,7 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _hideTimer?.cancel();
     _demo
       ..removeListener(_onDemo)
       ..dispose();
@@ -135,7 +156,9 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
       });
       if (lost && _started && _videoEnabled) {
         await _reopenCamera();
-        _toast('That camera was disconnected — switched to the default camera.');
+        _toast(
+          'That camera was disconnected — switched to the default camera.',
+        );
       }
     } catch (_) {
       // Enumeration unsupported here; the default camera still works.
@@ -166,6 +189,9 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
       );
       if (!mounted) return;
       _demo.start();
+      _showStartAt = DateTime.now().add(const Duration(minutes: 10));
+      unawaited(_loadLibrary());
+      unawaited(_loadQuickMessages());
       setState(() => _started = true);
       NileAnalytics.capture(NileEvent.studioPreviewStarted);
     } catch (_) {
@@ -378,11 +404,255 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
     );
   }
 
-  void _toast(String message) {
+  void _toast(String message, {SnackBarAction? action}) {
     if (!mounted) return;
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
-      ..showSnackBar(SnackBar(content: Text(message)));
+      ..showSnackBar(
+        SnackBar(
+          content: Text(message),
+          action: action,
+          duration: Duration(seconds: action == null ? 4 : 8),
+        ),
+      );
+  }
+
+  /// The real Studio asks before anything viewers would notice mid-show.
+  Future<bool> _confirmLive(String title, String body, String action) async {
+    if (!_demo.isLive) return true;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: NileColors.bgSurface,
+        title: Text(title, style: NileTextStyles.headingMd()),
+        content: Text(
+          body,
+          style: NileTextStyles.bodyMd().copyWith(
+            color: NileColors.txtSecondary,
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text(
+              action,
+              style: NileTextStyles.labelMd().copyWith(color: NileColors.volt),
+            ),
+          ),
+        ],
+      ),
+    );
+    return ok == true && mounted;
+  }
+
+  // ── Graphics ───────────────────────────────────────────────────────────────
+
+  /// The cameras a graphic can go on, in tile order.
+  List<StudioSlotRef> get _slots => [
+    for (final s in _sources)
+      if (s.isAngle) (id: s.slotId!, label: s.label),
+  ];
+
+  Future<void> _loadLibrary() async {
+    try {
+      final items = await GraphicsService.list();
+      if (mounted) setState(() => _library = items);
+    } catch (_) {
+      // Offline or signed out: the panel's presets still work.
+    }
+  }
+
+  Future<bool> _push(GraphicsState next) async {
+    setState(() => _graphics = next);
+    _scheduleHide();
+    return true;
+  }
+
+  /// Takes auto-hidden graphics down when they are due, as the Studio does.
+  void _scheduleHide() {
+    _hideTimer?.cancel();
+    final at = _graphics.nextHideAt;
+    if (at == null) return;
+    final wait = at - DateTime.now().millisecondsSinceEpoch;
+    _hideTimer = Timer(Duration(milliseconds: max(0, wait)), () {
+      if (!mounted) return;
+      final now = DateTime.now().millisecondsSinceEpoch;
+      setState(() => _graphics = _graphics.withoutExpired(now));
+      _scheduleHide();
+    });
+  }
+
+  void _openGraphics() => showGraphicsPushPanel(
+    context,
+    current: _graphics,
+    slots: _slots,
+    push: _push,
+    onTargetsUsed: (id, targets) => _lastTargets[id] = targets,
+    onLibrary: (items) {
+      if (mounted) setState(() => _library = items);
+    },
+    showStartAt: _showStartAt,
+    isLive: _demo.isLive,
+  );
+
+  Future<void> _openLibrary() async {
+    await showGraphicsLibrary(context);
+    await _loadLibrary();
+  }
+
+  void _hotkey(int digit) {
+    final next = graphicsAfterHotkey(
+      digit: digit,
+      library: _library,
+      current: _graphics,
+      lastTargets: _lastTargets,
+      now: DateTime.now(),
+      showStartAt: _showStartAt,
+    );
+    if (next != null) {
+      _push(next);
+    } else {
+      _toast(
+        _library.isEmpty
+            ? 'Keys 1–9 play your saved graphics — add some in the Graphics '
+                  'library.'
+            : 'Nothing on key $digit yet.',
+      );
+    }
+  }
+
+  LiveGraphic _chatCard(ChatMessage m, [int seconds = 10]) =>
+      LiveGraphic.chatMessage(
+        messageId: m.id ?? '${m.senderId}-${m.sentAt.millisecondsSinceEpoch}',
+        username: m.username,
+        message: m.content,
+        avatarUrl: m.avatarUrl,
+        now: DateTime.now(),
+        seconds: seconds,
+      );
+
+  void _showOnScreen(ChatMessage m) =>
+      _push(_graphics.withTargets(_chatCard(m), const GraphicTargets.all()));
+
+  Future<void> _showOnScreenOptions(ChatMessage m) async {
+    final id = _chatCard(m).id;
+    final current = _graphics.targetsOf(id);
+    final choice = await showGraphicTargetsDialog(
+      context,
+      title: '@${m.username}',
+      slots: _slots,
+      initial: current,
+      autoHideSeconds: 10,
+      canRemove: !current.isNone,
+    );
+    if (choice == null || !mounted) return;
+    await _push(
+      choice.targets.isNone
+          ? _graphics.withoutEverywhere(id)
+          : _graphics.withTargets(
+              _chatCard(m, choice.autoHideSeconds),
+              choice.targets,
+            ),
+    );
+  }
+
+  // ── Tiles ──────────────────────────────────────────────────────────────────
+
+  NileStudioSourceActions get _sourceActions => NileStudioSourceActions(
+    onToggleOffAir: (s) {
+      _demo.toggleOffAir(s.slotId!);
+      _toast(
+        _demo.isOffAir(s.slotId!)
+            ? '${s.label} is off air. Anyone watching it moves to the '
+                  'default angle.'
+            : '${s.label} is back on air.',
+      );
+    },
+    onSetDefault: (s) => _demo.toggleDefault(s.slotId!),
+    onSendEveryone: _sendEveryone,
+    onMakeMasterAudio: _makeMasterAudio,
+    onRemoveGraphic: (s, g, {required everywhere}) => _push(
+      everywhere || !s.isAngle
+          ? _graphics.withoutEverywhere(g.id)
+          : _graphics.withoutOnSlot(g.id, s.slotId!),
+    ),
+    onNudge: _nudge,
+    onCommand: (s, c) {
+      final notice = _demo.command(s.identity, c);
+      _toast(
+        notice == null ? 'Sent to ${s.label}.' : 'Sent to ${s.label}: $notice',
+      );
+    },
+    onReorder: _demo.reorder,
+  );
+
+  Future<void> _sendEveryone(NileStudioSource s) async {
+    if (!await _confirmLive(
+      'Send everyone to ${s.label}?',
+      'Every viewer switches to this angle now. They can still pick another.',
+      'Send everyone',
+    )) {
+      return;
+    }
+    _demo.sendEveryone(s.slotId!);
+    _toast('Everyone moved to ${s.label}');
+  }
+
+  Future<void> _makeMasterAudio(NileStudioSource s) async {
+    if (!await _confirmLive(
+      'Switch show audio?',
+      'Viewers will hear ${s.label} from now on. There may be a brief jump in '
+          'the sound while it switches.',
+      'Switch',
+    )) {
+      return;
+    }
+    _demo.master = s.identity;
+  }
+
+  void _nudge(NileStudioSource s, String text) {
+    _demo.nudge(s.identity, text);
+    _toast('Nudge sent to ${s.label}: “$text”');
+  }
+
+  void _onAlert(String identity, CameraAlertKind kind) {
+    final camera = _sources.where((s) => s.identity == identity).firstOrNull;
+    if (camera == null) return;
+    switch (kind) {
+      case CameraAlertKind.battery:
+        _toast(
+          '${camera.label}: battery at ${camera.health?.battery}%.',
+          action: SnackBarAction(
+            label: 'Send “${NudgePresets.chargeSoon}”',
+            onPressed: () => _nudge(camera, NudgePresets.chargeSoon),
+          ),
+        );
+      case CameraAlertKind.heat:
+        _toast('${camera.label} is running hot — it may lower quality.');
+      case CameraAlertKind.signal:
+        _toast('${camera.label} has had a poor connection for a while.');
+    }
+  }
+
+  // ── Chat ───────────────────────────────────────────────────────────────────
+
+  Future<void> _loadQuickMessages() async {
+    try {
+      final items = await ChatToolsService.quickMessages();
+      if (mounted) setState(() => _quickMessages = items);
+    } catch (_) {
+      // Signed out or offline: the ⚡ menu just starts empty.
+    }
+  }
+
+  Future<void> _editQuickMessages() async {
+    final items = await showQuickMessagesEditor(context);
+    if (items == null) return _loadQuickMessages();
+    if (mounted) setState(() => _quickMessages = items);
   }
 
   void _previewOnly([Object? _]) =>
@@ -449,7 +719,11 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
             Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Icon(Icons.lock_outline, size: 16, color: NileColors.txtTertiary),
+                Icon(
+                  Icons.lock_outline,
+                  size: 16,
+                  color: NileColors.txtTertiary,
+                ),
                 const SizedBox(width: NileSpacing.s8),
                 Flexible(
                   child: Text(
@@ -467,7 +741,9 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
               Text(
                 'Studio Preview needs a wider window. Make this window wider '
                 'to continue.',
-                style: NileTextStyles.bodyMd().copyWith(color: NileColors.amber),
+                style: NileTextStyles.bodyMd().copyWith(
+                  color: NileColors.amber,
+                ),
                 textAlign: TextAlign.center,
               )
             else
@@ -490,7 +766,9 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
               const SizedBox(height: NileSpacing.s16),
               Text(
                 _error!,
-                style: NileTextStyles.bodySm().copyWith(color: NileColors.error),
+                style: NileTextStyles.bodySm().copyWith(
+                  color: NileColors.error,
+                ),
                 textAlign: TextAlign.center,
               ),
               if (isMac)
@@ -510,32 +788,67 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
     );
   }
 
-  List<NileStudioSource> get _sources => [
-    NileStudioSource(
-      identity: _selfId,
-      label: 'Your camera',
-      sublabel: 'Broadcast audio',
-      track: _videoEnabled ? _camera : null,
-      isLocal: true,
-      isMasterAudio: true,
-    ),
-    if (_share != null)
-      NileStudioSource(
-        identity: _shareId,
-        label: 'Your screen',
-        sublabel: 'Screen share',
-        track: _share,
-        isLocal: true,
-        isScreenShare: true,
-      ),
-    ...StudioPreviewDemo.crew,
-  ];
+  /// Your camera and the demo crew in the order you dragged them, each with
+  /// the show state the demo holds; your screen share rides under your camera.
+  List<NileStudioSource> get _sources {
+    final d = _demo;
+    final crew = {for (final c in StudioPreviewDemo.crew) c.slotId!: c};
+    return [
+      for (final slot in d.order)
+        if (crew[slot] case final c?)
+          NileStudioSource(
+            identity: c.identity,
+            label: d.labelOf(c),
+            sublabel: c.sublabel,
+            isReady: c.isReady,
+            slotId: slot,
+            isMasterAudio: d.master == c.identity,
+            isOffAir: d.isOffAir(slot),
+            isDefaultAngle: d.defaultSlot == slot,
+            viewers: d.viewersOn(slot),
+            level: d.levelOf(c.identity),
+            health: d.healthOf(c.identity),
+            nudgeAcked: d.ackedNudge(c.identity),
+          )
+        else ...[
+          NileStudioSource(
+            identity: _selfId,
+            label: 'Your camera',
+            sublabel: d.master == _selfId ? 'Broadcast audio' : null,
+            track: _videoEnabled ? _camera : null,
+            isLocal: true,
+            isMasterAudio: d.master == _selfId,
+            slotId: slot,
+            isOffAir: d.isOffAir(slot),
+            isDefaultAngle: d.defaultSlot == slot,
+            viewers: d.viewersOn(slot),
+          ),
+          if (_share != null)
+            NileStudioSource(
+              identity: _shareId,
+              label: 'Your screen',
+              sublabel: 'Screen share',
+              track: _share,
+              isLocal: true,
+              isScreenShare: true,
+            ),
+        ],
+    ];
+  }
+
+  String get _audioLabel {
+    final master = _demo.master;
+    if (master == _selfId) return 'Your mic';
+    return _demo.labelOf(
+      StudioPreviewDemo.crew.firstWhere((c) => c.identity == master),
+    );
+  }
 
   Widget _buildChat() => NileStudioChat(
     messages: _demo.messages,
     hiddenSenders: _demo.hiddenSenders,
     blockedSenders: const {},
-    selfId: null,
+    selfId: StudioPreviewDemo.hostId,
     onHide: (m) => _demo.hide(m.senderId),
     onShowAll: _demo.showAll,
     onBlock: _previewOnly,
@@ -543,126 +856,135 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
     onRemove: _previewOnly,
     onBan: _previewOnly,
     onSettings: _previewOnly,
+    onSend: _demo.send,
+    quickMessages: _quickMessages,
+    onEditQuickMessages: _editQuickMessages,
+    pinned: _demo.pinned,
+    onPin: _demo.pin,
+    onUnpin: _demo.unpin,
+    onShowOnScreen: _showOnScreen,
+    onShowOnScreenOptions: _showOnScreenOptions,
+    onRelease: _demo.release,
   );
 
   Widget _buildStudio(bool hasChatColumn) {
     final live = _demo.isLive;
-    return Stack(
-      children: [
-        NileStudio(
-          sources: _sources,
-          selectedIdentity: _selectedSourceId,
-          onSelectSource: (id) => setState(() => _selectedSourceId = id),
-          selfIdentity: _selfId,
-          graphicsFor: (_) => _graphics.forSlot(null),
-          stats: NileStudioStats(
-            isLive: live,
-            elapsed: _demo.elapsed,
-            remaining: _demo.remaining,
-            viewerCount: _demo.viewerCount,
-            readyCount: _demo.readyCount,
-            crewCount: _demo.crewCount,
-            cameraCount: (_videoEnabled ? 1 : 0) + (_share != null ? 1 : 0),
-            audioSourceLabel: 'Your mic',
-          ),
-          leading: IconButton(
-            onPressed: _exit,
-            icon: const Icon(Icons.arrow_back),
-            color: NileColors.txtPrimary,
-            tooltip: 'Exit preview',
-          ),
-          trailing: IconButton(
-            onPressed: _openSettings,
-            icon: const Icon(Icons.settings),
-            color: NileColors.txtPrimary,
-            tooltip: 'Audio settings',
-          ),
-          banner: StudioPreviewBanner(
-            live: live,
-            onChanged: (v) => _demo.isLive = v,
-          ),
-          meter: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              AudioMeter(level: () => _level, height: 120),
-              const SizedBox(height: NileSpacing.s8),
-              Text(
-                'YOUR MIC',
-                style: NileTextStyles.labelSm().copyWith(
-                  color: NileColors.volt,
-                  letterSpacing: 1.2,
-                ),
-              ),
-            ],
-          ),
-          controls: NileStudioControlBar(
-            isLive: live,
-            isHost: true,
-            isMasterAudio: true,
-            videoEnabled: _videoEnabled,
-            showChatToggle: !hasChatColumn,
-            chatVisible: _chatVisible,
-            onToggleChat: _toggleChat,
-            cameraControl: _showCameraPicker
-                ? NileCameraPickerButton(
-                    devices: _videoInputs,
-                    selectedId: _selectedCameraId,
-                    onSelected: _selectCamera,
-                  )
-                : null,
-            showScreenShare: _canShareScreen,
-            isSharingScreen: _share != null,
-            onToggleScreenShare: _togglingShare ? null : _toggleShare,
-            onToggleVideo: _toggleVideo,
-            onViewAsViewer: _previewOnly,
-            onStartShow: _startShowTapped,
-            onEndStream: _previewOnly,
-            onLeave: _exit,
-            leaveLabel: 'Exit',
-            leaveIcon: Icons.close,
-            toolbar: [
-              NileStudioIconButton(
-                onPressed: () => showGraphicsPushPanel(
-                  context,
-                  current: _graphics,
-                  targetSlotId: null,
-                  targetLabel: 'this preview',
-                  push: (next) async {
-                    setState(() => _graphics = next);
-                    return true;
-                  },
-                ),
-                tooltip: 'Graphics',
-                icon: Icons.layers_outlined,
-                active: !_graphics.isEmpty,
-              ),
-              NileStudioIconButton(
-                onPressed: () => showGraphicsLibrary(context),
-                tooltip: 'Graphics library',
-                icon: Icons.collections_bookmark_outlined,
-              ),
-            ],
-          ),
-          showChatColumn: hasChatColumn,
-          chat: hasChatColumn ? _buildChat() : null,
-        ),
-        // Too narrow for a third column: chat floats over the monitor, the
-        // same fallback the real Studio uses.
-        if (!hasChatColumn && _chatVisible)
-          Positioned(
-            right: NileSpacing.s16,
-            top: 112,
-            bottom: 96,
-            width: NileStudio.chatColumnWidth,
-            child: Material(
-              color: NileColors.bgSurface,
-              elevation: 8,
-              borderRadius: BorderRadius.circular(NileRadius.md),
-              clipBehavior: Clip.antiAlias,
-              child: _buildChat(),
+    final selfIsMaster = _demo.master == _selfId;
+    return StudioGraphicsHotkeys(
+      // Not while a dialog (the graphics panel among them) is over the Studio.
+      enabled: ModalRoute.of(context)?.isCurrent ?? true,
+      onDigit: _hotkey,
+      child: Stack(
+        children: [
+          NileStudio(
+            sources: _sources,
+            selectedIdentity: _selectedSourceId,
+            onSelectSource: (id) => setState(() => _selectedSourceId = id),
+            selfIdentity: _selfId,
+            graphicsFor: (s) =>
+                _graphics.forSlot(s.isScreenShare ? null : s.slotId),
+            sourceActions: _sourceActions,
+            stats: NileStudioStats(
+              isLive: live,
+              elapsed: _demo.elapsed,
+              remaining: _demo.remaining,
+              viewerCount: _demo.viewerCount,
+              readyCount: _demo.readyCount,
+              crewCount: _demo.crewCount,
+              cameraCount: (_videoEnabled ? 1 : 0) + (_share != null ? 1 : 0),
+              audioSourceLabel: _audioLabel,
             ),
+            leading: IconButton(
+              onPressed: _exit,
+              icon: const Icon(Icons.arrow_back),
+              color: NileColors.txtPrimary,
+              tooltip: 'Exit preview',
+            ),
+            trailing: IconButton(
+              onPressed: _openSettings,
+              icon: const Icon(Icons.settings),
+              color: NileColors.txtPrimary,
+              tooltip: 'Audio settings',
+            ),
+            banner: StudioPreviewBanner(
+              live: live,
+              onChanged: (v) => _demo.isLive = v,
+            ),
+            meter: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                AudioMeter(level: () => _level, height: 120),
+                const SizedBox(height: NileSpacing.s8),
+                Text(
+                  'YOUR MIC',
+                  style: NileTextStyles.labelSm().copyWith(
+                    color: NileColors.volt,
+                    letterSpacing: 1.2,
+                  ),
+                ),
+              ],
+            ),
+            controls: NileStudioControlBar(
+              isLive: live,
+              isHost: true,
+              isMasterAudio: selfIsMaster,
+              onClaimMasterAudio: () => _demo.master = _selfId,
+              videoEnabled: _videoEnabled,
+              showChatToggle: !hasChatColumn,
+              chatVisible: _chatVisible,
+              onToggleChat: _toggleChat,
+              cameraControl: _showCameraPicker
+                  ? NileCameraPickerButton(
+                      devices: _videoInputs,
+                      selectedId: _selectedCameraId,
+                      onSelected: _selectCamera,
+                    )
+                  : null,
+              showScreenShare: _canShareScreen,
+              isSharingScreen: _share != null,
+              onToggleScreenShare: _togglingShare ? null : _toggleShare,
+              onToggleVideo: _toggleVideo,
+              onViewAsViewer: _previewOnly,
+              onStartShow: _startShowTapped,
+              onEndStream: _previewOnly,
+              onLeave: _exit,
+              leaveLabel: 'Exit',
+              leaveIcon: Icons.close,
+              toolbar: [
+                NileStudioIconButton(
+                  onPressed: _openGraphics,
+                  tooltip: 'Graphics',
+                  icon: Icons.layers_outlined,
+                  active: !_graphics.isEmpty,
+                ),
+                NileStudioIconButton(
+                  onPressed: _openLibrary,
+                  tooltip: 'Graphics library',
+                  icon: Icons.collections_bookmark_outlined,
+                ),
+              ],
+            ),
+            showChatColumn: hasChatColumn,
+            chat: hasChatColumn ? _buildChat() : null,
           ),
-      ],
+          // Too narrow for a third column: chat floats over the monitor, the
+          // same fallback the real Studio uses.
+          if (!hasChatColumn && _chatVisible)
+            Positioned(
+              right: NileSpacing.s16,
+              top: 112,
+              bottom: 96,
+              width: NileStudio.chatColumnWidth,
+              child: Material(
+                color: NileColors.bgSurface,
+                elevation: 8,
+                borderRadius: BorderRadius.circular(NileRadius.md),
+                clipBehavior: Clip.antiAlias,
+                child: _buildChat(),
+              ),
+            ),
+        ],
+      ),
     );
   }
 }

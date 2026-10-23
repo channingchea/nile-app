@@ -3,7 +3,7 @@
 // `graphics`. Mirrors GraphicsState / LiveGraphic in
 // lib/services/studio_graphics.dart. Pure, so it can be unit tested.
 
-const KINDS = new Set(["lower_third", "logo", "banner", "slate"]);
+const KINDS = new Set(["lower_third", "logo", "banner", "slate", "chat"]);
 const CORNERS = new Set(["tl", "tr", "bl", "br"]);
 const SIZES = new Set(["s", "m", "l"]);
 
@@ -17,10 +17,21 @@ export interface LiveGraphic {
   subtitle?: string;
   text?: string;
   imageUrl?: string;
+  avatarUrl?: string;
   corner?: string;
   size?: string;
   scrolling?: true;
   endsAt?: number;
+  showsClock?: true;
+  hideAt?: number;
+  except?: string[];
+}
+
+export interface GraphicOpts {
+  /** studio-graphics bucket public prefix — the only place images may come from. */
+  imagePrefix: string;
+  /** This project's public storage prefix — chat avatars must live here. */
+  avatarPrefix?: string;
 }
 
 export interface GraphicsState {
@@ -39,7 +50,8 @@ export const capKey = (g: LiveGraphic) => (g.kind === "logo" ? `logo:${g.corner}
  * the studio-graphics bucket ([imagePrefix]) — room metadata is not a way to
  * make every viewer's app fetch an arbitrary URL.
  */
-export function cleanGraphic(raw: unknown, imagePrefix: string): LiveGraphic | null {
+export function cleanGraphic(raw: unknown, opts: GraphicOpts | string): LiveGraphic | null {
+  const { imagePrefix, avatarPrefix } = typeof opts === "string" ? { imagePrefix: opts, avatarPrefix: undefined } : opts;
   if (!raw || typeof raw !== "object") return null;
   const r = raw as Record<string, unknown>;
   const id = str(r.id, 80);
@@ -49,7 +61,7 @@ export function cleanGraphic(raw: unknown, imagePrefix: string): LiveGraphic | n
   const g: LiveGraphic = { id, kind };
   const title = str(r.title, 60);
   const subtitle = str(r.subtitle, 120);
-  const text = str(r.text, 140);
+  const text = str(r.text, kind === "chat" ? 200 : 140);
   const imageUrl = str(r.imageUrl, 500);
   if (title) g.title = title;
   if (subtitle) g.subtitle = subtitle;
@@ -58,8 +70,19 @@ export function cleanGraphic(raw: unknown, imagePrefix: string): LiveGraphic | n
     if (!imageUrl.startsWith(imagePrefix)) return null;
     g.imageUrl = imageUrl;
   }
+  // Auto-hide: when it comes down by itself. Viewers stop drawing it then even
+  // if the Studio is slow to take it out of the metadata.
+  if (typeof r.hideAt === "number" && Number.isFinite(r.hideAt)) g.hideAt = Math.round(r.hideAt);
 
   switch (kind) {
+    case "chat": {
+      // A viewer's avatar may be hosted anywhere (a Google profile photo); only
+      // our own storage is drawn — otherwise the card just goes without it.
+      const avatar = str(r.avatarUrl, 500);
+      if (avatar && avatarPrefix && avatar.startsWith(avatarPrefix)) g.avatarUrl = avatar;
+      if (g.title && g.title.length > 40) g.title = g.title.slice(0, 40);
+      return g.title && g.text ? g : null;
+    }
     case "lower_third":
       return g.title ? g : null;
     case "logo":
@@ -73,18 +96,21 @@ export function cleanGraphic(raw: unknown, imagePrefix: string): LiveGraphic | n
       return g;
     case "slate":
       if (!g.title) return null;
-      if (typeof r.endsAt === "number" && Number.isFinite(r.endsAt)) g.endsAt = Math.round(r.endsAt);
+      if (typeof r.endsAt === "number" && Number.isFinite(r.endsAt)) {
+        g.endsAt = Math.round(r.endsAt);
+        if (r.showsClock === true) g.showsClock = true;
+      }
       return g;
   }
   return null;
 }
 
 /** Drop bad entries and enforce the caps — the last graphic of a cap key wins. */
-function cleanList(raw: unknown, imagePrefix: string): LiveGraphic[] {
+function cleanList(raw: unknown, opts: GraphicOpts): LiveGraphic[] {
   if (!Array.isArray(raw)) return [];
   const byCap = new Map<string, LiveGraphic>();
   for (const item of raw.slice(0, 20)) {
-    const g = cleanGraphic(item, imagePrefix);
+    const g = cleanGraphic(item, opts);
     if (g) {
       byCap.delete(capKey(g)); // keep insertion order = latest last
       byCap.set(capKey(g), g);
@@ -99,15 +125,30 @@ function cleanList(raw: unknown, imagePrefix: string): LiveGraphic[] {
  */
 export function validateGraphics(
   raw: unknown,
-  opts: { imagePrefix: string; slotIds: Set<string> },
+  opts: GraphicOpts & { slotIds: Set<string> },
 ): { state: GraphicsState } | { error: string } {
   if (!raw || typeof raw !== "object") return { error: "graphics must be an object" };
   const r = raw as Record<string, unknown>;
-  const state: GraphicsState = { all: cleanList(r.all, opts.imagePrefix), bySlot: {} };
+  // `except` only means something on an all-cameras graphic, and only for
+  // this event's real slots.
+  const rawExcept = new Map<string, unknown>();
+  if (Array.isArray(r.all)) {
+    for (const x of r.all) {
+      if (x && typeof x === "object") rawExcept.set((x as Record<string, unknown>).id as string, (x as Record<string, unknown>).except);
+    }
+  }
+  const all = cleanList(r.all, opts).map((g) => {
+    const raw = rawExcept.get(g.id);
+    const except = Array.isArray(raw)
+      ? [...new Set(raw.filter((s): s is string => typeof s === "string" && opts.slotIds.has(s)))].sort()
+      : [];
+    return except.length ? { ...g, except } : g;
+  });
+  const state: GraphicsState = { all, bySlot: {} };
   if (r.bySlot && typeof r.bySlot === "object") {
     for (const [slotId, list] of Object.entries(r.bySlot as Record<string, unknown>)) {
       if (!opts.slotIds.has(slotId)) continue;
-      const clean = cleanList(list, opts.imagePrefix);
+      const clean = cleanList(list, opts);
       if (clean.length) state.bySlot[slotId] = clean;
     }
   }

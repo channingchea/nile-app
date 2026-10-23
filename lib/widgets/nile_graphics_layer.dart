@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:intl/intl.dart' show DateFormat;
 
 import '../services/studio_graphics.dart';
 import '../theme.dart';
@@ -14,16 +15,66 @@ import '../theme.dart';
 ///
 /// Used by the viewer, the Studio monitor, the operator phone's preview and the
 /// Studio Preview demo. Viewers can't hide it.
-class NileGraphicsLayer extends StatelessWidget {
+///
+/// Auto-hide: a graphic past its `hideAt` stops drawing on the dot (and fades
+/// out), even before the Studio takes it out of the room metadata.
+class NileGraphicsLayer extends StatefulWidget {
   const NileGraphicsLayer({super.key, required this.graphics});
 
   final List<LiveGraphic> graphics;
 
-  static const _fade = Duration(milliseconds: 280);
+  static const fade = Duration(milliseconds: 250);
+
+  @override
+  State<NileGraphicsLayer> createState() => _NileGraphicsLayerState();
+}
+
+class _NileGraphicsLayerState extends State<NileGraphicsLayer> {
+  Timer? _hideTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    _scheduleHide();
+  }
+
+  @override
+  void didUpdateWidget(NileGraphicsLayer old) {
+    super.didUpdateWidget(old);
+    _scheduleHide();
+  }
+
+  @override
+  void dispose() {
+    _hideTimer?.cancel();
+    super.dispose();
+  }
+
+  /// Rebuild when the next graphic's auto-hide comes due.
+  void _scheduleHide() {
+    _hideTimer?.cancel();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final next = widget.graphics
+        .map((g) => g.hideAt)
+        .whereType<int>()
+        .where((h) => h > now)
+        .fold<int?>(null, (a, b) => a == null || b < a ? b : a);
+    if (next == null) return;
+    _hideTimer = Timer(Duration(milliseconds: next - now + 20), () {
+      if (mounted) setState(_scheduleHide);
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
-    if (graphics.isEmpty) return const SizedBox.shrink();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final graphics = [
+      for (final g in widget.graphics)
+        if (!g.expiredAt(now)) g,
+    ];
+    const fade = NileGraphicsLayer.fade;
+    // Never short-circuit to nothing: the last graphic has to be able to fade
+    // out, which needs its AnimatedSwitcher still in the tree.
     return IgnorePointer(
       child: LayoutBuilder(
         builder: (context, box) {
@@ -35,7 +86,7 @@ class NileGraphicsLayer extends StatelessWidget {
           Widget slot(String key, Widget Function(LiveGraphic g) build) {
             final g = at(key);
             return AnimatedSwitcher(
-              duration: _fade,
+              duration: fade,
               child: g == null
                   ? const SizedBox.shrink(key: ValueKey('none'))
                   : KeyedSubtree(key: ValueKey(g.id), child: build(g)),
@@ -62,6 +113,13 @@ class NileGraphicsLayer extends StatelessWidget {
                   GraphicKind.lowerThird.wire,
                   (g) => _LowerThird(g: g, u: u),
                 ),
+              ),
+              // A chat card sits above where a lower third goes, so the two
+              // can be up together.
+              Positioned(
+                left: u * 4,
+                bottom: u * 4 + bannerHeight + u * 11,
+                child: slot(GraphicKind.chat.wire, (g) => _ChatCard(g: g, u: u)),
               ),
               Positioned(
                 left: 0,
@@ -126,6 +184,75 @@ class _LowerThird extends StatelessWidget {
       ),
     ),
   );
+}
+
+class _ChatCard extends StatelessWidget {
+  const _ChatCard({required this.g, required this.u});
+  final LiveGraphic g;
+  final double u;
+
+  @override
+  Widget build(BuildContext context) {
+    final name = g.title ?? '';
+    final avatar = g.avatarUrl;
+    return ConstrainedBox(
+      constraints: BoxConstraints(maxWidth: u * 55),
+      child: Container(
+        padding: EdgeInsets.symmetric(horizontal: u * 1.6, vertical: u * 1.2),
+        decoration: BoxDecoration(
+          color: NileColors.bgSurface.withValues(alpha: 0.92),
+          borderRadius: BorderRadius.circular(u * 1.4),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            CircleAvatar(
+              radius: u * 2,
+              backgroundColor: nileChatNameColor(name),
+              foregroundImage: avatar == null ? null : NetworkImage(avatar),
+              child: Text(
+                name.isEmpty ? '?' : name[0].toUpperCase(),
+                style: NileTextStyles.labelSm().copyWith(
+                  fontSize: u * 1.8,
+                  color: Colors.white,
+                ),
+              ),
+            ),
+            SizedBox(width: u * 1.2),
+            Flexible(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    '@$name',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: NileTextStyles.labelLg().copyWith(
+                      fontSize: u * 1.9,
+                      color: nileChatNameColor(name),
+                      height: 1.2,
+                    ),
+                  ),
+                  Text(
+                    g.text ?? '',
+                    maxLines: 3,
+                    overflow: TextOverflow.ellipsis,
+                    style: NileTextStyles.bodyMd().copyWith(
+                      fontSize: u * 2.2,
+                      color: NileColors.txtPrimary,
+                      height: 1.25,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 class _Logo extends StatelessWidget {
@@ -323,6 +450,16 @@ class _SlateState extends State<_Slate> {
                         fontFeatures: const [FontFeature.tabularFigures()],
                       ),
                     ),
+                    // Counting to a time of day: say the time too, in this
+                    // viewer's own time zone.
+                    if (g.showsClock && g.endsAt != null)
+                      Text(
+                        'at ${DateFormat.jm().format(DateTime.fromMillisecondsSinceEpoch(g.endsAt!))}',
+                        style: NileTextStyles.bodyLg().copyWith(
+                          fontSize: u * 2.6,
+                          color: NileColors.txtSecondary,
+                        ),
+                      ),
                   ],
                   if ((g.subtitle ?? '').isNotEmpty) ...[
                     SizedBox(height: u * 2),

@@ -18,6 +18,7 @@ import '../services/realsync.dart';
 import '../services/realtime.dart';
 import '../services/report_service.dart';
 import '../services/share_urls.dart';
+import '../services/show_control.dart';
 import '../services/studio_graphics.dart';
 import '../services/studio_roles.dart';
 import '../services/supabase_client.dart';
@@ -27,6 +28,7 @@ import '../theme.dart';
 import 'widgets/moderation_menu.dart';
 import '../widgets/nile_desktop.dart';
 import '../widgets/nile_graphics_layer.dart';
+import '../widgets/nile_link_text.dart';
 import '../widgets/rolling_number.dart';
 import '../widgets/share_to_sheet.dart';
 
@@ -51,11 +53,16 @@ class CameraFeed {
   /// are always matched on identity AND kind — never identity alone.
   final bool isScreenShare;
 
+  /// The event_cameras slot this participant is on (token metadata). Null for
+  /// a publisher with no slot — never off air, never reordered.
+  final String? slotId;
+
   CameraFeed({
     required this.identity,
     required this.cameraName,
     this.track,
     this.isScreenShare = false,
+    this.slotId,
   });
 
   String get displayName =>
@@ -89,6 +96,27 @@ class _ViewerScreenState extends State<ViewerScreen>
   // Studio graphics on air (room metadata `graphics`), drawn over whichever
   // angle this viewer is watching. Viewers can't hide them.
   GraphicsState _graphics = GraphicsState.empty;
+
+  // Show control (room metadata `show`): off-air angles, where new viewers
+  // start, the camera order and "Send everyone here".
+  ShowControl _show = ShowControl.empty;
+
+  /// The "Send everyone here" already acted on — or already in place when we
+  /// joined, so a late joiner never replays it.
+  int? _seenSendAllNonce;
+
+  /// Cameras' video lands over the first seconds after a join, in no fixed
+  /// order. Until this time the viewer is settled onto the start angle as each
+  /// one arrives; cleared the moment they (or the host) pick one.
+  DateTime? _settleUntil;
+  static const _settleWindow = Duration(seconds: 5);
+
+  /// The angle being watched when the room dropped, restored on rejoin.
+  ({String identity, bool screen})? _resume;
+
+  // Viewers per angle: the slot last reported, and the 60 s heartbeat.
+  ({String? slot})? _reportedAngle;
+  Timer? _angleHeartbeat;
 
   // Resync: the Studio stamps `resyncAt` into room metadata. We act on a
   // stamp that changes after we joined — compared by value, not by clock, so
@@ -160,6 +188,12 @@ class _ViewerScreenState extends State<ViewerScreen>
   /// rather than swallowed — see [_onChatStatus].
   bool _chatUnavailable = false;
   final List<ChatMessage> _chatMessages = [];
+
+  /// The pinned message over the chat, and whether it is expanded. _pinLive
+  /// flips on the first live pin update, which makes the join fetch stale.
+  PinnedMessage? _pinned;
+  bool _pinnedExpanded = false;
+  bool _pinLive = false;
 
   /// Accounts this viewer has blocked. Chat arrives over a broadcast, not a
   /// table, so RLS never sees it — without this a viewer who blocked someone
@@ -244,6 +278,8 @@ class _ViewerScreenState extends State<ViewerScreen>
     _chatChannel = null;
     _systemChannel?.unsubscribe();
     _systemChannel = null;
+    _angleHeartbeat?.cancel();
+    _angleHeartbeat = null;
   }
 
   /// Re-pull authoritative event state after a realtime drop/rejoin, so a status
@@ -389,6 +425,15 @@ class _ViewerScreenState extends State<ViewerScreen>
     // Auto-follow only when the user is already pinned to the bottom (or it's
     // their own message). Otherwise keep their scroll position and count the
     // new message for the "new messages" pill.
+    // Same id again = the host released a held-back line, re-delivering it.
+    // Replace it where it stands; it isn't new.
+    final at = msg.id == null
+        ? -1
+        : _chatMessages.indexWhere((m) => m.id == msg.id);
+    if (at != -1) {
+      setState(() => _chatMessages[at] = msg);
+      return;
+    }
     final follow = _chatAtBottom || msg.isMine;
     setState(() {
       _chatMessages.add(msg);
@@ -399,6 +444,15 @@ class _ViewerScreenState extends State<ViewerScreen>
       if (_chatShowing && !follow && !msg.isSystem) _pendingChatCount++;
     });
     if (_chatShowing && follow) _scrollChatToBottom();
+  }
+
+  void _onPin(PinnedMessage? pinned) {
+    if (!mounted) return;
+    setState(() {
+      _pinLive = true;
+      if (pinned?.messageId != _pinned?.messageId) _pinnedExpanded = false;
+      _pinned = pinned;
+    });
   }
 
   /// The host removed a single message. Silent by design: no "message removed"
@@ -472,7 +526,8 @@ class _ViewerScreenState extends State<ViewerScreen>
   /// Send through the `live-chat` function rather than straight onto the
   /// channel (#16 phase 1) — that is where the rate limit, the ban check and
   /// the server-side record are. Our own copy comes back over the broadcast
-  /// like everyone else's, so nothing is added locally.
+  /// like everyone else's — unless the host's blocked words held it back, in
+  /// which case send() hands it to us and only we see it.
   Future<void> _sendChat() async {
     final raw = _chatController.text.trim();
     final eventId = _streamEventId;
@@ -480,7 +535,8 @@ class _ViewerScreenState extends State<ViewerScreen>
     final text = raw.length > 250 ? raw.substring(0, 250) : raw;
     _chatController.clear();
     try {
-      await ChatService.send(eventId: eventId, content: text);
+      final own = await ChatService.send(eventId: eventId, content: text);
+      if (own != null) _onChatMessage(own);
     } on ChatSendException catch (e) {
       if (!mounted) return;
       // Give them their words back. Losing what you typed to a rate limit is a
@@ -574,9 +630,11 @@ class _ViewerScreenState extends State<ViewerScreen>
     }
   }
 
-  void _showSnack(String msg) {
+  void _showSnack(String msg, {Duration duration = const Duration(seconds: 4)}) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(msg), duration: duration));
   }
 
   /// Chat's private channel refused us, or never answered.
@@ -717,6 +775,9 @@ class _ViewerScreenState extends State<ViewerScreen>
       _audioJoinedAt = _findAudioJoinedAt(room);
       // Graphics already on air, and the resync stamp we joined with.
       _applyRoomMetadata(room.metadata, joining: true);
+      // A "Send everyone here" already in place is history to a new viewer.
+      _seenSendAllNonce = _show.sendAll?.nonce;
+      _settleUntil = DateTime.now().add(_settleWindow);
 
       for (final participant in room.remoteParticipants.values) {
         for (final publication in participant.videoTrackPublications) {
@@ -778,7 +839,17 @@ class _ViewerScreenState extends State<ViewerScreen>
       );
       // Server-authored announcements (tips) arrive on their own read-only
       // topic — see ChatService.subscribeSystem.
-      _systemChannel = ChatService.subscribeSystem(eventId, _onChatMessage);
+      _systemChannel = ChatService.subscribeSystem(
+        eventId,
+        _onChatMessage,
+        onPin: _onPin,
+      );
+      // Whatever was pinned before we arrived; _onPin keeps it current.
+      ChatService.fetchPinned(eventId).then((p) {
+        if (mounted && !_pinLive && _streamEventId == eventId) {
+          setState(() => _pinned = p);
+        }
+      });
       // Chat is a broadcast, so a block can only be applied client-side here.
       BlockService.blockedIds()
           .then((ids) {
@@ -814,6 +885,13 @@ class _ViewerScreenState extends State<ViewerScreen>
 
       _updateAudioRouting();
       _startRealSync(room);
+      _syncOffAir();
+      _afterAnglesChanged();
+      _angleHeartbeat?.cancel();
+      _angleHeartbeat = Timer.periodic(
+        AngleWatchers.heartbeat,
+        (_) => _reportAngle(force: true),
+      );
     } catch (e) {
       await room?.disconnect();
       if (!mounted) return;
@@ -830,6 +908,11 @@ class _ViewerScreenState extends State<ViewerScreen>
     // Don't gate on TrackSource (can be `unknown` at subscribe time) — _addCamera
     // checks the participant's role == 'camera' authoritatively.
     if (event.track is VideoTrack) {
+      // Off air (or went off while this was on its way): don't pull it.
+      if (!_onAirParticipant(event.participant)) {
+        event.publication.unsubscribe();
+        return;
+      }
       final isScreen = _isScreenSharePub(event.participant, event.publication);
       final idx = _cameras.indexWhere(
         (c) =>
@@ -843,6 +926,7 @@ class _ViewerScreenState extends State<ViewerScreen>
             cameraName: _cameras[idx].cameraName,
             track: event.track as VideoTrack,
             isScreenShare: isScreen,
+            slotId: _cameras[idx].slotId,
           );
         });
       } else {
@@ -870,19 +954,18 @@ class _ViewerScreenState extends State<ViewerScreen>
           if (isScreen) {
             // A stopped share is gone for good — drop the tile entirely
             // instead of leaving a dead placeholder.
-            _cameras.removeAt(idx);
-            if (_focusedIndex >= _cameras.length && _cameras.isNotEmpty) {
-              _focusedIndex = _cameras.length - 1;
-            }
+            _keepingFocus(() => _cameras.removeAt(idx));
           } else {
             // A camera can come back (video toggle) — keep the placeholder.
             _cameras[idx] = CameraFeed(
               identity: _cameras[idx].identity,
               cameraName: _cameras[idx].cameraName,
               track: null,
+              slotId: _cameras[idx].slotId,
             );
           }
         });
+        if (isScreen) _afterAnglesChanged();
       }
       _updateAudioRouting();
     } else if (event.track is AudioTrack) {
@@ -892,17 +975,19 @@ class _ViewerScreenState extends State<ViewerScreen>
 
   void _onParticipantDisconnected(ParticipantDisconnectedEvent event) {
     _audioPublications.remove(event.participant.identity);
-    setState(() {
-      _cameras.removeWhere((c) => c.identity == event.participant.identity);
-      if (_focusedIndex >= _cameras.length && _cameras.isNotEmpty) {
-        _focusedIndex = _cameras.length - 1;
-      }
-    });
+    setState(
+      () => _keepingFocus(
+        () => _cameras.removeWhere(
+          (c) => c.identity == event.participant.identity,
+        ),
+      ),
+    );
     if (event.participant.identity == _masterAudioIdentity) {
       final newIdentity = _findMasterAudioIdentity(_room);
       setState(() => _masterAudioIdentity = newIdentity);
     }
     _updateAudioRouting();
+    _afterAnglesChanged();
   }
 
   void _onParticipantConnected(ParticipantConnectedEvent event) {
@@ -957,6 +1042,9 @@ class _ViewerScreenState extends State<ViewerScreen>
   ) {
     // Screen shares aren't part of the audio-sync dance — show immediately.
     // With RealSync on, nothing waits: it aligns the picture continuously.
+    // An off-air angle isn't pulled at all; _syncOffAir picks it up when it
+    // comes back.
+    if (!_onAirParticipant(participant)) return;
     if (_realSyncOn || publication.source == TrackSource.screenShareVideo) {
       publication.subscribe();
       return;
@@ -972,7 +1060,7 @@ class _ViewerScreenState extends State<ViewerScreen>
       return;
     }
     Future.delayed(Duration(milliseconds: delayMs), () {
-      if (!mounted || _room == null) return;
+      if (!mounted || _room == null || !_onAirParticipant(participant)) return;
       if (!publication.subscribed) publication.subscribe();
     });
   }
@@ -992,6 +1080,7 @@ class _ViewerScreenState extends State<ViewerScreen>
               cameraName: name,
               track: c.track,
               isScreenShare: c.isScreenShare,
+              slotId: c.slotId,
             );
           }
         });
@@ -1004,11 +1093,19 @@ class _ViewerScreenState extends State<ViewerScreen>
     }
   }
 
-  // ── Room metadata: graphics + resync ──────────────────────────────────────
+  // ── Room metadata: graphics + show control + resync ───────────────────────
 
   void _applyRoomMetadata(String? raw, {bool joining = false}) {
     final graphics = GraphicsState.fromRoomMetadata(raw);
     if (graphics != _graphics && mounted) setState(() => _graphics = graphics);
+    // On (re)join the caller syncs subscriptions and focus once the cameras
+    // are in; only a live change is acted on here.
+    final show = ShowControl.fromRoomMetadata(raw);
+    if (joining) {
+      _show = show;
+    } else if (mounted) {
+      _applyShow(show);
+    }
     final stamp = (parseParticipantMeta(raw)['resyncAt'] as num?)?.toInt();
     if (joining) {
       _seenResyncAt = stamp;
@@ -1022,8 +1119,8 @@ class _ViewerScreenState extends State<ViewerScreen>
   /// audio, re-measuring the offset between them. A brief, deliberate pause.
   Future<void> _resyncNow() async {
     final room = _room;
-    if (room == null || _cameras.isEmpty || _syncing) return;
-    final focused = _cameras[_focusedIndex.clamp(0, _cameras.length - 1)];
+    final focused = _focused;
+    if (room == null || focused == null || _syncing) return;
     final cam = room.remoteParticipants[focused.identity];
     final videoPubs = [
       ...?cam?.videoTrackPublications.where(
@@ -1079,6 +1176,160 @@ class _ViewerScreenState extends State<ViewerScreen>
   String? _slotOf(String identity) =>
       _parseMeta(_room?.remoteParticipants[identity]?.metadata)['slotId']
           as String?;
+
+  // ── Show control + viewers per angle ──────────────────────────────────────
+
+  bool _onAirParticipant(Participant p) =>
+      _show.isOnAir(_parseMeta(p.metadata)['slotId'] as String?);
+
+  /// The angles this viewer can pick right now: off-air ones left out, in the
+  /// host's order. [_focusedIndex] indexes this list, not [_cameras].
+  List<CameraFeed> get _onAir => _show.ordered([
+    for (final c in _cameras)
+      if (_show.isOnAir(c.slotId)) c,
+  ], (c) => c.slotId);
+
+  CameraFeed? get _focused {
+    final cams = _onAir;
+    return cams.isEmpty ? null : cams[_focusedIndex.clamp(0, cams.length - 1)];
+  }
+
+  /// Index in [_onAir] of [slot]'s camera, preferring it over its share.
+  int _indexOfSlot(String slot) {
+    final cams = _onAir;
+    final i = cams.indexWhere((c) => c.slotId == slot && !c.isScreenShare);
+    return i != -1 ? i : cams.indexWhere((c) => c.slotId == slot);
+  }
+
+  /// Runs [change] (which may add, hide or reorder angles) and keeps the
+  /// viewer on the angle they were watching, wherever it lands. Call inside
+  /// setState.
+  void _keepingFocus(VoidCallback change) {
+    final before = _focused;
+    change();
+    final cams = _onAir;
+    final i = before == null
+        ? -1
+        : cams.indexWhere(
+            (c) =>
+                c.identity == before.identity &&
+                c.isScreenShare == before.isScreenShare,
+          );
+    if (i != -1) {
+      _focusedIndex = i;
+    } else if (_focusedIndex >= cams.length && cams.isNotEmpty) {
+      _focusedIndex = cams.length - 1;
+    }
+  }
+
+  /// Every focus change goes through here: audio follows the angle when there
+  /// is no master audio, and the per-angle count hears about it.
+  void _focusOn(int index) {
+    setState(() => _focusedIndex = index);
+    _updateAudioRouting();
+    _reportAngle();
+  }
+
+  /// A live show-control change from the room metadata.
+  void _applyShow(ShowControl show) {
+    final before = _focused;
+    if (show != _show) {
+      final back = _show.offAir.difference(show.offAir);
+      setState(() => _keepingFocus(() => _show = show));
+      _syncOffAir(back: back);
+    }
+    _afterAnglesChanged(watching: before);
+  }
+
+  /// Off-air angles aren't watched, so their video isn't pulled at all (the
+  /// tile stays in _cameras, hidden). [back] lists slots that just came back
+  /// on air; they're picked up through the usual subscribe path.
+  void _syncOffAir({Set<String> back = const {}}) {
+    final room = _room;
+    if (room == null) return;
+    for (final p in room.remoteParticipants.values) {
+      final slot = _parseMeta(p.metadata)['slotId'] as String?;
+      if (slot == null) continue;
+      for (final pub in p.videoTrackPublications) {
+        if (!_show.isOnAir(slot)) {
+          if (pub.subscribed) pub.unsubscribe();
+        } else if (back.contains(slot) && !pub.subscribed) {
+          _delayedSubscribeVideo(p, pub);
+        }
+      }
+    }
+  }
+
+  /// After the angles change: settle a new viewer onto the start angle, act on
+  /// show control, keep the per-angle count current. [watching] is the angle
+  /// the viewer was on before the change (it may just have been hidden).
+  void _afterAnglesChanged({CameraFeed? watching}) {
+    if (!mounted) return;
+    _settleStartAngle();
+    _applyShowMove(watching ?? _focused);
+    _reportAngle();
+  }
+
+  void _settleStartAngle() {
+    final until = _settleUntil;
+    if (until == null || DateTime.now().isAfter(until)) return;
+    final cams = _onAir;
+    if (cams.isEmpty) return;
+    final r = _resume;
+    var i = r == null
+        ? -1
+        : cams.indexWhere(
+            (c) => c.identity == r.identity && c.isScreenShare == r.screen,
+          );
+    if (i == -1) {
+      final start = _show.startSlot([
+        for (final c in cams)
+          if (!c.isScreenShare) c.slotId,
+      ]);
+      i = start == null ? 0 : _indexOfSlot(start);
+    }
+    if (i != -1 && i != _focusedIndex) _focusOn(i);
+  }
+
+  /// Off air under the viewer, or "Send everyone here": move them and say why.
+  void _applyShowMove(CameraFeed? watching) {
+    final cams = _onAir;
+    final send = _show.sendAll;
+    // Already where the host is sending everyone: nothing left to act on.
+    if (send != null && watching != null && send.slot == watching.slotId) {
+      _seenSendAllNonce = send.nonce;
+    }
+    final move = _show.viewerMove(
+      watching: watching?.slotId,
+      available: [for (final c in cams) c.slotId],
+      seenNonce: _seenSendAllNonce,
+    );
+    if (move == null) return;
+    final i = _indexOfSlot(move.slot);
+    if (i == -1) return;
+    _seenSendAllNonce = send?.nonce;
+    _settleUntil = null;
+    final to = cams[i].displayName;
+    _focusOn(i);
+    _showSnack(switch (move.reason) {
+      ViewerMoveReason.offAir =>
+        '${watching?.displayName ?? 'Your angle'} went off air — switched to $to',
+      ViewerMoveReason.sendAll => 'The host moved everyone to $to',
+    }, duration: const Duration(seconds: 3));
+  }
+
+  /// Tells the per-angle count which angle this viewer is on: on change, and
+  /// every heartbeat with [force]. Never awaited; anonymous viewers aren't
+  /// counted, so they don't call. A screen share isn't a camera angle.
+  void _reportAngle({bool force = false}) {
+    final slug = _streamEventId;
+    final f = _focused;
+    if (slug == null || f == null || supabase.auth.currentUser == null) return;
+    final angle = (slot: f.isScreenShare ? null : f.slotId);
+    if (!force && angle == _reportedAngle) return;
+    _reportedAngle = angle;
+    AngleWatchers.report(slug, angle.slot);
+  }
 
   void _onRoomDisconnected(RoomDisconnectedEvent event) {
     // The LiveKit room dropped. This is NOT the same as the show ending — the
@@ -1148,6 +1399,9 @@ class _ViewerScreenState extends State<ViewerScreen>
   /// listeners and re-subscribing to existing tracks. Throws on failure so the
   /// caller can back off and retry.
   Future<void> _rejoinRoom(String eventId) async {
+    // Come back to the angle we were on, if it's still there.
+    final f = _focused;
+    if (f != null) _resume = (identity: f.identity, screen: f.isScreenShare);
     await _listener?.dispose();
     await _room?.disconnect();
 
@@ -1177,6 +1431,7 @@ class _ViewerScreenState extends State<ViewerScreen>
 
     _audioJoinedAt = _findAudioJoinedAt(room);
     _applyRoomMetadata(room.metadata, joining: true);
+    _settleUntil = DateTime.now().add(_settleWindow);
     setState(() {
       _cameras.clear();
       _audioPublications.clear();
@@ -1208,6 +1463,8 @@ class _ViewerScreenState extends State<ViewerScreen>
     }
     _updateAudioRouting();
     _startRealSync(room);
+    _syncOffAir();
+    _afterAnglesChanged();
   }
 
   // ── Audio management ──────────────────────────────────────────────────────
@@ -1240,11 +1497,7 @@ class _ViewerScreenState extends State<ViewerScreen>
       }
       return;
     }
-    final target =
-        _masterAudioIdentity ??
-        (_cameras.isNotEmpty
-            ? _cameras[_focusedIndex.clamp(0, _cameras.length - 1)].identity
-            : null);
+    final target = _masterAudioIdentity ?? _focused?.identity;
     if (target == null) return;
     for (final entry in _audioPublications.entries) {
       if (entry.key == target) {
@@ -1323,17 +1576,21 @@ class _ViewerScreenState extends State<ViewerScreen>
         (meta['cameraName'] as String?) ??
         (participant.name.isNotEmpty ? participant.name : participant.identity);
 
-    setState(() {
-      _cameras.add(
-        CameraFeed(
-          identity: participant.identity,
-          cameraName: cameraName,
-          track: track,
-          isScreenShare: isScreenShare,
+    setState(
+      () => _keepingFocus(
+        () => _cameras.add(
+          CameraFeed(
+            identity: participant.identity,
+            cameraName: cameraName,
+            track: track,
+            isScreenShare: isScreenShare,
+            slotId: meta['slotId'] as String?,
+          ),
         ),
-      );
-    });
+      ),
+    );
     _updateAudioRouting();
+    _afterAnglesChanged();
   }
 
   // ── Leave ─────────────────────────────────────────────────────────────────
@@ -1364,6 +1621,14 @@ class _ViewerScreenState extends State<ViewerScreen>
       _hostAvatarUrl = null;
       _tipPending = false;
       _chatMessages.clear();
+      _pinned = null;
+      _pinnedExpanded = false;
+      _pinLive = false;
+      _show = ShowControl.empty;
+      _seenSendAllNonce = null;
+      _settleUntil = null;
+      _resume = null;
+      _reportedAngle = null;
       _chatController.clear();
       _chatOpen = false;
       _chatPinned = false;
@@ -1742,7 +2007,7 @@ class _ViewerScreenState extends State<ViewerScreen>
         Column(
           children: [
             _buildTopBar(),
-            if (_cameras.isEmpty)
+            if (_onAir.isEmpty)
               Expanded(child: _buildWaitingForCameras())
             else
               Expanded(
@@ -2001,6 +2266,7 @@ class _ViewerScreenState extends State<ViewerScreen>
         ),
         child: Column(
           children: [
+            if (_pinned != null) _buildPinnedBar(),
             Expanded(
               child: Stack(
                 children: [
@@ -2016,6 +2282,66 @@ class _ViewerScreenState extends State<ViewerScreen>
               ),
             ),
             _buildChatInput(media.padding.bottom),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// The pinned message, over the chat list: two lines, the whole thing on
+  /// tap. Only the host's and crew's links are tappable, as in the list.
+  Widget _buildPinnedBar() {
+    final p = _pinned!;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => setState(() => _pinnedExpanded = !_pinnedExpanded),
+      child: Container(
+        margin: const EdgeInsets.fromLTRB(
+          NileSpacing.s12,
+          NileSpacing.s8,
+          NileSpacing.s12,
+          0,
+        ),
+        padding: const EdgeInsets.symmetric(
+          horizontal: NileSpacing.s12,
+          vertical: NileSpacing.s8,
+        ),
+        decoration: BoxDecoration(
+          color: NileColors.bgSurface.withValues(alpha: 0.92),
+          borderRadius: BorderRadius.circular(NileRadius.sm),
+          border: Border.all(color: NileColors.border),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(Icons.push_pin, size: 14, color: NileColors.volt),
+            const SizedBox(width: NileSpacing.s8),
+            Expanded(
+              child: NileLinkText(
+                p.body,
+                linkify: p.mayLink,
+                maxLines: _pinnedExpanded ? null : 2,
+                style: NileTextStyles.bodySm().copyWith(
+                  color: NileColors.txtPrimary,
+                ),
+                prefix: TextSpan(
+                  text: '@${p.username}  ',
+                  style: TextStyle(
+                    color: nileChatNameColor(
+                      p.senderId,
+                      isHost: p.senderRole == 'host',
+                    ),
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(width: NileSpacing.s4),
+            Icon(
+              _pinnedExpanded ? Icons.expand_less : Icons.expand_more,
+              size: 16,
+              color: NileColors.txtTertiary,
+            ),
           ],
         ),
       ),
@@ -2220,9 +2546,10 @@ class _ViewerScreenState extends State<ViewerScreen>
     }
 
     final isHost = _hostId != null && m.senderId == _hostId;
-    final nameColor = isHost
-        ? NileColors.coral
-        : (m.isMine ? NileColors.volt : NileColors.azure);
+    final nameColor = nileChatNameColor(
+      m.senderId,
+      isHost: m.isHost || isHost,
+    );
 
     final row = Container(
       margin: const EdgeInsets.symmetric(vertical: NileSpacing.s2),
@@ -2277,7 +2604,11 @@ class _ViewerScreenState extends State<ViewerScreen>
                     ],
                   ],
                 ),
-                Text(m.content, style: NileTextStyles.bodyMd()),
+                NileLinkText(
+                  m.content,
+                  style: NileTextStyles.bodyMd(),
+                  linkify: m.mayLink,
+                ),
               ],
             ),
           ),
@@ -2462,9 +2793,9 @@ class _ViewerScreenState extends State<ViewerScreen>
     return Column(
       children: [
         Expanded(child: _buildMainCamera()),
-        if (_cameras.length > 1 && _isDesktop)
+        if (_onAir.length > 1 && _isDesktop)
           _buildThumbResizeHandle(horizontal: true),
-        if (_cameras.length > 1) _buildHorizontalThumbnails(),
+        if (_onAir.length > 1) _buildHorizontalThumbnails(),
       ],
     );
   }
@@ -2473,15 +2804,16 @@ class _ViewerScreenState extends State<ViewerScreen>
     return Row(
       children: [
         Expanded(child: _buildMainCamera()),
-        if (_cameras.length > 1 && _isDesktop)
+        if (_onAir.length > 1 && _isDesktop)
           _buildThumbResizeHandle(horizontal: false),
-        if (_cameras.length > 1) _buildVerticalThumbnails(),
+        if (_onAir.length > 1) _buildVerticalThumbnails(),
       ],
     );
   }
 
   Widget _buildMainCamera() {
-    final focused = _cameras[_focusedIndex.clamp(0, _cameras.length - 1)];
+    // Only built while an angle is on air.
+    final focused = _focused!;
     final onAir = _graphics.forSlot(
       focused.isScreenShare ? null : _slotOf(focused.identity),
     );
@@ -2539,14 +2871,16 @@ class _ViewerScreenState extends State<ViewerScreen>
   }
 
   Widget _buildHorizontalThumbnails() {
+    final cams = _onAir;
     return Container(
       height: 100 * _thumbScale,
       color: NileColors.bgPage,
       child: ListView.builder(
         scrollDirection: Axis.horizontal,
         padding: const EdgeInsets.all(NileSpacing.s8),
-        itemCount: _cameras.length,
+        itemCount: cams.length,
         itemBuilder: (context, index) => _buildThumbnailItem(
+          camera: cams[index],
           index: index,
           width: 140 * _thumbScale,
           height: double.infinity,
@@ -2557,14 +2891,16 @@ class _ViewerScreenState extends State<ViewerScreen>
   }
 
   Widget _buildVerticalThumbnails() {
+    final cams = _onAir;
     return Container(
       width: 110 * _thumbScale,
       color: NileColors.bgPage,
       child: ListView.builder(
         scrollDirection: Axis.vertical,
         padding: const EdgeInsets.all(NileSpacing.s6),
-        itemCount: _cameras.length,
+        itemCount: cams.length,
         itemBuilder: (context, index) => _buildThumbnailItem(
+          camera: cams[index],
           index: index,
           width: double.infinity,
           height: 80 * _thumbScale,
@@ -2575,19 +2911,19 @@ class _ViewerScreenState extends State<ViewerScreen>
   }
 
   Widget _buildThumbnailItem({
+    required CameraFeed camera,
     required int index,
     required double width,
     required double height,
     required EdgeInsets margin,
   }) {
-    final camera = _cameras[index];
     final isFocused = index == _focusedIndex;
     final isMasterAudio = camera.identity == _masterAudioIdentity;
 
     return GestureDetector(
       onTap: () {
-        setState(() => _focusedIndex = index);
-        _updateAudioRouting();
+        _settleUntil = null; // their pick from here on
+        _focusOn(index);
       },
       child: Container(
         width: width,
@@ -2798,7 +3134,7 @@ class _ViewerScreenState extends State<ViewerScreen>
           child: Column(
             children: [
               _buildTopBar(showChatToggle: false),
-              if (_cameras.isEmpty)
+              if (_onAir.isEmpty)
                 Expanded(child: _buildWaitingForCameras())
               else ...[
                 _buildAudioBar(),
@@ -2816,9 +3152,9 @@ class _ViewerScreenState extends State<ViewerScreen>
                           ],
                         ),
                       ),
-                      if (_cameras.length > 1 && _isDesktop)
+                      if (_onAir.length > 1 && _isDesktop)
                         _buildThumbResizeHandle(horizontal: true),
-                      if (_cameras.length > 1) _buildHorizontalThumbnails(),
+                      if (_onAir.length > 1) _buildHorizontalThumbnails(),
                     ],
                   ),
                 ),
@@ -2990,6 +3326,7 @@ class _ViewerScreenState extends State<ViewerScreen>
             ),
           ),
           const Divider(height: 1),
+          if (_pinned != null) _buildPinnedBar(),
           Expanded(
             child: Stack(
               children: [

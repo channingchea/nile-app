@@ -22,5 +22,32 @@ import UIKit
         self?.window?.rootViewController
       }
     }
+
+    // Studio status link: battery and heat, sent to the Studio while this
+    // phone is a camera (lib/services/camera_status.dart, DeviceStatus).
+    if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "NileDeviceStatus") {
+      let channel = FlutterMethodChannel(
+        name: "nile/device_status", binaryMessenger: registrar.messenger())
+      channel.setMethodCallHandler { call, result in
+        guard call.method == "read" else { return result(FlutterMethodNotImplemented) }
+        let device = UIDevice.current
+        device.isBatteryMonitoringEnabled = true
+        let level = device.batteryLevel  // -1 when unknown
+        let thermal: String
+        switch ProcessInfo.processInfo.thermalState {
+        case .nominal: thermal = "nominal"
+        case .fair: thermal = "fair"
+        case .serious: thermal = "serious"
+        case .critical: thermal = "critical"
+        @unknown default: thermal = "nominal"
+        }
+        var out: [String: Any] = [
+          "charging": device.batteryState == .charging || device.batteryState == .full,
+          "thermal": thermal,
+        ]
+        if level >= 0 { out["battery"] = Int((level * 100).rounded()) }
+        result(out)
+      }
+    }
   }
 }

@@ -3,19 +3,24 @@ import 'package:flutter/material.dart';
 import 'package:livekit_client/livekit_client.dart' hide ChatMessage;
 import 'package:flutter_webrtc/flutter_webrtc.dart' as rtc;
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart' show HapticFeedback;
 import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart' show RealtimeChannel;
 import '../services/supabase_client.dart';
 import '../services/block_service.dart';
+import '../services/camera_status.dart';
 import '../services/chat_service.dart';
+import '../services/chat_tools_service.dart';
 import '../services/crew_service.dart';
 import '../services/event_service.dart';
+import '../services/graphics_service.dart';
 import '../services/install_id.dart';
 import '../services/livekit_service.dart';
 import '../services/realsync.dart';
 import '../services/report_service.dart';
 import '../services/screen_capture_permission.dart';
 import '../services/shake_detector.dart';
+import '../services/show_control.dart';
 import '../services/studio_prefs.dart';
 import '../services/studio_graphics.dart';
 import '../services/studio_roles.dart';
@@ -24,6 +29,8 @@ import '../widgets/nile_studio.dart';
 import '../widgets/screen_share_picker.dart';
 import '../widgets/camera_slot_sheet.dart';
 import '../widgets/nile_graphics_layer.dart';
+import '../widgets/nile_link_text.dart';
+import '../widgets/studio_chat_tools.dart';
 import '../widgets/studio_graphics_panel.dart';
 import '../widgets/studio_settings_sheet.dart';
 import '../widgets/viewer_preview_overlay.dart';
@@ -438,7 +445,7 @@ class _CameraScreenState extends State<CameraScreen> {
     }
 
     final placedCrew = <String>{};
-    for (final slot in _slots) {
+    for (final slot in _show.ordered(_slots, (s) => s.id)) {
       if (slot.id == _slotId) continue; // this device — listed first, as yours
       final p = bySlot[slot.id];
       if (p != null) {
@@ -463,6 +470,8 @@ class _CameraScreenState extends State<CameraScreen> {
               : '@${waiting.profile.username} · not connected',
           slotId: slot.id,
           isRenamable: true,
+          isOffAir: _show.offAir.contains(slot.id),
+          isDefaultAngle: _show.defaultSlot == slot.id,
         ),
       );
     }
@@ -510,6 +519,27 @@ class _CameraScreenState extends State<CameraScreen> {
     final isMaster = p.identity == _masterIdentity;
     final renamable = role == NileRole.camera || role == NileRole.studio;
 
+    // Studio: what this phone last reported over the status link.
+    final now = DateTime.now();
+    final st = _isStudio && role == NileRole.camera
+        ? _status.putIfAbsent(p.identity, () {
+            _ensureStatusTicker();
+            return _CamStatus(now);
+          })
+        : null;
+    final health = st?.health;
+    final level = st?.levelAt != null &&
+            now.difference(st!.levelAt!) < StudioLink.levelStale
+        ? st.level
+        : null;
+    final unsupported = st != null &&
+        health == null &&
+        now.difference(st.firstSeen) >= _statusGrace;
+    final acked = st?.ackAt != null && now.difference(st!.ackAt!) < _ackShown;
+    final quality = _remoteQuality[p.identity] ?? NileStudioQuality.unknown;
+    final onAir = slotId == null || !_show.offAir.contains(slotId);
+    final isDefault = slotId != null && _show.defaultSlot == slotId;
+
     final videoPubs = p.videoTrackPublications;
     final cameraPubs = videoPubs
         .where((pub) => pub.source != TrackSource.screenShareVideo)
@@ -529,6 +559,14 @@ class _CameraScreenState extends State<CameraScreen> {
           isRemovable: role != NileRole.studio,
           slotId: slotId,
           isRenamable: renamable && !isAudioOnly,
+          isOffAir: !onAir,
+          isDefaultAngle: isDefault,
+          viewers: _viewersOn(slotId),
+          level: level,
+          health: health,
+          statusUnsupported: unsupported,
+          nudgeAcked: acked,
+          connectionQuality: quality,
         ),
       );
     }
@@ -553,6 +591,14 @@ class _CameraScreenState extends State<CameraScreen> {
           isRenamable: !isShare && renamable,
           // Only worth showing with more than one camera to compare.
           lagMs: isShare || _lagMs.length < 2 ? null : _lagMs[p.identity],
+          isOffAir: !isShare && !onAir,
+          isDefaultAngle: !isShare && isDefault,
+          viewers: isShare ? null : _viewersOn(slotId),
+          level: isShare ? null : level,
+          health: isShare ? null : health,
+          statusUnsupported: !isShare && unsupported,
+          nudgeAcked: !isShare && acked,
+          connectionQuality: quality,
         ),
       );
     }
@@ -581,6 +627,10 @@ class _CameraScreenState extends State<CameraScreen> {
         mirror: _selectedCameraId == null && _isFrontCamera,
         slotId: _slotId,
         isRenamable: _slotId != null,
+        isOffAir: _isOffAir,
+        isDefaultAngle: _slotId != null && _show.defaultSlot == _slotId,
+        viewers: _viewersOn(_slotId),
+        connectionQuality: _quality,
       ),
     ];
     final share = _screenShareTrack;
@@ -593,6 +643,7 @@ class _CameraScreenState extends State<CameraScreen> {
           track: share,
           isLocal: true,
           isScreenShare: true,
+          connectionQuality: _quality,
         ),
       );
     }
@@ -736,6 +787,71 @@ class _CameraScreenState extends State<CameraScreen> {
     }
   }
 
+  /// The Studio's composer. Returns the error to show under the field.
+  Future<String?> _sendChat(String text) async {
+    final eventId = _eventId;
+    if (eventId == null) return 'You’re not connected to the show.';
+    try {
+      // Non-null only when blocked words held it back: the sender still
+      // sees their own copy.
+      final own = await ChatService.send(eventId: eventId, content: text);
+      if (own != null) _onChatMessage(own);
+      return null;
+    } on ChatSendException catch (e) {
+      return e.message;
+    }
+  }
+
+  /// Runs a moderation call, toasting its failure.
+  Future<void> _moderate(Future<void> Function(String eventId) call) async {
+    final eventId = _eventId;
+    if (eventId == null) return;
+    try {
+      await call(eventId);
+    } on ChatSendException catch (e) {
+      _toast(e.message);
+    } catch (_) {
+      _toast('That didn’t go through. Try again.');
+    }
+  }
+
+  Future<void> _pinMessage(ChatMessage m) =>
+      _moderate((id) => ChatService.pin(eventId: id, message: m));
+
+  Future<void> _unpinMessage() =>
+      _moderate((id) => ChatService.unpin(eventId: id));
+
+  /// "Show anyway" on a line the blocked words held back. The release comes
+  /// back over the broadcast with the same id and replaces the greyed line.
+  Future<void> _releaseMessage(ChatMessage m) async {
+    final messageId = m.id;
+    if (messageId == null) return;
+    await _moderate(
+      (id) => ChatService.release(eventId: id, messageId: messageId),
+    );
+  }
+
+  /// Moderators also hear what the blocked words held back.
+  void _syncModChannel() {
+    final eventId = _eventId;
+    if (eventId == null || _modChannel != null || !_canModerateChat) return;
+    _modChannel = ChatService.subscribeModeration(eventId, _onChatMessage);
+  }
+
+  Future<void> _loadQuickMessages() async {
+    try {
+      final list = await ChatToolsService.quickMessages();
+      if (mounted) setState(() => _quickMessages = list);
+    } catch (_) {
+      // The ⚡ menu just stays empty.
+    }
+  }
+
+  Future<void> _editQuickMessages() async {
+    await showQuickMessagesEditor(context);
+    await _loadQuickMessages();
+  }
+
   /// One line describing how the host has narrowed the room, or null when they
   /// haven't. Drawn in the chat header: a throttled room looks exactly like a
   /// quiet one, and a host who forgot the setting reads the silence as a bug.
@@ -770,6 +886,8 @@ class _CameraScreenState extends State<CameraScreen> {
             (row['chat_slow_mode_seconds'] as num?)?.toInt() ?? 0;
         _chatAccess = row['chat_access'] as String? ?? 'everyone';
       });
+      // Crew learn here whether they moderate this show.
+      _syncModChannel();
     } catch (_) {}
   }
 
@@ -925,6 +1043,22 @@ class _CameraScreenState extends State<CameraScreen> {
                     ],
                   ),
                   const SizedBox(height: NileSpacing.s8),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: Icon(Icons.block, color: NileColors.txtPrimary),
+                    title: Text(
+                      'Blocked words…',
+                      style: NileTextStyles.bodyMd(),
+                    ),
+                    subtitle: Text(
+                      'Messages containing them are hidden from everyone but '
+                      'the sender.',
+                      style: NileTextStyles.caption().copyWith(
+                        color: NileColors.txtTertiary,
+                      ),
+                    ),
+                    onTap: () => showBlockedWordsEditor(context),
+                  ),
                 ],
               ),
             ),
@@ -951,6 +1085,7 @@ class _CameraScreenState extends State<CameraScreen> {
     if (room == null) return;
     final publishers = <PublisherInfo>[];
     var studio = false;
+    String? studioIdentity;
     var otherHostDevice = false;
     final uid = supabase.auth.currentUser?.id;
     for (final p in room.remoteParticipants.values) {
@@ -958,7 +1093,10 @@ class _CameraScreenState extends State<CameraScreen> {
       final role = meta['role'];
       if (!NileRole.isPublisher(role)) continue;
       publishers.add(PublisherInfo.fromMeta(p.identity, meta));
-      if (role == NileRole.studio) studio = true;
+      if (role == NileRole.studio) {
+        studio = true;
+        studioIdentity = p.identity;
+      }
       if (uid != null && meta['userId'] == uid) otherHostDevice = true;
     }
     final local = room.localParticipant;
@@ -972,6 +1110,8 @@ class _CameraScreenState extends State<CameraScreen> {
         _otherHostDevice = otherHostDevice;
       });
     }
+    _studioIdentity = studioIdentity;
+    _syncStatusLink();
     // A Studio never hands itself over; only the host's phones step aside.
     if (widget.isHost && !_isStudio) {
       _handover.update(studioPresent: studio);
@@ -1033,6 +1173,8 @@ class _CameraScreenState extends State<CameraScreen> {
   /// audio reaches viewers, which kills the multi-mic feedback. Called on
   /// connect and whenever the source reassigns (metadata / participant changes).
   Future<void> _syncMicEnabled() async {
+    // A muted phone meters through its own track for the Studio.
+    unawaited(_syncMeterTrack());
     final pub = _room?.localParticipant?.audioTrackPublications.firstOrNull;
     final track = pub?.track;
     if (track == null) return;
@@ -1127,12 +1269,54 @@ class _CameraScreenState extends State<CameraScreen> {
   /// The event's camera slots, in order — the Studio lists sources by them.
   List<CameraSlot> _slots = const [];
 
-  /// Toolbar target: the selected source, or every camera at once.
-  bool _targetAll = false;
-
   /// Graphics on air (room metadata `graphics`). The Studio monitor and this
   /// device's own preview draw what a viewer of that camera sees.
   GraphicsState _graphics = GraphicsState.empty;
+
+  /// Studio: where each library graphic last went (its hotkey reuses it), the
+  /// library itself (keys 1–9), and the auto-hide timer for [_graphics].
+  final Map<String, GraphicTargets> _lastTargets = {};
+  List<StudioGraphic> _graphicsLibrary = const [];
+  Timer? _hideTimer;
+  int? _hideArmedFor;
+
+  /// Show control from room metadata: off air, default angle, camera order.
+  ShowControl _show = ShowControl.empty;
+
+  /// Studio: signed-in viewers per slot, polled. Null until the first poll.
+  Map<String, int>? _angleCounts;
+  Timer? _angleTimer;
+
+  /// The event's scheduled start — countdowns can run to it.
+  DateTime? _scheduledAt;
+
+  // ── Status link (studio-edits phases 6-7) ─────────────────────────────────
+  // Studio side: what each phone last reported, its LiveKit connection
+  // quality, and the alerts they raise. Rebuilt by a short ticker while
+  // anything on a tile is time-sensitive, never per packet.
+  static const _statusTick = Duration(milliseconds: 250);
+  static const _statusGrace = Duration(seconds: 12);
+  static const _ackShown = Duration(seconds: 10);
+  final Map<String, _CamStatus> _status = {};
+  final Map<String, NileStudioQuality> _remoteQuality = {};
+  CameraAlerts _alerts = CameraAlerts();
+  Timer? _statusTicker;
+
+  // Phone side: the Studio to report to, the send timers, a private meter for
+  // a muted mic, the camera state the Studio can change, and its nudge.
+  String? _studioIdentity;
+  Timer? _levelTimer;
+  Timer? _healthTimer;
+  LocalAudioTrack? _meterTrack;
+  AudioVisualizer? _meterViz;
+  double? _meterLevel;
+  bool _meterOpening = false;
+  bool _meterFailed = false;
+  bool _torchOn = false;
+  double _zoom = 1;
+  bool _focusLocked = false;
+  bool _exposureLocked = false;
+  ({String id, String text})? _nudge;
 
   /// Resync stamp this device joined with; a new one makes the Studio
   /// monitor re-pick up the feed it is showing.
@@ -1238,6 +1422,7 @@ class _CameraScreenState extends State<CameraScreen> {
       final sched = state['scheduled_at'] as String?;
       final end = state['end_at'] as String?;
       setState(() {
+        _scheduledAt = sched == null ? null : DateTime.tryParse(sched);
         _plannedEndAt = end == null ? null : DateTime.parse(end);
         _plannedDuration = (sched != null && end != null)
             ? DateTime.parse(end).difference(DateTime.parse(sched))
@@ -1275,6 +1460,9 @@ class _CameraScreenState extends State<CameraScreen> {
 
   void _tickCountdown() {
     if (!mounted || _autoEnding) return;
+    // A poor connection only alerts once it has lasted 10 s; quality events
+    // fire on change, so re-check here rather than run another timer.
+    if (_isStudio) _recheckSignal();
     // The Studio's "time on air" is derived from _startedAt at build time, so
     // it only advances if something rebuilds. This ticker is already running
     // every second for the countdown — piggyback rather than add a second one.
@@ -1315,12 +1503,24 @@ class _CameraScreenState extends State<CameraScreen> {
 
   /// Read-only topic for server-authored announcements (migration 0099).
   RealtimeChannel? _systemChannel;
+
+  /// Moderators: lines the host's blocked words held back.
+  RealtimeChannel? _modChannel;
   final List<ChatMessage> _chatMessages = [];
   bool _chatVisible = true;
+  PinnedMessage? _pinned;
+  List<QuickMessage> _quickMessages = const [];
 
+  /// Inserts [m], or replaces the line with the same id — a released or
+  /// re-delivered message must not appear twice.
   void _onChatMessage(ChatMessage m) {
     if (!mounted) return;
     setState(() {
+      final i = m.id == null ? -1 : _chatMessages.indexWhere((x) => x.id == m.id);
+      if (i >= 0) {
+        _chatMessages[i] = m;
+        return;
+      }
       _chatMessages.insert(0, m);
       if (_chatMessages.length > _maxChatMessages) {
         _chatMessages.removeLast();
@@ -1368,9 +1568,14 @@ class _CameraScreenState extends State<CameraScreen> {
     _lagAges.dispose();
     _clock?.stop();
     _countdownTimer?.cancel();
+    _hideTimer?.cancel();
+    _angleTimer?.cancel();
+    _statusTicker?.cancel();
+    _stopStatusLink();
     _statusChannel?.unsubscribe();
     _chatChannel?.unsubscribe();
     _systemChannel?.unsubscribe();
+    _modChannel?.unsubscribe();
     _deviceChangeSub?.cancel();
     _eventIdController.dispose();
     _cameraNameController.dispose();
@@ -1534,11 +1739,27 @@ class _CameraScreenState extends State<CameraScreen> {
         ..on<TrackUnmutedEvent>((_) => _rebuildRemoteSources())
         ..on<ParticipantConnectionQualityUpdatedEvent>((event) {
           if (!mounted) return;
-          if (event.participant.identity !=
-              _room?.localParticipant?.identity) {
+          final q = _mapQuality(event.connectionQuality);
+          final p = event.participant;
+          if (p.identity == _room?.localParticipant?.identity) {
+            setState(() => _quality = q);
             return;
           }
-          setState(() => _quality = _mapQuality(event.connectionQuality));
+          // Studio: each camera's own signal, for its tile and alerts.
+          if (!_isStudio || !_isPublisher(p)) return;
+          _remoteQuality[p.identity] = q;
+          _checkAlerts(p.identity);
+          _rebuildRemoteSources();
+        })
+        // Studio ↔ phone status link and commands (camera_status.dart).
+        ..on<DataReceivedEvent>((event) {
+          final from = event.participant;
+          if (from == null) return;
+          if (event.topic == StudioLink.statusTopic) {
+            _onStatus(from, event.data);
+          } else if (event.topic == StudioLink.commandTopic) {
+            _obeyCommand(from, event.data);
+          }
         })
         ..on<RoomReconnectingEvent>((_) {
           if (mounted) setState(() => _quality = NileStudioQuality.lost);
@@ -1554,6 +1775,10 @@ class _CameraScreenState extends State<CameraScreen> {
         // re-stamps ready: false server-side anyway.
         final userId = _metaOf(event.participant)['userId'] as String?;
         if (userId != null) setState(() => _crewReady[userId] = false);
+        final gone = event.participant.identity;
+        _alerts.forget(gone);
+        _status.remove(gone);
+        _remoteQuality.remove(gone);
         // The master-audio holder may have left (the fallback takes over), or
         // the Studio did (its handover grace starts).
         _refreshRoomState();
@@ -1643,7 +1868,16 @@ class _CameraScreenState extends State<CameraScreen> {
       if (_studioMode && !asStudio && (_prefs?.videoStartsOff ?? false)) {
         await _toggleVideo();
       }
-      if (asStudio) _loadSlots(eventId);
+      if (asStudio) {
+        _loadSlots(eventId);
+        // Hotkeys 1–9 work before the Graphics panel is ever opened.
+        GraphicsService.list()
+            .then((l) => _graphicsLibrary = l)
+            .catchError((_) => _graphicsLibrary);
+        _angleTimer?.cancel();
+        _angleTimer = Timer.periodic(AngleWatchers.poll, (_) => _pollAngles());
+        _pollAngles();
+      }
 
       // Studio: pick up whoever was already in the room, and fold in the
       // people this host has already blocked so their chat never appears.
@@ -1679,7 +1913,18 @@ class _CameraScreenState extends State<CameraScreen> {
       );
       // Server-authored announcements (tips) come in on their own read-only
       // topic — the host should see them in the Studio too.
-      _systemChannel = ChatService.subscribeSystem(eventId, _onChatMessage);
+      _systemChannel = ChatService.subscribeSystem(
+        eventId,
+        _onChatMessage,
+        onPin: (p) {
+          if (mounted) setState(() => _pinned = p);
+        },
+      );
+      ChatService.fetchPinned(eventId).then((p) {
+        if (mounted && _pinned == null) setState(() => _pinned = p);
+      });
+      _syncModChannel();
+      if (widget.isHost) _loadQuickMessages();
 
       // How the host has set this room up — crew moderation, slow mode, who
       // may speak. Only drives what we draw; the server enforces it.
@@ -1786,6 +2031,393 @@ class _CameraScreenState extends State<CameraScreen> {
     }
   }
 
+  // ── Status link: Studio side ────────────────────────────────────────────────
+
+  /// A phone's level, health or nudge 👍.
+  void _onStatus(RemoteParticipant from, List<int> data) {
+    if (!_isStudio) return;
+    final msg = StatusMessage.decode(data);
+    if (msg == null) return;
+    final now = DateTime.now();
+    final s = _status.putIfAbsent(from.identity, () => _CamStatus(now));
+    switch (msg) {
+      case LevelMessage(:final level):
+        s
+          ..level = level
+          ..levelAt = now;
+      case HealthMessage(:final health):
+        s.health = health;
+        _checkAlerts(from.identity);
+        _rebuildRemoteSources();
+      case AckMessage():
+        s.ackAt = now;
+        _rebuildRemoteSources();
+    }
+    _ensureStatusTicker();
+  }
+
+  /// True while a tile has something time-sensitive: a live meter, a recent
+  /// 👍, or a camera still inside its grace period for reporting health.
+  bool get _statusLive {
+    final now = DateTime.now();
+    bool within(DateTime? t, Duration d) =>
+        t != null && now.difference(t) < d + _statusTick;
+    return _status.values.any(
+      (s) =>
+          within(s.levelAt, StudioLink.levelStale) ||
+          within(s.ackAt, _ackShown) ||
+          (s.health == null && within(s.firstSeen, _statusGrace)),
+    );
+  }
+
+  /// Rebuilds the tiles a few times a second while [_statusLive], then stops.
+  void _ensureStatusTicker() {
+    if (_statusTicker != null || !_isStudio) return;
+    _statusTicker = Timer.periodic(_statusTick, (_) {
+      if (!mounted || _room == null || !_statusLive) {
+        _statusTicker?.cancel();
+        _statusTicker = null;
+      }
+      _rebuildRemoteSources();
+    });
+  }
+
+  bool _poorSignal(String identity) => switch (_remoteQuality[identity]) {
+    NileStudioQuality.poor || NileStudioQuality.lost => true,
+    _ => false,
+  };
+
+  void _recheckSignal() {
+    for (final id in _remoteQuality.keys.where(_poorSignal).toList()) {
+      _checkAlerts(id);
+    }
+  }
+
+  /// Feeds [CameraAlerts] and toasts each alert that just started.
+  void _checkAlerts(String identity) {
+    final fired = _alerts.update(
+      identity,
+      health: _status[identity]?.health,
+      poorSignal: _poorSignal(identity),
+      now: DateTime.now(),
+    );
+    for (final kind in fired) {
+      _alertToast(identity, kind);
+    }
+  }
+
+  void _alertToast(String identity, CameraAlertKind kind) {
+    if (!mounted) return;
+    final p = _room?.remoteParticipants[identity];
+    final name = p == null
+        ? 'A camera'
+        : (_metaOf(p)['cameraName'] as String?) ??
+              (p.name.isNotEmpty ? p.name : 'A camera');
+    final text = switch (kind) {
+      CameraAlertKind.battery =>
+        '$name battery is at ${_status[identity]?.health?.battery ?? 0}%',
+      CameraAlertKind.heat => '$name is running hot',
+      CameraAlertKind.signal => '$name has a poor connection',
+    };
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(text),
+        duration: const Duration(seconds: 8),
+        action: kind == CameraAlertKind.battery
+            ? SnackBarAction(
+                label: 'Send ‘${NudgePresets.chargeSoon}’',
+                onPressed: () =>
+                    _sendNudge(identity, NudgePresets.chargeSoon),
+              )
+            : null,
+      ),
+    );
+  }
+
+  /// Studio → one phone: a nudge or a remote control, reliable.
+  Future<void> _sendCommand(String identity, StudioCommand command) async {
+    final local = _room?.localParticipant;
+    if (local == null) return;
+    try {
+      await local.publishData(
+        command.encode(),
+        reliable: true,
+        destinationIdentities: [identity],
+        topic: StudioLink.commandTopic,
+      );
+    } catch (_) {
+      _toast('Couldn’t reach that camera. Try again.');
+    }
+  }
+
+  Future<void> _sendNudge(String identity, String text) {
+    final clean = cleanNudge(text);
+    if (clean.isEmpty) return Future.value();
+    final id = '${DateTime.now().microsecondsSinceEpoch}';
+    return _sendCommand(identity, NudgeCommand(id, clean));
+  }
+
+  // ── Status link: camera side ────────────────────────────────────────────────
+  // A camera phone reports to the Studio — and only to it — while one is in
+  // the room: mic level ~8×/s and health every 5 s, both lossy.
+
+  bool get _isMobile =>
+      !kIsWeb &&
+      (defaultTargetPlatform == TargetPlatform.iOS ||
+          defaultTargetPlatform == TargetPlatform.android);
+
+  /// Zoom and focus/exposure lock need a phone's built-in camera.
+  bool get _builtInCamera => _isMobile && _selectedCameraId == null;
+
+  rtc.MediaStreamTrack? get _cameraTrack =>
+      _cameraPub(_room?.localParticipant)?.track?.mediaStreamTrack;
+
+  /// Whether viewers hear this mic right now (the published track is live).
+  bool get _micLive => _isMainAudioSource && !_viewerPreviewOpen;
+
+  bool get _isOffAir => _slotId != null && _show.offAir.contains(_slotId);
+
+  /// Start or stop reporting as the Studio joins and leaves.
+  void _syncStatusLink() {
+    if (_isStudio || _room == null || _studioIdentity == null) {
+      _stopStatusLink();
+      return;
+    }
+    if (_healthTimer == null) {
+      _levelTimer = Timer.periodic(StudioLink.levelEvery, (_) => _sendLevel());
+      _healthTimer = Timer.periodic(
+        StudioLink.healthEvery,
+        (_) => _sendHealth(),
+      );
+      unawaited(_sendHealth());
+    }
+    unawaited(_syncMeterTrack());
+  }
+
+  void _stopStatusLink() {
+    _levelTimer?.cancel();
+    _healthTimer?.cancel();
+    _levelTimer = null;
+    _healthTimer = null;
+    unawaited(_closeMeterTrack());
+  }
+
+  void _sendStatus(StatusMessage message, {bool reliable = false}) {
+    final to = _studioIdentity;
+    final local = _room?.localParticipant;
+    if (to == null || local == null) return;
+    local
+        .publishData(
+          message.encode(),
+          reliable: reliable,
+          destinationIdentities: [to],
+          topic: StudioLink.statusTopic,
+        )
+        .catchError((_) {});
+  }
+
+  /// The published mic's level when it is live; otherwise the private
+  /// meter's. Nothing at all when neither has a reading.
+  void _sendLevel() {
+    final level = _micLive
+        ? _room?.localParticipant?.audioLevel
+        : _meterLevel;
+    if (level != null) _sendStatus(LevelMessage(level));
+  }
+
+  Future<void> _sendHealth() async {
+    if (_isStudio || _studioIdentity == null) return;
+    final device = await DeviceStatus.read();
+    final track = _videoEnabled ? _cameraTrack : null;
+    int? width, height;
+    double? fps;
+    var torch = false;
+    if (track != null) {
+      try {
+        final s = track.getSettings();
+        width = (s['width'] as num?)?.toInt();
+        height = (s['height'] as num?)?.toInt();
+        fps = (s['frameRate'] as num?)?.toDouble();
+      } catch (_) {}
+      try {
+        torch = await track.hasTorch();
+      } catch (_) {}
+    }
+    if (!mounted) return;
+    final lens = track != null && _builtInCamera;
+    _sendStatus(
+      HealthMessage(
+        CameraHealth(
+          battery: device.battery,
+          charging: device.charging,
+          thermal: device.thermal,
+          width: width,
+          height: height,
+          fps: fps,
+          caps: CameraCaps(
+            torch: torch,
+            zoom: lens,
+            focusLock: lens,
+            exposureLock: lens,
+            flip: _isMobile,
+          ),
+          torchOn: _torchOn,
+          zoom: _zoom,
+          focusLocked: _focusLocked,
+          exposureLocked: _exposureLocked,
+        ),
+      ),
+    );
+  }
+
+  /// Non-master cameras mute their published mic, which stops its capture,
+  /// so they meter through a private, never-published track instead (phase
+  /// 6a: unverified on hardware). Gives up for the session if it can't open.
+  Future<void> _syncMeterTrack() async {
+    final want = _levelTimer != null && !_micLive && !_meterFailed;
+    if (_meterOpening || want == (_meterTrack != null)) return;
+    if (!want) return _closeMeterTrack();
+    _meterOpening = true;
+    try {
+      final track = await LocalAudioTrack.create(
+        AudioCaptureOptions(deviceId: _selectedMicId),
+      );
+      final viz = createVisualizer(
+        track,
+        options: const AudioVisualizerOptions(
+          barCount: 7,
+          centeredBands: false,
+          smoothTransition: false,
+        ),
+      );
+      viz.events.on<AudioVisualizerEvent>((e) {
+        var peak = 0.0;
+        for (final v in e.event) {
+          if (v is num && v > peak) peak = v.toDouble();
+        }
+        _meterLevel = peak.clamp(0.0, 1.0);
+      });
+      await viz.start();
+      _meterTrack = track;
+      _meterViz = viz;
+    } catch (_) {
+      _meterFailed = true;
+    } finally {
+      _meterOpening = false;
+    }
+    // Settle anything that changed while it opened.
+    unawaited(_syncMeterTrack());
+  }
+
+  Future<void> _closeMeterTrack() async {
+    final viz = _meterViz;
+    final track = _meterTrack;
+    _meterViz = null;
+    _meterTrack = null;
+    _meterLevel = null;
+    try {
+      await viz?.stop();
+      await viz?.dispose();
+    } catch (_) {}
+    try {
+      await track?.stop();
+      await track?.dispose();
+    } catch (_) {}
+  }
+
+  /// A command from the Studio. Obeyed only when the sender's server-issued
+  /// role is `studio`; anything this device can't do is ignored.
+  Future<void> _obeyCommand(RemoteParticipant from, List<int> data) async {
+    if (_isStudio || _metaOf(from)['role'] != NileRole.studio) return;
+    final command = StudioCommand.decode(data);
+    if (command == null || !mounted) return;
+    Future<void> Function() undo;
+    try {
+      switch (command) {
+        case NudgeCommand(:final id, :final text):
+          HapticFeedback.heavyImpact();
+          setState(() => _nudge = (id: id, text: text));
+          return;
+        case TorchCommand(:final on):
+          final was = _torchOn;
+          await _setTorch(on);
+          undo = () => _setTorch(was);
+        case ZoomCommand(:final zoom):
+          final was = _zoom;
+          await _setZoom(zoom);
+          undo = () => _setZoom(was);
+        case LockCommand(:final focus, :final exposure):
+          final f = _focusLocked;
+          final x = _exposureLocked;
+          await _setLocks(focus: focus, exposure: exposure);
+          undo = () => _setLocks(focus: f, exposure: x);
+        case FlipCommand():
+          if (!_isMobile) return;
+          await _switchCamera();
+          undo = _switchCamera;
+      }
+    } catch (_) {
+      return;
+    }
+    unawaited(_sendHealth());
+    final notice = command.operatorNotice;
+    if (notice == null || !mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(notice),
+        duration: const Duration(seconds: 6),
+        action: SnackBarAction(
+          label: 'Undo',
+          onPressed: () async {
+            try {
+              await undo();
+            } catch (_) {}
+            unawaited(_sendHealth());
+          },
+        ),
+      ),
+    );
+  }
+
+  Future<void> _setTorch(bool on) async {
+    final track = _cameraTrack;
+    if (track == null || !await track.hasTorch()) {
+      throw UnsupportedError('torch');
+    }
+    await track.setTorch(on);
+    _torchOn = on;
+  }
+
+  Future<void> _setZoom(double zoom) async {
+    final track = _cameraTrack;
+    if (track == null || !_builtInCamera) throw UnsupportedError('zoom');
+    await rtc.Helper.setZoom(track, zoom);
+    _zoom = zoom;
+  }
+
+  Future<void> _setLocks({required bool focus, required bool exposure}) async {
+    final track = _cameraTrack;
+    if (track == null || !_builtInCamera) throw UnsupportedError('lock');
+    await rtc.Helper.setFocusMode(
+      track,
+      focus ? rtc.CameraFocusMode.locked : rtc.CameraFocusMode.auto,
+    );
+    _focusLocked = focus;
+    await rtc.Helper.setExposureMode(
+      track,
+      exposure ? rtc.CameraExposureMode.locked : rtc.CameraExposureMode.auto,
+    );
+    _exposureLocked = exposure;
+  }
+
+  /// 👍 on a nudge: tell the Studio, then dismiss.
+  void _ackNudge() {
+    final nudge = _nudge;
+    if (nudge == null) return;
+    _sendStatus(AckMessage(nudge.id), reliable: true);
+    setState(() => _nudge = null);
+  }
+
   // ── Graphics + resync ───────────────────────────────────────────────────────
 
   /// Studio: every 2 s, read how old each subscribed camera's picture is and
@@ -1821,6 +2453,19 @@ class _CameraScreenState extends State<CameraScreen> {
   void _applyRoomMetadata(String? raw, {bool joining = false}) {
     final graphics = GraphicsState.fromRoomMetadata(raw);
     if (graphics != _graphics && mounted) setState(() => _graphics = graphics);
+    _armAutoHide();
+    final show = ShowControl.fromRoomMetadata(raw);
+    if (show != _show && mounted) {
+      final reordered = !listEquals(show.slotOrder, _show.slotOrder);
+      setState(() => _show = show);
+      // A reorder renumbers default "Camera N" labels — re-read the slots.
+      final eventId = _eventId;
+      if (reordered && _isStudio && eventId != null) {
+        _loadSlots(eventId);
+      } else {
+        _rebuildRemoteSources();
+      }
+    }
     final stamp = (parseParticipantMeta(raw)['resyncAt'] as num?)?.toInt();
     if (joining) {
       _seenResyncAt = stamp;
@@ -1904,21 +2549,37 @@ class _CameraScreenState extends State<CameraScreen> {
     }
   }
 
-  /// Studio: open the Graphics panel for the toolbar's target.
-  Future<void> _openGraphics() async {
-    final target = _toolbarTarget;
-    final slotId = _targetAll ? null : target?.slotId;
-    if (!_targetAll && slotId == null) {
-      _toast('That feed isn’t on a camera slot — choose “All cameras”.');
-      return;
-    }
-    await showGraphicsPushPanel(
-      context,
+  /// Every slot of the event, in display order — what graphics can target.
+  List<StudioSlotRef> get _slotRefs => [
+    for (final s in _show.ordered(_slots, (s) => s.id))
+      (id: s.id, label: s.label),
+  ];
+
+  /// Studio: the Graphics panel. Each graphic picks its own cameras.
+  Future<void> _openGraphics() => showGraphicsPushPanel(
+    context,
+    current: _graphics,
+    slots: _slotRefs,
+    push: _pushGraphics,
+    onTargetsUsed: (id, targets) => _lastTargets[id] = targets,
+    onLibrary: (library) => _graphicsLibrary = library,
+    showStartAt: _scheduledAt,
+    isLive: _state == CameraState.live,
+  );
+
+  /// Studio: keys 1–9 toggle library items on their last cameras.
+  Future<void> _onGraphicsHotkey(int digit) async {
+    final next = graphicsAfterHotkey(
+      digit: digit,
+      library: _graphicsLibrary,
       current: _graphics,
-      targetSlotId: slotId,
-      targetLabel: _targetAll ? 'all cameras' : target!.label,
-      push: _pushGraphics,
+      lastTargets: _lastTargets,
+      now: DateTime.now(),
+      showStartAt: _scheduledAt,
     );
+    if (next != null && !await _pushGraphics(next)) {
+      _toast('Couldn’t update the show’s graphics. Try again.');
+    }
   }
 
   Future<bool> _pushGraphics(GraphicsState next) async {
@@ -1927,10 +2588,220 @@ class _CameraScreenState extends State<CameraScreen> {
     try {
       await LivekitService.setGraphics(eventId: eventId, graphics: next);
       if (mounted) setState(() => _graphics = next);
+      _armAutoHide();
       return true;
     } catch (_) {
       return false;
     }
+  }
+
+  /// Studio: take graphics down when their auto-hide comes due. Re-armed
+  /// whenever [_graphics] changes; a failed push isn't retried for the same
+  /// deadline (viewers already hide expired graphics on their own).
+  void _armAutoHide() {
+    final at = _isStudio ? _graphics.nextHideAt : null;
+    if (at == _hideArmedFor) return;
+    _hideTimer?.cancel();
+    _hideTimer = null;
+    _hideArmedFor = at;
+    if (at == null) return;
+    final wait = at - DateTime.now().millisecondsSinceEpoch;
+    _hideTimer = Timer(Duration(milliseconds: wait < 0 ? 0 : wait), () {
+      final next = _graphics.withoutExpired(
+        DateTime.now().millisecondsSinceEpoch,
+      );
+      if (next != _graphics) _pushGraphics(next);
+    });
+  }
+
+  /// A chat line as an on-screen card.
+  LiveGraphic _chatGraphic(ChatMessage m, int seconds) =>
+      LiveGraphic.chatMessage(
+        messageId: m.id ?? '${m.senderId}-${m.sentAt.millisecondsSinceEpoch}',
+        username: m.username,
+        message: m.content,
+        avatarUrl: m.avatarUrl,
+        now: DateTime.now(),
+        seconds: seconds,
+      );
+
+  /// "Show on screen": every camera, 10 s.
+  Future<void> _showChatOnScreen(ChatMessage m) async {
+    final next = _graphics.withTargets(
+      _chatGraphic(m, 10),
+      const GraphicTargets.all(),
+    );
+    if (!await _pushGraphics(next)) {
+      _toast('Couldn’t put that on screen. Try again.');
+    }
+  }
+
+  /// "Show on screen" with a choice of cameras and timer.
+  Future<void> _showChatOnScreenOptions(ChatMessage m) async {
+    final choice = await showGraphicTargetsDialog(
+      context,
+      title: 'Show on screen',
+      slots: _slotRefs,
+      initial: const GraphicTargets.all(),
+      autoHideSeconds: 10,
+    );
+    if (choice == null || !mounted) return;
+    final g = _chatGraphic(m, choice.autoHideSeconds);
+    final next = choice.targets.isNone
+        ? _graphics.withoutEverywhere(g.id)
+        : _graphics.withTargets(g, choice.targets);
+    if (!await _pushGraphics(next)) {
+      _toast('Couldn’t put that on screen. Try again.');
+    }
+  }
+
+  /// A tile's graphic menu: off this camera, or off every camera.
+  Future<void> _removeGraphic(
+    NileStudioSource source,
+    LiveGraphic g, {
+    required bool everywhere,
+  }) async {
+    final slot = source.slotId;
+    final next = everywhere || slot == null
+        ? _graphics.withoutEverywhere(g.id)
+        : _graphics.withoutOnSlot(g.id, slot);
+    if (!await _pushGraphics(next)) {
+      _toast('Couldn’t remove that graphic. Try again.');
+    }
+  }
+
+  // ── Show control (Studio) ───────────────────────────────────────────────
+
+  /// Studio: tile actions. Host-only, so nothing for anyone else.
+  NileStudioSourceActions get _sourceActions => !_isStudio
+      ? const NileStudioSourceActions()
+      : NileStudioSourceActions(
+          onToggleOffAir: _toggleOffAir,
+          onSetDefault: _toggleDefault,
+          onSendEveryone: _sendEveryone,
+          onMakeMasterAudio: (s) => _setMasterAudio(s.identity),
+          onRemoveGraphic: _removeGraphic,
+          onNudge: (s, text) => _sendNudge(s.identity, text),
+          onCommand: (s, c) => _sendCommand(s.identity, c),
+          onReorder: _reorderSources,
+        );
+
+  Future<void> _setShow({
+    List<String>? offAir,
+    String? defaultSlot,
+    bool clearDefault = false,
+    String? sendAll,
+  }) async {
+    final eventId = _eventId;
+    if (eventId == null) return;
+    try {
+      await LivekitService.setShow(
+        eventId: eventId,
+        offAir: offAir,
+        defaultSlot: defaultSlot,
+        clearDefault: clearDefault,
+        sendAll: sendAll,
+      );
+    } catch (e) {
+      _toast(e.toString().replaceFirst('Exception: ', ''));
+    }
+  }
+
+  Future<void> _toggleOffAir(NileStudioSource s) async {
+    final slot = s.slotId;
+    if (slot == null) return;
+    final off = {..._show.offAir};
+    if (!off.remove(slot)) off.add(slot);
+    await _setShow(offAir: off.toList());
+  }
+
+  Future<void> _toggleDefault(NileStudioSource s) async {
+    final slot = s.slotId;
+    if (slot == null) return;
+    await (_show.defaultSlot == slot
+        ? _setShow(clearDefault: true)
+        : _setShow(defaultSlot: slot));
+  }
+
+  /// "Send everyone here" — every viewer moves once. Asks first when live.
+  Future<void> _sendEveryone(NileStudioSource s) async {
+    final slot = s.slotId;
+    if (slot == null) return;
+    if (_state == CameraState.live) {
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: NileColors.bgSurface,
+          title: Text(
+            'Send everyone to ${s.label}?',
+            style: NileTextStyles.headingMd(),
+          ),
+          content: Text(
+            'Every viewer switches to this camera now. They can still pick '
+            'another angle afterwards.',
+            style: NileTextStyles.bodyMd().copyWith(
+              color: NileColors.txtSecondary,
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: Text(
+                'Send everyone',
+                style: NileTextStyles.labelMd().copyWith(
+                  color: NileColors.volt,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+      if (ok != true) return;
+    }
+    await _setShow(sendAll: slot);
+  }
+
+  /// Tiles dragged into a new order. The server wants every slot once.
+  Future<void> _reorderSources(List<String> slotIds) async {
+    final eventId = _eventId;
+    if (eventId == null) return;
+    final order = [
+      ...slotIds,
+      for (final s in _slotRefs)
+        if (!slotIds.contains(s.id)) s.id,
+    ];
+    try {
+      await LivekitService.reorderCameras(eventId: eventId, order: order);
+      await _loadSlots(eventId);
+    } catch (e) {
+      _toast(e.toString().replaceFirst('Exception: ', ''));
+    }
+  }
+
+  /// Studio: viewers per angle, for the tiles.
+  Future<void> _pollAngles() async {
+    final eventId = _eventId;
+    if (eventId == null || !_isStudio) return;
+    final counts = await AngleWatchers.counts(eventId);
+    if (counts == null ||
+        !mounted ||
+        _room == null ||
+        mapEquals(counts, _angleCounts)) {
+      return;
+    }
+    _angleCounts = counts;
+    _rebuildRemoteSources();
+  }
+
+  /// Viewers on [slotId] for a tile — Studio only, once counts have loaded.
+  int? _viewersOn(String? slotId) {
+    final counts = _angleCounts;
+    if (!_isStudio || slotId == null || counts == null) return null;
+    return counts[slotId] ?? 0;
   }
 
   /// Studio: the show went live from somewhere else (a host phone on a build
@@ -2374,6 +3245,11 @@ class _CameraScreenState extends State<CameraScreen> {
           _isFrontCamera = nowFront;
           _selectedCameraId = null; // flipping means the built-in cameras
           _localVideoTrack = track;
+          // A new lens starts with no torch, no zoom and nothing locked.
+          _torchOn = false;
+          _zoom = 1;
+          _focusLocked = false;
+          _exposureLocked = false;
         });
       } else {
         // No live track yet (video off) — fall back to a full republish.
@@ -2440,7 +3316,22 @@ class _CameraScreenState extends State<CameraScreen> {
     _chatChannel = null;
     _systemChannel?.unsubscribe();
     _systemChannel = null;
+    _modChannel?.unsubscribe();
+    _modChannel = null;
     _chatMessages.clear();
+    _hideTimer?.cancel();
+    _hideTimer = null;
+    _hideArmedFor = null;
+    _angleTimer?.cancel();
+    _angleTimer = null;
+    _statusTicker?.cancel();
+    _statusTicker = null;
+    _stopStatusLink();
+    _status.clear();
+    _remoteQuality.clear();
+    _alerts = CameraAlerts();
+    _lastTargets.clear();
+    _graphicsLibrary = const [];
     // Stop screen capture explicitly — disconnect unpublishes the track but
     // doesn't always halt the native capturer promptly.
     try {
@@ -2465,8 +3356,14 @@ class _CameraScreenState extends State<CameraScreen> {
       _otherHostDevice = false;
       _slotId = null;
       _slots = const [];
-      _targetAll = false;
       _graphics = GraphicsState.empty;
+      _show = ShowControl.empty;
+      _angleCounts = null;
+      _scheduledAt = null;
+      _pinned = null;
+      _quickMessages = const [];
+      _studioIdentity = null;
+      _nudge = null;
       _seenResyncAt = null;
       _reconnectHint = null;
       _videoEnabled = true;
@@ -2975,6 +3872,10 @@ class _CameraScreenState extends State<CameraScreen> {
   /// the same actions the Studio column offers on hover.
   Widget _buildChatOverlay() {
     final size = MediaQuery.of(context).size;
+    final messages = [
+      for (final m in _visibleChatMessages)
+        if (!m.filtered) m,
+    ];
     return Positioned(
       top: 56,
       left: 16,
@@ -2991,8 +3892,9 @@ class _CameraScreenState extends State<CameraScreen> {
         ),
         // Same filter the Studio column applies. It was missing here, which
         // meant hiding or blocking someone on a phone changed nothing at all —
-        // the host kept seeing them in the only chat view a phone has.
-        child: _visibleChatMessages.isEmpty
+        // the host kept seeing them in the only chat view a phone has. Lines
+        // the blocked words held back stay out: the overlay can't mark them.
+        child: messages.isEmpty
             ? Text(
                 'Chat is quiet — messages will appear here.',
                 style: NileTextStyles.bodySm().copyWith(color: Colors.white54),
@@ -3000,9 +3902,9 @@ class _CameraScreenState extends State<CameraScreen> {
             : ListView.builder(
                 reverse: true,
                 shrinkWrap: true,
-                itemCount: _visibleChatMessages.length,
+                itemCount: messages.length,
                 itemBuilder: (context, i) {
-                  final m = _visibleChatMessages[i];
+                  final m = messages[i];
                   return GestureDetector(
                     behavior: HitTestBehavior.opaque,
                     onLongPress: () => _showChatActions(m),
@@ -3018,23 +3920,21 @@ class _CameraScreenState extends State<CameraScreen> {
                                 fontStyle: FontStyle.italic,
                               ),
                             )
-                          : Text.rich(
-                              TextSpan(
-                                children: [
-                                  TextSpan(
-                                    text: '@${m.username}  ',
-                                    style: NileTextStyles.bodySm().copyWith(
-                                      color: NileColors.volt,
-                                      fontWeight: FontWeight.w700,
-                                    ),
+                          : NileLinkText(
+                              m.content,
+                              linkify: m.mayLink,
+                              style: NileTextStyles.bodySm().copyWith(
+                                color: Colors.white,
+                              ),
+                              prefix: TextSpan(
+                                text: '@${m.username}  ',
+                                style: NileTextStyles.bodySm().copyWith(
+                                  color: nileChatNameColor(
+                                    m.senderId,
+                                    isHost: m.isHost,
                                   ),
-                                  TextSpan(
-                                    text: m.content,
-                                    style: NileTextStyles.bodySm().copyWith(
-                                      color: Colors.white,
-                                    ),
-                                  ),
-                                ],
+                                  fontWeight: FontWeight.w700,
+                                ),
                               ),
                             ),
                     ),
@@ -3157,6 +4057,21 @@ class _CameraScreenState extends State<CameraScreen> {
         Positioned.fill(
           child: NileGraphicsLayer(graphics: _graphics.forSlot(_slotId)),
         ),
+
+        // ── Off air — the Studio took this angle away from viewers ──────
+        if (_isOffAir)
+          Positioned.fill(
+            child: IgnorePointer(
+              child: Center(
+                child: _statusPill(
+                  'Off air — viewers can’t see this camera',
+                  NileColors.amber.withValues(alpha: 0.9),
+                  Colors.white,
+                  icon: Icons.videocam_off_outlined,
+                ),
+              ),
+            ),
+          ),
 
         // ── Audio meter — right edge, vertically centred ───────────────
         // Every camera shows the same meter the Stream Audio screen uses, fed
@@ -3551,9 +4466,64 @@ class _CameraScreenState extends State<CameraScreen> {
             ],
           ),
         ),
+
+        // ── Nudge from the Studio — on top of everything until 👍 ───────
+        if (_nudge != null)
+          Positioned(
+            top: NileSpacing.s16,
+            left: NileSpacing.s16,
+            right: NileSpacing.s16,
+            child: _buildNudgeBanner(),
+          ),
       ],
     );
   }
+
+  /// "Go wide", "Charge soon"… from the Studio, with a 👍 that tells it the
+  /// operator has read it.
+  Widget _buildNudgeBanner() => Material(
+    color: NileColors.volt,
+    borderRadius: BorderRadius.circular(NileRadius.sm),
+    child: Padding(
+      padding: const EdgeInsets.fromLTRB(
+        NileSpacing.s16,
+        NileSpacing.s8,
+        NileSpacing.s8,
+        NileSpacing.s8,
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.campaign_outlined, color: NileColors.onVolt),
+          const SizedBox(width: NileSpacing.s12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  'FROM THE STUDIO',
+                  style: NileTextStyles.labelSm().copyWith(
+                    color: NileColors.onVolt,
+                    letterSpacing: 1.2,
+                  ),
+                ),
+                Text(
+                  _nudge?.text ?? '',
+                  style: NileTextStyles.headingSm().copyWith(
+                    color: NileColors.onVolt,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          TextButton(
+            onPressed: _ackNudge,
+            child: Text('👍', style: NileTextStyles.headingMd()),
+          ),
+        ],
+      ),
+    ),
+  );
 
   // ── Studio (desktop) ────────────────────────────────────────────────────────
 
@@ -3568,8 +4538,9 @@ class _CameraScreenState extends State<CameraScreen> {
     final live = _state == CameraState.live;
     final started = _startedAt;
 
-    return NileStudio(
+    final studio = NileStudio(
       sources: sources,
+      sourceActions: _sourceActions,
       selectedIdentity: _selectedSourceId,
       onSelectSource: (id) => setState(() => _selectedSourceId = id),
       // Ejecting someone is the host's call, not an operator's — same bar as
@@ -3645,9 +4616,24 @@ class _CameraScreenState extends State<CameraScreen> {
               // it.
               onSettings: widget.isHost ? _showChatSettings : null,
               restrictionLabel: _chatRestrictionLabel,
+              onSend: _sendChat,
+              quickMessages: _quickMessages,
+              onEditQuickMessages: widget.isHost ? _editQuickMessages : null,
+              pinned: _pinned,
+              onPin: _canModerateChat ? _pinMessage : null,
+              onUnpin: _canModerateChat ? _unpinMessage : null,
+              onRelease: _canModerateChat ? _releaseMessage : null,
+              // Only the control room puts things on screen.
+              onShowOnScreen: _isStudio ? _showChatOnScreen : null,
+              onShowOnScreenOptions: _isStudio
+                  ? _showChatOnScreenOptions
+                  : null,
             )
           : null,
-      banner: _reconnectHint != null
+      // An operator on a desk-sized screen gets nudges here.
+      banner: _nudge != null
+          ? _buildNudgeBanner()
+          : _reconnectHint != null
           ? _buildReconnectHint()
           : _externalMicConnected &&
                 !_disableAgc &&
@@ -3655,6 +4641,9 @@ class _CameraScreenState extends State<CameraScreen> {
           ? _buildExternalMicBanner()
           : null,
     );
+    return _isStudio
+        ? StudioGraphicsHotkeys(onDigit: _onGraphicsHotkey, child: studio)
+        : studio;
   }
 
   /// The Studio's control bar. Same actions, same handlers, same confirms as
@@ -3722,13 +4711,8 @@ class _CameraScreenState extends State<CameraScreen> {
   List<Widget> _buildStudioToolbar() {
     final target = _toolbarTarget;
     return [
-      NileStudioTargetChips(
-        targetLabel: target?.label,
-        allCameras: _targetAll,
-        onChanged: (all) => setState(() => _targetAll = all),
-      ),
       NileStudioIconButton(
-        onPressed: !_targetAll && target != null && target.isRenamable
+        onPressed: target != null && target.isRenamable
             ? () => _renameSource(target)
             : null,
         tooltip: 'Rename camera',
@@ -3784,4 +4768,16 @@ class _CameraScreenState extends State<CameraScreen> {
           ),
     ];
   }
+}
+
+/// What one camera phone last told the Studio over the status link.
+class _CamStatus {
+  _CamStatus(this.firstSeen);
+
+  /// When the Studio first saw this camera — the "update app" grace starts.
+  final DateTime firstSeen;
+  double? level;
+  DateTime? levelAt;
+  CameraHealth? health;
+  DateTime? ackAt;
 }
