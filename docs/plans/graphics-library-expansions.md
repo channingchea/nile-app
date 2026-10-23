@@ -51,11 +51,11 @@ Four additions to the Studio graphics library: cue before air, a brand kit, a QR
 - [x] Tests: eligibility, no foreign image URLs, impression rules, spend tally unaffected.
 
 ## Phase 5: Verify & ship
-- [ ] Full Flutter + Deno tests, analyze clean, iOS/Android/macOS debug builds.
+- [x] Full Flutter + Deno tests, analyze clean, iOS/Android/macOS debug builds.
 - [ ] Studio Preview rehearsal of all four features.
 - [ ] On-device checklist: QR scan from a second screen, tap-through on a phone, kit font on cold cache, sponsor impression counted once.
 - [x] Old builds drop unknown kinds and ignore `brand` (draw Nile style) — no min_build bump needed.
-- [ ] Commit on `macos-phase5-router` (app) / `main` (website); push only on approval.
+- [x] Commit on `macos-phase5-router` (app) / `main` (website); push only on approval.
 
 ## Open questions / risks
 - Google Fonts are fetched on first use; slow or offline viewers briefly see the Nile font.
