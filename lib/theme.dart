@@ -587,6 +587,9 @@ ThemeData nileTheme(Brightness brightness) {
     snackBarTheme: SnackBarThemeData(
       backgroundColor: p.bgRaised,
       contentTextStyle: NileTextStyles.bodyMd(p),
+      // Without this the action label falls back to the colour scheme's
+      // inversePrimary, which is near-black on bgRaised in the dark theme.
+      actionTextColor: p.volt,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(NileRadius.sm),
       ),

@@ -352,11 +352,21 @@ class NileStudio extends StatelessWidget {
                 ),
               ),
               const _StudioDivider(),
+              // The control bar belongs to the monitor column, so sources and
+              // chat run the full height beside it.
               Expanded(
-                child: _StudioMonitor(
-                  selected: selected,
-                  self: showSelfPane ? self : null,
-                  graphicsFor: graphicsFor,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Expanded(
+                      child: _StudioMonitor(
+                        selected: selected,
+                        self: showSelfPane ? self : null,
+                        graphicsFor: graphicsFor,
+                      ),
+                    ),
+                    _StudioControlBar(child: controls),
+                  ],
                 ),
               ),
               if (showChatColumn && chat != null) ...[
@@ -366,7 +376,6 @@ class NileStudio extends StatelessWidget {
             ],
           ),
         ),
-        _StudioControlBar(child: controls),
       ],
     );
   }
@@ -2431,8 +2440,9 @@ class NileStudioControlBar extends StatelessWidget {
       spacing: NileSpacing.s12,
       runSpacing: NileSpacing.s8,
       children: [
-        Row(
-          mainAxisSize: MainAxisSize.min,
+        Wrap(
+          crossAxisAlignment: WrapCrossAlignment.center,
+          runSpacing: NileSpacing.s8,
           children: [
             if (showChatToggle) ...[
               NileStudioIconButton(
@@ -2492,8 +2502,9 @@ class NileStudioControlBar extends StatelessWidget {
           ],
         ),
         if (toolbar.isNotEmpty)
-          Row(
-            mainAxisSize: MainAxisSize.min,
+          Wrap(
+            crossAxisAlignment: WrapCrossAlignment.center,
+            runSpacing: NileSpacing.s8,
             children: [
               for (var i = 0; i < toolbar.length; i++) ...[
                 if (i > 0) const SizedBox(width: NileSpacing.s8),
@@ -2501,8 +2512,9 @@ class NileStudioControlBar extends StatelessWidget {
               ],
             ],
           ),
-        Row(
-          mainAxisSize: MainAxisSize.min,
+        Wrap(
+          crossAxisAlignment: WrapCrossAlignment.center,
+          runSpacing: NileSpacing.s8,
           children: [
             if (soundCheck && isHost) ...[
               OutlinedButton.icon(
