@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
+import 'analytics.dart';
 import 'brand_kit.dart';
 import 'live_elements.dart';
 import 'livekit_service.dart' show ElementStale;
@@ -36,7 +37,12 @@ class StudioElementsController extends ChangeNotifier {
     this.load,
     this.removeRemote,
     this.onError,
+    this.rehearsal = false,
   });
+
+  /// Studio Preview's controller: nothing leaves the device, and analytics
+  /// marks what it reports as a rehearsal.
+  final bool rehearsal;
 
   final ElementPush push;
 
@@ -165,8 +171,36 @@ class StudioElementsController extends ChangeNotifier {
     }
     _live[id] = next;
     notifyListeners();
-    if (!pushOffAir && !next.onAir && base.version == 0) return true;
-    return _send(next, clockOps);
+    if (!pushOffAir && !next.onAir && base.version == 0) {
+      _track(base, next);
+      return true;
+    }
+    final ok = await _send(next, clockOps);
+    if (ok) _track(base, next);
+    return ok;
+  }
+
+  /// PostHog: what the host did with an element — its kind and counts, never
+  /// its name or values.
+  void _track(LiveElement was, LiveElement now) {
+    final props = <String, Object>{'kind': now.kind, 'preview': rehearsal};
+    final t = now.targets;
+    if (was.targets.isNone && !t.isNone) {
+      NileAnalytics.capture(NileEvent.elementTaken, {
+        ...props,
+        'all_cameras': t.all,
+        if (!t.all) 'cameras': t.slots.length,
+      });
+    }
+    if (!was.angle && now.angle) {
+      NileAnalytics.capture(NileEvent.elementAngleShown, props);
+    }
+    if (was.open != now.open && now.choices.isNotEmpty) {
+      NileAnalytics.capture(
+        now.open ? NileEvent.elementTapsOpened : NileEvent.elementTapsClosed,
+        props,
+      );
+    }
   }
 
   /// Show [id] as its own angle, or stop.

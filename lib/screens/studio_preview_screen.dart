@@ -14,15 +14,21 @@ import '../services/chat_service.dart' show ChatMessage;
 import '../services/brand_kit.dart';
 import '../services/chat_tools_service.dart';
 import '../services/graphics_service.dart';
+import '../services/live_elements.dart';
+import '../services/overlay_layout.dart';
 import '../services/screen_capture_permission.dart';
 import '../services/share_urls.dart';
+import '../services/studio_elements_controller.dart';
 import '../services/studio_graphics.dart';
 import '../services/studio_prefs.dart';
 import '../theme.dart';
 import '../widgets/audio_meter.dart';
+import '../widgets/elements/element_kinds.dart' show ElementInteraction;
 import '../widgets/nile_studio.dart';
 import '../widgets/screen_share_picker.dart';
 import '../widgets/studio_chat_tools.dart';
+import '../widgets/studio_elements_panel.dart';
+import '../widgets/studio_layout_sheet.dart';
 import '../widgets/studio_preview_demo.dart';
 import '../widgets/studio_graphics_panel.dart';
 import '../widgets/studio_settings_sheet.dart';
@@ -35,7 +41,8 @@ import '../widgets/studio_settings_sheet.dart';
 /// never published, which `studio_preview_test.dart` holds this file to.
 /// Every production tool — graphics, tile controls, nudges, chat tools — acts
 /// on the demo or on local state. The only account data it reads is your own
-/// graphics library and quick messages, which belong to you, not a show.
+/// graphics and elements libraries and quick messages, which belong to you,
+/// not a show — element edits here stay in the preview.
 ///
 /// What it does change is [StudioPrefs], on purpose — the camera, mic mode and
 /// chat column picked here are what the next real Sound Check opens with.
@@ -96,6 +103,18 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
     sponsorName: 'Your sponsor',
   );
 
+  /// Live elements rehearsed locally: the controller's "push" hands each
+  /// change straight back. The library starts from your saved elements but
+  /// saves nowhere; the demo audience votes on anything open for taps.
+  late final _elements = StudioElementsController(
+    push: (e, _) async => e,
+    rehearsal: true,
+  )..addListener(_onElements);
+  final _elementLibrary = PreviewElementLibrary();
+
+  /// Spots and layer order per camera (each tile's Layout sheet).
+  OverlayLayout _layout = OverlayLayout.empty;
+
   /// Fiction for "count down to show start": ten minutes after you start.
   DateTime? _showStartAt;
 
@@ -107,7 +126,8 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
     WidgetsBinding.instance.addObserver(this);
     _demo
       ..addListener(_onDemo)
-      ..onAlert = _onAlert;
+      ..onAlert = _onAlert
+      ..onTally = _elements.setTally;
     StudioPrefs.load().then<void>((p) => _prefs = p, onError: (_) {});
     _cue.addListener(() {
       if (mounted) setState(() {});
@@ -145,11 +165,27 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
     _demo
       ..removeListener(_onDemo)
       ..dispose();
+    _elements
+      ..removeListener(_onElements)
+      ..dispose();
     _stopTracks();
     super.dispose();
   }
 
   void _onDemo() {
+    if (mounted) setState(() {});
+  }
+
+  /// Element angles become tiles, and whatever is open for taps gets votes.
+  void _onElements() {
+    _demo
+      ..elementAngles = [for (final e in _elements.angles) e.id]
+      ..vote({
+        for (final item in _elements.library)
+          if (_elements.live(item.id)?.openChoices case final c?
+              when c.isNotEmpty)
+            item.id: c,
+      });
     if (mounted) setState(() {});
   }
 
@@ -482,10 +518,10 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
 
   // ── Graphics ───────────────────────────────────────────────────────────────
 
-  /// The cameras a graphic can go on, in tile order.
+  /// The cameras a graphic or element can go on, in tile order.
   List<StudioSlotRef> get _slots => [
     for (final s in _sources)
-      if (s.isAngle) (id: s.slotId!, label: s.label),
+      if (s.isAngle && s.element == null) (id: s.slotId!, label: s.label),
   ];
 
   Future<void> _loadLibrary() async {
@@ -537,6 +573,7 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
       _push(_graphics);
     },
     brandKitDemo: true,
+    takeElements: _takeElementCues,
   );
 
   /// Stand-in links: the real ones only exist for a real show.
@@ -558,8 +595,61 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
   void _take() {
     final cues = _cue.value;
     if (cues.isEmpty) return;
-    _push(cues.take(_graphics, DateTime.now()));
+    if (cues.items.isNotEmpty) _push(cues.take(_graphics, DateTime.now()));
+    _takeElementCues(cues.elements);
     _cue.value = CueSet.empty;
+  }
+
+  // ── Elements + layout ──────────────────────────────────────────────────────
+
+  Future<bool> _takeElementCues(List<ElementCue> cues) async {
+    for (final c in cues) {
+      await _elements.setTargets(c.id, c.targets);
+    }
+    return true;
+  }
+
+  void _openElements() => showElementsPanel(
+    context,
+    controller: _elements,
+    slots: _slots,
+    cue: _cue,
+    onTake: () async => _take(),
+    library: _elementLibrary,
+    kit: _brandKit?.style,
+  );
+
+  NileOverlayExtras _overlayFor(NileStudioSource s, {bool preview = false}) {
+    if (s.element != null) {
+      return (elements: const [], layers: const [], interactionFor: null);
+    }
+    final slot = s.isScreenShare ? null : s.slotId;
+    final state = preview ? _elements.preview(_cue.value) : _elements.onAir;
+    return (
+      elements: state.forSlot(slot),
+      layers: _layout.layersFor(slot),
+      // The Studio sees the totals; it never votes.
+      interactionFor: (e) => ElementInteraction(tally: _elements.tally(e.id)),
+    );
+  }
+
+  /// A camera tile's "Layout…": spots and layer order, kept locally.
+  Future<void> _openLayout(NileStudioSource s) async {
+    final slot = s.slotId;
+    if (slot == null || s.element != null) return;
+    final choice = await showLayoutSheet(
+      context,
+      cameraLabel: s.label,
+      graphics: _graphics.forSlot(slot),
+      elements: _elements.onAir.forSlot(slot),
+      layers: _layout.layersFor(slot),
+    );
+    if (choice == null || !mounted) return;
+    setState(
+      () => _layout = choice.copyToAll
+          ? _layout.copiedToAll(choice.layers)
+          : _layout.withLayers(slot, choice.layers),
+    );
   }
 
   Widget _cueBar() {
@@ -578,13 +668,14 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
   }
 
   List<LiveGraphic> _previewFor(NileStudioSource s) {
+    if (s.element != null) return const [];
     final slot = s.isScreenShare ? null : s.slotId;
     final base = _graphics.withBrand(_brandKit?.style);
     return _cue.value.preview(base, DateTime.now()).forSlot(slot);
   }
 
   bool _isCued(NileStudioSource s) =>
-      _cue.value.lands(s.isScreenShare ? null : s.slotId);
+      s.element == null && _cue.value.lands(s.isScreenShare ? null : s.slotId);
 
   void _hotkey(int digit) {
     final action = graphicsHotkeyAction(
@@ -681,6 +772,7 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
       );
     },
     onReorder: _demo.reorder,
+    onLayout: _openLayout,
   );
 
   Future<void> _sendEveryone(NileStudioSource s) async {
@@ -881,14 +973,27 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
     );
   }
 
-  /// Your camera and the demo crew in the order you dragged them, each with
-  /// the show state the demo holds; your screen share rides under your camera.
+  /// Your camera, the demo crew and element angles in the order you dragged
+  /// them, each with the show state the demo holds; your screen share rides
+  /// under your camera.
   List<NileStudioSource> get _sources {
     final d = _demo;
     final crew = {for (final c in StudioPreviewDemo.crew) c.slotId!: c};
+    final angles = {for (final e in _elements.angles) elementAngleId(e.id): e};
     return [
       for (final slot in d.order)
-        if (crew[slot] case final c?)
+        if (angles[slot] case final e?)
+          NileStudioSource(
+            identity: slot,
+            label: e.name,
+            sublabel: 'Element angle',
+            slotId: slot,
+            element: e,
+            isOffAir: d.isOffAir(slot),
+            isDefaultAngle: d.defaultSlot == slot,
+            viewers: d.viewersOn(slot),
+          )
+        else if (crew[slot] case final c?)
           NileStudioSource(
             identity: c.identity,
             label: d.labelOf(c),
@@ -903,7 +1008,7 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
             health: d.healthOf(c.identity),
             nudgeAcked: d.ackedNudge(c.identity),
           )
-        else ...[
+        else if (slot == StudioPreviewDemo.selfSlot) ...[
           NileStudioSource(
             identity: _selfId,
             label: 'Your camera',
@@ -976,10 +1081,13 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
             selectedIdentity: _selectedSourceId,
             onSelectSource: (id) => setState(() => _selectedSourceId = id),
             selfIdentity: _selfId,
-            graphicsFor: (s) =>
-                _graphics.forSlot(s.isScreenShare ? null : s.slotId),
+            graphicsFor: (s) => s.element != null
+                ? const []
+                : _graphics.forSlot(s.isScreenShare ? null : s.slotId),
             previewFor: _previewFor,
             isCued: _isCued,
+            overlayFor: _overlayFor,
+            previewOverlayFor: (s) => _overlayFor(s, preview: true),
             sourceActions: _sourceActions,
             stats: NileStudioStats(
               isLive: live,
@@ -1065,6 +1173,13 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
                   onPressed: _openLibrary,
                   tooltip: 'Graphics library',
                   icon: Icons.collections_bookmark_outlined,
+                ),
+                NileStudioIconButton(
+                  onPressed: _openElements,
+                  tooltip: 'Elements',
+                  icon: Icons.widgets_outlined,
+                  active:
+                      !_elements.onAir.isEmpty || _elements.angles.isNotEmpty,
                 ),
               ],
             ),

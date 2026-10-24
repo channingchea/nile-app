@@ -123,6 +123,19 @@ async function closeRoom(event: { id: string; livekit_room: string }) {
       log("warn", { step: "stop-egress", eventId: event.id, error: String(err) });
     }
   }
+  const { data: grids } = await admin
+    .from("replay_grids")
+    .select("egress_id")
+    .eq("event_id", event.id)
+    .eq("status", "recording");
+  for (const g of grids ?? []) {
+    if (!g.egress_id) continue;
+    try {
+      await egressClient.stopEgress(g.egress_id as string);
+    } catch (err) {
+      log("warn", { step: "stop-grid-egress", eventId: event.id, error: String(err) });
+    }
+  }
 
   await roomService.deleteRoom(roomNameFor(event.livekit_room));
 }

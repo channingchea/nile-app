@@ -916,7 +916,8 @@ class _SourceTile extends StatelessWidget {
           _TileAction.offAir,
           s.isOffAir ? 'Put back on air' : 'Take off air',
         ),
-      if (s.isAngle && actions.onLayout != null)
+      // An element angle draws no camera graphics, so nothing to lay out.
+      if (s.isAngle && s.element == null && actions.onLayout != null)
         item(_TileAction.layout, 'Layout…'),
     ];
     final operator = [

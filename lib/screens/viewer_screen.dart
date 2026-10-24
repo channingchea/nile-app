@@ -10,6 +10,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:video_player/video_player.dart';
 import '../services/ad_service.dart';
+import '../services/analytics.dart';
 import '../services/block_service.dart';
 import '../services/chat_service.dart';
 import '../services/deep_link_service.dart';
@@ -1374,6 +1375,8 @@ class _ViewerScreenState extends State<ViewerScreen>
         choice: choice,
       );
       if (mounted && mine != null) setState(() => _myChoices[e.id] = mine);
+      // The kind only — never the choice.
+      NileAnalytics.capture(NileEvent.elementVoteCast, {'kind': e.kind});
     } catch (err) {
       if (!mounted) return;
       setState(() {

@@ -30,6 +30,7 @@
 //   stop-egress       host    → { success: true }   ← stops replay egress on show end
 //   replay-exists     viewer  → { available: bool } ← is a ready replay viewable by caller? (drives the CTA)
 //   replay-url        viewer  → { url, durationMs }  ← signed playback URL (ticket-gated)
+//   replay-grid       viewer  → { url, durationMs, marks } ← grid replay + overlay timeline (same gate)
 //   viewer-token      viewer  → { mode: "webrtc", token, wsUrl }   ← typed descriptor (3.2)
 //
 // Auth (section 3.3): verify-jwt is ON at the gateway. Every action requires a
@@ -80,6 +81,7 @@ import {
   validateLayout,
 } from "../_shared/elements.ts";
 import { cleanShowPatch, planReorder } from "../_shared/show.ts";
+import { timelineOf } from "../_shared/replay_marks.ts";
 
 // CORS headers are per-request, so the JSON responder is built per-request too
 // and handed to the helpers below (they run outside the handler's scope).
@@ -95,6 +97,7 @@ import {
   EgressClient,
   EncodedFileOutput,
   EncodedFileType,
+  EncodingOptionsPreset,
   RoomServiceClient,
   S3Upload,
 } from "https://esm.sh/livekit-server-sdk@2.9.7?target=deno";
@@ -122,6 +125,9 @@ const REPLAYS_S3_REGION = Deno.env.get("REPLAYS_S3_REGION") ?? "us-east-1";
 const REPLAYS_S3_ACCESS_KEY = Deno.env.get("REPLAYS_S3_ACCESS_KEY") ?? "";
 const REPLAYS_S3_SECRET_KEY = Deno.env.get("REPLAYS_S3_SECRET_KEY") ?? "";
 const REPLAYS_BUCKET = "replays";
+// Nile's recorder page (recorder/index.html, hosted on R2). Unset = no grid
+// replay; the combined recording alone still runs.
+const REPLAY_RECORDER_URL = Deno.env.get("REPLAY_RECORDER_URL") ?? "";
 
 // Signed replay URLs are valid for the recording's own length plus slack, held
 // between a floor and the old flat ceiling. See replayUrl() for the reasoning.
@@ -431,6 +437,8 @@ async function handle(req: Request, ctx: ReqCtx, json: Json): Promise<Response> 
       return await replayExists(body, user.id, admin, json);
     case "replay-url":
       return await replayUrl(body, user.id, admin, json);
+    case "replay-grid":
+      return await replayGrid(body, user.id, admin, json);
     case "viewer-token":
       return await viewerToken(body, user.id, admin, json);
     case "reconcile-viewers":
@@ -1133,6 +1141,21 @@ async function broadcastSystem(slug: string, event: string, payload: Record<stri
   }
 }
 
+/** Totals into a running grid replay's timeline, so the replay shows them move. */
+async function recordTally(eventPk: string, elementId: string, tally: Record<string, number>, admin: any) {
+  const { data: grid } = await admin
+    .from("replay_grids")
+    .select("id")
+    .eq("event_id", eventPk)
+    .eq("status", "recording")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (!grid) return;
+  const { error } = await admin.from("replay_marks").insert({ grid_id: grid.id, kind: "tally", data: { elementId, tally } });
+  if (error) log("warn", { action: "record-tally", error: error.message });
+}
+
 /**
  * Send an element's totals to everyone at most once a second. The first vote
  * after a quiet second goes out at once; votes inside the second schedule one
@@ -1149,6 +1172,7 @@ async function pushTally(eventPk: string, slug: string, elementId: string, choic
     }
     const tally = await tallyOf(eventPk, elementId, choices, admin);
     await broadcastSystem(slug, "tally", { elementId, tally });
+    await recordTally(eventPk, elementId, tally, admin);
   };
   if (wait === 0) return await send();
   // The trailing send outlives this request; keep the worker up for it.
@@ -1579,7 +1603,36 @@ async function startReplayEgress(
 
   // Object path inside the bucket: <eventPk>/<startedAt>.mp4
   const filepath = `${eventPk}/${startedAt}.mp4`;
-  const output = new EncodedFileOutput({
+  const output = replayFile(filepath);
+
+  // opts.layout = "speaker" → active-speaker composite. RoomCompositeOptions is
+  // a plain options object (interface), not a constructed class.
+  const info = await egressClient.startRoomCompositeEgress(
+    roomName,
+    { file: output },
+    { layout: "speaker" },
+  );
+
+  const { data: replay } = await admin.from("replays").insert({
+    event_id: eventPk,
+    egress_id: info.egressId,
+    status: "recording",
+    playback_path: filepath,
+    started_at: new Date(startedAt).toISOString(),
+  }).select("id").single();
+
+  // The grid replay (phase 6) rides alongside; it never decides egressStarted.
+  if (replay?.id && REPLAY_RECORDER_URL) {
+    await startGridEgress(eventPk, replay.id, roomName, startedAt, admin).catch((err) =>
+      log("error", { reqId: "-", action: "start-grid-egress", error: String(err) })
+    );
+  }
+
+  return true;
+}
+
+function replayFile(filepath: string) {
+  return new EncodedFileOutput({
     fileType: EncodedFileType.MP4,
     filepath,
     output: {
@@ -1594,24 +1647,53 @@ async function startReplayEgress(
       }),
     },
   });
+}
 
-  // opts.layout = "speaker" → active-speaker composite. RoomCompositeOptions is
-  // a plain options object (interface), not a constructed class.
-  const info = await egressClient.startRoomCompositeEgress(
-    roomName,
-    { file: output },
-    { layout: "speaker" },
-  );
-
-  await admin.from("replays").insert({
+/**
+ * Grid replay (studio live elements, phase 6): LiveKit records Nile's own
+ * recorder page — on-air cameras and element angles in the host's order —
+ * and the page reports its tiles and every overlay change to replay-recorder,
+ * proving itself with the row's recorder_key. The row exists before the
+ * egress does, so the page's first report always has somewhere to land.
+ */
+async function startGridEgress(eventPk: string, replayId: string, roomName: string, startedAt: number, admin: any) {
+  const filepath = `${eventPk}/${startedAt}-grid.mp4`;
+  const { data: grid, error } = await admin.from("replay_grids").insert({
+    replay_id: replayId,
     event_id: eventPk,
-    egress_id: info.egressId,
-    status: "recording",
     playback_path: filepath,
-    started_at: new Date(startedAt).toISOString(),
-  });
+  }).select("id, recorder_key").single();
+  if (error || !grid) throw error ?? new Error("grid row not created");
 
-  return true;
+  const page = new URL(REPLAY_RECORDER_URL);
+  page.searchParams.set("k", grid.recorder_key);
+  page.searchParams.set("fn", `${Deno.env.get("SUPABASE_URL")}/functions/v1/replay-recorder`);
+  try {
+    const info = await egressClient.startRoomCompositeEgress(roomName, { file: replayFile(filepath) }, {
+      layout: "nile-grid",
+      customBaseUrl: page.toString(),
+      encodingOptions: EncodingOptionsPreset.H264_1080P_30,
+    });
+    await admin.from("replay_grids").update({ egress_id: info.egressId }).eq("id", grid.id);
+  } catch (err) {
+    await admin.from("replay_grids").update({ status: "failed" }).eq("id", grid.id);
+    throw err;
+  }
+}
+
+/** Stop every grid recording still running for an event. Idempotent. */
+async function stopGridEgress(eventPk: string, admin: any) {
+  const { data: grids } = await admin
+    .from("replay_grids")
+    .select("egress_id")
+    .eq("event_id", eventPk)
+    .eq("status", "recording");
+  for (const g of grids ?? []) {
+    if (!g.egress_id) continue;
+    await egressClient.stopEgress(g.egress_id).catch((err) =>
+      log("warn", { action: "stop-grid-egress", error: String(err) })
+    );
+  }
 }
 
 // stop-egress — host ends the show; stop the active egress so the file
@@ -1646,6 +1728,7 @@ async function stopEgress(body: any, userId: string, admin: any, json: Json): Pr
       log("warn", { action: "stop-egress", error: String(err) }),
     );
   }
+  await stopGridEgress(gate.event.id, admin);
 
   // C12: nothing used to close the LiveKit room when a show ended — the cron is
   // DB-only, and publishers relied entirely on receiving the realtime 'ended'
@@ -1876,6 +1959,64 @@ async function replayUrl(body: any, userId: string, admin: any, json: Json): Pro
   if (signErr || !signed) return json({ error: "Could not sign replay URL" }, 500);
 
   return json({ url: signed.signedUrl, durationMs, expiresInSeconds: ttl });
+}
+
+// replay-grid — the grid replay (phase 6) and its overlay timeline, behind the
+// same gate as replay-url. { available: false } when this show has none (older
+// shows, or the grid recording failed): the app then plays replay-url.
+async function replayGrid(body: any, userId: string, admin: any, json: Json): Promise<Response> {
+  const gate = await gateReplayAccess(body.eventId, userId, admin, json);
+  if (gate instanceof Response) return gate;
+
+  const { data: replay } = await admin
+    .from("replays")
+    .select("id")
+    .eq("event_id", gate.id)
+    .eq("status", "ready")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  const { data: grid } = replay
+    ? await admin
+      .from("replay_grids")
+      .select("id, playback_path, duration_ms, recorder_started_at")
+      .eq("replay_id", replay.id)
+      .eq("status", "ready")
+      .limit(1)
+      .maybeSingle()
+    : { data: null };
+  if (!grid?.playback_path) return json({ available: false });
+
+  const rows: any[] = [];
+  for (let from = 0; from < 20000; from += 1000) {
+    const { data, error } = await admin
+      .from("replay_marks")
+      .select("offset_ms, at, kind, data")
+      .eq("grid_id", grid.id)
+      .order("id")
+      .range(from, from + 999);
+    if (error) return json({ error: "Could not load the replay" }, 500);
+    rows.push(...data);
+    if (data.length < 1000) break;
+  }
+
+  const durationMs = (grid.duration_ms as number | null) ?? null;
+  const ttl = Math.min(
+    REPLAY_URL_MAX_TTL_SECONDS,
+    Math.max(REPLAY_URL_MIN_TTL_SECONDS, Math.ceil((durationMs ?? 0) / 1000) + REPLAY_URL_SLACK_SECONDS),
+  );
+  const { data: signed, error: signErr } = await admin.storage
+    .from(REPLAYS_BUCKET)
+    .createSignedUrl(grid.playback_path, ttl);
+  if (signErr || !signed) return json({ error: "Could not sign replay URL" }, 500);
+
+  return json({
+    available: true,
+    url: signed.signedUrl,
+    durationMs,
+    expiresInSeconds: ttl,
+    marks: timelineOf(rows, grid.recorder_started_at),
+  });
 }
 
 // viewer-token (was POST /api/viewer-token) — JWT-derived identity + mode seam

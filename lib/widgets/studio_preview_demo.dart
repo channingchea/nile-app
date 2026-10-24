@@ -5,11 +5,14 @@ import 'package:flutter/foundation.dart';
 
 import '../services/camera_status.dart';
 import '../services/chat_service.dart' show ChatMessage, PinnedMessage;
+import '../services/live_elements.dart'
+    show ElementTally, elementAngleId, isElementAngleId;
 import 'nile_studio.dart';
 
 /// Everything in Studio Preview that would normally come from other people:
 /// a trickle of chat, two crew phones with their mic levels and health,
-/// viewers moving between angles and a show clock. It also holds the show
+/// viewers moving between angles (element angles among them), votes on any
+/// element open for taps, and a show clock. It also holds the show
 /// controls the real Studio writes to the room — off air, default angle,
 /// camera order, master audio — because here there is no room to write to.
 /// Pure fiction, generated on timers — nothing here reads or writes the
@@ -153,6 +156,16 @@ class StudioPreviewDemo extends ChangeNotifier {
   String _master = selfId;
   final Map<String, int> _angleViewers = {};
 
+  /// Element angles the host turned on (`el:` ids), and the elements open
+  /// for taps with their running totals.
+  List<String> _elementAngles = const [];
+  final Map<String, List<String>> _voting = {};
+  final Map<String, ElementTally> _tallies = {};
+  Timer? _votes;
+
+  /// Told whenever an element's pretend totals move.
+  void Function(String elementId, ElementTally tally)? onTally;
+
   final Map<String, CameraHealth> _health = Map.of(_startHealth);
   final Map<String, double> _levels = {};
   final Set<String> _talking = {};
@@ -169,8 +182,14 @@ class StudioPreviewDemo extends ChangeNotifier {
   int get crewCount => crew.length;
   PinnedMessage? get pinned => _pinned;
 
-  /// Camera slots top to bottom, as the host last dragged them.
-  List<String> get order => List.unmodifiable(_order);
+  /// Camera slots and element angles top to bottom, as the host last dragged
+  /// them; a new element angle starts at the bottom.
+  List<String> get order => [
+    for (final s in _order)
+      if (!isElementAngleId(s) || _elementAngles.contains(s)) s,
+    for (final a in _elementAngles)
+      if (!_order.contains(a)) a,
+  ];
   bool isOffAir(String slotId) => _offAir.contains(slotId);
   String? get defaultSlot => _defaultSlot;
   String get master => _master;
@@ -183,9 +202,10 @@ class StudioPreviewDemo extends ChangeNotifier {
   bool ackedNudge(String identity) =>
       _ackUntil[identity]?.isAfter(DateTime.now()) ?? false;
 
-  /// "Camera N · Alex" — the number follows the camera's place in [order].
+  /// "Camera N · Alex" — the number follows the camera's place in [order],
+  /// counting cameras only.
   String labelOf(NileStudioSource camera) =>
-      'Camera ${_order.indexOf(camera.slotId!) + 1} · '
+      'Camera ${_order.where((s) => !isElementAngleId(s)).toList().indexOf(camera.slotId!) + 1} · '
       '${_operators[camera.identity]}';
 
   Duration? get elapsed =>
@@ -254,12 +274,89 @@ class StudioPreviewDemo extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// The elements shown as their own angle. One that goes away takes its
+  /// viewers to the default angle and forgets its show settings.
+  set elementAngles(List<String> elementIds) {
+    final next = [for (final id in elementIds) elementAngleId(id)];
+    if (listEquals(next, _elementAngles)) return;
+    final gone = _elementAngles.where((a) => !next.contains(a)).toList();
+    _elementAngles = next;
+    for (final a in gone) {
+      _offAir.remove(a);
+      if (_defaultSlot == a) _defaultSlot = null;
+      final to = _fallback;
+      if (to != null) _move(a, to);
+    }
+    notifyListeners();
+  }
+
+  // ── Votes ──────────────────────────────────────────────────────────────────
+
+  /// Its pretend totals so far (kept after taps close).
+  ElementTally? tallyOf(String elementId) => _tallies[elementId];
+
+  /// Viewers tap on exactly these elements (id → its choices); any other
+  /// stops. Totals stay where they got to.
+  void vote(Map<String, List<String>> open) {
+    _voting
+      ..clear()
+      ..addAll(open);
+    open.forEach(
+      (id, choices) =>
+          _tallies[id] = {for (final c in choices) c: _tallies[id]?[c] ?? 0},
+    );
+    if (_voting.isEmpty) {
+      _votes?.cancel();
+      _votes = null;
+    } else {
+      _votes ??= Timer.periodic(
+        const Duration(milliseconds: 900),
+        (_) => addVotes(),
+      );
+    }
+  }
+
+  /// One beat of the audience voting: a few new votes (fast at first,
+  /// slowing as most of the room has voted), now and then someone changing
+  /// their mind. Leans toward the first choice so the race has a leader.
+  /// Public so a test can move totals without waiting on the timer.
+  @visibleForTesting
+  void addVotes() {
+    final room = _live ? max(viewerCount, 1) : 24;
+    for (final MapEntry(key: id, value: choices) in [..._voting.entries]) {
+      final t = {..._tallies[id] ?? const <String, int>{}};
+      final total = t.values.fold(0, (a, b) => a + b);
+      String pick() =>
+          choices[_random.nextDouble() < 0.45
+              ? 0
+              : _random.nextInt(choices.length)];
+      final left = (room * 0.8).round() - total;
+      final add = left <= 0
+          ? 0
+          : 1 + _random.nextInt(max(1, min(4, left ~/ 4)));
+      for (var i = 0; i < add; i++) {
+        final c = pick();
+        t[c] = (t[c] ?? 0) + 1;
+      }
+      if (total > 4 && _random.nextInt(4) == 0) {
+        final from = choices[_random.nextInt(choices.length)];
+        final to = pick();
+        if (from != to && (t[from] ?? 0) > 0) {
+          t[from] = t[from]! - 1;
+          t[to] = (t[to] ?? 0) + 1;
+        }
+      }
+      _tallies[id] = t;
+      onTally?.call(id, t);
+    }
+  }
+
   /// Where viewers land when their angle goes: the default angle if it's on
   /// air, else the first camera that is.
   String? get _fallback =>
       _defaultSlot != null && !_offAir.contains(_defaultSlot)
       ? _defaultSlot
-      : _order.where((s) => !_offAir.contains(s)).firstOrNull;
+      : order.where((s) => !_offAir.contains(s)).firstOrNull;
 
   void _move(String from, String to) {
     final n = _angleViewers.remove(from) ?? 0;
@@ -267,7 +364,7 @@ class StudioPreviewDemo extends ChangeNotifier {
   }
 
   void _seatAudience(int total) {
-    final onAir = _order.where((s) => !_offAir.contains(s)).toList();
+    final onAir = order.where((s) => !_offAir.contains(s)).toList();
     if (onAir.isEmpty) return;
     final home = _fallback ?? onAir.first;
     for (var i = 0; i < total; i++) {
@@ -444,7 +541,7 @@ class StudioPreviewDemo extends ChangeNotifier {
 
   /// A viewer arrives, leaves, or switches angle.
   void _driftAudience() {
-    final onAir = _order.where((s) => !_offAir.contains(s)).toList();
+    final onAir = order.where((s) => !_offAir.contains(s)).toList();
     if (onAir.isEmpty) return;
     final s = onAir[_random.nextInt(onAir.length)];
     final n = _angleViewers[s] ?? 0;
@@ -528,7 +625,9 @@ class StudioPreviewDemo extends ChangeNotifier {
     _chatTimer?.cancel();
     _clock?.cancel();
     _meter?.cancel();
+    _votes?.cancel();
     onAlert = null;
+    onTally = null;
     super.dispose();
   }
 }

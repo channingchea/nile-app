@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../services/analytics.dart';
 import '../services/brand_kit.dart';
 import '../services/elements_service.dart';
 import '../services/live_elements.dart';
@@ -63,6 +64,48 @@ class MemoryElementLibrary extends ElementLibrary {
   @override
   Future<void> delete(StudioElement e) async =>
       _items.removeWhere((x) => x.id == e.id);
+}
+
+/// Studio Preview's library: starts from your saved elements (read once,
+/// best-effort) and keeps every create, edit and delete in memory — a
+/// rehearsal never changes your account.
+class PreviewElementLibrary extends MemoryElementLibrary {
+  PreviewElementLibrary([this._saved = _account]);
+
+  static Future<List<StudioElement>> _account() =>
+      const ElementLibrary().list();
+
+  final Future<List<StudioElement>> Function() _saved;
+  Future<void>? _seeded;
+
+  Future<void> _seed() => _seeded ??= _saved().then(
+    (items) => _items.insertAll(0, items),
+    onError: (_) {}, // Offline or signed out: start empty.
+  );
+
+  @override
+  Future<List<StudioElement>> list() async {
+    await _seed();
+    return super.list();
+  }
+
+  @override
+  Future<StudioElement> create(StudioElement draft) async {
+    await _seed();
+    return super.create(draft);
+  }
+
+  @override
+  Future<void> update(StudioElement e) async {
+    await _seed();
+    return super.update(e);
+  }
+
+  @override
+  Future<void> delete(StudioElement e) async {
+    await _seed();
+    return super.delete(e);
+  }
 }
 
 /// The Studio toolbar's Elements panel (studio live elements, phase 3): every
@@ -227,6 +270,13 @@ class _ElementsPanelState extends State<ElementsPanel> {
       kit: widget.kit,
     );
     if (result == null || !mounted) return;
+    if (result.element case final saved?) {
+      NileAnalytics.capture(NileEvent.elementSaved, {
+        'kind': saved.kind,
+        'new': existing == null,
+        'preview': _c.rehearsal,
+      });
+    }
     if (result.deleted && existing != null) {
       widget.cue.value = widget.cue.value.without(existing.id);
       await _c.remove(existing.id);

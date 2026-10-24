@@ -14,6 +14,7 @@ import '../services/crew_service.dart';
 import '../services/share_urls.dart';
 import '../services/event_service.dart';
 import '../services/follow_service.dart';
+import '../services/live_elements.dart';
 import '../services/livekit_service.dart';
 import '../services/money.dart';
 import '../services/report_service.dart';
@@ -21,6 +22,7 @@ import '../services/supabase_client.dart';
 import '../services/ticket_service.dart';
 import '../router.dart';
 import '../theme.dart';
+import '../widgets/element_results.dart';
 import '../widgets/live_badge.dart';
 import '../widgets/nile_desktop.dart';
 import '../widgets/official_badge.dart';
@@ -97,6 +99,10 @@ class _EventDetailScreenState extends State<EventDetailScreen>
   bool _replayHasReplay = false;
   bool _replayPublished = false;
   int? _replayPrice; // cents, from replay-exists (server-authoritative)
+
+  // Host, after the show: every element and the final totals of those
+  // viewers could tap (livekit list-elements).
+  ({List<LiveElement> elements, Map<String, ElementTally> tallies})? _results;
 
   // Countdown
   Timer? _ticker;
@@ -274,6 +280,7 @@ class _EventDetailScreenState extends State<EventDetailScreen>
       _initCountdown();
       _initRealtime();
       _checkReplay();
+      _loadResults();
 
       // Best-effort "Sponsored by" line (0079) — only set for an active,
       // approved sponsorship; never blocks or fails the screen.
@@ -354,6 +361,19 @@ class _EventDetailScreenState extends State<EventDetailScreen>
     });
   }
 
+  /// Host, after the show: element results. Best-effort — the section just
+  /// doesn't appear without them.
+  Future<void> _loadResults() async {
+    final event = _event;
+    if (event == null || !_isOwnEvent || !event.isOver) return;
+    try {
+      final r = await LivekitService.listElements(
+        eventId: event.liveKitEventId ?? event.id,
+      );
+      if (mounted) setState(() => _results = r);
+    } catch (_) {}
+  }
+
   /// Host: open the pricing screen; refresh the replay probe on return so the
   /// CTA flips from "Set replay price" once published.
   Future<void> _priceReplay() async {
@@ -404,8 +424,10 @@ class _EventDetailScreenState extends State<EventDetailScreen>
             'is_official': _event!.hostIsOfficial,
           },
         };
+        final wasEnded = _event!.isEnded;
         setState(() => _event = Event.fromJson(merged));
         if (_event!.isLive || _event!.isEnded) _ticker?.cancel();
+        if (_event!.isEnded && !wasEnded) _loadResults();
       },
     );
   }
@@ -819,6 +841,12 @@ class _EventDetailScreenState extends State<EventDetailScreen>
       const SizedBox(height: 6),
       Text(_event!.description!, style: NileTextStyles.bodyMd()),
       const SizedBox(height: 24),
+    ],
+    // Host-only (the server answers the host alone): how viewers tapped.
+    if (_results case final r?
+        when ElementResults.tappable(r.elements).isNotEmpty) ...[
+      ElementResults(elements: r.elements, tallies: r.tallies),
+      const SizedBox(height: 16),
     ],
     // FUTURE (agreed 2026-08-08, unscoped): a `Sponsored by` block listing
     // vendor logos off ad_campaigns, and a `Collaborating with` block for

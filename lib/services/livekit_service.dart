@@ -477,6 +477,27 @@ class LivekitService {
     }
   }
 
+  /// The grid replay (cameras + element angles, with the overlay timeline to
+  /// draw on it), behind the same gate as [replayUrl]. Null when this show has
+  /// none (older shows, a failed grid recording) — play [replayUrl] instead.
+  static Future<ReplayGrid?> replayGrid({required String eventId}) async {
+    try {
+      final d = await _invoke<Map>({
+        'action': 'replay-grid',
+        'eventId': eventId,
+      });
+      final url = d['url'] as String?;
+      if (d['available'] != true || url == null) return null;
+      return ReplayGrid(
+        url: url,
+        durationMs: (d['durationMs'] as num?)?.toInt(),
+        marks: d['marks'] is List ? d['marks'] as List : const [],
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// Viewer: ticket-gated connection descriptor. Identity comes from the JWT.
   /// Today `mode` is always "webrtc"; the seam allows "hls" at much higher scale.
   ///
@@ -583,6 +604,13 @@ class ReplayPlayback {
   final String url; // short-lived signed URL to the composited replay MP4
   final int? durationMs;
   const ReplayPlayback({required this.url, this.durationMs});
+}
+
+class ReplayGrid {
+  final String url; // short-lived signed URL to the grid replay MP4
+  final int? durationMs;
+  final List<Object?> marks; // overlay timeline, see ReplayTimeline.fromMarks
+  const ReplayGrid({required this.url, this.durationMs, this.marks = const []});
 }
 
 class ReplayAvailability {

@@ -79,17 +79,18 @@ Findings that shaped this plan:
 - [ ] Separate to-do (website copy, not part of this build): privacy-policy line about storing votes.
 
 ## Phase 6: Replays with graphics + elements (entirely in the Nile app)
-- [ ] Decide the approach later (all in-app, nothing on the website). Candidate: record each camera separately plus a timeline of overlay/element changes, and have the app's replay screen draw the grid and overlays itself.
-- [ ] Replay shows a grid of on-air cameras + element angles, each tile with its own graphics/elements in layer order.
-- [ ] Results show (scores, poll results); nothing is tappable; QR codes display but aren't clickable.
-- [ ] Check grid sync between cameras in replay and fix if it drifts.
+- [x] Approach (decided 2026-10-23): one combined grid recording through Nile's own recorder page, kept alongside today's combined recording as the backup. The app draws graphics and elements over it.
+- [x] Replay shows a grid of on-air cameras + element angles, each tile with its own graphics/elements in layer order.
+- [x] Results show (scores, poll results); nothing is tappable; QR codes display but aren't clickable.
+- [ ] Check grid sync between cameras in replay and fix if it drifts — needs a real show (on-device checklist).
 
 ## Phase 7: Studio Preview, compatibility, verification
-- [ ] Studio Preview supports elements, layouts, virtual angles, and simulated votes.
-- [ ] Confirm older builds ignore unknown element kinds / layout fields without crashing; bump `min_build` at ship.
-- [ ] Post-show element results available to the host; PostHog events for element use.
-- [ ] Full test pass (Flutter + Deno), analyze clean, iOS/Android/macOS builds.
-- [ ] On-device checklist: layout on phones upright/sideways, hold-back timing vs video, Studio drop/reconnect, element angle + master audio.
+- [x] Studio Preview supports elements, layouts, virtual angles, and simulated votes.
+- [x] Confirm older builds ignore unknown element kinds / layout fields without crashing (audited — nothing crashes; see notes).
+- [ ] Bump `min_build` at ship.
+- [x] Post-show element results available to the host; PostHog events for element use.
+- [x] Full test pass (Flutter + Deno), analyze clean, iOS/Android/macOS builds.
+- [ ] On-device checklist: layout on phones upright/sideways, hold-back timing vs video, Studio drop/reconnect, element angle + master audio, grid replay (overlays on the right tiles, camera sync, start offset).
 
 ## Implementation notes — phases 1-3 (2026-10-23)
 - Migration 0138 (applied to prod): `studio_elements` uses `owner_id` (matches `studio_graphics`), kind checked by shape only so new kinds need no migration; `live_element_state` adds a `spec` column (name/config/style/targets/presentedBy) and `content_at` (hold-back stamp). No RLS policies on live state — the Studio reads it via the new `list-elements` action, which also re-mirrors on-air elements into a room that came back without them.
@@ -108,7 +109,22 @@ Findings that shaped this plan:
 - Overlay: elements are tappable only while open and not under a full-screen item; Studio sees totals, never taps.
 - 0139 applied to prod and the livekit function deployed 2026-10-23 (after the host approved the migration). SQL self-test passed (rolled back).
 
+## Implementation notes — phase 6 (2026-10-23)
+- [stated] Channing chose one combined grid video (cheapest), kept the old combined recording as a backup, and then our own recorder page once it was clear LiveKit's built-in grid can't say which tile is which camera.
+- Recorder page: `recorder/index.html` + `recorder.js` (plain JS, livekit-client 2.17.3 served next to it), published by `recorder/upload.sh` to https://downloads.joinnile.com/recorder/v1/. LiveKit's recording browser opens it; viewers never see it. Tiles = on-air cameras/screen shares + element angles in the show order, 16:9 boxes in a near-square grid (last row centred). It reports `start` (wall clock), `tiles` (fractions of the frame), `meta` (room metadata) and `end`, each stamped with video time, to the new `replay-recorder` function (no user session; proves itself with `replay_grids.recorder_key` in its URL; plain-text POST, no CORS preflight). `node recorder/recorder_test.js` checks the layout rules; a headless run with a fake room checked tiles, off-air removal and START/END_RECORDING.
+- Migrations 0140 (`replay_grids`, `replay_marks`, purge/fail-stuck cover grids) + 0140a (plain unique index for the upsert), applied to prod.
+- livekit fn: start-show also starts the grid egress (`customBaseUrl` = secret `REPLAY_RECORDER_URL`, 1080p, file `<event>/<start>-grid.mp4`) — non-fatal, never affects `egressStarted`; stop-egress/sweep/webhook stop it too; vote totals are added to the grid timeline as they go out; new `replay-grid` action (same gate as replay-url) returns the signed URL + marks sorted by video time (tallies placed from wall time). livekit-webhook marks the grid ready/failed and sends no extra notification.
+- App: `ReplayTimeline` (lib/services/replay_timeline.dart) answers "what was on screen at this moment"; `ReplayGridOverlay` draws each tile (camera → NileGraphicsLayer for that slot, element angle → NileElementAngle) inside IgnorePointer; `OverlayClock` gives overlays the recording's moment so clocks, countdowns and auto-hides read as on air (live behaviour unchanged). ReplayScreen plays the grid when it has a timeline, else the combined recording; the dock keeps the timeline per event.
+- Not tested on a real show (none possible yet). On the device pass: overlays line up with tiles, camera sync in the grid, the file starts where the page says it does.
+
+## Implementation notes — phase 7 (2026-10-23)
+- Studio Preview: Elements button, panel, per-tile Layout sheet and element-angle tiles as in the real Studio, all local (a stand-in push hands each change straight back). `PreviewElementLibrary` reads saved elements once, read-only, then keeps edits in memory. Simulated votes arrive while taps are open (slowing toward ~80% of the demo room, leaning to the first choice); closing taps stops them. Element angles join the demo's tile order and work with off air / default / send everyone / drag order / viewer counts. "Layout…" is no longer offered on element-angle tiles (they draw no camera graphics) — real Studio too.
+- PostHog: `element_saved`, `element_taken` (kind, all cameras or how many), `element_angle_shown`, `element_taps_opened`, `element_taps_closed`, `element_vote_cast` (viewer, kind only). Kinds and counts only, never names, values or choices; `preview: true/false` marks rehearsal. Controller events fire only after a successful push and only on a real change.
+- Results: host's ended-event page shows a "Results" section (lib/widgets/element_results.dart) from `list-elements` — each element with choices, total votes, per-choice count, share and bar. Host only (list-elements uses requireHost). Choices show their raw ids until a kind supplies labels.
+- Old builds (before 609bcd6): nothing crashes. They don't show elements or element angles, can't vote, draw graphics at their old spots and order, and **still show graphics hidden with the Layout eye**; with only an element angle on air they see nothing. An old Studio dragging tiles drops element angles to the bottom. Hence the `min_build` bump at ship.
+- Verified: analyze clean, 394 Flutter tests (test/studio_preview_elements_test.dart 10, test/replay_timeline_test.dart 5), 70 Deno (money_test failure pre-existing), recorder layout test; builds below.
+
 ## Open questions / risks
-- Replay approach (Phase 6) still to be designed, constrained to the app only.
+- Grid replay timing: overlay marks are stamped when the recorder page sees each change; video time 0 is when it logs START_RECORDING — a small fixed lag is possible, to check on the first real show.
 - Hold-back accuracy depends on knowing each viewer's video delay; RealSync content-age is the best source but its flag is off by default.
 - Privacy-policy wording for stored votes (website copy, outside this build).

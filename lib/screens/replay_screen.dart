@@ -5,12 +5,19 @@ import 'package:video_player/video_player.dart';
 import '../services/event_service.dart';
 import '../services/livekit_service.dart';
 import '../services/mini_player.dart';
+import '../services/overlay_clock.dart';
+import '../services/replay_timeline.dart';
 import '../theme.dart';
+import '../widgets/replay_grid_overlay.dart';
 
-/// Plays the composited replay (VOD) for an ended event. The signed playback URL
-/// is minted server-side by the `replay-url` action behind the same paid-ticket
-/// gate as the live stream, so navigation here is only offered when a replay is
-/// known to be available to this user (see event detail).
+/// Plays the replay (VOD) for an ended event. The signed playback URL is minted
+/// server-side behind the same paid-ticket gate as the live stream, so
+/// navigation here is only offered when a replay is known to be available to
+/// this user (see event detail).
+///
+/// Shows recorded with the grid recorder (studio live elements, phase 6) play
+/// the grid of on-air cameras and element angles with the graphics and
+/// elements drawn over each tile; older shows play the combined recording.
 class ReplayScreen extends StatefulWidget {
   final Event event;
   const ReplayScreen({super.key, required this.event});
@@ -20,7 +27,12 @@ class ReplayScreen extends StatefulWidget {
 }
 
 class _ReplayScreenState extends State<ReplayScreen> {
+  /// Overlay timelines by event, so a replay coming back from the dock keeps
+  /// its graphics without another fetch.
+  static final _timelines = <String, ReplayTimeline>{};
+
   VideoPlayerController? _controller;
+  ReplayTimeline? _timeline;
   String? _error;
   bool _controlsVisible = true;
 
@@ -37,6 +49,7 @@ class _ReplayScreenState extends State<ReplayScreen> {
     final docked = MiniPlayer.instance.reclaim(widget.event.id);
     if (docked != null) {
       _controller = docked;
+      _timeline = _timelines[widget.event.id];
     } else {
       _load();
     }
@@ -51,13 +64,24 @@ class _ReplayScreenState extends State<ReplayScreen> {
 
   Future<void> _load() async {
     final slug = widget.event.liveKitEventId ?? widget.event.id;
-    final playback = await LivekitService.replayUrl(eventId: slug);
+    // The grid replay when this show has one with overlays to draw; the
+    // combined recording otherwise.
+    final grid = await LivekitService.replayGrid(eventId: slug);
+    final timeline = grid == null ? null : ReplayTimeline.fromMarks(grid.marks);
+    final url = timeline != null && !timeline.isEmpty
+        ? grid!.url
+        : (await LivekitService.replayUrl(eventId: slug))?.url;
     if (!mounted) return;
-    if (playback == null) {
+    if (url == null) {
       setState(() => _error = 'This replay is no longer available.');
       return;
     }
-    final controller = VideoPlayerController.networkUrl(Uri.parse(playback.url));
+    if (url == grid?.url && timeline != null) {
+      _timeline = _timelines[widget.event.id] = timeline;
+    } else {
+      _timelines.remove(widget.event.id);
+    }
+    final controller = VideoPlayerController.networkUrl(Uri.parse(url));
     try {
       await controller.initialize();
     } catch (_) {
@@ -133,10 +157,7 @@ class _ReplayScreenState extends State<ReplayScreen> {
       ),
       // A player is one of the surfaces that breaks out of the text column —
       // capped only so the video doesn't stretch absurdly on a 32" display.
-      body: NileMaxWidth(
-        maxWidth: 1100,
-        child: Center(child: _buildContent()),
-      ),
+      body: NileMaxWidth(maxWidth: 1100, child: Center(child: _buildContent())),
     );
   }
 
@@ -149,7 +170,11 @@ class _ReplayScreenState extends State<ReplayScreen> {
           children: [
             Icon(Icons.error_outline, color: NileColors.txtSecondary, size: 40),
             const SizedBox(height: NileSpacing.s12),
-            Text(_error!, textAlign: TextAlign.center, style: NileTextStyles.bodyMd()),
+            Text(
+              _error!,
+              textAlign: TextAlign.center,
+              style: NileTextStyles.bodyMd(),
+            ),
           ],
         ),
       );
@@ -166,13 +191,34 @@ class _ReplayScreenState extends State<ReplayScreen> {
           alignment: Alignment.center,
           children: [
             VideoPlayer(c),
-            if (_controlsVisible) _Controls(controller: c, onPlayPause: _togglePlay),
+            if (_timeline case final timeline?)
+              Positioned.fill(child: _overlay(c, timeline)),
+            if (_controlsVisible)
+              _Controls(controller: c, onPlayPause: _togglePlay),
           ],
         ),
       ),
     );
   }
 }
+
+/// The grid replay's graphics and elements at the current position. Clocks and
+/// countdowns read the recording's own moment, not today's.
+Widget _overlay(VideoPlayerController c, ReplayTimeline timeline) =>
+    ValueListenableBuilder<VideoPlayerValue>(
+      valueListenable: c,
+      builder: (context, v, _) {
+        final overlay = ReplayGridOverlay(
+          frame: timeline.frameAt(v.position.inMilliseconds),
+        );
+        return timeline.startWall == null
+            ? overlay
+            : OverlayClock(
+                now: () => timeline.wallAt(c.value.position.inMilliseconds)!,
+                child: overlay,
+              );
+      },
+    );
 
 class _Controls extends StatelessWidget {
   final VideoPlayerController controller;
@@ -191,7 +237,9 @@ class _Controls extends StatelessWidget {
             iconSize: 64,
             color: Colors.white,
             icon: Icon(
-              controller.value.isPlaying ? Icons.pause_circle_filled : Icons.play_circle_fill,
+              controller.value.isPlaying
+                  ? Icons.pause_circle_filled
+                  : Icons.play_circle_fill,
             ),
             onPressed: onPlayPause,
           ),

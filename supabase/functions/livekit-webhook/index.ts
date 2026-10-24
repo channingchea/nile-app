@@ -89,6 +89,19 @@ serve(async (req) => {
         );
         log("info", { event: "room_finished", roomName, action: "stopped-egress" });
       }
+      // The grid replay (phase 6) records alongside; stop it the same way.
+      const { data: grids } = await admin
+        .from("replay_grids")
+        .select("egress_id")
+        .eq("event_id", ev.id)
+        .eq("status", "recording");
+      for (const g of grids ?? []) {
+        if (g.egress_id) {
+          await egressClient.stopEgress(g.egress_id).catch((err) =>
+            log("warn", { event: "room_finished", roomName, stop_error: String(err) }),
+          );
+        }
+      }
 
       // C6: close the event too. Nothing used to write events.status here, so a
       // host whose battery died stayed pinned to Live Now for the rest of the
@@ -136,6 +149,25 @@ serve(async (req) => {
     if (error) {
       log("error", { egressId, error: error.message });
       return new Response("db error", { status: 500 });
+    }
+
+    // Not the main recording: maybe the grid replay (phase 6). Its own row,
+    // no notifications — the main recording's end already sends those.
+    if (!updated) {
+      const { data: grid, error: gridErr } = await admin
+        .from("replay_grids")
+        .update({ status: ok ? "ready" : "failed", duration_ms: ok ? durationMs : null })
+        .eq("egress_id", egressId)
+        .select("id")
+        .maybeSingle();
+      if (gridErr) {
+        log("error", { egressId, error: gridErr.message });
+        return new Response("db error", { status: 500 });
+      }
+      if (grid) {
+        log("info", { event: "egress_ended", egressId, grid: true, status: ok ? "ready" : "failed" });
+        return new Response("ok", { status: 200 });
+      }
     }
 
     // Fan out replay_ready notifications (followers + paid-ticket holders), gated

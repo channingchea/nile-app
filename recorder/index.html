@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nile recorder</title>
+<!--
+  Nile's grid replay recorder (studio live elements, phase 6). LiveKit's
+  recording browser opens this page; viewers never see it. It shows the
+  on-air cameras and element angles in the host's order and tells
+  replay-recorder where each tile sits and what the overlays were, so the
+  app can draw graphics on the replay. Deployed with recorder/upload.sh.
+-->
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  .tile { position: absolute; overflow: hidden; background: #000; }
+  .tile video { width: 100%; height: 100%; object-fit: contain; display: block; }
+</style>
+<script src="livekit-client.umd.js"></script>
+</head>
+<body>
+<script src="recorder.js"></script>
+</body>
+</html>

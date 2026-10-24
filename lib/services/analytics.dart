@@ -84,7 +84,16 @@ class NileAnalytics {
     } catch (_) {/* never surface analytics failures */}
   }
 
-  static Future<void> capture(NileEvent event, [Map<String, Object>? props]) async {
+  /// Tests: when set, every [capture] is recorded here too (configured or
+  /// not), so a test can check what would have been sent.
+  @visibleForTesting
+  static List<(NileEvent, Map<String, Object>)>? debugLog;
+
+  static Future<void> capture(
+    NileEvent event, [
+    Map<String, Object>? props,
+  ]) async {
+    debugLog?.add((event, props ?? const {}));
     // Belt and braces: disable() should already have stopped this, but the
     // opt-out is a promise to the user and shouldn't rest on one SDK call
     // having succeeded.
@@ -130,7 +139,17 @@ enum NileEvent {
   eventPublished('event_published'),
   signUpCompleted('sign_up_completed'),
   studioPreviewOpened('studio_preview_opened'),
-  studioPreviewStarted('studio_preview_started');
+  studioPreviewStarted('studio_preview_started'),
+
+  // Studio live elements. Properties are the element's kind and counts only —
+  // never its name, a viewer's choice or anything else identifying. `preview`
+  // is true when it happened in Studio Preview (a rehearsal), not a show.
+  elementSaved('element_saved'),
+  elementTaken('element_taken'),
+  elementAngleShown('element_angle_shown'),
+  elementTapsOpened('element_taps_opened'),
+  elementTapsClosed('element_taps_closed'),
+  elementVoteCast('element_vote_cast');
 
   const NileEvent(this.name);
 

@@ -5,6 +5,7 @@ import 'package:intl/intl.dart' show DateFormat;
 import 'package:qr_flutter/qr_flutter.dart';
 
 import '../services/live_elements.dart';
+import '../services/overlay_clock.dart';
 import '../services/overlay_layout.dart';
 import '../services/studio_graphics.dart';
 import '../theme.dart';
@@ -73,8 +74,8 @@ class _NileGraphicsLayerState extends State<NileGraphicsLayer> {
   final Map<String, _Gone> _gone = {};
 
   @override
-  void initState() {
-    super.initState();
+  void didChangeDependencies() {
+    super.didChangeDependencies();
     _recompute();
   }
 
@@ -94,11 +95,14 @@ class _NileGraphicsLayerState extends State<NileGraphicsLayer> {
   /// Place everything still up, and remember what just left so its fade-out
   /// has somewhere to happen.
   void _recompute() {
+    // Fades run on real time; what's up runs on the overlay clock (the
+    // recording's moment in a replay).
     final now = DateTime.now().millisecondsSinceEpoch;
+    final at = OverlayClock.maybeNow(context) ?? now;
     final placed = placeOverlay(
       graphics: [
         for (final g in widget.graphics)
-          if (!g.expiredAt(now)) g,
+          if (!g.expiredAt(at)) g,
       ],
       elements: widget.elements,
       layers: widget.layers,
@@ -115,7 +119,7 @@ class _NileGraphicsLayerState extends State<NileGraphicsLayer> {
     _gone.removeWhere((k, g) => current.contains(k) || g.until <= now);
     _placed = placed;
     _schedulePurge(now);
-    _scheduleHide(now);
+    _scheduleHide(at);
   }
 
   void _schedulePurge(int now) {
@@ -823,7 +827,11 @@ class _SlateState extends State<_Slate> {
     final end = widget.g.endsAt;
     if (end == null) return null;
     final left = Duration(
-      milliseconds: (end - DateTime.now().millisecondsSinceEpoch).clamp(0, 86400000),
+      milliseconds:
+          (end -
+                  (OverlayClock.maybeNow(context) ??
+                      DateTime.now().millisecondsSinceEpoch))
+              .clamp(0, 86400000),
     );
     final m = left.inMinutes;
     final s = (left.inSeconds % 60).toString().padLeft(2, '0');

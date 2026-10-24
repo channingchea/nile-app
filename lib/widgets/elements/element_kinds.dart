@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../services/live_elements.dart';
+import '../../services/overlay_clock.dart';
 import '../../services/server_clock.dart';
 import '../../theme.dart';
 import '../overlay_look.dart';
@@ -240,8 +241,8 @@ class _CounterView extends StatelessWidget {
         if (showClock)
           _Ticking(
             running: clock.running,
-            builder: (_) => Text(
-              formatClock(clock.valueAt(ServerClock.now())),
+            builder: (context) => Text(
+              formatClock(clock.valueAt(OverlayClock.nowOf(context))),
               style: look.font(
                 NileTextStyles.labelLg().copyWith(
                   fontSize: u * 2.2 * s,
