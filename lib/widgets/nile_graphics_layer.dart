@@ -38,6 +38,7 @@ class NileGraphicsLayer extends StatefulWidget {
     this.elements = const [],
     this.layers = const [],
     this.onTapLink,
+    this.interactionFor,
   });
 
   final List<LiveGraphic> graphics;
@@ -50,6 +51,11 @@ class NileGraphicsLayer extends StatefulWidget {
   /// Called with a tapped [LiveGraphic.tappable] graphic. Null = nothing is
   /// tappable (Studio, operator phones).
   final ValueChanged<LiveGraphic>? onTapLink;
+
+  /// Votes, totals and taps for an element (phase 5). A viewer's
+  /// [ElementInteraction.onTap] works only while the element is open and
+  /// nothing full screen sits over it.
+  final ElementInteraction? Function(LiveElement e)? interactionFor;
 
   static const fade = Duration(milliseconds: 250);
 
@@ -155,26 +161,40 @@ class _NileGraphicsLayerState extends State<NileGraphicsLayer> {
         final margin = u * 3;
         final bannerH = u * 6;
 
+        // Under a full-screen item nothing takes taps.
+        bool covered(PlacedItem p) => topFull != null && topFull > p.z;
+
         VoidCallback? tapFor(PlacedItem p) {
           final g = p.graphic;
           if (onTapLink == null || g == null || !g.tappable) return null;
-          // Under a full-screen item nothing takes taps.
-          if (topFull != null && topFull > p.z) return null;
+          if (covered(p)) return null;
           return () => onTapLink(g);
+        }
+
+        ElementInteraction? interactionOf(PlacedItem p) {
+          final e = p.element;
+          final i = e == null ? null : widget.interactionFor?.call(e);
+          if (i == null || i.onTap == null) return i;
+          return e!.openChoices.isEmpty || covered(p)
+              ? ElementInteraction(mine: i.mine, tally: i.tally)
+              : i;
         }
 
         Widget channel(({String key, PlacedItem at, PlacedItem? item}) c) {
           final item = c.item;
+          final interaction = item == null ? null : interactionOf(item);
           return IgnorePointer(
             key: ValueKey(c.key),
-            ignoring: item == null || tapFor(item) == null,
+            ignoring:
+                item == null ||
+                (tapFor(item) == null && interaction?.onTap == null),
             child: AnimatedSwitcher(
               duration: NileGraphicsLayer.fade,
               child: item == null
                   ? const SizedBox.shrink(key: ValueKey('none'))
                   : KeyedSubtree(
                       key: ValueKey(item.id),
-                      child: _draw(item, u, tapFor(item), bannerH),
+                      child: _draw(item, u, tapFor(item), bannerH, interaction),
                     ),
             ),
           );
@@ -319,9 +339,17 @@ class _NileGraphicsLayerState extends State<NileGraphicsLayer> {
     );
   }
 
-  Widget _draw(PlacedItem p, double u, VoidCallback? onTap, double bannerH) {
+  Widget _draw(
+    PlacedItem p,
+    double u,
+    VoidCallback? onTap,
+    double bannerH,
+    ElementInteraction? interaction,
+  ) {
     final e = p.element;
-    if (e != null) return buildElement(e, u, full: p.isFull);
+    if (e != null) {
+      return buildElement(e, u, full: p.isFull, interaction: interaction);
+    }
     final g = p.graphic!;
     return switch (g.kind) {
       GraphicKind.lowerThird => _LowerThird(g: g, u: u),
@@ -333,6 +361,49 @@ class _NileGraphicsLayerState extends State<NileGraphicsLayer> {
       GraphicKind.banner => _Banner(g: g, u: u, height: bannerH),
       GraphicKind.slate => _Slate(g: g, u: u),
     };
+  }
+}
+
+/// An element shown as its own angle (phase 4): full screen on its brand
+/// background, measured against the 16:9 picture like everything else. What
+/// viewers see in the main view and thumbnails, and the Studio on the tile.
+class NileElementAngle extends StatelessWidget {
+  const NileElementAngle({super.key, required this.element, this.interaction});
+
+  final LiveElement element;
+  final ElementInteraction? interaction;
+
+  @override
+  Widget build(BuildContext context) {
+    final look = OverlayLook(element.style);
+    return ColoredBox(
+      color: look.page,
+      child: LayoutBuilder(
+        builder: (context, box) {
+          final frame = videoFrame(box.biggest);
+          return Stack(
+            children: [
+              Positioned.fromRect(
+                rect: frame,
+                child: buildElement(
+                  element,
+                  frame.width / 100,
+                  full: true,
+                  interaction: element.openChoices.isEmpty
+                      ? interaction == null
+                            ? null
+                            : ElementInteraction(
+                                mine: interaction!.mine,
+                                tally: interaction!.tally,
+                              )
+                      : interaction,
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
   }
 }
 

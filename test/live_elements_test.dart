@@ -6,14 +6,17 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:go_router/go_router.dart';
 
 import 'package:nile_app/services/brand_kit.dart';
+import 'package:nile_app/services/nile_navigation.dart';
 import 'package:nile_app/services/live_elements.dart';
 import 'package:nile_app/services/livekit_service.dart' show ElementStale;
 import 'package:nile_app/services/overlay_layout.dart';
 import 'package:nile_app/services/server_clock.dart';
 import 'package:nile_app/services/studio_elements_controller.dart';
 import 'package:nile_app/services/studio_graphics.dart';
+import 'package:nile_app/widgets/elements/element_kinds.dart';
 import 'package:nile_app/widgets/nile_graphics_layer.dart';
 import 'package:nile_app/widgets/studio_elements_panel.dart';
 import 'package:nile_app/widgets/studio_graphics_panel.dart' show StudioSlotRef;
@@ -362,10 +365,17 @@ void main() {
     test('restore: the server wins over older local state', () async {
       final r = StudioElementsController(
         push: (e, ops) async => e,
-        load: () async => [_live(value: 7).copyWith(version: 5)],
+        load: () async => (
+          elements: [_live(value: 7).copyWith(version: 5)],
+          tallies: {
+            'el-1': {'up': 2, 'down': 1},
+          },
+        ),
       );
       await r.restore();
       expect(r.live('el-1')!.state['value'], 7);
+      // Totals after the show come back with it.
+      expect(r.tally('el-1'), {'up': 2, 'down': 1});
     });
   });
 
@@ -540,6 +550,232 @@ void main() {
       await t.sendKeyEvent(LogicalKeyboardKey.enter);
       await t.pump();
       expect(took, 1);
+    });
+  });
+
+  group('element angles (phase 4)', () {
+    test('ids, round-trip and the angle list', () {
+      expect(elementAngleId('x'), 'el:x');
+      expect(isElementAngleId('el:x'), isTrue);
+      expect(isElementAngleId('s1'), isFalse);
+      expect(elementIdOfAngle('el:x'), 'x');
+      final e = _live(targets: GraphicTargets.none).copyWith(angle: true);
+      expect(e.live, isTrue);
+      expect(LiveElement.fromJson(e.toJson())!.angle, isTrue);
+      final s = ElementsState(items: [e, _live().copyWith()]);
+      expect(s.angles.single.angle, isTrue);
+      // Its own angle isn't over any camera.
+      expect(s.forSlot('s1').where((x) => x.angle), isEmpty);
+    });
+
+    test('the Studio lists element angles from its own state', () async {
+      final c = StudioElementsController(push: (e, ops) async => e)
+        ..setLibrary(const [_counter]);
+      await c.setAngle('el-1', true);
+      expect(c.angles.single.id, 'el-1');
+      await c.setAngle('el-1', false);
+      expect(c.angles, isEmpty);
+    });
+
+    testWidgets('draws full screen on its brand background', (t) async {
+      await t.pumpWidget(
+        MaterialApp(
+          home: SizedBox(
+            width: 640,
+            height: 360,
+            child: NileElementAngle(element: _live(value: 12)),
+          ),
+        ),
+      );
+      expect(find.text('12'), findsOneWidget);
+    });
+  });
+
+  group('viewer taps (phase 5)', () {
+    LiveElement poll({bool open = true, bool onAir = true}) => LiveElement(
+      id: 'p',
+      kind: 'counter',
+      name: 'Poll',
+      config: const {'label': 'Who wins?', 'step': 1, 'taps': true},
+      state: {'value': 0, if (open) 'open': true},
+      targets: onAir ? const GraphicTargets.all() : GraphicTargets.none,
+    );
+
+    test('open + live + choices = tappable', () {
+      expect(poll().openChoices, ['up', 'down']);
+      expect(poll(open: false).openChoices, isEmpty);
+      expect(poll(onAir: false).openChoices, isEmpty);
+      expect(_live().openChoices, isEmpty); // taps off
+      expect(ElementsState(items: [poll()]).takesTaps, isTrue);
+      expect(tallyFromJson({'up': 3, 'x': 'no'}), {'up': 3});
+    });
+
+    Widget layer(LiveElement e, {List<LiveGraphic> graphics = const [], void Function(String)? onTap, String? mine}) =>
+        MaterialApp(
+          home: Center(
+            child: SizedBox(
+              width: 640,
+              height: 360,
+              child: NileGraphicsLayer(
+                graphics: graphics,
+                elements: [e],
+                interactionFor: (_) => ElementInteraction(
+                  mine: mine,
+                  tally: const {'up': 4, 'down': 1},
+                  onTap: onTap,
+                ),
+              ),
+            ),
+          ),
+        );
+
+    testWidgets('a viewer taps a choice and sees the totals', (t) async {
+      String? tapped;
+      await t.pumpWidget(layer(poll(), onTap: (c) => tapped = c, mine: 'down'));
+      await t.pumpAndSettle();
+      expect(find.text('4'), findsOneWidget);
+      await t.tap(find.byIcon(Icons.arrow_upward));
+      expect(tapped, 'up');
+    });
+
+    testWidgets('closed, or under a slate: nothing to tap', (t) async {
+      String? tapped;
+      await t.pumpWidget(layer(poll(open: false), onTap: (c) => tapped = c));
+      await t.pumpAndSettle();
+      await t.tap(find.byIcon(Icons.arrow_upward), warnIfMissed: false);
+      expect(tapped, isNull);
+      await t.pumpWidget(layer(poll(), graphics: const [_slate], onTap: (c) => tapped = c));
+      await t.pumpAndSettle();
+      await t.tap(find.byIcon(Icons.arrow_upward), warnIfMissed: false);
+      expect(tapped, isNull);
+    });
+
+    test('the Studio keeps live totals', () {
+      final c = StudioElementsController(push: (e, ops) async => e);
+      c.setTally('p', const {'up': 1, 'down': 0});
+      expect(c.tally('p'), {'up': 1, 'down': 0});
+    });
+  });
+
+  group('navigation never stacks a duplicate', () {
+    test('already on top, or the same push a moment ago', () {
+      expect(
+        isDuplicatePush(
+          location: '/settings',
+          showing: '/settings/',
+          lastPush: null,
+          sinceLastPush: const Duration(hours: 1),
+        ),
+        isTrue,
+      );
+      expect(
+        isDuplicatePush(
+          location: '/settings',
+          showing: '/home',
+          lastPush: '/settings',
+          sinceLastPush: const Duration(milliseconds: 100),
+        ),
+        isTrue,
+      );
+      // Later on, from somewhere else, it opens again.
+      expect(
+        isDuplicatePush(
+          location: '/settings',
+          showing: '/home',
+          lastPush: '/settings',
+          sinceLastPush: const Duration(seconds: 2),
+        ),
+        isFalse,
+      );
+      // A different page (or query) is a different screen.
+      expect(
+        isDuplicatePush(
+          location: '/settings/appearance',
+          showing: '/settings',
+          lastPush: '/settings',
+          sinceLastPush: Duration.zero,
+        ),
+        isFalse,
+      );
+      expect(
+        isDuplicatePush(
+          location: '/search?q=a',
+          showing: '/search?q=b',
+          lastPush: null,
+          sinceLastPush: Duration.zero,
+        ),
+        isFalse,
+      );
+    });
+
+    testWidgets('pressing Settings again does nothing; Back works', (t) async {
+      final router = NileGoRouter(
+        initialLocation: '/',
+        routes: [
+          GoRoute(
+            path: '/',
+            builder: (context, _) => Scaffold(
+              body: TextButton(
+                onPressed: () => context.push('/settings'),
+                child: const Text('Settings'),
+              ),
+            ),
+          ),
+          GoRoute(
+            path: '/settings',
+            builder: (context, _) => Scaffold(
+              body: Column(
+                children: [
+                  const Text('Settings page'),
+                  TextButton(
+                    onPressed: () => context.push('/settings'),
+                    child: const Text('Settings again'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      );
+      await t.pumpWidget(MaterialApp.router(routerConfig: router));
+      await t.tap(find.text('Settings'));
+      await t.tap(find.text('Settings'), warnIfMissed: false); // double tap
+      await t.pumpAndSettle();
+      await t.tap(find.text('Settings again'));
+      await t.pumpAndSettle();
+      await t.pump(const Duration(seconds: 1));
+      await t.tap(find.text('Settings again'));
+      await t.pumpAndSettle();
+      expect(find.text('Settings page'), findsOneWidget);
+      router.pop();
+      await t.pumpAndSettle();
+      // One Back and we're home: nothing stacked underneath.
+      expect(find.text('Settings page'), findsNothing);
+      expect(find.text('Settings'), findsOneWidget);
+    });
+
+    testWidgets('a double tap opens one plain page', (t) async {
+      NileNav.debugReset();
+      await t.pumpWidget(
+        MaterialApp(
+          home: Builder(
+            builder: (context) => TextButton(
+              onPressed: () => NileNav.push(
+                context,
+                MaterialPageRoute<void>(builder: (_) => const Text('viewer')),
+              ),
+              child: const Text('open'),
+            ),
+          ),
+        ),
+      );
+      await t.tap(find.text('open'));
+      await t.tap(find.text('open'), warnIfMissed: false);
+      await t.pumpAndSettle();
+      final nav = t.state<NavigatorState>(find.byType(Navigator));
+      nav.pop();
+      await t.pumpAndSettle();
+      expect(find.text('viewer'), findsNothing);
     });
   });
 }

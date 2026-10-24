@@ -218,18 +218,62 @@ class LivekitService {
     'remove': id,
   });
 
-  /// Studio: every element's live state in this show, on air or not.
-  static Future<List<LiveElement>> listElements({
-    required String eventId,
-  }) async {
+  /// Studio: every element's live state in this show, on air or not, and
+  /// the totals of the ones viewers can tap.
+  static Future<({List<LiveElement> elements, Map<String, ElementTally> tallies})>
+  listElements({required String eventId}) async {
     final d = await _invoke<Map>({
       'action': 'list-elements',
       'eventId': eventId,
     });
-    return [
-      for (final j in (d['elements'] as List? ?? const []))
-        ?LiveElement.fromJson(j),
-    ];
+    final tallies = <String, ElementTally>{};
+    if (d['tallies'] case final Map t) {
+      t.forEach((k, v) {
+        final tally = tallyFromJson(v);
+        if (k is String && tally != null) tallies[k] = tally;
+      });
+    }
+    return (
+      elements: [
+        for (final j in (d['elements'] as List? ?? const []))
+          ?LiveElement.fromJson(j),
+      ],
+      tallies: tallies,
+    );
+  }
+
+  /// Viewer: tap [choice] on an element (a vote, changeable until it
+  /// closes). Returns the choice the server holds for you.
+  static Future<String?> respond({
+    required String eventId,
+    required String elementId,
+    required String choice,
+  }) async {
+    final d = await _invoke<Map>({
+      'action': 'respond',
+      'eventId': eventId,
+      'elementId': elementId,
+      'choice': choice,
+    });
+    return d['mine'] as String?;
+  }
+
+  /// Viewer: what you have tapped in this show (element id → choice).
+  static Future<Map<String, String>> myResponses({
+    required String eventId,
+  }) async {
+    final d = await _invoke<Map>({
+      'action': 'my-responses',
+      'eventId': eventId,
+    });
+    final m = d['mine'];
+    return m is Map
+        ? {
+            for (final e in m.entries)
+              if (e.key is String && e.value is String)
+                e.key as String: e.value as String,
+          }
+        : const {};
   }
 
   /// Studio: where graphics and elements sit on each camera.

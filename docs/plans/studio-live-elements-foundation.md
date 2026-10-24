@@ -63,19 +63,19 @@ Findings that shaped this plan:
 - [x] Save/load elements to the account library.
 
 ## Phase 4: Element as its own angle
-- [ ] "Show as its own angle" toggle → virtual angle in room metadata `show` (id, label, elementId).
-- [ ] Viewer angle picker lists it; renders the element full-screen on a brand-kit background.
-- [ ] Works with off-air, default angle, Send everyone, reorder, viewers-per-angle counts.
-- [ ] Audio stays on master audio; picking an element angle never changes audio unless the host chooses otherwise.
-- [ ] Studio source tile for the virtual angle.
+- [x] "Show as its own angle" toggle → virtual angle in room metadata `show` (id, label, elementId).
+- [x] Viewer angle picker lists it; renders the element full-screen on a brand-kit background.
+- [x] Works with off-air, default angle, Send everyone, reorder, viewers-per-angle counts.
+- [x] Audio stays on master audio; picking an element angle never changes audio unless the host chooses otherwise.
+- [x] Studio source tile for the virtual angle.
 
 ## Phase 5: Viewer taps (shared plumbing for polls and later elements)
-- [ ] Migration: `element_responses` (event_id, element_id, user_id, choice, updated_at; unique per user per element). RLS: viewers write their own; nobody (host included) reads individual rows.
-- [ ] `respond` action: signed in, has access to the show (ticket gate), element open, per-user rate limit; upsert so votes can change until close.
-- [ ] Tallies counted in the database; totals pushed to viewers at most once per second outside room metadata (Supabase Realtime broadcast).
-- [ ] Hosts see totals only, live and after the show.
-- [ ] Overlay tappable regions for elements; taps off under a full-screen slate and in replays.
-- [ ] Tests: one-vote-per-account, change-until-close, access gate, throttle.
+- [x] Migration: `element_responses` (event_id, element_id, user_id, choice, updated_at; unique per user per element). RLS: viewers write their own; nobody (host included) reads individual rows.
+- [x] `respond` action: signed in, has access to the show (ticket gate), element open, per-user rate limit; upsert so votes can change until close.
+- [x] Tallies counted in the database; totals pushed to viewers at most once per second outside room metadata (Supabase Realtime broadcast).
+- [x] Hosts see totals only, live and after the show.
+- [x] Overlay tappable regions for elements; taps off under a full-screen slate and in replays.
+- [x] Tests: one-vote-per-account, change-until-close, access gate, throttle.
 - [ ] Separate to-do (website copy, not part of this build): privacy-policy line about storing votes.
 
 ## Phase 6: Replays with graphics + elements (entirely in the Nile app)
@@ -99,6 +99,14 @@ Findings that shaped this plan:
 - Hold-back only runs when the viewer knows both the server clock and its picture age (RealSync measuring); otherwise overlays apply at once — never a guess.
 - Counter kind is offered only in debug builds.
 - Studio Preview support stays in Phase 7.
+
+## Implementation notes — phases 4-5 (2026-10-23)
+- Element angle = id `el:<elementId>`, from the element's own `angle` flag (Elements panel → "Show as its own angle"). An angle-only element still mirrors into room metadata. set-show and reorder-cameras accept these ids next to slot ids (cameras are numbered among cameras only). Viewers get it as a feed with no track: full screen on its brand background, no camera graphics on it, and the audio keeps whatever was playing. Studio gets a source tile (off air / default / send everyone / drag order work as for cameras).
+- Viewers per angle: migration 0139 adds `angle_watchers.angle` and makes angle_heartbeat/angle_counts take text ids.
+- Taps: 0139 `element_responses` (no policies — nobody reads rows), `element_respond` (1 change/s per viewer), `element_tally`, `element_tally_claim`/`_sent` (totals at most once a second, with a trailing send so the last vote always lands). livekit `respond` (same gate as viewer-token, from the DB) and `my-responses`; totals go out on the existing read-only `live_system:<slug>` topic as event `tally`; list-elements returns totals for the host after the show.
+- Kinds declare `choices(config)`; an element takes taps while `state.open` and live. Test counter: "Viewers can tap ▲/▼" + Open/Close taps.
+- Overlay: elements are tappable only while open and not under a full-screen item; Studio sees totals, never taps.
+- 0139 needed the host's approval in the Supabase tool (replaces two functions) — applied/deployed only after that.
 
 ## Open questions / risks
 - Replay approach (Phase 6) still to be designed, constrained to the app only.

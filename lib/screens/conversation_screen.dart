@@ -17,6 +17,7 @@ import '../widgets/offline_banner.dart';
 import '../widgets/official_badge.dart';
 import 'messages_screen.dart' show NileAvatar;
 import '../services/formats.dart';
+import '../services/nile_navigation.dart';
 
 /// The thread as a full-screen route: `/dm/:userId`, and every push from a
 /// phone. A titled frame around [ConversationView] and nothing else — the
@@ -389,7 +390,8 @@ class _ConversationViewState extends State<ConversationView> {
     // plain text messages.
     final canCopy = !msg.isSharedPost && !msg.isSharedEvent && !msg.isImage;
 
-    final result = await Navigator.of(context).push<_ReactionMenuResult>(
+    final result = await NileNav.push<_ReactionMenuResult>(
+      context,
       _ReactionMenuRoute(
         bubbleRect: bubbleRect,
         isMine: isMine,
@@ -1588,7 +1590,7 @@ class _ImageBubble extends StatelessWidget {
             final url = snap.data;
             if (url == null) return placeholder();
             return GestureDetector(
-              onTap: () => Navigator.push(
+              onTap: () => NileNav.push(
                 context,
                 MaterialPageRoute(builder: (_) => _ImageViewer(imageUrl: url)),
               ),

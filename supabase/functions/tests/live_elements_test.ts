@@ -16,6 +16,8 @@ import {
   validateElementPush,
   validateLayout,
 } from "../_shared/elements.ts";
+import { elementAngleIds, openChoices, shapeTally, validateResponse } from "../_shared/elements.ts";
+import { cleanShowPatch, planReorder } from "../_shared/show.ts";
 
 const slotIds = new Set(["s1", "s2"]);
 const opts = { slotIds, sponsorCampaignId: "c-1" };
@@ -136,4 +138,58 @@ Deno.test("layout: spots, hidden, real slots and de-duplicated ids", () => {
     bySlot: { s1: [{ id: "c", spot: "full" }] },
   });
   assert("error" in validateLayout("x", slotIds));
+});
+
+// ── Phase 4: element angles ─────────────────────────────────────────────────
+
+
+Deno.test("angle: an element that is only its own angle still reaches viewers", () => {
+  const row = buildRow("ev", push({ id: "el-9", targets: { slots: [] }, angle: true }), undefined, 1);
+  assertEquals(row.spec.angle, true);
+  const snap = liveSnapshot([row]);
+  assertEquals(snap.items.map((e) => e.id), ["el-9"]);
+  assertEquals(elementAngleIds({ elements: snap }), new Set(["el:el-9"]));
+  assertEquals(elementAngleIds({}), new Set());
+});
+
+Deno.test("angle: show control and reorder take element angles", () => {
+  const ids = new Set(["s1", "s2", "el:x"]);
+  const r = cleanShowPatch({ offAir: ["el:x"], defaultSlot: "el:x" }, ids, {}, 1);
+  assert("patch" in r);
+  assertEquals(r.patch.offAir, ["el:x"]);
+  const slots = [
+    { id: "s1", slot_index: 1, label: "Camera 1" },
+    { id: "s2", slot_index: 2, label: "Camera 2" },
+  ];
+  const plan = planReorder(["el:x", "s2", "s1"], slots, new Set(["el:x"]));
+  assert("rows" in plan);
+  assertEquals(plan.order, ["el:x", "s2", "s1"]);
+  // Cameras are numbered among cameras only.
+  assertEquals(plan.rows.map((r) => [r.id, r.label]), [["s2", "Camera 1"], ["s1", "Camera 2"]]);
+  assert("error" in planReorder(["el:y", "s2", "s1"], slots, new Set(["el:x"])));
+  assert("error" in planReorder(["el:x", "s2"], slots, new Set(["el:x"])));
+});
+
+// ── Phase 5: viewer taps ────────────────────────────────────────────────────
+
+Deno.test("taps: only an open, live element with taps takes a vote, and only its own choices", () => {
+  const open = buildRow("ev", push({ config: { label: "Q", taps: true }, state: { value: 0, open: true } }), undefined, 1);
+  assertEquals(openChoices(open), ["up", "down"]);
+  assertEquals(validateResponse(open, "up"), { choice: "up" });
+  assertEquals((validateResponse(open, "sideways") as { status: number }).status, 400);
+
+  const closed = buildRow("ev", push({ config: { label: "Q", taps: true }, state: { value: 0 } }), undefined, 1);
+  assertEquals((validateResponse(closed, "up") as { status: number }).status, 409);
+
+  const noTaps = buildRow("ev", push({ state: { value: 0, open: true } }), undefined, 1);
+  assertEquals(openChoices(noTaps), []);
+
+  const offAir = buildRow("ev", push({ config: { taps: true }, state: { open: true }, targets: { slots: [] } }), undefined, 1);
+  assertEquals(openChoices(offAir), []);
+  assertEquals((validateResponse(undefined, "up") as { status: number }).status, 404);
+});
+
+Deno.test("taps: totals list every choice, zeros included, junk ignored", () => {
+  assertEquals(shapeTally(["up", "down"], { up: 3, other: 9 }), { up: 3, down: 0 });
+  assertEquals(shapeTally(["up", "down"], { up: -1, down: "7" }), { up: 0, down: 0 });
 });

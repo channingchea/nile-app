@@ -16,6 +16,13 @@ typedef ElementPush =
       Map<String, ClockOp> clockOps,
     );
 
+/// What `list-elements` returns: every element in the show and the totals of
+/// those viewers can tap.
+typedef ElementsSnapshot = ({
+  List<LiveElement> elements,
+  Map<String, ElementTally> tallies,
+});
+
 /// The Studio's side of live elements (phase 3): the latest known state of
 /// every element in this show — on air or not — applied locally at once and
 /// pushed in order, one element at a time, so a burst of "+1"s never races.
@@ -32,7 +39,9 @@ class StudioElementsController extends ChangeNotifier {
   });
 
   final ElementPush push;
-  final Future<List<LiveElement>> Function()? load;
+
+  /// Every element in the show and its totals (`list-elements`).
+  final Future<ElementsSnapshot> Function()? load;
 
   /// Drops an element's live state server-side (`set-element` remove).
   final Future<void> Function(String id)? removeRemote;
@@ -43,6 +52,21 @@ class StudioElementsController extends ChangeNotifier {
   final Map<String, LiveElement> _live = {};
   final Map<String, List<LiveElement>> _undo = {};
   final Map<String, Future<void>> _queue = {};
+  final Map<String, ElementTally> _tallies = {};
+
+  /// An element's totals, live from the system topic (and on reload).
+  ElementTally? tally(String id) => _tallies[id];
+
+  void setTally(String id, ElementTally tally) {
+    _tallies[id] = tally;
+    notifyListeners();
+  }
+
+  /// Elements shown as their own angle (phase 4).
+  List<LiveElement> get angles => [
+    for (final e in _live.values)
+      if (e.angle) e,
+  ]..sort((a, b) => a.id.compareTo(b.id));
 
   /// Changes that can be undone per element.
   static const undoDepth = 10;
@@ -145,6 +169,10 @@ class StudioElementsController extends ChangeNotifier {
     return _send(next, clockOps);
   }
 
+  /// Show [id] as its own angle, or stop.
+  Future<bool> setAngle(String id, bool on) =>
+      update(id, (e) => e.copyWith(angle: on), undoable: false);
+
   /// Put [id] on [targets] (none = off air) — Take, or a retarget.
   Future<bool> setTargets(String id, GraphicTargets targets) =>
       update(id, (e) => e.copyWith(targets: targets), undoable: false);
@@ -190,11 +218,12 @@ class StudioElementsController extends ChangeNotifier {
     final fetch = load;
     if (fetch == null) return;
     try {
-      final rows = await fetch();
-      for (final e in rows) {
+      final snap = await fetch();
+      for (final e in snap.elements) {
         final mine = _live[e.id];
         if (mine == null || mine.version <= e.version) _live[e.id] = e;
       }
+      _tallies.addAll(snap.tallies);
       notifyListeners();
     } catch (_) {
       // Next push or rejoin tries again.

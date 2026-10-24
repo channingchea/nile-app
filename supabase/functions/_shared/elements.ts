@@ -84,6 +84,8 @@ interface KindRule {
   config(raw: Record<string, unknown>): Record<string, unknown> | null;
   state(raw: Record<string, unknown>): Record<string, unknown>;
   clocks: string[];
+  /** What viewers may tap, for this config; empty = nothing to tap. */
+  choices?(config: Record<string, unknown>): string[];
 }
 
 export const ELEMENT_KINDS: Record<string, KindRule> = {
@@ -94,10 +96,16 @@ export const ELEMENT_KINDS: Record<string, KindRule> = {
       const label = r.label === undefined ? "Count" : str(r.label, 40);
       if (label === undefined) return null;
       const step = r.step === undefined ? 1 : r.step;
-      return isInt(step, 1, 100) ? { label, step } : null;
+      if (!isInt(step, 1, 100)) return null;
+      return r.taps === true ? { label, step, taps: true } : { label, step };
     },
-    state: (r) => ({ value: isInt(r.value, -99999, 99999) ? r.value : 0 }),
+    state: (r) => ({
+      value: isInt(r.value, -99999, 99999) ? r.value : 0,
+      ...(r.open === true ? { open: true } : {}),
+    }),
     clocks: ["main"],
+    // With taps on, viewers vote up or down (the test stand-in for a poll).
+    choices: (c) => (c.taps === true ? ["up", "down"] : []),
   },
 };
 
@@ -128,6 +136,8 @@ export interface ElementSpec {
   style?: BrandStyle;
   nileStyle?: true;
   targets: Targets;
+  /** Also its own angle in every viewer's picker (phase 4). */
+  angle?: true;
   /** Sponsor hook ("presented by"): this event's accepted campaign only. No UI yet. */
   presentedBy?: string;
 }
@@ -168,6 +178,7 @@ export function validateElementPush(
   const style = cleanBrand(raw.style);
   if (style) spec.style = style;
   if (raw.nileStyle === true) spec.nileStyle = true;
+  if (raw.angle === true) spec.angle = true;
   if (raw.presentedBy !== undefined && raw.presentedBy !== null) {
     if (typeof raw.presentedBy !== "string" || raw.presentedBy !== opts.sponsorCampaignId) {
       return { error: "Only this show's sponsor can present an element" };
@@ -240,10 +251,10 @@ export const rowToLive = (r: ElementRow) => ({
   at: Number(r.content_at),
 });
 
-/** Room metadata `elements`: every element that is on air somewhere. */
+/** Room metadata `elements`: every element on air somewhere — over a camera or as its own angle. */
 export function liveSnapshot(rows: ElementRow[]) {
   const items = rows
-    .filter((r) => r.spec?.targets && onAir(r.spec.targets))
+    .filter((r) => r.spec?.angle === true || (r.spec?.targets && onAir(r.spec.targets)))
     .sort((a, b) => a.element_id.localeCompare(b.element_id))
     .map(rowToLive);
   return { items, at: items.reduce((m, e) => Math.max(m, e.at), 0) };
@@ -299,4 +310,52 @@ export function validateLayout(
   }
   if (JSON.stringify(layout).length > MAX_LAYOUT_JSON) return { error: "That layout is too large" };
   return { layout };
+}
+
+// ── Element angles (phase 4) ─────────────────────────────────────────────────
+// An element shown as its own angle is a virtual camera with id `el:<id>`.
+// Show control (off air, default, send everyone, order) takes these ids next
+// to real slot ids.
+
+export const ANGLE_PREFIX = "el:";
+export const angleIdOf = (elementId: string) => `${ANGLE_PREFIX}${elementId}`;
+
+/** The element angles in a room's metadata right now. */
+export function elementAngleIds(meta: Record<string, unknown>): Set<string> {
+  const items = isObj(meta.elements) && Array.isArray(meta.elements.items) ? meta.elements.items : [];
+  return new Set(
+    items
+      .filter((e): e is Record<string, unknown> => isObj(e) && e.angle === true && typeof e.id === "string")
+      .map((e) => angleIdOf(e.id as string)),
+  );
+}
+
+// ── Viewer taps (phase 5) ────────────────────────────────────────────────────
+
+/** What a viewer may tap on [row] right now: its choices while it is open, else none. */
+export function openChoices(row: Pick<ElementRow, "kind" | "spec" | "state"> | undefined): string[] {
+  if (!row) return [];
+  const rule = ELEMENT_KINDS[row.kind];
+  if (!rule?.choices || row.state?.open !== true) return [];
+  const isLive = row.spec?.angle === true || (row.spec?.targets && onAir(row.spec.targets));
+  return isLive ? rule.choices(row.spec.config ?? {}) : [];
+}
+
+/** Whether a viewer's tap counts: the element is open, live, and [choice] is one of its own. */
+export function validateResponse(
+  row: Pick<ElementRow, "kind" | "spec" | "state"> | undefined,
+  choice: unknown,
+): { choice: string } | { error: string; status: number } {
+  if (!row) return { error: "That isn't on screen", status: 404 };
+  const choices = openChoices(row);
+  if (!choices.length) return { error: "Voting has closed", status: 409 };
+  if (typeof choice !== "string" || !choices.includes(choice)) return { error: "Not a choice", status: 400 };
+  return { choice };
+}
+
+/** Choice → count, every choice present (zeros included), in the kind's order. */
+export function shapeTally(choices: string[], counts: Record<string, unknown>): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const c of choices) out[c] = isInt(counts[c], 0, 1e9) ? counts[c] as number : 0;
+  return out;
 }

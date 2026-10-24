@@ -33,6 +33,7 @@ import '../services/studio_prefs.dart';
 import '../services/studio_graphics.dart';
 import '../services/studio_roles.dart';
 import '../widgets/audio_meter.dart';
+import '../widgets/elements/element_kinds.dart' show ElementInteraction;
 import '../widgets/nile_studio.dart';
 import '../widgets/screen_share_picker.dart';
 import '../widgets/camera_slot_sheet.dart';
@@ -457,7 +458,30 @@ class _CameraScreenState extends State<CameraScreen> {
     }
 
     final placedCrew = <String>{};
-    for (final slot in _show.ordered(_slots, (s) => s.id)) {
+    // Cameras and element angles together, in the host's order.
+    final angles = {
+      for (final e in _isStudio ? _elementsCtl.angles : const <LiveElement>[])
+        elementAngleId(e.id): e,
+    };
+    final slotsById = {for (final s in _slots) s.id: s};
+    for (final id in _show.ordered([...slotsById.keys, ...angles.keys], (id) => id)) {
+      final angle = angles[id];
+      if (angle != null) {
+        sources.add(
+          NileStudioSource(
+            identity: id,
+            label: angle.name,
+            sublabel: 'Element angle',
+            slotId: id,
+            element: angle,
+            isOffAir: _show.offAir.contains(id),
+            isDefaultAngle: _show.defaultSlot == id,
+            viewers: _viewersOn(id),
+          ),
+        );
+        continue;
+      }
+      final slot = slotsById[id]!;
       if (slot.id == _slotId) continue; // this device — listed first, as yours
       final p = bySlot[slot.id];
       if (p != null) {
@@ -1974,6 +1998,8 @@ class _CameraScreenState extends State<CameraScreen> {
         onPin: (p) {
           if (mounted) setState(() => _pinned = p);
         },
+        // Live element totals (viewer taps) — the Elements panel shows them.
+        onTally: _elementsCtl.setTally,
       );
       ChatService.fetchPinned(eventId).then((p) {
         if (mounted && _pinned == null) setState(() => _pinned = p);
@@ -2642,7 +2668,8 @@ class _CameraScreenState extends State<CameraScreen> {
   // ── Live elements + layout (studio live elements, phases 1-3) ────────────
 
   void _onElementsChanged() {
-    if (mounted) setState(() {});
+    // Element angles are source tiles too.
+    if (mounted) _rebuildRemoteSources();
   }
 
   /// How old the monitor's picture is, when RealSync is measuring.
@@ -2682,10 +2709,15 @@ class _CameraScreenState extends State<CameraScreen> {
   }
 
   NileOverlayExtras _overlayFor(NileStudioSource s, {bool preview = false}) {
+    if (s.element != null) {
+      return (elements: const [], layers: const [], interactionFor: null);
+    }
     final slot = s.isScreenShare ? null : s.slotId;
     return (
       elements: _elementsFor(slot, preview: preview),
       layers: _layout.layersFor(slot),
+      // The Studio sees totals on screen; it never votes.
+      interactionFor: (e) => ElementInteraction(tally: _elementsCtl.tally(e.id)),
     );
   }
 
@@ -2800,13 +2832,14 @@ class _CameraScreenState extends State<CameraScreen> {
 
   /// What the monitor shows for a source: on air, plus the cue.
   List<LiveGraphic> _previewFor(NileStudioSource s) {
+    if (s.element != null) return const [];
     final slot = s.isScreenShare ? null : s.slotId;
     final base = _graphics.withBrand(_brandKit?.style);
     return _cue.value.preview(base, DateTime.now()).forSlot(slot);
   }
 
   bool _isCued(NileStudioSource s) =>
-      _cue.value.lands(s.isScreenShare ? null : s.slotId);
+      s.element == null && _cue.value.lands(s.isScreenShare ? null : s.slotId);
 
   Widget? _buildCueBar() {
     final cues = _cue.value;
@@ -4825,7 +4858,9 @@ class _CameraScreenState extends State<CameraScreen> {
       onRemoveSource: widget.isHost ? _removeSource : null,
       // Renaming is a show-control, so only the Studio offers it.
       onRenameSource: _isStudio ? _renameSource : null,
-      graphicsFor: (s) => _graphics.forSlot(s.isScreenShare ? null : s.slotId),
+      graphicsFor: (s) => s.element != null
+          ? const []
+          : _graphics.forSlot(s.isScreenShare ? null : s.slotId),
       previewFor: _isStudio ? _previewFor : null,
       isCued: _isStudio ? _isCued : null,
       overlayFor: _overlayFor,
@@ -4850,6 +4885,7 @@ class _CameraScreenState extends State<CameraScreen> {
                   !s.isScreenShare &&
                   !s.identity.startsWith('crew:') &&
                   !s.identity.startsWith('slot:') &&
+                  s.element == null &&
                   // The Studio counts once its own camera is on.
                   !(s.isLocal && _isStudio && !_videoEnabled),
             )

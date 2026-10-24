@@ -139,6 +139,7 @@ class ElementKindSpec {
     this.clocks = const [],
     this.hidden = false,
     this.validate,
+    this.choices,
   });
 
   final String wire;
@@ -155,6 +156,10 @@ class ElementKindSpec {
 
   /// Why a config can't be saved, or null.
   final String? Function(Map<String, dynamic> config)? validate;
+
+  /// What viewers may tap for this config (phase 5); null or empty = nothing.
+  /// Mirrors KindRule.choices on the server.
+  final List<String> Function(Map<String, dynamic> config)? choices;
 }
 
 String? _counterConfigError(Map<String, dynamic> c) {
@@ -164,8 +169,12 @@ String? _counterConfigError(Map<String, dynamic> c) {
   }
   final step = c['step'] ?? 1;
   if (step is! int || step < 1 || step > 100) return 'Step is 1 to 100.';
+  if (c['taps'] != null && c['taps'] is! bool) return 'Taps setting is malformed.';
   return null;
 }
+
+List<String> _counterChoices(Map<String, dynamic> c) =>
+    c['taps'] == true ? const ['up', 'down'] : const [];
 
 abstract final class ElementKinds {
   /// A labelled number with a stopwatch — the hidden test kind that exercises
@@ -179,6 +188,7 @@ abstract final class ElementKinds {
     clocks: ['main'],
     hidden: true,
     validate: _counterConfigError,
+    choices: _counterChoices,
   );
 
   static const all = [counter];
@@ -371,6 +381,7 @@ class LiveElement {
     this.style,
     this.nileStyle = false,
     this.targets = GraphicTargets.none,
+    this.angle = false,
     this.presentedBy,
     this.version = 0,
     this.at,
@@ -402,6 +413,10 @@ class LiveElement {
   final bool nileStyle;
   final GraphicTargets targets;
 
+  /// Also its own angle in viewers' pickers ([elementAngleId]) — full screen
+  /// on its brand background (phase 4).
+  final bool angle;
+
   /// Sponsor hook: the campaign presenting it. No UI yet.
   final String? presentedBy;
 
@@ -413,7 +428,19 @@ class LiveElement {
 
   bool get onAir => !targets.isNone;
 
+  /// On a camera or as its own angle — viewers can see it.
+  bool get live => onAir || angle;
+
   ElementKindSpec? get spec => ElementKinds.of(kind);
+
+  /// Taps are being taken (the Studio opened them).
+  bool get open => state['open'] == true;
+
+  /// Everything a viewer could tap on it, open or not.
+  List<String> get choices => spec?.choices?.call(config) ?? const [];
+
+  /// What a viewer may tap right now: its choices while open and live.
+  List<String> get openChoices => open && live ? choices : const [];
 
   ElementClock clock(String name) => clocks[name] ?? const ElementClock();
 
@@ -436,6 +463,7 @@ class LiveElement {
     bool clearStyle = false,
     bool? nileStyle,
     GraphicTargets? targets,
+    bool? angle,
     int? version,
     int? at,
   }) => LiveElement(
@@ -448,6 +476,7 @@ class LiveElement {
     style: clearStyle ? null : style ?? this.style,
     nileStyle: nileStyle ?? this.nileStyle,
     targets: targets ?? this.targets,
+    angle: angle ?? this.angle,
     presentedBy: presentedBy,
     version: version ?? this.version,
     at: at ?? this.at,
@@ -491,6 +520,7 @@ class LiveElement {
       style: BrandStyle.fromJson(j['style']),
       nileStyle: j['nileStyle'] == true,
       targets: targetsFromJson(j['targets']),
+      angle: j['angle'] == true,
       presentedBy: j['presentedBy'] as String?,
       version: (j['version'] as num?)?.toInt() ?? 0,
       at: (j['at'] as num?)?.toInt(),
@@ -511,6 +541,7 @@ class LiveElement {
     'style': ?style?.toJson(),
     if (nileStyle) 'nileStyle': true,
     'targets': targetsToJson(targets),
+    if (angle) 'angle': true,
     'presentedBy': ?presentedBy,
     'version': version,
   };
@@ -562,6 +593,17 @@ class ElementsState {
     );
   }
 
+  /// Elements shown as their own angle, by id order.
+  List<LiveElement> get angles => [
+    for (final e in items)
+      if (e.angle) e,
+  ];
+
+  LiveElement? byId(String id) => items.where((e) => e.id == id).firstOrNull;
+
+  /// Any element viewers can tap right now.
+  bool get takesTaps => items.any((e) => e.openChoices.isNotEmpty);
+
   /// What a viewer watching [slotId] sees (null = a screen share: all-camera
   /// elements only).
   List<LiveElement> forSlot(String? slotId) => [
@@ -575,6 +617,31 @@ class ElementsState {
 
   @override
   int get hashCode => Object.hash(at, Object.hashAll(items));
+}
+
+// ── Element angles (phase 4) ─────────────────────────────────────────────────
+
+/// An element shown as its own angle is a virtual camera with this id; show
+/// control (off air, default, send everyone, order) takes it like a slot id.
+String elementAngleId(String elementId) => 'el:$elementId';
+
+bool isElementAngleId(String? id) => id != null && id.startsWith('el:');
+
+/// The element behind an element-angle id, or null.
+String? elementIdOfAngle(String? id) =>
+    isElementAngleId(id) ? id!.substring(3) : null;
+
+// ── Viewer taps (phase 5) ────────────────────────────────────────────────────
+
+/// An element's totals: choice → count. Hosts see these, never who voted what.
+typedef ElementTally = Map<String, int>;
+
+ElementTally? tallyFromJson(Object? j) {
+  if (j is! Map) return null;
+  return {
+    for (final e in j.entries)
+      if (e.key is String && e.value is num) e.key as String: (e.value as num).toInt(),
+  };
 }
 
 /// An element waiting in the Studio for Take, next to cued graphics. Only

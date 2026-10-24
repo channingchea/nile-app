@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart' show Uint8List;
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'services/nile_navigation.dart';
 
 import 'screens/appearance_screen.dart';
 import 'screens/attendee_list_screen.dart';
@@ -227,7 +228,7 @@ final _scheduleNavigatorKey = GlobalKey<NavigatorState>();
 /// Navigate from outside a widget (push notifications, deep links, services).
 GoRouter get nileRouter => _router;
 
-final GoRouter _router = GoRouter(
+final GoRouter _router = NileGoRouter(
   navigatorKey: rootNavigatorKey,
   initialLocation: NileRoutes.splash,
   refreshListenable: AuthGate.instance,

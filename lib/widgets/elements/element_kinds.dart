@@ -21,6 +21,20 @@ typedef ElementAct =
       Map<String, ClockOp> clockOps,
     });
 
+/// What a viewer (or the Studio) can do with an element on screen: their own
+/// vote, the totals, and — viewers only — tapping a choice (phase 5).
+@immutable
+class ElementInteraction {
+  const ElementInteraction({this.mine, this.tally, this.onTap});
+
+  /// The choice this viewer holds. Null = hasn't tapped.
+  final String? mine;
+  final ElementTally? tally;
+
+  /// Null = nothing is tappable here (Studio, replays, under a slate).
+  final ValueChanged<String>? onTap;
+}
+
 /// A key that works while the Elements panel has focus.
 @immutable
 class ElementShortcut {
@@ -46,8 +60,14 @@ class ElementKindUi {
   });
 
   /// Draws it over the video; [u] is 1% of the picture's width. [full] = on
-  /// its own, filling the picture.
-  final Widget Function(LiveElement e, double u, {required bool full}) render;
+  /// its own, filling the picture. [interaction] carries votes and taps.
+  final Widget Function(
+    LiveElement e,
+    double u, {
+    required bool full,
+    ElementInteraction? interaction,
+  })
+  render;
 
   /// Edits a library item's settings.
   final Widget Function(
@@ -56,8 +76,9 @@ class ElementKindUi {
   )
   editor;
 
-  /// The live controls in the Elements panel.
-  final Widget Function(LiveElement e, ElementAct act) controls;
+  /// The live controls in the Elements panel; [tally] = its totals, if any.
+  final Widget Function(LiveElement e, ElementAct act, ElementTally? tally)
+  controls;
   final List<ElementShortcut> shortcuts;
 }
 
@@ -66,8 +87,19 @@ final Map<String, ElementKindUi> elementKindUis = {
 };
 
 /// Draws [e] (nothing for a kind this build has no drawing for).
-Widget buildElement(LiveElement e, double u, {bool full = false}) =>
-    elementKindUis[e.kind]?.render(e, u, full: full) ?? const SizedBox.shrink();
+Widget buildElement(
+  LiveElement e,
+  double u, {
+  bool full = false,
+  ElementInteraction? interaction,
+}) =>
+    elementKindUis[e.kind]?.render(
+      e,
+      u,
+      full: full,
+      interaction: interaction,
+    ) ??
+    const SizedBox.shrink();
 
 // ── Counter (hidden test kind) ───────────────────────────────────────────────
 
@@ -87,10 +119,11 @@ ElementChange _toggleClock(LiveElement e) => (
 );
 
 final _counterUi = ElementKindUi(
-  render: (e, u, {required full}) => _CounterView(e: e, u: u, full: full),
+  render: (e, u, {required full, interaction}) =>
+      _CounterView(e: e, u: u, full: full, interaction: interaction),
   editor: (config, onChanged) =>
       _CounterEditor(config: config, onChanged: onChanged),
-  controls: (e, act) => _CounterControls(e: e, act: act),
+  controls: (e, act, tally) => _CounterControls(e: e, act: act, tally: tally),
   shortcuts: [
     ElementShortcut(
       const [
@@ -161,10 +194,16 @@ class _TickingState extends State<_Ticking> {
 }
 
 class _CounterView extends StatelessWidget {
-  const _CounterView({required this.e, required this.u, required this.full});
+  const _CounterView({
+    required this.e,
+    required this.u,
+    required this.full,
+    this.interaction,
+  });
   final LiveElement e;
   final double u;
   final bool full;
+  final ElementInteraction? interaction;
 
   @override
   Widget build(BuildContext context) {
@@ -212,6 +251,29 @@ class _CounterView extends StatelessWidget {
               ),
             ),
           ),
+        if (e.choices.isNotEmpty) ...[
+          SizedBox(height: u * 0.8 * s),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (final (i, c) in e.choices.indexed) ...[
+                if (i > 0) SizedBox(width: u * 0.8 * s),
+                _TapChip(
+                  icon: c == 'up' ? Icons.arrow_upward : Icons.arrow_downward,
+                  count: interaction?.tally?[c],
+                  mine: interaction?.mine == c,
+                  look: look,
+                  u: u * s,
+                  onTap: e.openChoices.contains(c)
+                      ? interaction?.onTap == null
+                            ? null
+                            : () => interaction!.onTap!(c)
+                      : null,
+                ),
+              ],
+            ],
+          ),
+        ],
       ],
     );
     if (full) {
@@ -226,6 +288,68 @@ class _CounterView extends StatelessWidget {
         border: Border(top: BorderSide(color: look.accent, width: u * 0.5)),
       ),
       child: body,
+    );
+  }
+}
+
+/// One tappable choice: an icon, its count, and a ring when it is yours.
+class _TapChip extends StatelessWidget {
+  const _TapChip({
+    required this.icon,
+    required this.count,
+    required this.mine,
+    required this.look,
+    required this.u,
+    this.onTap,
+  });
+
+  final IconData icon;
+  final int? count;
+  final bool mine;
+  final OverlayLook look;
+  final double u;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final chip = Container(
+      padding: EdgeInsets.symmetric(horizontal: u * 1.2, vertical: u * 0.5),
+      decoration: BoxDecoration(
+        color: mine ? look.accent : look.text.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(u * 3),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: u * 2, color: mine ? look.onAccent : look.text),
+          if (count != null) ...[
+            SizedBox(width: u * 0.5),
+            Text(
+              '$count',
+              style: look.font(
+                NileTextStyles.labelLg().copyWith(
+                  fontSize: u * 1.8,
+                  color: mine ? look.onAccent : look.text,
+                  fontFeatures: const [FontFeature.tabularFigures()],
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+    if (onTap == null) return chip;
+    return Semantics(
+      button: true,
+      selected: mine,
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: onTap,
+          child: chip,
+        ),
+      ),
     );
   }
 }
@@ -278,15 +402,34 @@ class _CounterEditorState extends State<_CounterEditor> {
             ),
           ],
         ),
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          title: Text('Viewers can tap ▲ / ▼', style: NileTextStyles.bodyMd()),
+          subtitle: Text(
+            'Open taps from the live controls; one vote each, changeable '
+            'until you close them.',
+            style: NileTextStyles.caption().copyWith(
+              color: NileColors.txtTertiary,
+            ),
+          ),
+          value: widget.config['taps'] == true,
+          activeThumbColor: NileColors.volt,
+          onChanged: (v) {
+            final next = {...widget.config};
+            v ? next['taps'] = true : next.remove('taps');
+            widget.onChanged(next);
+          },
+        ),
       ],
     );
   }
 }
 
 class _CounterControls extends StatelessWidget {
-  const _CounterControls({required this.e, required this.act});
+  const _CounterControls({required this.e, required this.act, this.tally});
   final LiveElement e;
   final ElementAct act;
+  final ElementTally? tally;
 
   void _run(ElementChange c) => act(c.change, clockOps: c.clockOps);
 
@@ -341,6 +484,24 @@ class _CounterControls extends StatelessWidget {
           onPressed: () => act((cur) => cur, clockOps: {'main': ClockOp.reset}),
           icon: const Icon(Icons.restart_alt),
         ),
+        if (e.choices.isNotEmpty) ...[
+          const SizedBox(width: NileSpacing.s8),
+          OutlinedButton(
+            onPressed: () => act((cur) {
+              final next = {...cur.state};
+              cur.open ? next.remove('open') : next['open'] = true;
+              return cur.copyWith(state: next);
+            }),
+            child: Text(e.open ? 'Close taps' : 'Open taps'),
+          ),
+          Text(
+            [
+              for (final c in e.choices)
+                '${c == 'up' ? '▲' : '▼'} ${tally?[c] ?? 0}',
+            ].join('   '),
+            style: value.copyWith(fontSize: NileTextStyles.bodyMd().fontSize),
+          ),
+        ],
       ],
     );
   }

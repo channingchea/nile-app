@@ -5,6 +5,7 @@ import '../services/camera_status.dart';
 import '../services/chat_service.dart';
 import '../services/chat_tools_service.dart' show QuickMessage;
 import '../services/realsync.dart' show realSyncCapMs;
+import 'elements/element_kinds.dart' show ElementInteraction;
 import '../services/live_elements.dart';
 import '../services/overlay_layout.dart';
 import '../services/studio_graphics.dart';
@@ -58,6 +59,7 @@ class NileStudioSource {
     this.statusUnsupported = false,
     this.nudgeAcked = false,
     this.connectionQuality = NileStudioQuality.unknown,
+    this.element,
   });
 
   /// LiveKit participant identity, plus a suffix for a participant's second
@@ -122,9 +124,15 @@ class NileStudioSource {
   /// This feed's own connection, from LiveKit.
   final NileStudioQuality connectionQuality;
 
+  /// An element shown as its own angle (phase 4): the tile draws it instead
+  /// of video. [slotId] is its angle id (`el:<id>`).
+  final LiveElement? element;
+
   /// An open slot or an absent crew member's row — nobody to talk to.
   bool get isPlaceholder =>
-      identity.startsWith('slot:') || identity.startsWith('crew:');
+      identity.startsWith('slot:') ||
+      identity.startsWith('crew:') ||
+      element != null;
 
   /// A slot-holding camera the show controls (off air, default, order) apply to.
   bool get isAngle => slotId != null && !isScreenShare;
@@ -806,9 +814,17 @@ class _StudioSourceList extends StatelessWidget {
 
 /// Live elements and this camera's layer list, drawn with its graphics
 /// (studio live elements, phase 2).
-typedef NileOverlayExtras = ({List<LiveElement> elements, List<LayerEntry> layers});
+typedef NileOverlayExtras = ({
+  List<LiveElement> elements,
+  List<LayerEntry> layers,
+  ElementInteraction? Function(LiveElement e)? interactionFor,
+});
 
-const NileOverlayExtras _noExtras = (elements: [], layers: []);
+const NileOverlayExtras _noExtras = (
+  elements: [],
+  layers: [],
+  interactionFor: null,
+);
 
 /// A short name for a graphic on a tile: its title, else its text, else kind.
 String graphicLabel(LiveGraphic g) => switch (g.kind) {
@@ -1120,6 +1136,7 @@ class _SourceTile extends StatelessWidget {
                   graphics: graphics,
                   elements: extras.elements,
                   layers: extras.layers,
+                  interactionFor: extras.interactionFor,
                 ),
               ],
             ),
@@ -1499,6 +1516,7 @@ class _LabelledPane extends StatelessWidget {
                   graphics: graphics,
                   elements: extras.elements,
                   layers: extras.layers,
+                  interactionFor: extras.interactionFor,
                 ),
               ],
             ),
@@ -1557,6 +1575,8 @@ class _VideoPane extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final track = source?.track;
+    final element = source?.element;
+    if (element != null) return NileElementAngle(element: element);
     return Container(
       color: Colors.black,
       child: track != null

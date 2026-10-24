@@ -319,10 +319,14 @@ class ChatService {
   ///
   /// [onPin] fires when the pinned message changes — with null when it is
   /// unpinned. Late joiners read the current one with [fetchPinned].
+  ///
+  /// [onTally] hears a live element's totals (studio live elements, phase 5)
+  /// — at most once a second per element, sent by the `livekit` function.
   static RealtimeChannel subscribeSystem(
     String eventId,
     void Function(ChatMessage) onMessage, {
     void Function(PinnedMessage? pinned)? onPin,
+    void Function(String elementId, Map<String, int> tally)? onTally,
   }) {
     final channel = supabase.channel(
       _systemChannelName(eventId),
@@ -341,6 +345,21 @@ class ChatService {
         event: _pinEvent,
         callback: (payload) =>
             onPin(PinnedMessage.fromJson(_body(payload)['pinned'])),
+      );
+    }
+    if (onTally != null) {
+      channel.onBroadcast(
+        event: 'tally',
+        callback: (payload) {
+          final b = _body(payload);
+          final id = b['elementId'], t = b['tally'];
+          if (id is! String || t is! Map) return;
+          onTally(id, {
+            for (final e in t.entries)
+              if (e.key is String && e.value is num)
+                e.key as String: (e.value as num).toInt(),
+          });
+        },
       );
     }
     channel.subscribe();

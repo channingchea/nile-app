@@ -6,6 +6,7 @@ import '../theme.dart';
 import '../widgets/empty_state.dart';
 import 'profile_screen.dart';
 import 'widgets/load_more_footer.dart';
+import '../services/nile_navigation.dart';
 
 class NotificationsScreen extends StatefulWidget {
   const NotificationsScreen({super.key});
@@ -287,7 +288,7 @@ class _NotificationTile extends StatelessWidget {
               clipBehavior: Clip.none,
               children: [
                 GestureDetector(
-                  onTap: () => Navigator.push(
+                  onTap: () => NileNav.push(
                     context,
                     MaterialPageRoute(
                       builder: (_) =>

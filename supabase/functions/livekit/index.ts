@@ -19,6 +19,8 @@
 //   set-element       host    → { success, element } ← Studio pushes one live element (state + metadata)
 //   list-elements     host    → { elements, serverNow } ← Studio reloads every element's live state
 //   set-layout        host    → { success: true }   ← per-camera spots + layer order (room metadata)
+//   respond           viewer  → { success, mine }   ← a viewer taps a live element (vote; changeable until close)
+//   my-responses      viewer  → { mine }            ← the caller's own taps this show (rejoin)
 //   resync            host    → { success, resyncAt } ← every viewer re-aligns cameras + audio
 //   clock             any     → { receivedAt, sentAt } ← RealSync clock ping (server ms)
 //   report-clock      crew    → { success: true }   ← publisher's clock offset into its metadata
@@ -64,7 +66,12 @@ import { mergeRoomMeta, resyncWait, type SponsorInfo, validateGraphics } from ".
 import {
   buildRow,
   contentAt,
+  elementAngleIds,
   type ElementRow,
+  openChoices,
+  shapeTally,
+  validateResponse,
+  ELEMENT_KINDS,
   liveSnapshot,
   MAX_ELEMENTS_JSON,
   MAX_LIVE_ELEMENTS,
@@ -398,6 +405,10 @@ async function handle(req: Request, ctx: ReqCtx, json: Json): Promise<Response> 
       return await listElements(body, user.id, admin, json);
     case "set-layout":
       return await setLayout(body, user.id, admin, json);
+    case "respond":
+      return await respond(body, user.id, admin, json);
+    case "my-responses":
+      return await myResponses(body, user.id, admin, json);
     case "set-show":
       return await setShow(body, user.id, admin, json);
     case "reorder-cameras":
@@ -1025,6 +1036,9 @@ async function setElement(body: any, userId: string, admin: any, json: Json): Pr
   if (typeof body.remove === "string") {
     const { error } = await table.delete().eq("event_id", gate.event.id).eq("element_id", body.remove);
     if (error) throw error;
+    // Its votes go with it.
+    await admin.from("element_responses").delete().eq("event_id", gate.event.id).eq("element_id", body.remove);
+    await admin.from("element_tally_state").delete().eq("event_id", gate.event.id).eq("element_id", body.remove);
     rows = rows.filter((r) => r.element_id !== body.remove);
     await mirrorElements(roomName, rows);
     return json({ success: true });
@@ -1087,7 +1101,138 @@ async function listElements(body: any, userId: string, admin: any, json: Json): 
   const rows = await elementRows(gate.event.id, admin);
   const roomName = roomNameFor(eventId);
   if (rows.length && (await peersOf(roomName)).length) await mirrorElements(roomName, rows);
-  return json({ elements: rows.map(rowToLive), serverNow: Date.now() });
+  // Totals for anything viewers can tap — hosts see totals, never who voted what.
+  const tallies: Record<string, Record<string, number>> = {};
+  for (const r of rows) {
+    const choices = ELEMENT_KINDS[r.kind]?.choices?.(r.spec?.config ?? {}) ?? [];
+    if (choices.length) tallies[r.element_id] = await tallyOf(gate.event.id, r.element_id, choices, admin);
+  }
+  return json({ elements: rows.map(rowToLive), tallies, serverNow: Date.now() });
+}
+
+// ── Viewer taps (phase 5) ──────────────────────────────────────────────────────
+
+async function tallyOf(eventPk: string, elementId: string, choices: string[], admin: any) {
+  const { data, error } = await admin.rpc("element_tally", { p_event: eventPk, p_element: elementId });
+  if (error) throw error;
+  return shapeTally(choices, (data ?? {}) as Record<string, unknown>);
+}
+
+/** Server-authored message on the read-only system topic (0104: clients may read, never write). */
+async function broadcastSystem(slug: string, event: string, payload: Record<string, unknown>) {
+  try {
+    const key = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+    const res = await fetch(`${Deno.env.get("SUPABASE_URL")}/realtime/v1/api/broadcast`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", apikey: key, Authorization: `Bearer ${key}` },
+      body: JSON.stringify({ messages: [{ topic: `live_system:${slug}`, event, payload, private: true }] }),
+    });
+    if (!res.ok) log("warn", { action: "broadcast", status: res.status, body: await res.text() });
+  } catch (err) {
+    log("warn", { action: "broadcast", error: String(err) });
+  }
+}
+
+/**
+ * Send an element's totals to everyone at most once a second. The first vote
+ * after a quiet second goes out at once; votes inside the second schedule one
+ * trailing send (element_tally_claim decides, atomically, across instances),
+ * which recounts when it fires so the last vote is never left out.
+ */
+async function pushTally(eventPk: string, slug: string, elementId: string, choices: string[], admin: any) {
+  const { data: wait, error } = await admin.rpc("element_tally_claim", { p_event: eventPk, p_element: elementId });
+  if (error || typeof wait !== "number" || wait < 0) return;
+  const send = async () => {
+    if (wait > 0) {
+      await new Promise((r) => setTimeout(r, wait));
+      await admin.rpc("element_tally_sent", { p_event: eventPk, p_element: elementId });
+    }
+    const tally = await tallyOf(eventPk, elementId, choices, admin);
+    await broadcastSystem(slug, "tally", { elementId, tally });
+  };
+  if (wait === 0) return await send();
+  // The trailing send outlives this request; keep the worker up for it.
+  const later = send().catch((err) => log("warn", { action: "tally", error: String(err) }));
+  // deno-lint-ignore no-explicit-any
+  (globalThis as any).EdgeRuntime?.waitUntil?.(later);
+}
+
+/**
+ * The same gate viewer-token applies, read from the database (no LiveKit call
+ * per tap): the show is on, the caller isn't removed from it, and a paid show
+ * needs a paid ticket. Crew always pass.
+ */
+async function viewerMayTap(
+  eventId: string,
+  userId: string,
+  admin: any,
+  json: Json,
+): Promise<{ id: string } | Response> {
+  const { data: event } = await admin
+    .from("events")
+    .select("id, host_id, status, price")
+    .eq("livekit_room", eventId)
+    .maybeSingle();
+  if (!event) return json({ error: "Event not found" }, 404);
+  if (event.status !== "live" && event.status !== "soundcheck") {
+    return json({ error: "Event is not currently live" }, 403);
+  }
+  if (await isAuthorizedOperator({ id: event.id, host_id: event.host_id }, userId, admin)) return { id: event.id };
+  const { data: ban } = await admin.from("live_chat_bans").select("user_id")
+    .eq("event_id", event.id).eq("user_id", userId).maybeSingle();
+  if (ban) return json({ error: "You've been removed from this event" }, 403);
+  if (event.price && event.price > 0) {
+    const { data: ticket } = await admin.from("tickets").select("status")
+      .eq("event_id", event.id).eq("buyer_id", userId).maybeSingle();
+    if (!ticket || ticket.status !== "paid") {
+      return json({ error: "A valid ticket is required to join this event" }, 403);
+    }
+  }
+  return { id: event.id };
+}
+
+// respond — a viewer taps an element (a vote). Body: { eventId, elementId, choice }.
+// One vote per signed-in account per element, changeable until the element
+// closes; at most one change a second. Nobody — host included — can read who
+// voted what; totals go out on the system topic.
+async function respond(body: any, userId: string, admin: any, json: Json): Promise<Response> {
+  const { eventId, elementId } = body;
+  if (!eventId || typeof elementId !== "string") return json({ error: "eventId and elementId are required" }, 400);
+
+  const gate = await viewerMayTap(eventId, userId, admin, json);
+  if (gate instanceof Response) return gate;
+
+  const { data: row } = await admin.from("live_element_state").select(ELEMENT_COLS)
+    .eq("event_id", gate.id).eq("element_id", elementId).maybeSingle();
+  const v = validateResponse(row ?? undefined, body.choice);
+  if ("error" in v) return json({ error: v.error }, v.status);
+
+  const { data: status, error } = await admin.rpc("element_respond", {
+    p_event: gate.id,
+    p_element: elementId,
+    p_user: userId,
+    p_choice: v.choice,
+  });
+  if (error) throw error;
+  if (status === "slow") return json({ error: "Slow down a moment", retryAfterMs: 1000 }, 429);
+
+  await pushTally(gate.id, eventId, elementId, openChoices(row), admin);
+  return json({ success: true, mine: v.choice });
+}
+
+// my-responses — the caller's own taps in this show, so a viewer who rejoins
+// sees what they picked. Body: { eventId }.
+async function myResponses(body: any, userId: string, admin: any, json: Json): Promise<Response> {
+  const { eventId } = body;
+  if (!eventId) return json({ error: "eventId is required" }, 400);
+  const { data: event } = await admin.from("events").select("id").eq("livekit_room", eventId).maybeSingle();
+  if (!event) return json({ error: "Event not found" }, 404);
+  const { data, error } = await admin.from("element_responses").select("element_id, choice")
+    .eq("event_id", event.id).eq("user_id", userId);
+  if (error) throw error;
+  const mine: Record<string, string> = {};
+  for (const r of data ?? []) mine[r.element_id] = r.choice;
+  return json({ mine });
 }
 
 // set-layout — where graphics and elements sit on each camera.
@@ -1157,7 +1302,9 @@ async function setShow(body: any, userId: string, admin: any, json: Json): Promi
   const roomName = roomNameFor(eventId);
   const slots = await slotsFor(gate.event.id, admin);
   const meta = await roomMetaOf(roomName);
-  const result = cleanShowPatch(body, new Set(slots.map((s) => s.id)), meta, Date.now());
+  // Element angles (`el:<id>`) take show control like cameras do.
+  const ids = new Set([...slots.map((s) => s.id), ...elementAngleIds(meta)]);
+  const result = cleanShowPatch(body, ids, meta, Date.now());
   if ("error" in result) return json({ error: result.error }, 400);
 
   await roomService.updateRoomMetadata(roomName, JSON.stringify(mergeRoomMeta(meta, result.patch)));
@@ -1179,7 +1326,8 @@ async function reorderCameras(body: any, userId: string, admin: any, json: Json)
   if (gate instanceof Response) return gate;
 
   const slots = await slotsFor(gate.event.id, admin);
-  const plan = planReorder(body.order, slots);
+  const roomName = roomNameFor(eventId);
+  const plan = planReorder(body.order, slots, elementAngleIds(await roomMetaOf(roomName)));
   if ("error" in plan) return json({ error: plan.error }, 400);
 
   // Pass 1: park every slot on a negative index. Pass 2: the real order.
@@ -1195,7 +1343,6 @@ async function reorderCameras(body: any, userId: string, admin: any, json: Json)
     if (error) throw error;
   }
 
-  const roomName = roomNameFor(eventId);
   const before = new Map(slots.map((s) => [s.id, s.label]));
   const renamed = new Map(plan.rows.filter((r) => before.get(r.id) !== r.label).map((r) => [r.id, r.label]));
   const peers = await peersOf(roomName);
@@ -1210,7 +1357,7 @@ async function reorderCameras(body: any, userId: string, admin: any, json: Json)
   const meta = await roomMetaOf(roomName);
   await roomService.updateRoomMetadata(
     roomName,
-    JSON.stringify(mergeRoomMeta(meta, { slotOrder: plan.rows.map((r) => r.id) })),
+    JSON.stringify(mergeRoomMeta(meta, { slotOrder: plan.order })),
   );
   return json({ success: true, slots: plan.rows });
 }

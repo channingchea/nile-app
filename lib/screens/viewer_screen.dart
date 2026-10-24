@@ -31,6 +31,7 @@ import '../router.dart';
 import '../theme.dart';
 import 'widgets/moderation_menu.dart';
 import '../widgets/nile_desktop.dart';
+import '../widgets/elements/element_kinds.dart' show ElementInteraction;
 import '../widgets/nile_graphics_layer.dart';
 import '../widgets/nile_link_text.dart';
 import '../widgets/rolling_number.dart';
@@ -71,6 +72,10 @@ class CameraFeed {
 
   String get displayName =>
       isScreenShare ? '$cameraName — Screen' : cameraName;
+
+  /// A live element shown as its own angle (studio live elements, phase 4):
+  /// no participant, no track — it draws the element.
+  bool get isElementAngle => isElementAngleId(identity);
 }
 
 class _ViewerScreenState extends State<ViewerScreen>
@@ -109,6 +114,16 @@ class _ViewerScreenState extends State<ViewerScreen>
   OverlayLayout _layout = OverlayLayout.empty;
   int _overlaySeq = 0;
   int _overlayShown = 0;
+
+  /// Viewer taps (phase 5): each element's totals, this viewer's own choices,
+  /// and whether those have been fetched for this show yet.
+  final Map<String, ElementTally> _tallies = {};
+  final Map<String, String> _myChoices = {};
+  bool _myChoicesLoaded = false;
+
+  /// The camera whose sound played before an element angle was picked — an
+  /// element angle never changes the audio (phase 4).
+  String? _lastCameraAudio;
 
   /// In-show sponsor logos already counted for this viewer (the server
   /// dedupes too; this just saves the calls).
@@ -861,6 +876,9 @@ class _ViewerScreenState extends State<ViewerScreen>
         eventId,
         _onChatMessage,
         onPin: _onPin,
+        onTally: (id, tally) {
+          if (mounted) setState(() => _tallies[id] = tally);
+        },
       );
       // Whatever was pinned before we arrived; _onPin keeps it current.
       ChatService.fetchPinned(eventId).then((p) {
@@ -1184,11 +1202,19 @@ class _ViewerScreenState extends State<ViewerScreen>
     void show() {
       if (!mounted || seq <= _overlayShown || _overlaySeq < 0) return;
       _overlayShown = seq;
-      setState(() {
-        _graphics = graphics;
-        _elements = elements;
-        _layout = layout;
-      });
+      final before = _focused;
+      // Element angles come and go with the elements; keep the viewer on
+      // what they were watching.
+      setState(
+        () => _keepingFocus(() {
+          _graphics = graphics;
+          _elements = elements;
+          _layout = layout;
+        }),
+      );
+      if (elements.takesTaps) _loadMyChoices();
+      // On (re)join the caller settles angles once the cameras are in.
+      if (!joining) _afterAnglesChanged(watching: before);
     }
 
     final focused = _focused;
@@ -1297,7 +1323,65 @@ class _ViewerScreenState extends State<ViewerScreen>
   List<CameraFeed> get _onAir => _show.ordered([
     for (final c in _cameras)
       if (_show.isOnAir(c.slotId)) c,
+    for (final e in _elements.angles)
+      if (_show.isOnAir(elementAngleId(e.id)))
+        CameraFeed(
+          identity: elementAngleId(e.id),
+          cameraName: e.name,
+          slotId: elementAngleId(e.id),
+        ),
   ], (c) => c.slotId);
+
+  LiveElement? _elementOf(CameraFeed f) {
+    final id = elementIdOfAngle(f.identity);
+    return id == null ? null : _elements.byId(id);
+  }
+
+  // ── Viewer taps (phase 5) ─────────────────────────────────────────────────
+
+  ElementInteraction _interactionFor(LiveElement e) => ElementInteraction(
+    mine: _myChoices[e.id],
+    tally: _tallies[e.id],
+    // Signed-in viewers vote; anyone else just sees the totals.
+    onTap: supabase.auth.currentUser == null ? null : (c) => _respond(e, c),
+  );
+
+  /// What this viewer already picked this show (a rejoin) — once.
+  Future<void> _loadMyChoices() async {
+    final slug = _streamEventId;
+    if (_myChoicesLoaded || slug == null || supabase.auth.currentUser == null) {
+      return;
+    }
+    _myChoicesLoaded = true;
+    try {
+      final mine = await LivekitService.myResponses(eventId: slug);
+      if (mounted) setState(() => _myChoices.addAll(mine));
+    } catch (_) {
+      _myChoicesLoaded = false;
+    }
+  }
+
+  /// A tap on an element: shown at once, undone if the server says no.
+  Future<void> _respond(LiveElement e, String choice) async {
+    final slug = _streamEventId;
+    if (slug == null || _myChoices[e.id] == choice) return;
+    final before = _myChoices[e.id];
+    setState(() => _myChoices[e.id] = choice);
+    try {
+      final mine = await LivekitService.respond(
+        eventId: slug,
+        elementId: e.id,
+        choice: choice,
+      );
+      if (mounted && mine != null) setState(() => _myChoices[e.id] = mine);
+    } catch (err) {
+      if (!mounted) return;
+      setState(() {
+        before == null ? _myChoices.remove(e.id) : _myChoices[e.id] = before;
+      });
+      _showSnack(err.toString().replaceFirst('Exception: ', ''));
+    }
+  }
 
   CameraFeed? get _focused {
     final cams = _onAir;
@@ -1607,7 +1691,14 @@ class _ViewerScreenState extends State<ViewerScreen>
       }
       return;
     }
-    final target = _masterAudioIdentity ?? _focused?.identity;
+    final focused = _focused;
+    // An element angle has no sound of its own: whatever played keeps playing.
+    if (focused != null && !focused.isElementAngle) {
+      _lastCameraAudio = focused.identity;
+    }
+    final target =
+        _masterAudioIdentity ??
+        (focused?.isElementAngle ?? false ? _lastCameraAudio : focused?.identity);
     if (target == null) return;
     for (final entry in _audioPublications.entries) {
       if (entry.key == target) {
@@ -2924,6 +3015,14 @@ class _ViewerScreenState extends State<ViewerScreen>
   Widget _buildMainCamera() {
     // Only built while an angle is on air.
     final focused = _focused!;
+    final element = _elementOf(focused);
+    if (element != null) {
+      // Its own angle: the element, full screen — no camera graphics on it.
+      return NileElementAngle(
+        element: element,
+        interaction: _interactionFor(element),
+      );
+    }
     final slot = focused.isScreenShare ? null : _slotOf(focused.identity);
     final onAir = _graphics.forSlot(slot);
     // The angle label sits where a lower third or banner goes; graphics win.
@@ -2946,6 +3045,7 @@ class _ViewerScreenState extends State<ViewerScreen>
           elements: _elements.forSlot(slot),
           layers: _layout.layersFor(slot),
           onTapLink: _openGraphicLink,
+          interactionFor: _interactionFor,
         ),
         if (_syncing)
           Positioned(
@@ -3060,9 +3160,12 @@ class _ViewerScreenState extends State<ViewerScreen>
           child: Stack(
             fit: StackFit.expand,
             children: [
-              camera.track != null
-                  ? VideoTrackRenderer(camera.track!)
-                  : _buildCameraOffPlaceholder(large: false),
+              if (_elementOf(camera) case final e?)
+                IgnorePointer(child: NileElementAngle(element: e))
+              else if (camera.track != null)
+                VideoTrackRenderer(camera.track!)
+              else
+                _buildCameraOffPlaceholder(large: false),
               if (isMasterAudio)
                 Positioned(
                   top: 4,

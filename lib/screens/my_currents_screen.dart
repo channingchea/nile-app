@@ -5,6 +5,7 @@ import '../services/current_service.dart';
 import '../theme.dart';
 import '../widgets/empty_state.dart';
 import '../widgets/nile_glass_app_bar.dart';
+import '../services/nile_navigation.dart';
 
 /// The caller's own Currents, newest first, including expired ones (the 24h
 /// public window hides them everywhere else; storage purges ~30 days after
@@ -75,7 +76,7 @@ class _MyCurrentsScreenState extends State<MyCurrentsScreen> {
   }
 
   void _play(Current r) {
-    Navigator.push(
+    NileNav.push(
       context,
       MaterialPageRoute(
         fullscreenDialog: true,

@@ -258,7 +258,8 @@ class _ElementsPanelState extends State<ElementsPanel> {
       _c.undo(id);
       return KeyEventResult.handled;
     }
-    for (final sc in elementKindUis[e.kind]?.shortcuts ?? const <ElementShortcut>[]) {
+    for (final sc
+        in elementKindUis[e.kind]?.shortcuts ?? const <ElementShortcut>[]) {
       if (sc.keys.any((k) => k.accepts(ev, kb))) {
         final c = sc.run(e);
         _act(id, c.change, clockOps: c.clockOps);
@@ -346,9 +347,7 @@ class _ElementsPanelState extends State<ElementsPanel> {
                       ),
                     ),
                   )
-                : ListView(
-                    children: [for (final e in lib) _row(e)],
-                  ),
+                : ListView(children: [for (final e in lib) _row(e)]),
           ),
           const Divider(height: 1),
           if (cues.isNotEmpty)
@@ -491,7 +490,11 @@ class _ElementsPanelState extends State<ElementsPanel> {
             ],
           ),
           subtitle: Text(
-            [e.spec?.label ?? e.kind, if (e.style.nileStyle) 'Nile style'].join(' · '),
+            [
+              e.spec?.label ?? e.kind,
+              if (live.angle) 'Own angle',
+              if (e.style.nileStyle) 'Nile style',
+            ].join(' · '),
             style: NileTextStyles.bodySm().copyWith(
               color: NileColors.txtTertiary,
             ),
@@ -526,52 +529,76 @@ class _ElementsPanelState extends State<ElementsPanel> {
           ),
         ),
         if (selected && ui != null)
-          Container(
+          // Material, not a coloured box: the switch tile draws its ink here.
+          Material(
             color: NileColors.bgRaised,
-            padding: const EdgeInsets.fromLTRB(
-              NileSpacing.s24,
-              NileSpacing.s12,
-              NileSpacing.s24,
-              NileSpacing.s12,
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                ui.controls(
-                  live,
-                  (change, {clockOps = const {}}) =>
-                      _act(e.id, change, clockOps: clockOps),
-                ),
-                const SizedBox(height: NileSpacing.s8),
-                Row(
-                  children: [
-                    TextButton.icon(
-                      onPressed: _c.canUndo(e.id) ? () => _c.undo(e.id) : null,
-                      icon: const Icon(Icons.undo, size: 18),
-                      label: const Text('Undo'),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(
+                NileSpacing.s24,
+                NileSpacing.s12,
+                NileSpacing.s24,
+                NileSpacing.s12,
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  ui.controls(
+                    live,
+                    (change, {clockOps = const {}}) =>
+                        _act(e.id, change, clockOps: clockOps),
+                    _c.tally(e.id),
+                  ),
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    dense: true,
+                    title: Text(
+                      'Show as its own angle',
+                      style: NileTextStyles.bodyMd(),
                     ),
-                    TextButton.icon(
-                      onPressed: () => _edit(existing: e),
-                      icon: const Icon(Icons.edit_outlined, size: 18),
-                      label: const Text('Edit'),
-                    ),
-                    const Spacer(),
-                    Flexible(
-                      child: Text(
-                        [
-                          for (final s in ui.shortcuts)
-                            '${_keyLabel(s.keys.first)} ${s.label}',
-                        ].join(' · '),
-                        textAlign: TextAlign.end,
-                        maxLines: 2,
-                        style: NileTextStyles.caption().copyWith(
-                          color: NileColors.txtTertiary,
-                        ),
+                    subtitle: Text(
+                      'Viewers can pick it like a camera — full screen on your '
+                      'brand background. The sound stays as it is.',
+                      style: NileTextStyles.caption().copyWith(
+                        color: NileColors.txtTertiary,
                       ),
                     ),
-                  ],
-                ),
-              ],
+                    value: live.angle,
+                    activeThumbColor: NileColors.volt,
+                    onChanged: (v) => _c.setAngle(e.id, v),
+                  ),
+                  const SizedBox(height: NileSpacing.s8),
+                  Row(
+                    children: [
+                      TextButton.icon(
+                        onPressed: _c.canUndo(e.id)
+                            ? () => _c.undo(e.id)
+                            : null,
+                        icon: const Icon(Icons.undo, size: 18),
+                        label: const Text('Undo'),
+                      ),
+                      TextButton.icon(
+                        onPressed: () => _edit(existing: e),
+                        icon: const Icon(Icons.edit_outlined, size: 18),
+                        label: const Text('Edit'),
+                      ),
+                      const Spacer(),
+                      Flexible(
+                        child: Text(
+                          [
+                            for (final s in ui.shortcuts)
+                              '${_keyLabel(s.keys.first)} ${s.label}',
+                          ].join(' · '),
+                          textAlign: TextAlign.end,
+                          maxLines: 2,
+                          style: NileTextStyles.caption().copyWith(
+                            color: NileColors.txtTertiary,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
             ),
           ),
       ],
@@ -825,7 +852,9 @@ class _ElementEditorState extends State<_ElementEditor> {
                 maxLength: 7,
                 decoration: InputDecoration(
                   labelText: '$label colour',
-                  hintText: widget.kit == null ? 'Nile default' : 'From your kit',
+                  hintText: widget.kit == null
+                      ? 'Nile default'
+                      : 'From your kit',
                   counterText: '',
                   prefixIcon: Padding(
                     padding: const EdgeInsets.all(NileSpacing.s12),
@@ -870,7 +899,10 @@ class _ElementEditorState extends State<_ElementEditor> {
             if (widget.existing != null)
               TextButton(
                 onPressed: _busy ? null : _delete,
-                child: Text('Delete', style: TextStyle(color: NileColors.error)),
+                child: Text(
+                  'Delete',
+                  style: TextStyle(color: NileColors.error),
+                ),
               ),
             const Spacer(),
             TextButton(
