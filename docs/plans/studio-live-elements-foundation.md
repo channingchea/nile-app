@@ -106,7 +106,7 @@ Findings that shaped this plan:
 - Taps: 0139 `element_responses` (no policies — nobody reads rows), `element_respond` (1 change/s per viewer), `element_tally`, `element_tally_claim`/`_sent` (totals at most once a second, with a trailing send so the last vote always lands). livekit `respond` (same gate as viewer-token, from the DB) and `my-responses`; totals go out on the existing read-only `live_system:<slug>` topic as event `tally`; list-elements returns totals for the host after the show.
 - Kinds declare `choices(config)`; an element takes taps while `state.open` and live. Test counter: "Viewers can tap ▲/▼" + Open/Close taps.
 - Overlay: elements are tappable only while open and not under a full-screen item; Studio sees totals, never taps.
-- 0139 needed the host's approval in the Supabase tool (replaces two functions) — applied/deployed only after that.
+- 0139 applied to prod and the livekit function deployed 2026-10-23 (after the host approved the migration). SQL self-test passed (rolled back).
 
 ## Open questions / risks
 - Replay approach (Phase 6) still to be designed, constrained to the app only.
