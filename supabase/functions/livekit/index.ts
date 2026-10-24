@@ -16,6 +16,9 @@
 //   list-cameras      host    → { cameras: [{ identity, name, cameraName, cameraId }] }
 //   set-master-audio  host    → { success: true }   ← any publisher; exactly one holds the flag
 //   set-graphics      host    → { success: true }   ← Studio pushes on-screen graphics (room metadata)
+//   set-element       host    → { success, element } ← Studio pushes one live element (state + metadata)
+//   list-elements     host    → { elements, serverNow } ← Studio reloads every element's live state
+//   set-layout        host    → { success: true }   ← per-camera spots + layer order (room metadata)
 //   resync            host    → { success, resyncAt } ← every viewer re-aligns cameras + audio
 //   clock             any     → { receivedAt, sentAt } ← RealSync clock ping (server ms)
 //   report-clock      crew    → { success: true }   ← publisher's clock offset into its metadata
@@ -58,6 +61,17 @@ import {
   studioIdentity,
 } from "../_shared/studio.ts";
 import { mergeRoomMeta, resyncWait, type SponsorInfo, validateGraphics } from "../_shared/graphics.ts";
+import {
+  buildRow,
+  contentAt,
+  type ElementRow,
+  liveSnapshot,
+  MAX_ELEMENTS_JSON,
+  MAX_LIVE_ELEMENTS,
+  rowToLive,
+  validateElementPush,
+  validateLayout,
+} from "../_shared/elements.ts";
 import { cleanShowPatch, planReorder } from "../_shared/show.ts";
 
 // CORS headers are per-request, so the JSON responder is built per-request too
@@ -378,6 +392,12 @@ async function handle(req: Request, ctx: ReqCtx, json: Json): Promise<Response> 
       return await reportClock(body, user.id, admin, json);
     case "set-graphics":
       return await setGraphics(body, user.id, admin, json);
+    case "set-element":
+      return await setElement(body, user.id, admin, json);
+    case "list-elements":
+      return await listElements(body, user.id, admin, json);
+    case "set-layout":
+      return await setLayout(body, user.id, admin, json);
     case "set-show":
       return await setShow(body, user.id, admin, json);
     case "reorder-cameras":
@@ -950,9 +970,151 @@ async function setGraphics(body: any, userId: string, admin: any, json: Json): P
   });
   if ("error" in result) return json({ error: result.error }, 400);
 
+  // `at`: the moment the change refers to — viewers whose video runs further
+  // behind hold it back so a graphic never lands before the picture does.
+  const graphics = { ...result.state, at: contentAt(Date.now(), body.srcAgeMs) };
   const meta = await roomMetaOf(roomName);
-  await roomService.updateRoomMetadata(roomName, JSON.stringify(mergeRoomMeta(meta, { graphics: result.state })));
-  return json({ success: true, graphics: result.state });
+  await roomService.updateRoomMetadata(roomName, JSON.stringify(mergeRoomMeta(meta, { graphics })));
+  return json({ success: true, graphics });
+}
+
+// ── Live elements (studio-live-elements-foundation, phases 1-3) ───────────────
+
+const ELEMENT_COLS = "event_id, element_id, kind, spec, state, version, content_at";
+
+async function elementRows(eventPk: string, admin: any): Promise<ElementRow[]> {
+  const { data, error } = await admin.from("live_element_state").select(ELEMENT_COLS).eq("event_id", eventPk);
+  if (error) throw error;
+  return (data ?? []) as ElementRow[];
+}
+
+/** Mirror the on-air elements into room metadata, if they changed. */
+async function mirrorElements(roomName: string, rows: ElementRow[]) {
+  const snap = liveSnapshot(rows);
+  const meta = await roomMetaOf(roomName);
+  if (JSON.stringify(meta.elements ?? null) === JSON.stringify(snap)) return;
+  await roomService.updateRoomMetadata(roomName, JSON.stringify(mergeRoomMeta(meta, { elements: snap })));
+}
+
+// set-element — the Studio changes one live element (or removes it).
+//
+// Body: { eventId, studio: true, element: { id, kind, name, config, state,
+//         style?, nileStyle?, targets, presentedBy?, version, clockOps?, srcAgeMs? } }
+//    or { eventId, studio: true, remove: <element id> }.
+// The element's live state is stored in live_element_state (the source of
+// truth — a Studio that drops reloads from it) and every on-air element is
+// mirrored into room metadata `elements`. A push must carry a version newer
+// than the stored one; an older one is refused with 409 and the current
+// element, so a Studio that fell out of step can catch up. Clocks are stamped
+// here with the server's own time.
+async function setElement(body: any, userId: string, admin: any, json: Json): Promise<Response> {
+  const { eventId } = body;
+  if (!eventId) return json({ error: "eventId is required" }, 400);
+
+  const gate = await requireHost(eventId, userId, admin, json);
+  if (gate instanceof Response) return gate;
+
+  const roomName = roomNameFor(eventId);
+  if (body.studio !== true || !studioConnected(await peersOf(roomName))) {
+    return json({ error: "Elements are run from the Studio." }, 409);
+  }
+
+  const table = admin.from("live_element_state");
+  let rows = await elementRows(gate.event.id, admin);
+
+  if (typeof body.remove === "string") {
+    const { error } = await table.delete().eq("event_id", gate.event.id).eq("element_id", body.remove);
+    if (error) throw error;
+    rows = rows.filter((r) => r.element_id !== body.remove);
+    await mirrorElements(roomName, rows);
+    return json({ success: true });
+  }
+
+  const slots = await slotsFor(gate.event.id, admin);
+  const wantsSponsor = typeof body.element?.presentedBy === "string";
+  const storage = `${Deno.env.get("SUPABASE_URL")}/storage/v1/object/public/`;
+  const sponsor = wantsSponsor ? await sponsorFor(gate.event.id, admin, storage) : null;
+  const v = validateElementPush(body.element, {
+    slotIds: new Set(slots.map((s) => s.id)),
+    sponsorCampaignId: sponsor?.campaignId,
+  });
+  if ("error" in v) return json({ error: v.error }, 400);
+
+  const prev = rows.find((r) => r.element_id === v.push.id);
+  if (prev && prev.kind !== v.push.kind) return json({ error: "An element can't change kind" }, 400);
+  if (!prev && rows.length >= MAX_LIVE_ELEMENTS) {
+    return json({ error: `A show can run ${MAX_LIVE_ELEMENTS} elements at most` }, 400);
+  }
+  if (prev && v.push.version <= prev.version) {
+    return json({ error: "stale", current: rowToLive(prev) }, 409);
+  }
+
+  const row = buildRow(gate.event.id, v.push, prev, Date.now());
+  const next = [...rows.filter((r) => r.element_id !== row.element_id), row];
+  if (JSON.stringify(liveSnapshot(next)).length > MAX_ELEMENTS_JSON) {
+    return json({ error: "Too many elements on screen at once" }, 400);
+  }
+
+  // Conditional write: only over an older version, so two pushes racing can't
+  // leave the older one standing.
+  const values = { kind: row.kind, spec: row.spec, state: row.state, version: row.version, content_at: row.content_at, updated_at: new Date().toISOString() };
+  if (prev) {
+    const { data, error } = await table.update(values)
+      .eq("event_id", row.event_id).eq("element_id", row.element_id).lt("version", row.version)
+      .select("element_id");
+    if (error) throw error;
+    if (!data?.length) return json({ error: "stale", current: rowToLive(prev) }, 409);
+  } else {
+    const { error } = await table.insert({ event_id: row.event_id, element_id: row.element_id, ...values });
+    if (error?.code === "23505") return json({ error: "stale" }, 409);
+    if (error) throw error;
+  }
+
+  await mirrorElements(roomName, next);
+  return json({ success: true, element: rowToLive(row) });
+}
+
+// list-elements — every element's live state for this event, on air or not:
+// the Studio reloads from here when it (re)joins. Also re-mirrors the on-air
+// ones into a room that came back up without them.
+async function listElements(body: any, userId: string, admin: any, json: Json): Promise<Response> {
+  const { eventId } = body;
+  if (!eventId) return json({ error: "eventId is required" }, 400);
+
+  const gate = await requireHost(eventId, userId, admin, json);
+  if (gate instanceof Response) return gate;
+
+  const rows = await elementRows(gate.event.id, admin);
+  const roomName = roomNameFor(eventId);
+  if (rows.length && (await peersOf(roomName)).length) await mirrorElements(roomName, rows);
+  return json({ elements: rows.map(rowToLive), serverNow: Date.now() });
+}
+
+// set-layout — where graphics and elements sit on each camera.
+//
+// Body: { eventId, studio: true, layout: { all?: [layer], bySlot: { <slotId>: [layer] } }, srcAgeMs? }
+// layer = { id, spot?: tl|tc|tr|ml|mc|mr|bl|bc|br|full, hidden?: true }, top = front.
+// The whole layout each time; written into room metadata `layout`.
+async function setLayout(body: any, userId: string, admin: any, json: Json): Promise<Response> {
+  const { eventId } = body;
+  if (!eventId) return json({ error: "eventId is required" }, 400);
+
+  const gate = await requireHost(eventId, userId, admin, json);
+  if (gate instanceof Response) return gate;
+
+  const roomName = roomNameFor(eventId);
+  if (body.studio !== true || !studioConnected(await peersOf(roomName))) {
+    return json({ error: "Layouts are run from the Studio." }, 409);
+  }
+
+  const slots = await slotsFor(gate.event.id, admin);
+  const result = validateLayout(body.layout, new Set(slots.map((s) => s.id)));
+  if ("error" in result) return json({ error: result.error }, 400);
+
+  const layout = { ...result.layout, at: contentAt(Date.now(), body.srcAgeMs) };
+  const meta = await roomMetaOf(roomName);
+  await roomService.updateRoomMetadata(roomName, JSON.stringify(mergeRoomMeta(meta, { layout })));
+  return json({ success: true, layout });
 }
 
 // The event's accepted Pre-Show sponsor — the only sponsor a Studio may put on

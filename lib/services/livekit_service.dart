@@ -1,4 +1,6 @@
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'live_elements.dart';
+import 'overlay_layout.dart';
 import 'studio_graphics.dart';
 import 'supabase_client.dart';
 
@@ -151,14 +153,96 @@ class LivekitService {
   /// Studio: put graphics on (or take them off) the air. Sends the whole
   /// on-air state; the server validates it, enforces the caps and writes it
   /// to the room metadata every viewer reads.
+  ///
+  /// [srcAgeMs]: how old the Studio's own picture is, when known — viewers
+  /// further behind hold the change back to match.
   static Future<void> setGraphics({
     required String eventId,
     required GraphicsState graphics,
+    int? srcAgeMs,
   }) => _invoke<Map>({
     'action': 'set-graphics',
     'eventId': eventId,
     'studio': true,
     'graphics': graphics.toJson(),
+    'srcAgeMs': ?srcAgeMs,
+  });
+
+  /// Studio: push one live element (its next [LiveElement.version]) with any
+  /// clock commands. Returns the element as stored — clocks stamped by the
+  /// server. Throws [ElementStale] when the server holds a newer version.
+  static Future<LiveElement> setElement({
+    required String eventId,
+    required LiveElement element,
+    Map<String, ClockOp> clockOps = const {},
+    int? srcAgeMs,
+  }) async {
+    final body = {
+      'action': 'set-element',
+      'eventId': eventId,
+      'studio': true,
+      'element': {
+        ...element.toJson(),
+        if (clockOps.isNotEmpty)
+          'clockOps': {
+            for (final e in clockOps.entries) e.key: e.value.toJson(),
+          },
+        'srcAgeMs': ?srcAgeMs,
+      },
+    };
+    try {
+      final res = await supabase.functions.invoke('livekit', body: body);
+      final stored = LiveElement.fromJson((res.data as Map)['element']);
+      if (stored == null) throw Exception('Unexpected reply');
+      return stored;
+    } on FunctionException catch (e) {
+      final d = e.details;
+      if (e.status == 409 && d is Map && d['error'] == 'stale') {
+        throw ElementStale(LiveElement.fromJson(d['current']));
+      }
+      throw Exception(
+        (d is Map ? d['error']?.toString() : null) ??
+            'livekit function failed (${e.status})',
+      );
+    }
+  }
+
+  /// Studio: take an element out of the show entirely (its live values go).
+  static Future<void> removeElement({
+    required String eventId,
+    required String id,
+  }) => _invoke<Map>({
+    'action': 'set-element',
+    'eventId': eventId,
+    'studio': true,
+    'remove': id,
+  });
+
+  /// Studio: every element's live state in this show, on air or not.
+  static Future<List<LiveElement>> listElements({
+    required String eventId,
+  }) async {
+    final d = await _invoke<Map>({
+      'action': 'list-elements',
+      'eventId': eventId,
+    });
+    return [
+      for (final j in (d['elements'] as List? ?? const []))
+        ?LiveElement.fromJson(j),
+    ];
+  }
+
+  /// Studio: where graphics and elements sit on each camera.
+  static Future<void> setLayout({
+    required String eventId,
+    required OverlayLayout layout,
+    int? srcAgeMs,
+  }) => _invoke<Map>({
+    'action': 'set-layout',
+    'eventId': eventId,
+    'studio': true,
+    'layout': layout.toJson(),
+    'srcAgeMs': ?srcAgeMs,
   });
 
   /// Show control: off-air angles, the default angle, "Send everyone here".
@@ -482,4 +566,14 @@ class ReplayAvailability {
     required this.published,
     this.replayPrice,
   });
+}
+
+/// set-element refused a push: the server already holds a newer version.
+/// [current] is that version (null if it couldn't be read).
+class ElementStale implements Exception {
+  const ElementStale(this.current);
+  final LiveElement? current;
+
+  @override
+  String toString() => 'That element changed elsewhere — reloaded.';
 }

@@ -1,36 +1,51 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:google_fonts/google_fonts.dart';
 import 'package:intl/intl.dart' show DateFormat;
 import 'package:qr_flutter/qr_flutter.dart';
 
-import '../services/brand_kit.dart';
+import '../services/live_elements.dart';
+import '../services/overlay_layout.dart';
 import '../services/studio_graphics.dart';
 import '../theme.dart';
+import 'elements/element_kinds.dart';
+import 'overlay_look.dart';
 
-/// Draws pushed Studio graphics over a video (Studio master host, phase 5).
+/// Draws what the Studio puts over a video: graphics and live elements, each
+/// in its spot on the 3×3 grid (or full screen) and in its camera's layer
+/// order ([placeOverlay]). Studio master host phase 5; one overlay for
+/// graphics and elements since studio live elements phase 2.
 ///
-/// Sized off the video area, not the screen, so a lower third reads the same on
-/// a phone, a Studio thumbnail and a full-screen TV-sized window. Each position
-/// fades on its own: swapping a lower third cross-fades, a slate fades over the
-/// picture (audio carries on underneath — it is only drawn over the video).
+/// Measured against the 16:9 picture inside the box ([videoFrame]), not the
+/// screen, so a lower third reads the same on a phone upright or sideways, a
+/// Studio thumbnail and a TV-sized window. Each item fades on its own: swapping
+/// a lower third cross-fades, a slate fades over the picture (audio carries on
+/// underneath — it is only drawn over the video).
 ///
-/// Used by the viewer, the Studio monitor, the operator phone's preview and the
-/// Studio Preview demo. Viewers can't hide it.
+/// Used by the viewer, the Studio monitor and tiles, the operator phone's
+/// preview and Studio Preview. Viewers can't hide it.
 ///
 /// Auto-hide: a graphic past its `hideAt` stops drawing on the dot (and fades
 /// out), even before the Studio takes it out of the room metadata.
 ///
-/// Each graphic draws in its attached brand kit ([LiveGraphic.brand]) or, with
-/// none, in Nile's own style.
-///
 /// Nothing here takes a touch except, when [onTapLink] is set, a QR code with
-/// a link (viewers on a phone tap it instead of scanning their own screen).
+/// a link (viewers on a phone tap it instead of scanning their own screen) —
+/// and never one under a full-screen item.
 class NileGraphicsLayer extends StatefulWidget {
-  const NileGraphicsLayer({super.key, required this.graphics, this.onTapLink});
+  const NileGraphicsLayer({
+    super.key,
+    required this.graphics,
+    this.elements = const [],
+    this.layers = const [],
+    this.onTapLink,
+  });
 
   final List<LiveGraphic> graphics;
+  final List<LiveElement> elements;
+
+  /// This camera's layer list ([OverlayLayout.layersFor]); empty = every item
+  /// in its default spot.
+  final List<LayerEntry> layers;
 
   /// Called with a tapped [LiveGraphic.tappable] graphic. Null = nothing is
   /// tappable (Studio, operator phones).
@@ -42,31 +57,73 @@ class NileGraphicsLayer extends StatefulWidget {
   State<NileGraphicsLayer> createState() => _NileGraphicsLayerState();
 }
 
+/// A channel that just went away, kept while it fades out.
+typedef _Gone = ({PlacedItem last, int until});
+
 class _NileGraphicsLayerState extends State<NileGraphicsLayer> {
   Timer? _hideTimer;
+  Timer? _purgeTimer;
+  List<PlacedItem> _placed = const [];
+  final Map<String, _Gone> _gone = {};
 
   @override
   void initState() {
     super.initState();
-    _scheduleHide();
+    _recompute();
   }
 
   @override
   void didUpdateWidget(NileGraphicsLayer old) {
     super.didUpdateWidget(old);
-    _scheduleHide();
+    _recompute();
   }
 
   @override
   void dispose() {
     _hideTimer?.cancel();
+    _purgeTimer?.cancel();
     super.dispose();
   }
 
-  /// Rebuild when the next graphic's auto-hide comes due.
-  void _scheduleHide() {
-    _hideTimer?.cancel();
+  /// Place everything still up, and remember what just left so its fade-out
+  /// has somewhere to happen.
+  void _recompute() {
     final now = DateTime.now().millisecondsSinceEpoch;
+    final placed = placeOverlay(
+      graphics: [
+        for (final g in widget.graphics)
+          if (!g.expiredAt(now)) g,
+      ],
+      elements: widget.elements,
+      layers: widget.layers,
+    );
+    final current = {for (final p in placed) p.channel};
+    for (final p in _placed) {
+      if (!current.contains(p.channel)) {
+        _gone[p.channel] = (
+          last: p,
+          until: now + NileGraphicsLayer.fade.inMilliseconds + 50,
+        );
+      }
+    }
+    _gone.removeWhere((k, g) => current.contains(k) || g.until <= now);
+    _placed = placed;
+    _schedulePurge(now);
+    _scheduleHide(now);
+  }
+
+  void _schedulePurge(int now) {
+    _purgeTimer?.cancel();
+    if (_gone.isEmpty) return;
+    final next = _gone.values.map((g) => g.until).reduce((a, b) => a < b ? a : b);
+    _purgeTimer = Timer(Duration(milliseconds: next - now + 10), () {
+      if (mounted) setState(_recompute);
+    });
+  }
+
+  /// Rebuild when the next graphic's auto-hide comes due.
+  void _scheduleHide(int now) {
+    _hideTimer?.cancel();
     final next = widget.graphics
         .map((g) => g.hideAt)
         .whereType<int>()
@@ -74,87 +131,122 @@ class _NileGraphicsLayerState extends State<NileGraphicsLayer> {
         .fold<int?>(null, (a, b) => a == null || b < a ? b : a);
     if (next == null) return;
     _hideTimer = Timer(Duration(milliseconds: next - now + 20), () {
-      if (mounted) setState(_scheduleHide);
+      if (mounted) setState(_recompute);
     });
   }
 
   @override
   Widget build(BuildContext context) {
-    final now = DateTime.now().millisecondsSinceEpoch;
-    final graphics = [
-      for (final g in widget.graphics)
-        if (!g.expiredAt(now)) g,
+    // Everything on screen plus what is fading out, as (channel, placement,
+    // item-or-null).
+    final channels = <({String key, PlacedItem at, PlacedItem? item})>[
+      for (final p in _placed) (key: p.channel, at: p, item: p),
+      for (final e in _gone.entries) (key: e.key, at: e.value.last, item: null),
     ];
-    const fade = NileGraphicsLayer.fade;
     final onTapLink = widget.onTapLink;
-    // Never short-circuit to nothing: the last graphic has to be able to fade
-    // out, which needs its AnimatedSwitcher still in the tree.
+    final fullZ = _placed.where((p) => p.isFull).map((p) => p.z);
+    final topFull = fullZ.isEmpty ? null : fullZ.reduce((a, b) => a > b ? a : b);
+
     return LayoutBuilder(
       builder: (context, box) {
-        // One "unit" is 1% of the video's width; everything scales off it.
-        final u = box.maxWidth / 100;
-        LiveGraphic? at(String key) =>
-            graphics.where((g) => g.capKey == key).lastOrNull;
+        final frame = videoFrame(box.biggest);
+        // One "unit" is 1% of the picture's width; everything scales off it.
+        final u = frame.width / 100;
+        final margin = u * 3;
+        final bannerH = u * 6;
 
-        // A slate covers everything under it, so nothing under it takes taps.
-        final slateUp = at(GraphicKind.slate.wire) != null;
-        VoidCallback? tapFor(LiveGraphic g) =>
-            onTapLink != null && g.tappable && !slateUp ? () => onTapLink(g) : null;
+        VoidCallback? tapFor(PlacedItem p) {
+          final g = p.graphic;
+          if (onTapLink == null || g == null || !g.tappable) return null;
+          // Under a full-screen item nothing takes taps.
+          if (topFull != null && topFull > p.z) return null;
+          return () => onTapLink(g);
+        }
 
-        // Every slot ignores the pointer unless it holds a tappable graphic,
-        // so touches fall through to the video controls underneath.
-        Widget slot(String key, Widget Function(LiveGraphic g) build) {
-          final g = at(key);
+        Widget channel(({String key, PlacedItem at, PlacedItem? item}) c) {
+          final item = c.item;
           return IgnorePointer(
-            ignoring: g == null || tapFor(g) == null,
+            key: ValueKey(c.key),
+            ignoring: item == null || tapFor(item) == null,
             child: AnimatedSwitcher(
-              duration: fade,
-              child: g == null
+              duration: NileGraphicsLayer.fade,
+              child: item == null
                   ? const SizedBox.shrink(key: ValueKey('none'))
-                  : KeyedSubtree(key: ValueKey(g.id), child: build(g)),
+                  : KeyedSubtree(
+                      key: ValueKey(item.id),
+                      child: _draw(item, u, tapFor(item), bannerH),
+                    ),
             ),
           );
         }
 
-        final banner = at(GraphicKind.banner.wire);
-        final bannerHeight = banner == null ? 0.0 : u * 6;
+        // A banner is a full-width row; bottom (or top) spots sit clear of it.
+        bool bannerAt(LayoutSpot s) =>
+            _placed.any((p) => p.isBanner && p.spot == s);
+        final topInset = bannerAt(LayoutSpot.tc) ? bannerH : 0.0;
+        final bottomInset = bannerAt(LayoutSpot.bc) ? bannerH : 0.0;
+
+        final layers = <({int z, Widget child})>[];
+        final bySpot = <LayoutSpot, List<({String key, PlacedItem at, PlacedItem? item})>>{};
+        for (final c in channels) {
+          final at = c.at;
+          if (at.isFull) {
+            layers.add((
+              z: at.z,
+              child: Positioned.fill(key: ValueKey('at:${c.key}'), child: channel(c)),
+            ));
+          } else if (at.isBanner) {
+            layers.add((
+              z: at.z,
+              child: Positioned(
+                key: ValueKey('at:${c.key}'),
+                left: 0,
+                right: 0,
+                top: switch (at.spot) {
+                  LayoutSpot.tc => 0.0,
+                  LayoutSpot.mc => (frame.height - bannerH) / 2,
+                  _ => null,
+                },
+                bottom: at.spot == LayoutSpot.bc ? 0.0 : null,
+                child: channel(c),
+              ),
+            ));
+          } else {
+            bySpot.putIfAbsent(at.spot, () => []).add(c);
+          }
+        }
+        bySpot.forEach((spot, list) {
+          layers.add((
+            z: list.map((c) => c.at.z).reduce((a, b) => a > b ? a : b),
+            child: Positioned.fill(
+              key: ValueKey('spot:${spot.wire}'),
+              child: Padding(
+                padding: EdgeInsets.fromLTRB(
+                  margin,
+                  margin + topInset,
+                  margin,
+                  margin + bottomInset,
+                ),
+                child: Align(
+                  alignment: spot.alignment,
+                  child: _spot(spot, list, channel, u),
+                ),
+              ),
+            ),
+          ));
+        });
+        layers.sort((a, b) => a.z.compareTo(b.z));
+
+        // Never short-circuit to nothing: the last item has to be able to fade
+        // out, which needs its AnimatedSwitcher still in the tree.
         return Stack(
-          fit: StackFit.expand,
           children: [
-            for (final corner in logoCorners)
-              Positioned(
-                left: corner.endsWith('l') ? u * 3 : null,
-                right: corner.endsWith('r') ? u * 3 : null,
-                top: corner.startsWith('t') ? u * 3 : null,
-                bottom: corner.startsWith('b') ? u * 3 + bannerHeight : null,
-                child: _corner(corner, u, slot, tapFor),
+            Positioned.fromRect(
+              rect: frame,
+              child: Stack(
+                fit: StackFit.expand,
+                children: [for (final l in layers) l.child],
               ),
-            Positioned(
-              left: u * 4,
-              bottom: u * 4 + bannerHeight,
-              child: slot(
-                GraphicKind.lowerThird.wire,
-                (g) => _LowerThird(g: g, u: u),
-              ),
-            ),
-            // A chat card sits above where a lower third goes, so the two
-            // can be up together.
-            Positioned(
-              left: u * 4,
-              bottom: u * 4 + bannerHeight + u * 11,
-              child: slot(GraphicKind.chat.wire, (g) => _ChatCard(g: g, u: u)),
-            ),
-            Positioned(
-              left: 0,
-              right: 0,
-              bottom: 0,
-              child: slot(
-                GraphicKind.banner.wire,
-                (g) => _Banner(g: g, u: u, height: u * 6),
-              ),
-            ),
-            Positioned.fill(
-              child: slot(GraphicKind.slate.wire, (g) => _Slate(g: g, u: u)),
             ),
           ],
         );
@@ -162,70 +254,90 @@ class _NileGraphicsLayerState extends State<NileGraphicsLayer> {
     );
   }
 
-  /// One corner: the logo (or sponsor) hugging the corner, and a QR code
-  /// beside it on the screen-centre side. The logo carries the gap on its
-  /// inward edge, so it sits exactly in the corner whether or not a QR is up.
-  Widget _corner(
-    String corner,
+  /// One grid spot: corner bugs (logos, sponsor, QR) side by side at the edge,
+  /// then lower third, chat card and elements stacking inward from it.
+  Widget _spot(
+    LayoutSpot spot,
+    List<({String key, PlacedItem at, PlacedItem? item})> list,
+    Widget Function(({String key, PlacedItem at, PlacedItem? item})) channel,
     double u,
-    Widget Function(String key, Widget Function(LiveGraphic g) build) slot,
-    VoidCallback? Function(LiveGraphic g) tapFor,
   ) {
-    final left = corner.endsWith('l');
-    final logo = slot(
-      'logo:$corner',
-      (g) => Padding(
-        padding: left
-            ? EdgeInsets.only(right: u * 1.5)
-            : EdgeInsets.only(left: u * 1.5),
-        child: g.kind == GraphicKind.sponsor && g.imageUrl == null
-            ? _SponsorBadge(g: g, u: u)
-            : _Logo(g: g, u: u),
-      ),
-    );
-    final qr = slot('qr:$corner', (g) => _Qr(g: g, u: u, onTap: tapFor(g)));
-    return Row(
+    int rank(PlacedItem p) => switch (p.graphic?.kind) {
+      GraphicKind.lowerThird => 0,
+      GraphicKind.chat => 1,
+      null => 2,
+      _ => 3,
+    };
+    final compact = list.where((c) => c.at.isCompact).toList()
+      ..sort((a, b) {
+        // The logo hugs the corner; a QR code sits on the screen-centre side.
+        final qa = a.at.graphic?.kind == GraphicKind.qr ? 1 : 0;
+        final qb = b.at.graphic?.kind == GraphicKind.qr ? 1 : 0;
+        return spot.isRight ? qb - qa : qa - qb;
+      });
+    final rest = list.where((c) => !c.at.isCompact).toList()
+      ..sort((a, b) {
+        final r = rank(a.at) - rank(b.at);
+        return r != 0 ? r : b.at.z - a.at.z;
+      });
+    final gap = u * 1.5;
+    final cross = spot.isLeft
+        ? CrossAxisAlignment.start
+        : spot.isRight
+        ? CrossAxisAlignment.end
+        : CrossAxisAlignment.center;
+    final children = <Widget>[
+      if (compact.isNotEmpty)
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: spot.isTop
+              ? CrossAxisAlignment.start
+              : spot.isBottom
+              ? CrossAxisAlignment.end
+              : CrossAxisAlignment.center,
+          children: [
+            for (var i = 0; i < compact.length; i++) ...[
+              if (i > 0) SizedBox(width: gap),
+              channel(compact[i]),
+            ],
+          ],
+        ),
+      for (final c in rest) channel(c),
+    ];
+    return Column(
       mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: corner.startsWith('t')
-          ? CrossAxisAlignment.start
-          : CrossAxisAlignment.end,
-      children: left ? [logo, qr] : [qr, logo],
+      crossAxisAlignment: cross,
+      verticalDirection: spot.isBottom
+          ? VerticalDirection.up
+          : VerticalDirection.down,
+      children: [
+        for (var i = 0; i < children.length; i++) ...[
+          if (i > 0) SizedBox(height: gap),
+          children[i],
+        ],
+      ],
     );
   }
-}
 
-/// A graphic's colours and fonts: its brand kit's, or Nile's own when it has
-/// none (then everything resolves to exactly the Nile tokens).
-class _Look {
-  const _Look(this.brand);
-  factory _Look.of(LiveGraphic g) => _Look(g.brand);
-
-  final BrandStyle? brand;
-
-  /// Replaces volt: lower-third stripe, banner fill, countdown numbers.
-  Color get accent => brand?.accentColor ?? NileColors.volt;
-
-  /// Card backgrounds (lower third, chat card, QR frame, sponsor badge).
-  Color get panel => brand?.panelColor ?? NileColors.bgSurface;
-
-  /// Full-screen slate background.
-  Color get page => brand?.panelColor ?? NileColors.bgPage;
-  Color get text => brand?.textColor ?? NileColors.txtPrimary;
-  Color get textDim =>
-      brand?.textColor.withValues(alpha: 0.7) ?? NileColors.txtSecondary;
-
-  /// Text on the accent colour (the banner).
-  Color get onAccent => brand?.onAccentColor ?? NileColors.onVolt;
-
-  /// [s] in the kit's font, sizes and weights kept. Only fonts on the
-  /// [brandFonts] list are fetched; anything else keeps the Nile font.
-  TextStyle font(TextStyle s) {
-    final f = brand?.font;
-    return f == null || !brandFonts.contains(f)
-        ? s
-        : GoogleFonts.getFont(f, textStyle: s);
+  Widget _draw(PlacedItem p, double u, VoidCallback? onTap, double bannerH) {
+    final e = p.element;
+    if (e != null) return buildElement(e, u, full: p.isFull);
+    final g = p.graphic!;
+    return switch (g.kind) {
+      GraphicKind.lowerThird => _LowerThird(g: g, u: u),
+      GraphicKind.chat => _ChatCard(g: g, u: u),
+      GraphicKind.logo => _Logo(g: g, u: u),
+      GraphicKind.sponsor =>
+        g.imageUrl == null ? _SponsorBadge(g: g, u: u) : _Logo(g: g, u: u),
+      GraphicKind.qr => _Qr(g: g, u: u, onTap: onTap),
+      GraphicKind.banner => _Banner(g: g, u: u, height: bannerH),
+      GraphicKind.slate => _Slate(g: g, u: u),
+    };
   }
 }
+
+/// A graphic's look: its attached brand kit, or Nile's own.
+OverlayLook _lookOf(LiveGraphic g) => OverlayLook(g.brand);
 
 class _LowerThird extends StatelessWidget {
   const _LowerThird({required this.g, required this.u});
@@ -234,7 +346,7 @@ class _LowerThird extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final look = _Look.of(g);
+    final look = _lookOf(g);
     return ConstrainedBox(
       constraints: BoxConstraints(maxWidth: u * 60),
       child: Container(
@@ -286,7 +398,7 @@ class _ChatCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final look = _Look.of(g);
+    final look = _lookOf(g);
     final name = g.title ?? '';
     final avatar = g.avatarUrl;
     return ConstrainedBox(
@@ -390,7 +502,7 @@ class _SponsorBadge extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final look = _Look.of(g);
+    final look = _lookOf(g);
     final scale = switch (g.size) {
       's' => 0.8,
       'l' => 1.4,
@@ -454,7 +566,7 @@ class _Qr extends StatelessWidget {
   Widget build(BuildContext context) {
     final url = g.url;
     if (url == null) return const SizedBox.shrink();
-    final look = _Look.of(g);
+    final look = _lookOf(g);
     final side = u * switch (g.size) {
       's' => 9.0,
       'l' => 18.0,
@@ -529,7 +641,7 @@ class _Banner extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final look = _Look.of(g);
+    final look = _lookOf(g);
     final style = look.font(
       NileTextStyles.labelLg().copyWith(
         fontSize: u * 2.4,
@@ -653,7 +765,7 @@ class _SlateState extends State<_Slate> {
   Widget build(BuildContext context) {
     final u = widget.u;
     final g = widget.g;
-    final look = _Look.of(g);
+    final look = _lookOf(g);
     final countdown = _countdown;
     return Container(
       color: look.page,

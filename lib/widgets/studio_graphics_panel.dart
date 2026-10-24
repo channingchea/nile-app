@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 
 import '../services/brand_kit.dart';
 import '../services/graphics_service.dart';
+import '../services/live_elements.dart' show ElementCue;
 import '../services/studio_graphics.dart';
 import '../theme.dart';
 import 'brand_kit_editor.dart';
@@ -213,6 +214,7 @@ Future<GraphicTargetsChoice?> showGraphicTargetsDialog(
   required int autoHideSeconds,
   bool canRemove = false,
   String confirmLabel = 'Put on air',
+  bool showAutoHide = true,
 }) => showDialog<GraphicTargetsChoice>(
   context: context,
   builder: (_) => _TargetsDialog(
@@ -222,6 +224,7 @@ Future<GraphicTargetsChoice?> showGraphicTargetsDialog(
     autoHide: autoHideSeconds,
     canRemove: canRemove,
     confirmLabel: confirmLabel,
+    showAutoHide: showAutoHide,
   ),
 );
 
@@ -233,6 +236,7 @@ class _TargetsDialog extends StatefulWidget {
     required this.autoHide,
     required this.canRemove,
     required this.confirmLabel,
+    this.showAutoHide = true,
   });
 
   final String title;
@@ -241,6 +245,9 @@ class _TargetsDialog extends StatefulWidget {
   final int autoHide;
   final bool canRemove;
   final String confirmLabel;
+
+  /// Elements stay up until taken down — no "Hide after".
+  final bool showAutoHide;
 
   @override
   State<_TargetsDialog> createState() => _TargetsDialogState();
@@ -313,6 +320,7 @@ class _TargetsDialogState extends State<_TargetsDialog> {
                   v == true ? _on.add(s.id) : _on.remove(s.id);
                 }),
               ),
+            if (widget.showAutoHide) ...[
             const SizedBox(height: NileSpacing.s12),
             Row(
               children: [
@@ -348,6 +356,7 @@ class _TargetsDialogState extends State<_TargetsDialog> {
                   () => _hide = (int.tryParse(v) ?? 1).clamp(1, 3600),
                 ),
               ),
+            ],
           ],
         ),
       ),
@@ -420,6 +429,7 @@ Future<void> showGraphicsPushPanel(
   BrandKit? brandKit,
   ValueChanged<BrandKit?>? onBrandKit,
   bool brandKitDemo = false,
+  Future<bool> Function(List<ElementCue> cues)? takeElements,
 }) => showDialog<void>(
   context: context,
   builder: (_) => Dialog(
@@ -441,6 +451,7 @@ Future<void> showGraphicsPushPanel(
         brandKit: brandKit,
         onBrandKit: onBrandKit,
         brandKitDemo: brandKitDemo,
+        takeElements: takeElements,
       ),
     ),
   ),
@@ -454,6 +465,7 @@ class _PushPanel extends StatefulWidget {
     required this.cue,
     required this.isLive,
     required this.brandKitDemo,
+    this.takeElements,
     this.onTargetsUsed,
     this.onLibrary,
     this.showStartAt,
@@ -476,6 +488,10 @@ class _PushPanel extends StatefulWidget {
   final BrandKit? brandKit;
   final ValueChanged<BrandKit?>? onBrandKit;
   final bool brandKitDemo;
+
+  /// Puts cued live elements on air with the graphics at Take. Null = they
+  /// stay cued.
+  final Future<bool> Function(List<ElementCue> cues)? takeElements;
 
   @override
   State<_PushPanel> createState() => _PushPanelState();
@@ -603,13 +619,16 @@ class _PushPanelState extends State<_PushPanel> {
   Future<void> _take() async {
     final cues = widget.cue.value;
     if (cues.isEmpty || _busy) return;
-    final ok = await _apply(cues.take(_state, DateTime.now()));
+    final ok =
+        cues.items.isEmpty || await _apply(cues.take(_state, DateTime.now()));
     if (!ok) return;
+    final take = widget.takeElements;
+    final elements =
+        cues.elements.isNotEmpty && take != null && await take(cues.elements);
     // Anything cued while the push was in flight stays cued.
-    widget.cue.value = CueSet([
-      for (final c in widget.cue.value.items)
-        if (!cues.items.contains(c)) c,
-    ]);
+    widget.cue.value = widget.cue.value.minus(
+      CueSet(cues.items, elements ? cues.elements : const []),
+    );
   }
 
   Future<void> _editBrandKit() async {

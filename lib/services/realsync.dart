@@ -370,8 +370,15 @@ class RealSyncDriver {
   final GroupSyncEngine engine;
   final ContentAgeReader _ages = ContentAgeReader();
 
+  /// Latest reading per camera (participant identity): how old its picture is
+  /// as it plays here — what overlays are held back to.
+  final Map<String, double> _videoAge = {};
+
   Timer? _sampler;
   Timer? _ramp;
+
+  /// How old [identity]'s picture is on this screen, ms; null until measured.
+  double? ageOf(String identity) => _videoAge[identity];
   DateTime _ignoreUntil = DateTime.now();
 
   void start() {
@@ -418,6 +425,9 @@ class RealSyncDriver {
       for (final e in streams.entries) {
         final age = await _ages.ageMs(e.value.$1, e.value.$2);
         if (age != null) engine.add(e.key, age);
+        if (age != null && e.value.$2 is VideoTrack) {
+          _videoAge[e.value.$1.identity] = age;
+        }
       }
       engine.solve();
     }

@@ -5,6 +5,8 @@ import '../services/camera_status.dart';
 import '../services/chat_service.dart';
 import '../services/chat_tools_service.dart' show QuickMessage;
 import '../services/realsync.dart' show realSyncCapMs;
+import '../services/live_elements.dart';
+import '../services/overlay_layout.dart';
 import '../services/studio_graphics.dart';
 import '../theme.dart';
 import 'nile_graphics_layer.dart';
@@ -142,6 +144,7 @@ class NileStudioSourceActions {
     this.onNudge,
     this.onCommand,
     this.onReorder,
+    this.onLayout,
   });
 
   final ValueChanged<NileStudioSource>? onToggleOffAir;
@@ -166,6 +169,9 @@ class NileStudioSourceActions {
 
   /// Tiles dragged into a new order: the slot ids, top to bottom.
   final ValueChanged<List<String>>? onReorder;
+
+  /// "Layout…": where this camera's graphics and elements sit.
+  final ValueChanged<NileStudioSource>? onLayout;
 }
 
 /// Signal strength for the top row. Mapped from LiveKit's `ConnectionQuality`
@@ -252,6 +258,8 @@ class NileStudio extends StatelessWidget {
     this.graphicsFor,
     this.previewFor,
     this.isCued,
+    this.overlayFor,
+    this.previewOverlayFor,
     this.sourceActions = const NileStudioSourceActions(),
   });
 
@@ -308,6 +316,11 @@ class NileStudio extends StatelessWidget {
   /// The cued graphic would land on this source (CUED badge / outline).
   final bool Function(NileStudioSource source)? isCued;
 
+  /// Live elements and the layer list for [source], on tiles; the monitor uses
+  /// [previewOverlayFor] (with cued elements) when given.
+  final NileOverlayExtras Function(NileStudioSource source)? overlayFor;
+  final NileOverlayExtras Function(NileStudioSource source)? previewOverlayFor;
+
   /// This device's own audio meter, pinned under the source list. It belongs
   /// beside the roster rather than over the video: it is about the feed you are
   /// responsible for, not the one you happen to be looking at.
@@ -359,6 +372,7 @@ class NileStudio extends StatelessWidget {
                   meter: meter,
                   actions: sourceActions,
                   graphicsFor: graphicsFor,
+                  overlayFor: overlayFor,
                   isCued: isCued,
                 ),
               ),
@@ -374,6 +388,7 @@ class NileStudio extends StatelessWidget {
                         selected: selected,
                         self: showSelfPane ? self : null,
                         graphicsFor: previewFor ?? graphicsFor,
+                        overlayFor: previewOverlayFor ?? overlayFor,
                         isCued: isCued,
                       ),
                     ),
@@ -665,6 +680,7 @@ class _StudioSourceList extends StatelessWidget {
     this.onRename,
     this.meter,
     this.graphicsFor,
+    this.overlayFor,
     this.isCued,
   });
 
@@ -677,6 +693,7 @@ class _StudioSourceList extends StatelessWidget {
   final Widget? meter;
   final NileStudioSourceActions actions;
   final List<LiveGraphic> Function(NileStudioSource source)? graphicsFor;
+  final NileOverlayExtras Function(NileStudioSource source)? overlayFor;
   final bool Function(NileStudioSource source)? isCued;
 
   /// Slot ids in the order the tiles now show, after dragging [from] to [to].
@@ -709,6 +726,7 @@ class _StudioSourceList extends StatelessWidget {
         onRename: s.isRenamable && onRename != null ? () => onRename!(s) : null,
         actions: actions,
         graphics: graphicsFor?.call(s) ?? const [],
+        extras: overlayFor?.call(s) ?? _noExtras,
         cued: isCued?.call(s) ?? false,
       ),
     );
@@ -786,6 +804,12 @@ class _StudioSourceList extends StatelessWidget {
   }
 }
 
+/// Live elements and this camera's layer list, drawn with its graphics
+/// (studio live elements, phase 2).
+typedef NileOverlayExtras = ({List<LiveElement> elements, List<LayerEntry> layers});
+
+const NileOverlayExtras _noExtras = (elements: [], layers: []);
+
 /// A short name for a graphic on a tile: its title, else its text, else kind.
 String graphicLabel(LiveGraphic g) => switch (g.kind) {
   GraphicKind.chat => 'Chat · @${g.title ?? ''}',
@@ -808,6 +832,7 @@ enum _TileAction {
   setDefault,
   sendEveryone,
   offAir,
+  layout,
   nudge,
   controls,
   remove,
@@ -822,6 +847,7 @@ class _SourceTile extends StatelessWidget {
     required this.onTap,
     required this.actions,
     required this.graphics,
+    this.extras = _noExtras,
     this.cued = false,
     this.onRemove,
     this.onRename,
@@ -837,6 +863,7 @@ class _SourceTile extends StatelessWidget {
   final VoidCallback? onRename;
   final NileStudioSourceActions actions;
   final List<LiveGraphic> graphics;
+  final NileOverlayExtras extras;
 
   static const _maxIcons = 6;
 
@@ -873,6 +900,8 @@ class _SourceTile extends StatelessWidget {
           _TileAction.offAir,
           s.isOffAir ? 'Put back on air' : 'Take off air',
         ),
+      if (s.isAngle && actions.onLayout != null)
+        item(_TileAction.layout, 'Layout…'),
     ];
     final operator = [
       if (_talkable && actions.onNudge != null)
@@ -906,6 +935,8 @@ class _SourceTile extends StatelessWidget {
         actions.onSendEveryone?.call(s);
       case _TileAction.offAir:
         actions.onToggleOffAir?.call(s);
+      case _TileAction.layout:
+        actions.onLayout?.call(s);
       case _TileAction.nudge:
         final text = await showNudgeDialog(context, s.label);
         if (text != null) actions.onNudge?.call(s, text);
@@ -1085,7 +1116,11 @@ class _SourceTile extends StatelessWidget {
               children: [
                 _VideoPane(source: s, compact: true),
                 // What a viewer of this angle sees, scaled to the tile.
-                NileGraphicsLayer(graphics: graphics),
+                NileGraphicsLayer(
+                  graphics: graphics,
+                  elements: extras.elements,
+                  layers: extras.layers,
+                ),
               ],
             ),
           ),
@@ -1372,11 +1407,13 @@ class _StudioMonitor extends StatelessWidget {
     required this.selected,
     required this.self,
     this.graphicsFor,
+    this.overlayFor,
     this.isCued,
   });
 
   final NileStudioSource? selected;
   final List<LiveGraphic> Function(NileStudioSource source)? graphicsFor;
+  final NileOverlayExtras Function(NileStudioSource source)? overlayFor;
   final bool Function(NileStudioSource source)? isCued;
 
   /// Null when your own camera is already the monitor.
@@ -1399,6 +1436,9 @@ class _StudioMonitor extends StatelessWidget {
               graphics: selected == null
                   ? const []
                   : graphicsFor?.call(selected!) ?? const [],
+              extras: selected == null
+                  ? _noExtras
+                  : overlayFor?.call(selected!) ?? _noExtras,
               cued: selected != null && (isCued?.call(selected!) ?? false),
             ),
           ),
@@ -1414,6 +1454,7 @@ class _StudioMonitor extends StatelessWidget {
                     title: 'YOUR CAMERA',
                     source: self,
                     graphics: graphicsFor?.call(self!) ?? const [],
+                    extras: overlayFor?.call(self!) ?? _noExtras,
                     cued: isCued?.call(self!) ?? false,
                   ),
                 ),
@@ -1431,12 +1472,14 @@ class _LabelledPane extends StatelessWidget {
     required this.title,
     required this.source,
     this.graphics = const [],
+    this.extras = _noExtras,
     this.cued = false,
   });
 
   final String title;
   final NileStudioSource? source;
   final List<LiveGraphic> graphics;
+  final NileOverlayExtras extras;
 
   /// Showing a cued graphic viewers don't see yet: volt outline + CUED.
   final bool cued;
@@ -1452,7 +1495,11 @@ class _LabelledPane extends StatelessWidget {
               fit: StackFit.expand,
               children: [
                 _VideoPane(source: source, compact: false),
-                NileGraphicsLayer(graphics: graphics),
+                NileGraphicsLayer(
+                  graphics: graphics,
+                  elements: extras.elements,
+                  layers: extras.layers,
+                ),
               ],
             ),
           ),

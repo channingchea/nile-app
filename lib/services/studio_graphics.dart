@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 
 import 'brand_kit.dart';
+import 'live_elements.dart' show ElementCue;
 
 /// Studio graphics (Studio master host, phases 4-5).
 ///
@@ -919,25 +920,50 @@ class GraphicCue {
       current.withTargets(build(now).copyWith(clearHide: true), targets);
 }
 
-/// Everything waiting for Take — several graphics can be cued at once and go
-/// on air together. Cueing a graphic again replaces its entry; cueing one that
-/// would take another's place on screen (same spot, overlapping cameras)
-/// drops the older one, so the monitor never previews what Take won't send.
+/// Everything waiting for Take — several graphics (and live elements) can be
+/// cued at once and go on air together. Cueing a graphic again replaces its
+/// entry; cueing one that would take another's place on screen (same spot,
+/// overlapping cameras) drops the older one, so the monitor never previews
+/// what Take won't send.
 @immutable
 class CueSet {
-  const CueSet([this.items = const []]);
+  const CueSet([this.items = const [], this.elements = const []]);
 
   static const empty = CueSet();
 
   /// In the order they were cued; Take applies them in this order.
   final List<GraphicCue> items;
 
-  bool get isEmpty => items.isEmpty;
-  bool get isNotEmpty => items.isNotEmpty;
-  int get length => items.length;
+  /// Live elements cued alongside (studio live elements, phase 3).
+  final List<ElementCue> elements;
+
+  bool get isEmpty => items.isEmpty && elements.isEmpty;
+  bool get isNotEmpty => !isEmpty;
+  int get length => items.length + elements.length;
 
   GraphicCue? byId(String id) => items.where((c) => c.id == id).firstOrNull;
-  bool contains(String id) => byId(id) != null;
+  ElementCue? elementById(String id) =>
+      elements.where((c) => c.id == id).firstOrNull;
+  bool contains(String id) => byId(id) != null || elementById(id) != null;
+
+  /// Cue an element (again: replaces its entry).
+  CueSet addingElement(ElementCue cue) => CueSet(items, [
+    for (final c in elements)
+      if (c.id != cue.id) c,
+    cue,
+  ]);
+
+  /// What is left after [taken] went on air — anything cued meanwhile stays.
+  CueSet minus(CueSet taken) => CueSet(
+    [
+      for (final c in items)
+        if (!taken.items.contains(c)) c,
+    ],
+    [
+      for (final c in elements)
+        if (!taken.elements.contains(c)) c,
+    ],
+  );
 
   CueSet adding(GraphicCue cue) {
     final now = DateTime.now();
@@ -948,13 +974,20 @@ class CueSet {
             !(c.build(now).capKey == key && _overlap(c.targets, cue.targets)))
           c,
       cue,
-    ]);
+    ], elements);
   }
 
-  CueSet without(String id) => CueSet([
-    for (final c in items)
-      if (c.id != id) c,
-  ]);
+  /// [id] (a graphic or an element) out of the cue.
+  CueSet without(String id) => CueSet(
+    [
+      for (final c in items)
+        if (c.id != id) c,
+    ],
+    [
+      for (final c in elements)
+        if (c.id != id) c,
+    ],
+  );
 
   /// Cued → un-cued; otherwise cue it.
   CueSet toggled(GraphicCue cue) =>
@@ -969,12 +1002,22 @@ class CueSet {
       items.fold(current, (s, c) => c.preview(s, now));
 
   /// Some cue lands on [slotId] (null = a screen share: all-camera cues).
-  bool lands(String? slotId) => items.any(
-    (c) => slotId == null ? c.targets.all : c.targets.includes(slotId),
-  );
+  bool lands(String? slotId) => [
+    ...items.map((c) => c.targets),
+    ...elements.map((c) => c.targets),
+  ].any((t) => slotId == null ? t.all : t.includes(slotId));
 
-  /// "Be right back" or "3 graphics".
-  String get label => length == 1 ? items.single.name : '$length graphics';
+  List<String> get _names => [
+    ...items.map((c) => c.name),
+    ...elements.map((c) => c.name),
+  ];
+
+  /// "Be right back" or "3 items".
+  String get label => length == 1
+      ? _names.single
+      : elements.isEmpty
+      ? '$length graphics'
+      : '$length items';
 
   /// For the cue strip: one cue → its name and cameras; several → "3
   /// graphics" and their names.
@@ -982,8 +1025,14 @@ class CueSet {
     String Function(String slotId) labelOf,
     List<String> order,
   ) => length == 1
-      ? (name: label, targets: items.single.targets.summary(labelOf, order))
-      : (name: label, targets: items.map((c) => c.name).join(', '));
+      ? (
+          name: label,
+          targets: (items.isEmpty
+                  ? elements.single.targets
+                  : items.single.targets)
+              .summary(labelOf, order),
+        )
+      : (name: label, targets: _names.join(', '));
 
   static bool _overlap(GraphicTargets a, GraphicTargets b) {
     if (a.all && b.all) return true;
@@ -994,8 +1043,10 @@ class CueSet {
 
   @override
   bool operator ==(Object other) =>
-      other is CueSet && listEquals(other.items, items);
+      other is CueSet &&
+      listEquals(other.items, items) &&
+      listEquals(other.elements, elements);
 
   @override
-  int get hashCode => Object.hashAll(items);
+  int get hashCode => Object.hash(Object.hashAll(items), Object.hashAll(elements));
 }

@@ -20,6 +20,10 @@ import '../services/profile_service.dart';
 import '../services/share_urls.dart';
 import '../services/install_id.dart';
 import '../services/livekit_service.dart';
+import '../services/live_elements.dart';
+import '../services/overlay_layout.dart';
+import '../services/server_clock.dart';
+import '../services/studio_elements_controller.dart';
 import '../services/realsync.dart';
 import '../services/report_service.dart';
 import '../services/screen_capture_permission.dart';
@@ -35,7 +39,9 @@ import '../widgets/camera_slot_sheet.dart';
 import '../widgets/nile_graphics_layer.dart';
 import '../widgets/nile_link_text.dart';
 import '../widgets/studio_chat_tools.dart';
+import '../widgets/studio_elements_panel.dart';
 import '../widgets/studio_graphics_panel.dart';
+import '../widgets/studio_layout_sheet.dart';
 import '../widgets/studio_settings_sheet.dart';
 import '../widgets/viewer_preview_overlay.dart';
 import '../router.dart';
@@ -1297,6 +1303,30 @@ class _CameraScreenState extends State<CameraScreen> {
   Timer? _hideTimer;
   int? _hideArmedFor;
 
+  /// Live elements on air (room metadata `elements`) and where everything
+  /// sits on each camera (`layout`) — studio live elements.
+  ElementsState _elements = ElementsState.empty;
+  OverlayLayout _layout = OverlayLayout.empty;
+
+  /// Studio: every element in this show, applied at once and pushed in order.
+  late final StudioElementsController _elementsCtl = StudioElementsController(
+    push: (e, ops) => LivekitService.setElement(
+      eventId: _eventId!,
+      element: e,
+      clockOps: ops,
+      srcAgeMs: _monitorAgeMs,
+    ),
+    load: () => LivekitService.listElements(eventId: _eventId!),
+    removeRemote: (id) =>
+        LivekitService.removeElement(eventId: _eventId!, id: id),
+    onError: (msg) => _toast(msg),
+  )..addListener(_onElementsChanged);
+
+  /// Studio, RealSync measuring: how old each camera's picture is here. The
+  /// monitor's one goes with every push so viewers further behind hold the
+  /// change back to match.
+  Map<String, double> _sourceAgesMs = const {};
+
   /// Show control from room metadata: off air, default angle, camera order.
   ShowControl _show = ShowControl.empty;
 
@@ -1573,6 +1603,7 @@ class _CameraScreenState extends State<CameraScreen> {
   @override
   void dispose() {
     _cue.dispose();
+    _elementsCtl.dispose();
     ShakeDetector.instance.resume();
     // A drop or back-swipe never ends a live show anymore — the show stays
     // 'live' and viewers' resilience logic treats it as reconnect-and-wait.
@@ -1895,6 +1926,9 @@ class _CameraScreenState extends State<CameraScreen> {
             .then((l) => _graphicsLibrary = l)
             .catchError((_) => _graphicsLibrary);
         _loadGraphicsExtras(eventId);
+        // Elements pick up exactly where they were if the Studio dropped.
+        unawaited(ServerClock.ensure());
+        unawaited(_elementsCtl.restore());
         _angleTimer?.cancel();
         _angleTimer = Timer.periodic(AngleWatchers.poll, (_) => _pollAngles());
         _pollAngles();
@@ -2463,6 +2497,7 @@ class _CameraScreenState extends State<CameraScreen> {
       }
       _lagAges.retain(receivers);
       if (!mounted) return;
+      _sourceAgesMs = ages;
       final lag = relativeLagMs(ages);
       if (!mapEquals(lag, _lagMs)) {
         _lagMs = lag;
@@ -2475,6 +2510,15 @@ class _CameraScreenState extends State<CameraScreen> {
     final graphics = GraphicsState.fromRoomMetadata(raw);
     if (graphics != _graphics && mounted) setState(() => _graphics = graphics);
     _armAutoHide();
+    final elements = ElementsState.fromRoomMetadata(raw);
+    final layout = OverlayLayout.fromRoomMetadata(raw);
+    if ((elements != _elements || layout != _layout) && mounted) {
+      setState(() {
+        _elements = elements;
+        _layout = layout;
+      });
+      if (elements.hasClocks) unawaited(ServerClock.ensure());
+    }
     final show = ShowControl.fromRoomMetadata(raw);
     if (show != _show && mounted) {
       final reordered = !listEquals(show.slotOrder, _show.slotOrder);
@@ -2493,6 +2537,7 @@ class _CameraScreenState extends State<CameraScreen> {
     } else if (stamp != null && stamp != _seenResyncAt) {
       _seenResyncAt = stamp;
       _clock?.remeasure();
+      if (ServerClock.offsetMs != null) unawaited(ServerClock.remeasure());
       _resyncMonitor();
     }
   }
@@ -2591,7 +2636,86 @@ class _CameraScreenState extends State<CameraScreen> {
     resolveLink: _resolveLink,
     brandKit: _brandKit,
     onBrandKit: _onBrandKit,
+    takeElements: _takeElementCues,
   );
+
+  // ── Live elements + layout (studio live elements, phases 1-3) ────────────
+
+  void _onElementsChanged() {
+    if (mounted) setState(() {});
+  }
+
+  /// How old the monitor's picture is, when RealSync is measuring.
+  int? get _monitorAgeMs {
+    final id = _selectedSourceId?.split('#').first;
+    return (id == null ? null : _sourceAgesMs[id])?.round().clamp(0, 5000);
+  }
+
+  /// Studio: the Elements panel.
+  Future<void> _openElements() => showElementsPanel(
+    context,
+    controller: _elementsCtl,
+    slots: _slotRefs,
+    cue: _cue,
+    onTake: _takeCue,
+    kit: _brandKit?.style,
+  );
+
+  /// Cued elements go on air (Take).
+  Future<bool> _takeElementCues(List<ElementCue> cues) async {
+    final results = await Future.wait([
+      for (final c in cues) _elementsCtl.setTargets(c.id, c.targets),
+    ]);
+    return results.every((ok) => ok);
+  }
+
+  /// On-air elements for [slotId]: the Studio's own (newest) state, plus any
+  /// in the room it hasn't loaded yet.
+  List<LiveElement> _elementsFor(String? slotId, {bool preview = false}) {
+    final mine = preview ? _elementsCtl.preview(_cue.value) : _elementsCtl.onAir;
+    final known = {for (final e in mine.items) e.id};
+    return [
+      ...mine.forSlot(slotId),
+      for (final e in _elements.forSlot(slotId))
+        if (!known.contains(e.id) && _elementsCtl.live(e.id) == null) e,
+    ];
+  }
+
+  NileOverlayExtras _overlayFor(NileStudioSource s, {bool preview = false}) {
+    final slot = s.isScreenShare ? null : s.slotId;
+    return (
+      elements: _elementsFor(slot, preview: preview),
+      layers: _layout.layersFor(slot),
+    );
+  }
+
+  /// A tile's "Layout…": spots and layer order for that camera.
+  Future<void> _openLayout(NileStudioSource s) async {
+    final eventId = _eventId;
+    final slot = s.slotId;
+    if (eventId == null || slot == null) return;
+    final choice = await showLayoutSheet(
+      context,
+      cameraLabel: s.label,
+      graphics: _graphics.withBrand(_brandKit?.style).forSlot(slot),
+      elements: _elementsFor(slot),
+      layers: _layout.layersFor(slot),
+    );
+    if (choice == null || !mounted) return;
+    final next = choice.copyToAll
+        ? _layout.copiedToAll(choice.layers)
+        : _layout.withLayers(slot, choice.layers);
+    try {
+      await LivekitService.setLayout(
+        eventId: eventId,
+        layout: next,
+        srcAgeMs: _monitorAgeMs,
+      );
+      if (mounted) setState(() => _layout = next);
+    } catch (e) {
+      _toast(e.toString().replaceFirst('Exception: ', ''));
+    }
+  }
 
   /// Studio: the brand kit, the show's sponsor and the host's username —
   /// each best-effort; graphics work without them.
@@ -2654,16 +2778,22 @@ class _CameraScreenState extends State<CameraScreen> {
     final cues = _cue.value;
     if (cues.isEmpty || _taking) return;
     setState(() => _taking = true);
-    final ok = await _pushGraphics(cues.take(_graphics, DateTime.now()));
+    final graphicsOk =
+        cues.items.isEmpty ||
+        await _pushGraphics(cues.take(_graphics, DateTime.now()));
+    final elementsOk =
+        graphicsOk &&
+        (cues.elements.isEmpty || await _takeElementCues(cues.elements));
     if (!mounted) return;
     setState(() => _taking = false);
-    if (ok) {
-      // Anything cued while the push was in flight stays cued.
-      _cue.value = CueSet([
-        for (final c in _cue.value.items)
-          if (!cues.items.contains(c)) c,
-      ]);
-    } else {
+    // Anything cued while the push was in flight stays cued.
+    _cue.value = _cue.value.minus(
+      CueSet(
+        graphicsOk ? cues.items : const [],
+        elementsOk ? cues.elements : const [],
+      ),
+    );
+    if (!graphicsOk || !elementsOk) {
       _toast('Couldn’t put that on air. Try again.');
     }
   }
@@ -2701,7 +2831,11 @@ class _CameraScreenState extends State<CameraScreen> {
     if (eventId == null) return false;
     next = next.withBrand(_brandKit?.style);
     try {
-      await LivekitService.setGraphics(eventId: eventId, graphics: next);
+      await LivekitService.setGraphics(
+        eventId: eventId,
+        graphics: next,
+        srcAgeMs: _monitorAgeMs,
+      );
       if (mounted) setState(() => _graphics = next);
       _armAutoHide();
       return true;
@@ -2804,6 +2938,7 @@ class _CameraScreenState extends State<CameraScreen> {
           onNudge: (s, text) => _sendNudge(s.identity, text),
           onCommand: (s, c) => _sendCommand(s.identity, c),
           onReorder: _reorderSources,
+          onLayout: _openLayout,
         );
 
   Future<void> _setShow({
@@ -4178,7 +4313,11 @@ class _CameraScreenState extends State<CameraScreen> {
 
         // ── Graphics on this camera, as viewers of it see them ───────────
         Positioned.fill(
-          child: NileGraphicsLayer(graphics: _graphics.forSlot(_slotId)),
+          child: NileGraphicsLayer(
+            graphics: _graphics.forSlot(_slotId),
+            elements: _elements.forSlot(_slotId),
+            layers: _layout.layersFor(_slotId),
+          ),
         ),
 
         // ── Off air — the Studio took this angle away from viewers ──────
@@ -4689,6 +4828,10 @@ class _CameraScreenState extends State<CameraScreen> {
       graphicsFor: (s) => _graphics.forSlot(s.isScreenShare ? null : s.slotId),
       previewFor: _isStudio ? _previewFor : null,
       isCued: _isStudio ? _isCued : null,
+      overlayFor: _overlayFor,
+      previewOverlayFor: _isStudio
+          ? (s) => _overlayFor(s, preview: true)
+          : null,
       selfIdentity: _room?.localParticipant?.identity,
       stats: NileStudioStats(
         isLive: live,
@@ -4872,6 +5015,12 @@ class _CameraScreenState extends State<CameraScreen> {
         tooltip: 'Graphics',
         icon: Icons.layers_outlined,
         active: !_graphics.isEmpty,
+      ),
+      NileStudioIconButton(
+        onPressed: _openElements,
+        tooltip: 'Elements',
+        icon: Icons.widgets_outlined,
+        active: !_elementsCtl.onAir.isEmpty || !_elements.isEmpty,
       ),
       NileStudioIconButton(
         onPressed: _confirmResync,

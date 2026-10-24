@@ -15,9 +15,12 @@ import '../services/chat_service.dart';
 import '../services/deep_link_service.dart';
 import '../services/event_service.dart';
 import '../services/livekit_service.dart';
+import '../services/live_elements.dart';
+import '../services/overlay_layout.dart';
 import '../services/realsync.dart';
 import '../services/realtime.dart';
 import '../services/report_service.dart';
+import '../services/server_clock.dart';
 import '../services/share_urls.dart';
 import '../services/show_control.dart';
 import '../services/studio_graphics.dart';
@@ -97,6 +100,15 @@ class _ViewerScreenState extends State<ViewerScreen>
   // Studio graphics on air (room metadata `graphics`), drawn over whichever
   // angle this viewer is watching. Viewers can't hide them.
   GraphicsState _graphics = GraphicsState.empty;
+
+  /// Live elements on air and where everything sits on each camera (studio
+  /// live elements). Overlay changes are held back to match this viewer's
+  /// video when its delay is known ([overlayHoldback]); [_overlaySeq] keeps a
+  /// late timer from putting an older state back.
+  ElementsState _elements = ElementsState.empty;
+  OverlayLayout _layout = OverlayLayout.empty;
+  int _overlaySeq = 0;
+  int _overlayShown = 0;
 
   /// In-show sponsor logos already counted for this viewer (the server
   /// dedupes too; this just saves the calls).
@@ -258,6 +270,7 @@ class _ViewerScreenState extends State<ViewerScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _overlaySeq = -1;
     _realSync?.dispose();
     _decrementAndCleanup();
     _eventIdController.dispose();
@@ -1147,9 +1160,52 @@ class _ViewerScreenState extends State<ViewerScreen>
     }
   }
 
-  void _applyRoomMetadata(String? raw, {bool joining = false}) {
+  /// The newest `at` stamp on the overlay parts of room metadata.
+  static int? _overlayStamp(String? raw) {
+    final m = parseParticipantMeta(raw);
+    int? at(Object? part) => part is Map ? (part['at'] as num?)?.toInt() : null;
+    final stamps = [
+      at(m['graphics']),
+      at(m['elements']),
+      at(m['layout']),
+    ].whereType<int>();
+    return stamps.isEmpty ? null : stamps.reduce(max);
+  }
+
+  void _applyOverlay(String? raw, {required bool joining}) {
     final graphics = GraphicsState.fromRoomMetadata(raw);
-    if (graphics != _graphics && mounted) setState(() => _graphics = graphics);
+    final elements = ElementsState.fromRoomMetadata(raw);
+    final layout = OverlayLayout.fromRoomMetadata(raw);
+    if (graphics == _graphics && elements == _elements && layout == _layout) {
+      return;
+    }
+    if (elements.hasClocks) unawaited(ServerClock.ensure());
+    final seq = ++_overlaySeq;
+    void show() {
+      if (!mounted || seq <= _overlayShown || _overlaySeq < 0) return;
+      _overlayShown = seq;
+      setState(() {
+        _graphics = graphics;
+        _elements = elements;
+        _layout = layout;
+      });
+    }
+
+    final focused = _focused;
+    final wait = joining
+        ? Duration.zero
+        : overlayHoldback(
+            contentAtMs: _overlayStamp(raw),
+            serverNowMs: ServerClock.nowIfKnown(),
+            viewerAgeMs: focused == null
+                ? null
+                : _realSync?.ageOf(focused.identity),
+          );
+    wait == Duration.zero ? show() : Timer(wait, show);
+  }
+
+  void _applyRoomMetadata(String? raw, {bool joining = false}) {
+    _applyOverlay(raw, joining: joining);
     // On (re)join the caller syncs subscriptions and focus once the cameras
     // are in; only a live change is acted on here.
     final show = ShowControl.fromRoomMetadata(raw);
@@ -1212,6 +1268,8 @@ class _ViewerScreenState extends State<ViewerScreen>
       if (!mounted || _room != room) return;
       _realSyncOn = on;
       if (!on) return;
+      // Holding overlays back to the picture needs the server clock.
+      unawaited(ServerClock.ensure());
       // Every feed on screen (main view and thumbnails) plus the master
       // audio, all lined up to the same moment.
       _realSync = RealSyncDriver(
@@ -2866,9 +2924,8 @@ class _ViewerScreenState extends State<ViewerScreen>
   Widget _buildMainCamera() {
     // Only built while an angle is on air.
     final focused = _focused!;
-    final onAir = _graphics.forSlot(
-      focused.isScreenShare ? null : _slotOf(focused.identity),
-    );
+    final slot = focused.isScreenShare ? null : _slotOf(focused.identity);
+    final onAir = _graphics.forSlot(slot);
     // The angle label sits where a lower third or banner goes; graphics win.
     // Corner graphics (logos, sponsor, QR codes) leave it be.
     final bottomTaken = onAir.any(
@@ -2884,7 +2941,12 @@ class _ViewerScreenState extends State<ViewerScreen>
             : _buildCameraOffPlaceholder(large: true),
         // Graphics follow the angle: show-wide ones plus this camera's own.
         // A screen share carries only the show-wide ones.
-        NileGraphicsLayer(graphics: onAir, onTapLink: _openGraphicLink),
+        NileGraphicsLayer(
+          graphics: onAir,
+          elements: _elements.forSlot(slot),
+          layers: _layout.layersFor(slot),
+          onTapLink: _openGraphicLink,
+        ),
         if (_syncing)
           Positioned(
             top: 12,
