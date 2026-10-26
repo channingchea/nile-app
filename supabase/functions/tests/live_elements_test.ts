@@ -16,7 +16,15 @@ import {
   validateElementPush,
   validateLayout,
 } from "../_shared/elements.ts";
-import { elementAngleIds, openChoices, shapeTally, validateResponse } from "../_shared/elements.ts";
+import {
+  cleanPollConfig,
+  elementAngleIds,
+  openChoices,
+  reshapes,
+  shapeTally,
+  totalsPublic,
+  validateResponse,
+} from "../_shared/elements.ts";
 import { cleanShowPatch, planReorder } from "../_shared/show.ts";
 
 const slotIds = new Set(["s1", "s2"]);
@@ -175,21 +183,138 @@ Deno.test("angle: show control and reorder take element angles", () => {
 Deno.test("taps: only an open, live element with taps takes a vote, and only its own choices", () => {
   const open = buildRow("ev", push({ config: { label: "Q", taps: true }, state: { value: 0, open: true } }), undefined, 1);
   assertEquals(openChoices(open), ["up", "down"]);
-  assertEquals(validateResponse(open, "up"), { choice: "up" });
-  assertEquals((validateResponse(open, "sideways") as { status: number }).status, 400);
+  assertEquals(validateResponse(open, { choice: "up" }), { picks: ["up"] });
+  assertEquals(validateResponse(open, { picks: ["down"] }), { picks: ["down"] });
+  assertEquals((validateResponse(open, { choice: "sideways" }) as { status: number }).status, 400);
+  assertEquals((validateResponse(open, { picks: ["up", "down"] }) as { status: number }).status, 400);
 
   const closed = buildRow("ev", push({ config: { label: "Q", taps: true }, state: { value: 0 } }), undefined, 1);
-  assertEquals((validateResponse(closed, "up") as { status: number }).status, 409);
+  assertEquals((validateResponse(closed, { choice: "up" }) as { status: number }).status, 409);
 
   const noTaps = buildRow("ev", push({ state: { value: 0, open: true } }), undefined, 1);
   assertEquals(openChoices(noTaps), []);
 
   const offAir = buildRow("ev", push({ config: { taps: true }, state: { open: true }, targets: { slots: [] } }), undefined, 1);
   assertEquals(openChoices(offAir), []);
-  assertEquals((validateResponse(undefined, "up") as { status: number }).status, 404);
+  assertEquals((validateResponse(undefined, { choice: "up" }) as { status: number }).status, 404);
 });
 
 Deno.test("taps: totals list every choice, zeros included, junk ignored", () => {
   assertEquals(shapeTally(["up", "down"], { up: 3, other: 9 }), { up: 3, down: 0 });
   assertEquals(shapeTally(["up", "down"], { up: -1, down: "7" }), { up: 0, down: 0 });
+});
+
+// ── Polls (docs/plans/studio-poll.md, phase 1) ────────────────────────────
+
+const answers = [
+  { id: "a", text: "Red" },
+  { id: "b", text: "Blue" },
+  { id: "c", text: "Green" },
+];
+const poll = (config: Record<string, unknown>, state: Record<string, unknown> = {}, over: Record<string, unknown> = {}) =>
+  push({ kind: "poll", name: "Poll", config: { question: "Best colour?", ...config }, state, ...over });
+
+Deno.test("poll: settings are cleaned; yes/no and rating fill in their own answers", () => {
+  assertEquals(cleanPollConfig({ question: "  Best colour? ", answers }), {
+    type: "choice",
+    question: "Best colour?",
+    results: "live",
+    answers,
+  });
+  assertEquals(cleanPollConfig({ type: "yesno", question: "Q", answers: [{ id: "x", text: "Maybe" }] }), {
+    type: "yesno",
+    question: "Q",
+    results: "live",
+  });
+  assertEquals(
+    (poll({ type: "rating" }).spec.config.type),
+    "rating",
+  );
+  assertEquals(cleanPollConfig({ type: "several", question: "Q", answers, maxPicks: 2, results: "reveal", timerSec: 60 }), {
+    type: "several",
+    question: "Q",
+    results: "reveal",
+    timerSec: 60,
+    answers,
+    maxPicks: 2,
+  });
+  const bad = [
+    { question: "", answers },
+    { question: "x".repeat(121), answers },
+    { question: "Q", answers: answers.slice(0, 1) },
+    { question: "Q", answers: [...answers, ...answers.map((a) => ({ ...a, id: a.id + "2", text: a.text + "2" })), { id: "z", text: "7" }] },
+    { question: "Q", answers: [{ id: "a", text: "Red" }, { id: "a", text: "Blue" }] },
+    { question: "Q", answers: [{ id: "a", text: "Red" }, { id: "b", text: "red" }] },
+    { question: "Q", answers: [{ id: "A!", text: "Red" }, { id: "b", text: "Blue" }] },
+    { question: "Q", answers: [{ id: "a", text: "x".repeat(41) }, { id: "b", text: "Blue" }] },
+    { type: "several", question: "Q", answers, maxPicks: 4 },
+    { question: "Q", answers, results: "never" },
+    { question: "Q", answers, timerSec: 5 },
+    { type: "quiz", question: "Q", answers },
+  ];
+  for (const c of bad) assertEquals(cleanPollConfig(c), null, JSON.stringify(c));
+});
+
+Deno.test("poll: closesAt and round are the server's; ops run on its clock", () => {
+  // The Studio can't write closesAt or round.
+  const first = buildRow("ev", poll({ answers, timerSec: 30 }, { open: true, closesAt: 5, round: 9 }), undefined, 1000);
+  assertEquals(first.state, { open: true, round: 0 });
+
+  const timed = buildRow("ev", poll({ answers, timerSec: 30 }, { open: true }, { version: 2, ops: { timer: { op: "start" } } }), first, 2000);
+  assertEquals(timed.state, { open: true, round: 0, closesAt: 32000 });
+  const custom = buildRow("ev", poll({ answers }, { open: true }, { version: 2, ops: { timer: { op: "start", sec: 10 } } }), first, 2000);
+  assertEquals(custom.state.closesAt, 12000);
+  // A later push keeps the timer; cancel clears it.
+  assertEquals(buildRow("ev", poll({ answers }, { open: true }, { version: 3 }), timed, 3000).state.closesAt, 32000);
+  assertEquals(buildRow("ev", poll({ answers }, {}, { version: 3, ops: { timer: { op: "cancel" } } }), timed, 3000).state, { round: 0 });
+
+  // Reset: a new round, no timer.
+  const reset = buildRow("ev", poll({ answers }, {}, { version: 3, ops: { reset: true } }), timed, 3000);
+  assertEquals(reset.state, { round: 1 });
+
+  // No timer without a length; ops are for polls only.
+  assert("error" in validateElementPush({ ...base, kind: "poll", config: { question: "Q", answers }, ops: { timer: { op: "start" } } }, opts));
+  assert("error" in validateElementPush({ ...base, kind: "poll", config: { question: "Q", answers }, ops: { timer: { op: "start", sec: 4000 } } }, opts));
+  assert("error" in validateElementPush({ ...base, ops: { reset: true } }, opts));
+});
+
+Deno.test("poll: wording edits keep the answers; changing them reshapes", () => {
+  const a = cleanPollConfig({ question: "Q", answers })!;
+  const reworded = cleanPollConfig({ question: "Q?", answers: answers.map((x) => ({ ...x, text: x.text + "!" })) })!;
+  assertEquals(reshapes("poll", a, reworded), false);
+  assertEquals(reshapes("poll", a, cleanPollConfig({ question: "Q", answers: [...answers].reverse() })!), true);
+  assertEquals(reshapes("poll", a, cleanPollConfig({ question: "Q", answers: answers.slice(0, 2) })!), true);
+  assertEquals(reshapes("poll", a, cleanPollConfig({ type: "several", question: "Q", answers })!), true);
+  assertEquals(reshapes("counter", { label: "a" }, { label: "b", taps: true }), false);
+});
+
+Deno.test("poll: picks — its own answers, once each, within the limit, before close", () => {
+  const one = buildRow("ev", poll({ answers }, { open: true }), undefined, 0);
+  assertEquals(validateResponse(one, { picks: ["b"] }, 1), { picks: ["b"] });
+  assertEquals((validateResponse(one, { picks: ["a", "b"] }, 1) as { status: number }).status, 400);
+  assertEquals((validateResponse(one, { picks: [] }, 1) as { status: number }).status, 400);
+  assertEquals((validateResponse(one, { picks: ["z"] }, 1) as { status: number }).status, 400);
+
+  const several = buildRow("ev", poll({ type: "several", answers, maxPicks: 2 }, { open: true }), undefined, 0);
+  assertEquals(validateResponse(several, { picks: ["a", "c"] }, 1), { picks: ["a", "c"] });
+  assertEquals((validateResponse(several, { picks: ["a", "b", "c"] }, 1) as { error: string }).error, "Pick up to 2");
+  assertEquals((validateResponse(several, { picks: ["a", "a"] }, 1) as { status: number }).status, 400);
+  const any = buildRow("ev", poll({ type: "several", answers }, { open: true }), undefined, 0);
+  assertEquals(validateResponse(any, { picks: ["a", "b", "c"] }, 1), { picks: ["a", "b", "c"] });
+
+  const rating = buildRow("ev", poll({ type: "rating" }, { open: true }), undefined, 0);
+  assertEquals(openChoices(rating, 1), ["1", "2", "3", "4", "5"]);
+
+  // The timer closes voting by itself, Studio or no Studio.
+  const timed = buildRow("ev", poll({ answers }, { open: true }, { ops: { timer: { op: "start", sec: 10 } } }), undefined, 0);
+  assertEquals(validateResponse(timed, { picks: ["a"] }, 9999), { picks: ["a"] });
+  assertEquals((validateResponse(timed, { picks: ["a"] }, 10000) as { error: string }).error, "Voting has closed");
+  assertEquals(openChoices(timed, 10000), []);
+});
+
+Deno.test("poll: reveal mode withholds totals from viewers until the reveal", () => {
+  assertEquals(totalsPublic(buildRow("ev", poll({ answers, results: "reveal" }, { open: true }), undefined, 0)), false);
+  assertEquals(totalsPublic(buildRow("ev", poll({ answers, results: "reveal" }, { revealed: true }), undefined, 0)), true);
+  assertEquals(totalsPublic(buildRow("ev", poll({ answers, results: "voted" }, { open: true }), undefined, 0)), true);
+  assertEquals(totalsPublic(buildRow("ev", push(), undefined, 0)), true);
 });

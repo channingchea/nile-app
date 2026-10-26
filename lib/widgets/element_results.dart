@@ -4,8 +4,10 @@ import '../services/live_elements.dart';
 import '../theme.dart';
 
 /// The host's look back at a finished show: every element viewers could tap,
-/// with each choice's final count and share. Totals only — never who voted
-/// what. Draws nothing when no element took taps.
+/// with each choice's final count and share (answer text, not ids), how many
+/// people voted, and a rating's average. A reset poll shows its last round.
+/// Totals only — never who voted what. Draws nothing when no element took
+/// taps.
 class ElementResults extends StatelessWidget {
   const ElementResults({
     super.key,
@@ -32,7 +34,7 @@ class ElementResults extends StatelessWidget {
         Text('Results', style: NileTextStyles.labelSm()),
         const SizedBox(height: NileSpacing.s6),
         for (final e in items) ...[
-          _ElementCard(element: e, tally: tallies[e.id] ?? const {}),
+          _ElementCard(element: e, tally: tallies[e.id] ?? ElementTally.empty),
           const SizedBox(height: NileSpacing.s8),
         ],
       ],
@@ -49,7 +51,12 @@ class _ElementCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final choices = element.choices;
-    final total = choices.fold(0, (sum, c) => sum + (tally[c] ?? 0));
+    final poll = element.kind == ElementKinds.poll.wire
+        ? PollResults(PollConfig.fromJson(element.config), tally)
+        : null;
+    final votes = choices.fold(0, (sum, c) => sum + (tally[c] ?? 0));
+    final people = poll?.voters ?? votes;
+    final average = poll?.average;
     return Container(
       padding: const EdgeInsets.all(NileSpacing.s12),
       decoration: BoxDecoration(
@@ -70,14 +77,22 @@ class _ElementCard extends StatelessWidget {
                 ),
               ),
               Text(
-                total == 1 ? '1 vote' : '$total votes',
+                [
+                  if (average != null) '★ ${average.toStringAsFixed(1)}',
+                  people == 1 ? '1 vote' : '$people votes',
+                ].join(' · '),
                 style: NileTextStyles.caption(),
               ),
             ],
           ),
           for (final c in choices) ...[
             const SizedBox(height: NileSpacing.s8),
-            _ChoiceRow(label: c, count: tally[c] ?? 0, total: total),
+            _ChoiceRow(
+              label: element.labelOf(c),
+              count: tally[c] ?? 0,
+              share:
+                  poll?.share(c) ?? (votes == 0 ? 0 : (tally[c] ?? 0) / votes),
+            ),
           ],
         ],
       ),
@@ -89,16 +104,15 @@ class _ChoiceRow extends StatelessWidget {
   const _ChoiceRow({
     required this.label,
     required this.count,
-    required this.total,
+    required this.share,
   });
 
   final String label;
   final int count;
-  final int total;
+  final double share;
 
   @override
   Widget build(BuildContext context) {
-    final share = total == 0 ? 0.0 : count / total;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [

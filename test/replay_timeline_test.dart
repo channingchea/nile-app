@@ -3,6 +3,7 @@
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:nile_app/services/live_elements.dart';
 import 'package:nile_app/services/overlay_clock.dart';
 import 'package:nile_app/services/replay_timeline.dart';
 import 'package:nile_app/services/studio_graphics.dart';
@@ -106,7 +107,7 @@ void main() {
       final mid = t.frameAt(7000);
       expect(mid.graphics.forSlot('b').single.title, 'Jane');
       expect(mid.graphics.forSlot('a'), isEmpty);
-      expect(mid.tallies['e1'], {'up': 2, 'down': 1});
+      expect(mid.tallies['e1'], const ElementTally({'up': 2, 'down': 1}));
 
       final late = t.frameAt(9000);
       expect(late.tiles.single.elementId, 'e1');

@@ -146,7 +146,11 @@ void main() {
     });
 
     test('style: kit with overrides, or Nile style', () {
-      const kit = BrandStyle(accent: '#112233', panel: '#000000', text: '#FFFFFF');
+      const kit = BrandStyle(
+        accent: '#112233',
+        panel: '#000000',
+        text: '#FFFFFF',
+      );
       expect(ElementStyle.none.resolve(null), isNull);
       expect(ElementStyle.none.resolve(kit), kit);
       expect(
@@ -155,22 +159,34 @@ void main() {
       );
       expect(const ElementStyle(nileStyle: true).resolve(kit), isNull);
       // Overrides without a kit sit on Nile's own colours.
-      expect(const ElementStyle(panel: '#123456').resolve(null)?.panel, '#123456');
+      expect(
+        const ElementStyle(panel: '#123456').resolve(null)?.panel,
+        '#123456',
+      );
       expect(const ElementStyle(accent: 'red').error, isNotNull);
     });
 
     test('the counter kind is test-only and validates its settings', () {
-      expect(ElementKinds.offered(debug: false), isEmpty);
-      expect(ElementKinds.offered(debug: true), [ElementKinds.counter]);
+      expect(ElementKinds.offered(debug: false), [ElementKinds.poll]);
+      expect(ElementKinds.offered(debug: true), [
+        ElementKinds.counter,
+        ElementKinds.poll,
+      ]);
       expect(_counter.error, isNull);
-      expect(_counter.copyWith(config: {'label': 'x', 'step': 500}).error, isNotNull);
+      expect(
+        _counter.copyWith(config: {'label': 'x', 'step': 500}).error,
+        isNotNull,
+      );
       expect(_counter.copyWith(name: ' ').error, isNotNull);
     });
   });
 
   group('placement', () {
     test('without a layout everything sits where it always did', () {
-      final p = placeOverlay(graphics: [_slate, _lt, _logo], elements: [_live()]);
+      final p = placeOverlay(
+        graphics: [_slate, _lt, _logo],
+        elements: [_live()],
+      );
       final at = {for (final x in p) x.id: x.spot};
       expect(at, {
         'logo': LayoutSpot.tr,
@@ -182,23 +198,26 @@ void main() {
       expect(p.map((x) => x.id), ['logo', 'el-1', 'lt', 'slate']);
     });
 
-    test('a layer list moves and orders items; disallowed spots are ignored', () {
-      final p = placeOverlay(
-        graphics: [_lt, _slate],
-        elements: [_live()],
-        layers: const [
-          LayerEntry('el-1', spot: LayoutSpot.full),
-          LayerEntry('lt', spot: LayoutSpot.tc),
-          LayerEntry('slate', spot: LayoutSpot.bl),
-        ],
-      );
-      final at = {for (final x in p) x.id: x.spot};
-      expect(at['el-1'], LayoutSpot.full);
-      expect(at['lt'], LayoutSpot.tc);
-      expect(at['slate'], LayoutSpot.full); // a slate is always full screen
-      // Top of the list = front.
-      expect(p.last.id, 'el-1');
-    });
+    test(
+      'a layer list moves and orders items; disallowed spots are ignored',
+      () {
+        final p = placeOverlay(
+          graphics: [_lt, _slate],
+          elements: [_live()],
+          layers: const [
+            LayerEntry('el-1', spot: LayoutSpot.full),
+            LayerEntry('lt', spot: LayoutSpot.tc),
+            LayerEntry('slate', spot: LayoutSpot.bl),
+          ],
+        );
+        final at = {for (final x in p) x.id: x.spot};
+        expect(at['el-1'], LayoutSpot.full);
+        expect(at['lt'], LayoutSpot.tc);
+        expect(at['slate'], LayoutSpot.full); // a slate is always full screen
+        // Top of the list = front.
+        expect(p.last.id, 'el-1');
+      },
+    );
 
     test('hidden items are left out; unlisted ones go in front', () {
       final p = placeOverlay(
@@ -223,9 +242,15 @@ void main() {
     });
 
     test('measures against the 16:9 picture inside any box', () {
-      expect(videoFrame(const Size(1600, 900)), const Rect.fromLTWH(0, 0, 1600, 900));
+      expect(
+        videoFrame(const Size(1600, 900)),
+        const Rect.fromLTWH(0, 0, 1600, 900),
+      );
       // Sideways phone: pillarboxed.
-      expect(videoFrame(const Size(2000, 900)), const Rect.fromLTWH(200, 0, 1600, 900));
+      expect(
+        videoFrame(const Size(2000, 900)),
+        const Rect.fromLTWH(200, 0, 1600, 900),
+      );
       // Upright phone: letterboxed.
       expect(videoFrame(const Size(900, 1600)).height, closeTo(506.25, 0.01));
       expect(videoFrame(Size.zero), Rect.zero);
@@ -248,19 +273,31 @@ void main() {
   group('hold-back', () {
     test('waits until this viewer\'s picture reaches the change', () {
       expect(
-        overlayHoldback(contentAtMs: 10000, serverNowMs: 10200, viewerAgeMs: 900),
+        overlayHoldback(
+          contentAtMs: 10000,
+          serverNowMs: 10200,
+          viewerAgeMs: 900,
+        ),
         const Duration(milliseconds: 700),
       );
       // Already caught up.
       expect(
-        overlayHoldback(contentAtMs: 10000, serverNowMs: 11000, viewerAgeMs: 300),
+        overlayHoldback(
+          contentAtMs: 10000,
+          serverNowMs: 11000,
+          viewerAgeMs: 300,
+        ),
         Duration.zero,
       );
     });
 
     test('never guesses: no clock or no picture age means no wait', () {
       expect(
-        overlayHoldback(contentAtMs: 10000, serverNowMs: null, viewerAgeMs: 900),
+        overlayHoldback(
+          contentAtMs: 10000,
+          serverNowMs: null,
+          viewerAgeMs: 900,
+        ),
         Duration.zero,
       );
       expect(
@@ -275,7 +312,11 @@ void main() {
   });
 
   group('cue with elements', () {
-    const cue = ElementCue(id: 'el-1', name: 'Goals', targets: GraphicTargets.all());
+    const cue = ElementCue(
+      id: 'el-1',
+      name: 'Goals',
+      targets: GraphicTargets.all(),
+    );
     test('cues alongside graphics and lands on cameras', () {
       final s = CueSet.empty.addingElement(cue);
       expect(s.length, 1);
@@ -285,7 +326,9 @@ void main() {
       expect(s.minus(CueSet(const [], [cue])).isEmpty, isTrue);
       // Re-cueing replaces.
       expect(
-        s.addingElement(cue.withTargets(const GraphicTargets.only({'s2'}))).length,
+        s
+            .addingElement(cue.withTargets(const GraphicTargets.only({'s2'})))
+            .length,
         1,
       );
     });
@@ -305,20 +348,24 @@ void main() {
       )..setLibrary(const [_counter]);
     });
 
-    test('changes apply at once and push in order with rising versions', () async {
-      for (var i = 0; i < 3; i++) {
-        unawaited(
-          c.update(
-            'el-1',
-            (e) => e.copyWith(state: {'value': (e.state['value'] as int) + 1}),
-          ),
-        );
-      }
-      expect(c.live('el-1')!.state['value'], 3);
-      await Future<void>.delayed(Duration.zero);
-      await Future<void>.delayed(Duration.zero);
-      expect(pushed.map((p) => p.$1.version), [1, 2, 3]);
-    });
+    test(
+      'changes apply at once and push in order with rising versions',
+      () async {
+        for (var i = 0; i < 3; i++) {
+          unawaited(
+            c.update(
+              'el-1',
+              (e) =>
+                  e.copyWith(state: {'value': (e.state['value'] as int) + 1}),
+            ),
+          );
+        }
+        expect(c.live('el-1')!.state['value'], 3);
+        await Future<void>.delayed(Duration.zero);
+        await Future<void>.delayed(Duration.zero);
+        expect(pushed.map((p) => p.$1.version), [1, 2, 3]);
+      },
+    );
 
     test('undo goes back one change, at most ten', () async {
       for (var i = 0; i < 12; i++) {
@@ -334,7 +381,11 @@ void main() {
 
     test('Take puts it on air; the monitor previews a cued one', () async {
       final cues = CueSet.empty.addingElement(
-        const ElementCue(id: 'el-1', name: 'Goals', targets: GraphicTargets.only({'s1'})),
+        const ElementCue(
+          id: 'el-1',
+          name: 'Goals',
+          targets: GraphicTargets.only({'s1'}),
+        ),
       );
       expect(c.onAir.isEmpty, isTrue);
       expect(c.preview(cues).forSlot('s1').single.id, 'el-1');
@@ -368,14 +419,14 @@ void main() {
         load: () async => (
           elements: [_live(value: 7).copyWith(version: 5)],
           tallies: {
-            'el-1': {'up': 2, 'down': 1},
+            'el-1': const ElementTally({'up': 2, 'down': 1}),
           },
         ),
       );
       await r.restore();
       expect(r.live('el-1')!.state['value'], 7);
       // Totals after the show come back with it.
-      expect(r.tally('el-1'), {'up': 2, 'down': 1});
+      expect(r.tally('el-1'), const ElementTally({'up': 2, 'down': 1}));
     });
   });
 
@@ -607,27 +658,35 @@ void main() {
       expect(poll(onAir: false).openChoices, isEmpty);
       expect(_live().openChoices, isEmpty); // taps off
       expect(ElementsState(items: [poll()]).takesTaps, isTrue);
-      expect(tallyFromJson({'up': 3, 'x': 'no'}), {'up': 3});
+      expect(
+        tallyFromJson({'up': 3, 'x': 'no'}),
+        const ElementTally({'up': 3}),
+      );
+      expect(tallyFromJson({'a': 2, 'b': 2}, 3)!.people, 3);
     });
 
-    Widget layer(LiveElement e, {List<LiveGraphic> graphics = const [], void Function(String)? onTap, String? mine}) =>
-        MaterialApp(
-          home: Center(
-            child: SizedBox(
-              width: 640,
-              height: 360,
-              child: NileGraphicsLayer(
-                graphics: graphics,
-                elements: [e],
-                interactionFor: (_) => ElementInteraction(
-                  mine: mine,
-                  tally: const {'up': 4, 'down': 1},
-                  onTap: onTap,
-                ),
-              ),
+    Widget layer(
+      LiveElement e, {
+      List<LiveGraphic> graphics = const [],
+      void Function(String)? onTap,
+      String? mine,
+    }) => MaterialApp(
+      home: Center(
+        child: SizedBox(
+          width: 640,
+          height: 360,
+          child: NileGraphicsLayer(
+            graphics: graphics,
+            elements: [e],
+            interactionFor: (_) => ElementInteraction(
+              mine: [?mine],
+              tally: const ElementTally({'up': 4, 'down': 1}),
+              onTap: onTap == null ? null : (picks) => onTap(picks.single),
             ),
           ),
-        );
+        ),
+      ),
+    );
 
     testWidgets('a viewer taps a choice and sees the totals', (t) async {
       String? tapped;
@@ -644,7 +703,9 @@ void main() {
       await t.pumpAndSettle();
       await t.tap(find.byIcon(Icons.arrow_upward), warnIfMissed: false);
       expect(tapped, isNull);
-      await t.pumpWidget(layer(poll(), graphics: const [_slate], onTap: (c) => tapped = c));
+      await t.pumpWidget(
+        layer(poll(), graphics: const [_slate], onTap: (c) => tapped = c),
+      );
       await t.pumpAndSettle();
       await t.tap(find.byIcon(Icons.arrow_upward), warnIfMissed: false);
       expect(tapped, isNull);
@@ -652,8 +713,8 @@ void main() {
 
     test('the Studio keeps live totals', () {
       final c = StudioElementsController(push: (e, ops) async => e);
-      c.setTally('p', const {'up': 1, 'down': 0});
-      expect(c.tally('p'), {'up': 1, 'down': 0});
+      c.setTally('p', const ElementTally({'up': 1, 'down': 0}));
+      expect(c.tally('p'), const ElementTally({'up': 1, 'down': 0}));
     });
   });
 

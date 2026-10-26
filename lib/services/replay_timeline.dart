@@ -81,7 +81,8 @@ class ReplayTimeline {
   factory ReplayTimeline.fromMarks(List<Object?> marks) {
     int? start;
     final tiles = <_At<List<ReplayTile>>>[];
-    final metas = <_At<({GraphicsState g, ElementsState e, OverlayLayout l})>>[];
+    final metas =
+        <_At<({GraphicsState g, ElementsState e, OverlayLayout l})>>[];
     final tallies = <String, List<_At<ElementTally>>>{};
     for (final m in marks) {
       if (m is! Map || m['o'] is! num) continue;
@@ -94,7 +95,10 @@ class ReplayTimeline {
           }
         case 'tiles':
           if (d is List) {
-            tiles.add((o: o, v: d.map(ReplayTile.fromJson).whereType<ReplayTile>().toList()));
+            tiles.add((
+              o: o,
+              v: d.map(ReplayTile.fromJson).whereType<ReplayTile>().toList(),
+            ));
           }
         case 'meta':
           if (d is Map) {
@@ -109,7 +113,7 @@ class ReplayTimeline {
             ));
           }
         case 'tally':
-          final t = d is Map ? tallyFromJson(d['tally']) : null;
+          final t = d is Map ? tallyFromJson(d['tally'], d['voters']) : null;
           final id = d is Map ? d['elementId'] : null;
           if (t != null && id is String) (tallies[id] ??= []).add((o: o, v: t));
       }

@@ -227,7 +227,8 @@ class _ElementsPanelState extends State<ElementsPanel> {
     String id,
     LiveElement Function(LiveElement) change, {
     Map<String, ClockOp> clockOps = const {},
-  }) => _c.update(id, change, clockOps: clockOps);
+    ElementOps ops = ElementOps.none,
+  }) => _c.update(id, change, clockOps: clockOps, ops: ops);
 
   Future<void> _chooseCameras(StudioElement e) async {
     final live = _c.current(e.id);
@@ -262,12 +263,16 @@ class _ElementsPanelState extends State<ElementsPanel> {
   Future<void> _edit({StudioElement? existing, ElementKindSpec? kind}) async {
     final k = kind ?? existing?.spec;
     if (k == null) return;
+    final live = existing == null ? null : _c.live(existing.id);
     final result = await showElementEditor(
       context,
       kind: k,
       existing: existing,
       library: widget.library,
       kit: widget.kit,
+      // Running with votes: wording only, so the votes still mean the same.
+      locked:
+          live != null && (live.open || (_c.tally(live.id)?.people ?? 0) > 0),
     );
     if (result == null || !mounted) return;
     if (result.element case final saved?) {
@@ -312,7 +317,7 @@ class _ElementsPanelState extends State<ElementsPanel> {
         in elementKindUis[e.kind]?.shortcuts ?? const <ElementShortcut>[]) {
       if (sc.keys.any((k) => k.accepts(ev, kb))) {
         final c = sc.run(e);
-        _act(id, c.change, clockOps: c.clockOps);
+        _act(id, c.change, clockOps: c.clockOps, ops: c.ops);
         return KeyEventResult.handled;
       }
     }
@@ -594,8 +599,8 @@ class _ElementsPanelState extends State<ElementsPanel> {
                 children: [
                   ui.controls(
                     live,
-                    (change, {clockOps = const {}}) =>
-                        _act(e.id, change, clockOps: clockOps),
+                    (change, {clockOps = const {}, ops = ElementOps.none}) =>
+                        _act(e.id, change, clockOps: clockOps, ops: ops),
                     _c.tally(e.id),
                   ),
                   SwitchListTile(
@@ -677,6 +682,7 @@ Future<ElementEditResult?> showElementEditor(
   StudioElement? existing,
   ElementLibrary library = const ElementLibrary(),
   BrandStyle? kit,
+  bool locked = false,
 }) => showDialog<ElementEditResult>(
   context: context,
   builder: (_) => Dialog(
@@ -689,6 +695,7 @@ Future<ElementEditResult?> showElementEditor(
         existing: existing,
         library: library,
         kit: kit,
+        locked: locked,
       ),
     ),
   ),
@@ -700,12 +707,14 @@ class _ElementEditor extends StatefulWidget {
     required this.existing,
     required this.library,
     required this.kit,
+    this.locked = false,
   });
 
   final ElementKindSpec kind;
   final StudioElement? existing;
   final ElementLibrary library;
   final BrandStyle? kit;
+  final bool locked;
 
   @override
   State<_ElementEditor> createState() => _ElementEditorState();
@@ -863,6 +872,7 @@ class _ElementEditorState extends State<_ElementEditor> {
           ui.editor(
             _draft.config,
             (c) => setState(() => _draft = _draft.copyWith(config: c)),
+            locked: widget.locked,
           ),
         const SizedBox(height: NileSpacing.s8),
         SwitchListTile(

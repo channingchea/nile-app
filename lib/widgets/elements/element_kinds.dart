@@ -8,11 +8,14 @@ import '../../services/overlay_clock.dart';
 import '../../services/server_clock.dart';
 import '../../theme.dart';
 import '../overlay_look.dart';
+import 'poll.dart';
 
-/// One change to a live element: its new values and any clock commands.
+/// One change to a live element: its new values, clock commands, and timer
+/// or reset commands (polls).
 typedef ElementChange = ({
   LiveElement Function(LiveElement current) change,
   Map<String, ClockOp> clockOps,
+  ElementOps ops,
 });
 
 /// Applies an [ElementChange] (the Elements panel pushes it).
@@ -20,20 +23,43 @@ typedef ElementAct =
     void Function(
       LiveElement Function(LiveElement current) change, {
       Map<String, ClockOp> clockOps,
+      ElementOps ops,
     });
 
 /// What a viewer (or the Studio) can do with an element on screen: their own
-/// vote, the totals, and — viewers only — tapping a choice (phase 5).
+/// vote, the totals, and — viewers only — voting (phase 5).
 @immutable
 class ElementInteraction {
-  const ElementInteraction({this.mine, this.tally, this.onTap});
+  const ElementInteraction({
+    this.mine = const [],
+    this.tally,
+    this.onTap,
+    this.audience = ElementAudience.viewer,
+    this.needsSignIn = false,
+  });
 
-  /// The choice this viewer holds. Null = hasn't tapped.
-  final String? mine;
+  /// The choices this viewer's vote holds. Empty = hasn't voted.
+  final List<String> mine;
   final ElementTally? tally;
 
-  /// Null = nothing is tappable here (Studio, replays, under a slate).
-  final ValueChanged<String>? onTap;
+  /// Votes these picks (replacing any earlier vote). Null = nothing is
+  /// tappable here (Studio, replays, under a slate, closed).
+  final ValueChanged<List<String>>? onTap;
+
+  /// Who is looking — decides whether a poll's totals show.
+  final ElementAudience audience;
+
+  /// A signed-out viewer: tapping says "Sign in to vote".
+  final bool needsSignIn;
+
+  bool get voted => mine.isNotEmpty;
+
+  /// Something here reacts to a tap.
+  bool get tappable => onTap != null || needsSignIn;
+
+  /// The same, with nothing tappable.
+  ElementInteraction get readOnly =>
+      ElementInteraction(mine: mine, tally: tally, audience: audience);
 }
 
 /// A key that works while the Elements panel has focus.
@@ -70,11 +96,13 @@ class ElementKindUi {
   })
   render;
 
-  /// Edits a library item's settings.
+  /// Edits a library item's settings. [locked] = it is running with votes
+  /// (or open), so only its wording may change.
   final Widget Function(
     Map<String, dynamic> config,
-    ValueChanged<Map<String, dynamic>> onChanged,
-  )
+    ValueChanged<Map<String, dynamic>> onChanged, {
+    required bool locked,
+  })
   editor;
 
   /// The live controls in the Elements panel; [tally] = its totals, if any.
@@ -85,6 +113,7 @@ class ElementKindUi {
 
 final Map<String, ElementKindUi> elementKindUis = {
   ElementKinds.counter.wire: _counterUi,
+  ElementKinds.poll.wire: pollUi,
 };
 
 /// Draws [e] (nothing for a kind this build has no drawing for).
@@ -112,17 +141,19 @@ ElementChange _bump(LiveElement e, int by) => (
     state: {...cur.state, 'value': (_value(cur) + by).clamp(-99999, 99999)},
   ),
   clockOps: const {},
+  ops: ElementOps.none,
 );
 
 ElementChange _toggleClock(LiveElement e) => (
   change: (cur) => cur,
   clockOps: {'main': e.clock('main').running ? ClockOp.pause : ClockOp.start},
+  ops: ElementOps.none,
 );
 
 final _counterUi = ElementKindUi(
   render: (e, u, {required full, interaction}) =>
       _CounterView(e: e, u: u, full: full, interaction: interaction),
-  editor: (config, onChanged) =>
+  editor: (config, onChanged, {required locked}) =>
       _CounterEditor(config: config, onChanged: onChanged),
   controls: (e, act, tally) => _CounterControls(e: e, act: act, tally: tally),
   shortcuts: [
@@ -150,17 +181,18 @@ final _counterUi = ElementKindUi(
   ],
 );
 
-/// Rebuilds every [period] while [running] — for anything showing a clock.
-class _Ticking extends StatefulWidget {
-  const _Ticking({required this.running, required this.builder});
+/// Rebuilds four times a second while [running] — for anything showing a
+/// clock or countdown.
+class Ticking extends StatefulWidget {
+  const Ticking({super.key, required this.running, required this.builder});
   final bool running;
   final WidgetBuilder builder;
 
   @override
-  State<_Ticking> createState() => _TickingState();
+  State<Ticking> createState() => _TickingState();
 }
 
-class _TickingState extends State<_Ticking> {
+class _TickingState extends State<Ticking> {
   Timer? _t;
 
   void _arm() {
@@ -179,7 +211,7 @@ class _TickingState extends State<_Ticking> {
   }
 
   @override
-  void didUpdateWidget(_Ticking old) {
+  void didUpdateWidget(Ticking old) {
     super.didUpdateWidget(old);
     if (old.running != widget.running) _arm();
   }
@@ -239,7 +271,7 @@ class _CounterView extends StatelessWidget {
           ),
         ),
         if (showClock)
-          _Ticking(
+          Ticking(
             running: clock.running,
             builder: (context) => Text(
               formatClock(clock.valueAt(OverlayClock.nowOf(context))),
@@ -262,13 +294,13 @@ class _CounterView extends StatelessWidget {
                 _TapChip(
                   icon: c == 'up' ? Icons.arrow_upward : Icons.arrow_downward,
                   count: interaction?.tally?[c],
-                  mine: interaction?.mine == c,
+                  mine: interaction?.mine.contains(c) ?? false,
                   look: look,
                   u: u * s,
                   onTap: e.openChoices.contains(c)
                       ? interaction?.onTap == null
                             ? null
-                            : () => interaction!.onTap!(c)
+                            : () => interaction!.onTap!([c])
                       : null,
                 ),
               ],
@@ -278,7 +310,11 @@ class _CounterView extends StatelessWidget {
       ],
     );
     if (full) {
-      return Container(color: look.page, alignment: Alignment.center, child: body);
+      return Container(
+        color: look.page,
+        alignment: Alignment.center,
+        child: body,
+      );
     }
     return Container(
       constraints: BoxConstraints(minWidth: u * 12, maxWidth: u * 30),
@@ -286,7 +322,9 @@ class _CounterView extends StatelessWidget {
       decoration: BoxDecoration(
         color: look.panel.withValues(alpha: 0.92),
         borderRadius: BorderRadius.circular(u * 1.2),
-        border: Border(top: BorderSide(color: look.accent, width: u * 0.5)),
+        border: Border(
+          top: BorderSide(color: look.accent, width: u * 0.5),
+        ),
       ),
       child: body,
     );
@@ -453,7 +491,11 @@ class _CounterControls extends StatelessWidget {
         ),
         SizedBox(
           width: 64,
-          child: Text('${_value(e)}', textAlign: TextAlign.center, style: value),
+          child: Text(
+            '${_value(e)}',
+            textAlign: TextAlign.center,
+            style: value,
+          ),
         ),
         IconButton.outlined(
           tooltip: '+$step  ( + )',
@@ -461,21 +503,20 @@ class _CounterControls extends StatelessWidget {
           icon: const Icon(Icons.add),
         ),
         TextButton(
-          onPressed: () => act(
-            (cur) => cur.copyWith(state: {...cur.state, 'value': 0}),
-          ),
+          onPressed: () =>
+              act((cur) => cur.copyWith(state: {...cur.state, 'value': 0})),
           child: const Text('Reset'),
         ),
         const SizedBox(width: NileSpacing.s8),
-        _Ticking(
+        Ticking(
           running: clock.running,
-          builder: (_) => Text(
-            formatClock(clock.valueAt(ServerClock.now())),
-            style: value,
-          ),
+          builder: (_) =>
+              Text(formatClock(clock.valueAt(ServerClock.now())), style: value),
         ),
         IconButton(
-          tooltip: clock.running ? 'Pause clock (space)' : 'Start clock (space)',
+          tooltip: clock.running
+              ? 'Pause clock (space)'
+              : 'Start clock (space)',
           onPressed: () => _run(_toggleClock(e)),
           icon: Icon(clock.running ? Icons.pause : Icons.play_arrow),
           color: NileColors.volt,

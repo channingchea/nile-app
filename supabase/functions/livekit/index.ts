@@ -19,8 +19,8 @@
 //   set-element       host    → { success, element } ← Studio pushes one live element (state + metadata)
 //   list-elements     host    → { elements, serverNow } ← Studio reloads every element's live state
 //   set-layout        host    → { success: true }   ← per-camera spots + layer order (room metadata)
-//   respond           viewer  → { success, mine }   ← a viewer taps a live element (vote; changeable until close)
-//   my-responses      viewer  → { mine }            ← the caller's own taps this show (rejoin)
+//   respond           viewer  → { success, mine, picks } ← a viewer taps a live element (vote; changeable until close)
+//   my-responses      viewer  → { mine, picks }     ← the caller's own taps this round (rejoin)
 //   resync            host    → { success, resyncAt } ← every viewer re-aligns cameras + audio
 //   clock             any     → { receivedAt, sentAt } ← RealSync clock ping (server ms)
 //   report-clock      crew    → { success: true }   ← publisher's clock offset into its metadata
@@ -66,13 +66,14 @@ import {
 import { mergeRoomMeta, resyncWait, type SponsorInfo, validateGraphics } from "../_shared/graphics.ts";
 import {
   buildRow,
+  choicesOf,
   contentAt,
   elementAngleIds,
   type ElementRow,
-  openChoices,
+  reshapes,
   shapeTally,
+  totalsPublic,
   validateResponse,
-  ELEMENT_KINDS,
   liveSnapshot,
   MAX_ELEMENTS_JSON,
   MAX_LIVE_ELEMENTS,
@@ -1018,7 +1019,8 @@ async function mirrorElements(roomName: string, rows: ElementRow[]) {
 // set-element — the Studio changes one live element (or removes it).
 //
 // Body: { eventId, studio: true, element: { id, kind, name, config, state,
-//         style?, nileStyle?, targets, presentedBy?, version, clockOps?, srcAgeMs? } }
+//         style?, nileStyle?, targets, presentedBy?, version, clockOps?, ops?, srcAgeMs? } }
+//   (ops, polls only: { timer?: { op: "start", sec? } | { op: "cancel" }, reset?: true })
 //    or { eventId, studio: true, remove: <element id> }.
 // The element's live state is stored in live_element_state (the source of
 // truth — a Studio that drops reloads from it) and every on-air element is
@@ -1070,6 +1072,14 @@ async function setElement(body: any, userId: string, admin: any, json: Json): Pr
   if (prev && v.push.version <= prev.version) {
     return json({ error: "stale", current: rowToLive(prev) }, 409);
   }
+  // Polls: wording can change any time; the answers themselves only while
+  // closed with no votes (or along with a reset).
+  if (prev && reshapes(prev.kind, prev.spec?.config ?? {}, v.push.spec.config)) {
+    const votes = v.push.ops.reset ? 0 : (await tallyOf(gate.event.id, prev, admin)).voters;
+    if (prev.state?.open === true || votes > 0) {
+      return json({ error: "Close and reset the poll to change its answers" }, 409);
+    }
+  }
 
   const row = buildRow(gate.event.id, v.push, prev, Date.now());
   const next = [...rows.filter((r) => r.element_id !== row.element_id), row];
@@ -1093,6 +1103,17 @@ async function setElement(body: any, userId: string, admin: any, json: Json): Pr
   }
 
   await mirrorElements(roomName, next);
+
+  // A reset starts a new round with no votes; a reveal shows the totals now.
+  // Both send them at once rather than waiting for the next vote.
+  if (v.push.ops.reset) {
+    await admin.from("element_responses").delete()
+      .eq("event_id", row.event_id).eq("element_id", row.element_id).lt("round", row.state.round as number);
+    await admin.from("element_tally_state").delete().eq("event_id", row.event_id).eq("element_id", row.element_id);
+  }
+  if (v.push.ops.reset || (prev && !totalsPublic(prev) && totalsPublic(row))) {
+    await sendTally(gate.event.id, eventId, row, admin);
+  }
   return json({ success: true, element: rowToLive(row) });
 }
 
@@ -1109,31 +1130,52 @@ async function listElements(body: any, userId: string, admin: any, json: Json): 
   const rows = await elementRows(gate.event.id, admin);
   const roomName = roomNameFor(eventId);
   if (rows.length && (await peersOf(roomName)).length) await mirrorElements(roomName, rows);
-  // Totals for anything viewers can tap — hosts see totals, never who voted what.
+  // Totals for anything viewers can tap — hosts see totals (hidden ones
+  // included), never who voted what.
   const tallies: Record<string, Record<string, number>> = {};
+  const voters: Record<string, number> = {};
   for (const r of rows) {
-    const choices = ELEMENT_KINDS[r.kind]?.choices?.(r.spec?.config ?? {}) ?? [];
-    if (choices.length) tallies[r.element_id] = await tallyOf(gate.event.id, r.element_id, choices, admin);
+    if (!choicesOf(r).length) continue;
+    const t = await tallyOf(gate.event.id, r, admin);
+    tallies[r.element_id] = t.tally;
+    voters[r.element_id] = t.voters;
   }
-  return json({ elements: rows.map(rowToLive), tallies, serverNow: Date.now() });
+  return json({ elements: rows.map(rowToLive), tallies, voters, serverNow: Date.now() });
 }
 
 // ── Viewer taps (phase 5) ──────────────────────────────────────────────────────
 
-async function tallyOf(eventPk: string, elementId: string, choices: string[], admin: any) {
-  const { data, error } = await admin.rpc("element_tally", { p_event: eventPk, p_element: elementId });
+const roundOf = (row: Pick<ElementRow, "state">) => (typeof row.state?.round === "number" ? row.state.round : 0);
+
+/** This round's totals: every choice (zeros included) and how many people voted. */
+async function tallyOf(eventPk: string, row: ElementRow, admin: any) {
+  const { data, error } = await admin.rpc("element_tally", {
+    p_event: eventPk,
+    p_element: row.element_id,
+    p_round: roundOf(row),
+  });
   if (error) throw error;
-  return shapeTally(choices, (data ?? {}) as Record<string, unknown>);
+  const counts = (data?.counts ?? {}) as Record<string, unknown>;
+  return { tally: shapeTally(choicesOf(row), counts), voters: typeof data?.voters === "number" ? data.voters : 0 };
 }
 
-/** Server-authored message on the read-only system topic (0104: clients may read, never write). */
-async function broadcastSystem(slug: string, event: string, payload: Record<string, unknown>) {
+/**
+ * Server-authored message on a read-only topic (0104/0133: clients may read,
+ * never write): `live_system` reaches everyone, `live_mod` only moderators
+ * (the host included).
+ */
+async function broadcastSystem(
+  slug: string,
+  event: string,
+  payload: Record<string, unknown>,
+  topic: "live_system" | "live_mod" = "live_system",
+) {
   try {
     const key = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
     const res = await fetch(`${Deno.env.get("SUPABASE_URL")}/realtime/v1/api/broadcast`, {
       method: "POST",
       headers: { "Content-Type": "application/json", apikey: key, Authorization: `Bearer ${key}` },
-      body: JSON.stringify({ messages: [{ topic: `live_system:${slug}`, event, payload, private: true }] }),
+      body: JSON.stringify({ messages: [{ topic: `${topic}:${slug}`, event, payload, private: true }] }),
     });
     if (!res.ok) log("warn", { action: "broadcast", status: res.status, body: await res.text() });
   } catch (err) {
@@ -1142,7 +1184,7 @@ async function broadcastSystem(slug: string, event: string, payload: Record<stri
 }
 
 /** Totals into a running grid replay's timeline, so the replay shows them move. */
-async function recordTally(eventPk: string, elementId: string, tally: Record<string, number>, admin: any) {
+async function recordTally(eventPk: string, data: Record<string, unknown>, admin: any) {
   const { data: grid } = await admin
     .from("replay_grids")
     .select("id")
@@ -1152,7 +1194,7 @@ async function recordTally(eventPk: string, elementId: string, tally: Record<str
     .limit(1)
     .maybeSingle();
   if (!grid) return;
-  const { error } = await admin.from("replay_marks").insert({ grid_id: grid.id, kind: "tally", data: { elementId, tally } });
+  const { error } = await admin.from("replay_marks").insert({ grid_id: grid.id, kind: "tally", data });
   if (error) log("warn", { action: "record-tally", error: error.message });
 }
 
@@ -1162,17 +1204,22 @@ async function recordTally(eventPk: string, elementId: string, tally: Record<str
  * trailing send (element_tally_claim decides, atomically, across instances),
  * which recounts when it fires so the last vote is never left out.
  */
-async function pushTally(eventPk: string, slug: string, elementId: string, choices: string[], admin: any) {
+async function pushTally(eventPk: string, slug: string, row: ElementRow, admin: any) {
+  const elementId = row.element_id;
   const { data: wait, error } = await admin.rpc("element_tally_claim", { p_event: eventPk, p_element: elementId });
   if (error || typeof wait !== "number" || wait < 0) return;
   const send = async () => {
+    let now = row;
     if (wait > 0) {
       await new Promise((r) => setTimeout(r, wait));
       await admin.rpc("element_tally_sent", { p_event: eventPk, p_element: elementId });
+      // It may have been revealed, reset or removed meanwhile.
+      const { data } = await admin.from("live_element_state").select(ELEMENT_COLS)
+        .eq("event_id", eventPk).eq("element_id", elementId).maybeSingle();
+      if (!data) return;
+      now = data as ElementRow;
     }
-    const tally = await tallyOf(eventPk, elementId, choices, admin);
-    await broadcastSystem(slug, "tally", { elementId, tally });
-    await recordTally(eventPk, elementId, tally, admin);
+    await sendTally(eventPk, slug, now, admin);
   };
   if (wait === 0) return await send();
   // The trailing send outlives this request; keep the worker up for it.
@@ -1215,7 +1262,20 @@ async function viewerMayTap(
   return { id: event.id };
 }
 
-// respond — a viewer taps an element (a vote). Body: { eventId, elementId, choice }.
+/**
+ * Send [row]'s totals now: to everyone, or — a reveal-mode poll before its
+ * reveal — to moderators only. The replay timeline records them either way
+ * (the replay hides them until the reveal from the recorded state).
+ */
+async function sendTally(eventPk: string, slug: string, row: ElementRow, admin: any) {
+  const { tally, voters } = await tallyOf(eventPk, row, admin);
+  const payload = { elementId: row.element_id, tally, voters };
+  await broadcastSystem(slug, "tally", payload, totalsPublic(row) ? "live_system" : "live_mod");
+  await recordTally(eventPk, payload, admin);
+}
+
+// respond — a viewer taps an element (a vote).
+// Body: { eventId, elementId, picks: [..] } (older builds: { choice }).
 // One vote per signed-in account per element, changeable until the element
 // closes; at most one change a second. Nobody — host included — can read who
 // voted what; totals go out on the system topic.
@@ -1228,20 +1288,21 @@ async function respond(body: any, userId: string, admin: any, json: Json): Promi
 
   const { data: row } = await admin.from("live_element_state").select(ELEMENT_COLS)
     .eq("event_id", gate.id).eq("element_id", elementId).maybeSingle();
-  const v = validateResponse(row ?? undefined, body.choice);
+  const v = validateResponse(row ?? undefined, body);
   if ("error" in v) return json({ error: v.error }, v.status);
 
   const { data: status, error } = await admin.rpc("element_respond", {
     p_event: gate.id,
     p_element: elementId,
     p_user: userId,
-    p_choice: v.choice,
+    p_picks: v.picks,
+    p_round: roundOf(row),
   });
   if (error) throw error;
   if (status === "slow") return json({ error: "Slow down a moment", retryAfterMs: 1000 }, 429);
 
-  await pushTally(gate.id, eventId, elementId, openChoices(row), admin);
-  return json({ success: true, mine: v.choice });
+  await pushTally(gate.id, eventId, row, admin);
+  return json({ success: true, mine: v.picks[0], picks: v.picks });
 }
 
 // my-responses — the caller's own taps in this show, so a viewer who rejoins
@@ -1251,12 +1312,20 @@ async function myResponses(body: any, userId: string, admin: any, json: Json): P
   if (!eventId) return json({ error: "eventId is required" }, 400);
   const { data: event } = await admin.from("events").select("id").eq("livekit_room", eventId).maybeSingle();
   if (!event) return json({ error: "Event not found" }, 404);
-  const { data, error } = await admin.from("element_responses").select("element_id, choice")
+  const { data, error } = await admin.from("element_responses").select("element_id, choice, picks, round")
     .eq("event_id", event.id).eq("user_id", userId);
   if (error) throw error;
+  // Only this round's votes: a reset leaves none behind.
+  const rows = await elementRows(event.id, admin);
+  const round = new Map(rows.map((r) => [r.element_id, roundOf(r)]));
   const mine: Record<string, string> = {};
-  for (const r of data ?? []) mine[r.element_id] = r.choice;
-  return json({ mine });
+  const picks: Record<string, string[]> = {};
+  for (const r of data ?? []) {
+    if (!round.has(r.element_id) || (r.round ?? 0) !== round.get(r.element_id)) continue;
+    mine[r.element_id] = r.choice;
+    picks[r.element_id] = r.picks ?? [r.choice];
+  }
+  return json({ mine, picks });
 }
 
 // set-layout — where graphics and elements sit on each camera.

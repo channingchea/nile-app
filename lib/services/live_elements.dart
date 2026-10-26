@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import '../theme.dart';
 import 'brand_kit.dart';
 import 'overlay_layout.dart';
+import 'server_clock.dart';
 import 'studio_graphics.dart' show GraphicTargets;
 
 /// Studio live elements (docs/plans/studio-live-elements-foundation.md).
@@ -69,10 +70,7 @@ class ElementClock {
           : ElementClock(elapsedMs: elapsedMs, runningSince: serverNowMs),
     ClockOpKind.pause =>
       running
-          ? ElementClock(
-              elapsedMs: valueAt(serverNowMs),
-              pausedAt: serverNowMs,
-            )
+          ? ElementClock(elapsedMs: valueAt(serverNowMs), pausedAt: serverNowMs)
           : this,
     ClockOpKind.reset => const ElementClock(),
     ClockOpKind.set =>
@@ -140,6 +138,9 @@ class ElementKindSpec {
     this.hidden = false,
     this.validate,
     this.choices,
+    this.maxPicks,
+    this.labelOf,
+    this.applyOps,
   });
 
   final String wire;
@@ -160,6 +161,22 @@ class ElementKindSpec {
   /// What viewers may tap for this config (phase 5); null or empty = nothing.
   /// Mirrors KindRule.choices on the server.
   final List<String> Function(Map<String, dynamic> config)? choices;
+
+  /// How many choices one vote may hold (null = one).
+  final int Function(Map<String, dynamic> config)? maxPicks;
+
+  /// A choice as people read it (null = the choice id itself).
+  final String Function(Map<String, dynamic> config, String choice)? labelOf;
+
+  /// Timer and reset applied locally the way the server applies them; null =
+  /// the kind takes no [ElementOps].
+  final Map<String, dynamic> Function(
+    Map<String, dynamic> state,
+    Map<String, dynamic> config,
+    ElementOps ops,
+    int serverNowMs,
+  )?
+  applyOps;
 }
 
 String? _counterConfigError(Map<String, dynamic> c) {
@@ -169,7 +186,8 @@ String? _counterConfigError(Map<String, dynamic> c) {
   }
   final step = c['step'] ?? 1;
   if (step is! int || step < 1 || step > 100) return 'Step is 1 to 100.';
-  if (c['taps'] != null && c['taps'] is! bool) return 'Taps setting is malformed.';
+  if (c['taps'] != null && c['taps'] is! bool)
+    return 'Taps setting is malformed.';
   return null;
 }
 
@@ -191,7 +209,30 @@ abstract final class ElementKinds {
     choices: _counterChoices,
   );
 
-  static const all = [counter];
+  /// Multiple choice, yes/no, rating 1–5 or pick several
+  /// (docs/plans/studio-poll.md).
+  static const poll = ElementKindSpec(
+    wire: 'poll',
+    label: 'Poll',
+    defaultConfig: {
+      'type': 'choice',
+      'question': '',
+      'answers': [
+        {'id': 'a1', 'text': ''},
+        {'id': 'a2', 'text': ''},
+      ],
+      'results': 'live',
+    },
+    defaultState: {},
+    defaultSpot: LayoutSpot.mr,
+    validate: _pollConfigError,
+    choices: _pollChoices,
+    maxPicks: _pollMaxPicks,
+    labelOf: _pollLabel,
+    applyOps: _pollOps,
+  );
+
+  static const all = [counter, poll];
 
   static ElementKindSpec? of(Object? wire) =>
       all.where((k) => k.wire == wire).firstOrNull;
@@ -259,13 +300,15 @@ class ElementStyle {
     for (final c in [accent, panel, text, onAccent]) {
       if (c != null && !isBrandHex(c)) return 'Colours are #RRGGBB.';
     }
-    if (font != null && !brandFonts.contains(font)) return 'Pick a listed font.';
+    if (font != null && !brandFonts.contains(font))
+      return 'Pick a listed font.';
     return null;
   }
 
   factory ElementStyle.fromJson(Object? j) {
     if (j is! Map) return none;
-    String? hex(Object? v) => isBrandHex(v) ? (v as String).toUpperCase() : null;
+    String? hex(Object? v) =>
+        isBrandHex(v) ? (v as String).toUpperCase() : null;
     return ElementStyle(
       nileStyle: j['nileStyle'] == true,
       accent: hex(j['accent']),
@@ -358,7 +401,9 @@ Map<String, dynamic> targetsToJson(GraphicTargets t) => t.all
         'all': true,
         if (t.except.isNotEmpty) 'except': [...t.except]..sort(),
       }
-    : {'slots': [...t.slots]..sort()};
+    : {
+        'slots': [...t.slots]..sort(),
+      };
 
 GraphicTargets targetsFromJson(Object? j) {
   if (j is! Map) return GraphicTargets.none;
@@ -385,6 +430,7 @@ class LiveElement {
     this.presentedBy,
     this.version = 0,
     this.at,
+    this.ops = ElementOps.none,
   });
 
   /// A library item's first appearance in a show: default values, off air.
@@ -426,6 +472,9 @@ class LiveElement {
   /// Server ms the last change refers to (viewer hold-back).
   final int? at;
 
+  /// Timer/reset commands riding on one push (never stored).
+  final ElementOps ops;
+
   bool get onAir => !targets.isNone;
 
   /// On a camera or as its own angle — viewers can see it.
@@ -439,8 +488,30 @@ class LiveElement {
   /// Everything a viewer could tap on it, open or not.
   List<String> get choices => spec?.choices?.call(config) ?? const [];
 
-  /// What a viewer may tap right now: its choices while open and live.
-  List<String> get openChoices => open && live ? choices : const [];
+  /// How many choices one vote may hold.
+  int get maxPicks => spec?.maxPicks?.call(config) ?? 1;
+
+  /// [choice] as people read it ("Red", not "a1").
+  String labelOf(String choice) =>
+      spec?.labelOf?.call(config, choice) ?? choice;
+
+  /// Voting ended by itself: its timer (`closesAt`, server ms) ran out.
+  bool timedOutAt(int serverNowMs) {
+    final c = state['closesAt'];
+    return c is num && serverNowMs >= c;
+  }
+
+  /// What a viewer may tap right now: its choices while open (timer not run
+  /// out) and live.
+  List<String> get openChoices =>
+      open && live && !timedOutAt(ServerClock.now()) ? choices : const [];
+
+  /// [ops] applied locally (the server does the same with its own clock).
+  LiveElement withOps(ElementOps ops, int serverNowMs) {
+    final apply = spec?.applyOps;
+    if (ops.isEmpty || apply == null) return this;
+    return copyWith(state: apply(state, config, ops, serverNowMs));
+  }
 
   ElementClock clock(String name) => clocks[name] ?? const ElementClock();
 
@@ -466,6 +537,7 @@ class LiveElement {
     bool? angle,
     int? version,
     int? at,
+    ElementOps? ops,
   }) => LiveElement(
     id: id,
     kind: kind,
@@ -480,6 +552,7 @@ class LiveElement {
     presentedBy: presentedBy,
     version: version ?? this.version,
     at: at ?? this.at,
+    ops: ops ?? this.ops,
   );
 
   /// [ops] applied to this element's clocks at [serverNowMs].
@@ -544,6 +617,7 @@ class LiveElement {
     if (angle) 'angle': true,
     'presentedBy': ?presentedBy,
     'version': version,
+    if (!ops.isEmpty) 'ops': ops.toJson(),
   };
 
   @override
@@ -613,7 +687,9 @@ class ElementsState {
 
   @override
   bool operator ==(Object other) =>
-      other is ElementsState && other.at == at && listEquals(other.items, items);
+      other is ElementsState &&
+      other.at == at &&
+      listEquals(other.items, items);
 
   @override
   int get hashCode => Object.hash(at, Object.hashAll(items));
@@ -633,15 +709,87 @@ String? elementIdOfAngle(String? id) =>
 
 // ── Viewer taps (phase 5) ────────────────────────────────────────────────────
 
-/// An element's totals: choice → count. Hosts see these, never who voted what.
-typedef ElementTally = Map<String, int>;
+/// An element's totals: choice → count, and how many people voted. Hosts see
+/// these, never who voted what.
+@immutable
+class ElementTally {
+  const ElementTally([this.counts = const {}, this.voters]);
 
-ElementTally? tallyFromJson(Object? j) {
+  static const empty = ElementTally();
+
+  final Map<String, int> counts;
+
+  /// People who voted; null = one vote each (the sum of [counts]). Fewer
+  /// than the sum when a vote may hold several picks.
+  final int? voters;
+
+  int? operator [](String choice) => counts[choice];
+
+  /// Every pick counted.
+  int get votes => counts.values.fold(0, (a, b) => a + b);
+
+  /// People who voted.
+  int get people => voters ?? votes;
+
+  @override
+  bool operator ==(Object other) =>
+      other is ElementTally &&
+      other.voters == voters &&
+      mapEquals(other.counts, counts);
+
+  @override
+  int get hashCode => Object.hash(
+    voters,
+    Object.hashAll(counts.entries.map((e) => (e.key, e.value))),
+  );
+
+  @override
+  String toString() => 'ElementTally($counts, voters: $voters)';
+}
+
+/// Totals off the wire: `{choice: n}` plus, from newer servers, `voters`.
+ElementTally? tallyFromJson(Object? j, [Object? voters]) {
   if (j is! Map) return null;
-  return {
+  return ElementTally({
     for (final e in j.entries)
-      if (e.key is String && e.value is num) e.key as String: (e.value as num).toInt(),
+      if (e.key is String && e.value is num)
+        e.key as String: (e.value as num).toInt(),
+  }, voters is num ? voters.toInt() : null);
+}
+
+/// Timer and reset commands for one push (polls). The server stamps the
+/// result with its own clock; the Studio applies them locally too.
+@immutable
+class ElementOps {
+  const ElementOps({this.timer, this.timerSec, this.reset = false});
+
+  static const none = ElementOps();
+
+  /// true = start (for [timerSec], else the element's own length), false =
+  /// cancel, null = leave as it is.
+  final bool? timer;
+  final int? timerSec;
+
+  /// A new round: every vote cleared.
+  final bool reset;
+
+  bool get isEmpty => timer == null && !reset;
+
+  Map<String, dynamic> toJson() => {
+    if (timer == true) 'timer': {'op': 'start', 'sec': ?timerSec},
+    if (timer == false) 'timer': {'op': 'cancel'},
+    if (reset) 'reset': true,
   };
+
+  @override
+  bool operator ==(Object other) =>
+      other is ElementOps &&
+      other.timer == timer &&
+      other.timerSec == timerSec &&
+      other.reset == reset;
+
+  @override
+  int get hashCode => Object.hash(timer, timerSec, reset);
 }
 
 /// An element waiting in the Studio for Take, next to cued graphics. Only
@@ -670,4 +818,332 @@ class ElementCue {
 
   @override
   int get hashCode => Object.hash(id, name, targets);
+}
+
+// ── Polls (docs/plans/studio-poll.md) ────────────────────────────────────────
+
+enum PollType {
+  choice('Multiple choice'),
+  yesno('Yes / no'),
+  rating('Rating 1–5'),
+  several('Pick several');
+
+  const PollType(this.label);
+  final String label;
+
+  static PollType of(Object? wire) =>
+      values.where((t) => t.name == wire).firstOrNull ?? choice;
+}
+
+/// Who sees a poll's totals.
+enum PollResultsMode {
+  live('Live', 'Everyone sees totals as votes come in.'),
+  voted('After you vote', 'Each viewer sees totals once they have voted.'),
+  reveal('Only when revealed', 'Nobody sees totals until you reveal them.');
+
+  const PollResultsMode(this.label, this.hint);
+  final String label;
+  final String hint;
+
+  static PollResultsMode of(Object? wire) =>
+      values.where((t) => t.name == wire).firstOrNull ?? live;
+}
+
+/// Who is looking at an element: what decides whether a poll's totals show.
+enum ElementAudience { viewer, staff, replay }
+
+@immutable
+class PollAnswer {
+  const PollAnswer(this.id, this.text);
+  final String id;
+  final String text;
+
+  Map<String, dynamic> toJson() => {'id': id, 'text': text};
+
+  @override
+  bool operator ==(Object other) =>
+      other is PollAnswer && other.id == id && other.text == text;
+
+  @override
+  int get hashCode => Object.hash(id, text);
+}
+
+/// A poll's settings (its `config`). Mirrors cleanPollConfig on the server.
+@immutable
+class PollConfig {
+  const PollConfig({
+    this.type = PollType.choice,
+    this.question = '',
+    this.answers = const [],
+    this.maxPicks,
+    this.results = PollResultsMode.live,
+    this.timerSec,
+  });
+
+  static const maxQuestion = 120;
+  static const maxAnswer = 40;
+  static const minAnswers = 2;
+  static const maxAnswers = 6;
+  static const minTimerSec = 10;
+  static const maxTimerSec = 1800;
+
+  static const yesNo = [PollAnswer('yes', 'Yes'), PollAnswer('no', 'No')];
+  static const stars = [
+    PollAnswer('1', '1'),
+    PollAnswer('2', '2'),
+    PollAnswer('3', '3'),
+    PollAnswer('4', '4'),
+    PollAnswer('5', '5'),
+  ];
+
+  final PollType type;
+  final String question;
+
+  /// Multiple choice and pick several: the host's answers.
+  final List<PollAnswer> answers;
+
+  /// Pick several: at most this many (null = any number).
+  final int? maxPicks;
+  final PollResultsMode results;
+
+  /// The timer's default length (null = no timer).
+  final int? timerSec;
+
+  factory PollConfig.fromJson(Map<String, dynamic> j) => PollConfig(
+    type: PollType.of(j['type']),
+    question: j['question'] is String ? j['question'] as String : '',
+    answers: [
+      if (j['answers'] case final List l)
+        for (final a in l)
+          if (a is Map && a['id'] is String)
+            PollAnswer(
+              a['id'] as String,
+              a['text'] is String ? a['text'] as String : '',
+            ),
+    ],
+    maxPicks: (j['maxPicks'] as num?)?.toInt(),
+    results: PollResultsMode.of(j['results']),
+    timerSec: (j['timerSec'] as num?)?.toInt(),
+  );
+
+  bool get ownAnswers => type == PollType.choice || type == PollType.several;
+
+  /// What viewers pick from: the host's answers, or yes/no, or 1–5.
+  List<PollAnswer> get items => switch (type) {
+    PollType.yesno => yesNo,
+    PollType.rating => stars,
+    _ => answers,
+  };
+
+  /// How many answers one vote may hold.
+  int get pickLimit => type == PollType.several
+      ? (maxPicks ?? items.length).clamp(1, math.max(1, items.length))
+      : 1;
+
+  String labelOf(String id) =>
+      items.where((a) => a.id == id).firstOrNull?.text ?? id;
+
+  /// Same answers in the same order (wording aside): what may change while
+  /// votes point at them.
+  bool sameAnswers(PollConfig o) =>
+      o.type == type &&
+      listEquals(
+        [for (final a in o.items) a.id],
+        [for (final a in items) a.id],
+      );
+
+  /// An id no answer here uses yet.
+  String nextAnswerId() {
+    var n = answers.length + 1;
+    while (answers.any((a) => a.id == 'a$n')) {
+      n++;
+    }
+    return 'a$n';
+  }
+
+  /// Why it can't be saved, or null.
+  String? get error {
+    final q = question.trim();
+    if (q.isEmpty) return 'Write the question.';
+    if (q.length > maxQuestion)
+      return 'The question is $maxQuestion characters at most.';
+    if (!ownAnswers) return null;
+    if (answers.length < minAnswers) return 'Add at least two answers.';
+    if (answers.length > maxAnswers) return 'Six answers at most.';
+    final seen = <String>{};
+    for (final a in answers) {
+      final t = a.text.trim();
+      if (t.isEmpty) return 'Fill in every answer, or remove the empty one.';
+      if (t.length > maxAnswer)
+        return 'Answers are $maxAnswer characters at most.';
+      if (!seen.add(t.toLowerCase())) return '“$t” is in there twice.';
+    }
+    final m = maxPicks;
+    if (type == PollType.several &&
+        m != null &&
+        (m < 1 || m > answers.length)) {
+      return 'Max picks is 1 to ${answers.length}.';
+    }
+    final t = timerSec;
+    if (t != null && (t < minTimerSec || t > maxTimerSec)) {
+      return 'The timer is 10 seconds to 30 minutes.';
+    }
+    return null;
+  }
+
+  PollConfig copyWith({
+    PollType? type,
+    String? question,
+    List<PollAnswer>? answers,
+    int? maxPicks,
+    bool clearMaxPicks = false,
+    PollResultsMode? results,
+    int? timerSec,
+    bool clearTimer = false,
+  }) => PollConfig(
+    type: type ?? this.type,
+    question: question ?? this.question,
+    answers: answers ?? this.answers,
+    maxPicks: clearMaxPicks ? null : maxPicks ?? this.maxPicks,
+    results: results ?? this.results,
+    timerSec: clearTimer ? null : timerSec ?? this.timerSec,
+  );
+
+  Map<String, dynamic> toJson() => {
+    'type': type.name,
+    'question': question,
+    if (ownAnswers) 'answers': [for (final a in answers) a.toJson()],
+    if (type == PollType.several) 'maxPicks': ?maxPicks,
+    'results': results.name,
+    'timerSec': ?timerSec,
+  };
+}
+
+/// A poll's live values (its `state`). [closesAt] and [round] are the
+/// server's.
+@immutable
+class PollState {
+  const PollState({
+    this.open = false,
+    this.revealed = false,
+    this.closesAt,
+    this.round = 0,
+  });
+
+  factory PollState.of(Map<String, dynamic> s) => PollState(
+    open: s['open'] == true,
+    revealed: s['revealed'] == true,
+    closesAt: (s['closesAt'] as num?)?.toInt(),
+    round: (s['round'] as num?)?.toInt() ?? 0,
+  );
+
+  final bool open;
+  final bool revealed;
+
+  /// Server ms the timer runs out (null = no timer running).
+  final int? closesAt;
+
+  /// Up one per reset.
+  final int round;
+
+  /// Taking votes at [serverNowMs].
+  bool openAt(int serverNowMs) =>
+      open && (closesAt == null || serverNowMs < closesAt!);
+
+  /// Whole seconds left on the timer (rounded up), or null.
+  int? secondsLeft(int serverNowMs) {
+    final c = closesAt;
+    if (!open || c == null) return null;
+    return (math.max(0, c - serverNowMs) / 1000).ceil();
+  }
+}
+
+/// Whether [audience] sees a poll's totals: live = always; after you vote =
+/// once this viewer has; only when revealed = after the reveal. The Studio
+/// and host always do; replays follow the reveal.
+bool pollResultsVisible(
+  PollConfig c,
+  PollState s, {
+  required ElementAudience audience,
+  bool voted = false,
+}) => switch (audience) {
+  ElementAudience.staff => true,
+  ElementAudience.replay => c.results != PollResultsMode.reveal || s.revealed,
+  ElementAudience.viewer => switch (c.results) {
+    PollResultsMode.live => true,
+    PollResultsMode.voted => voted,
+    PollResultsMode.reveal => s.revealed,
+  },
+};
+
+/// A poll's totals as people read them.
+@immutable
+class PollResults {
+  const PollResults(this.config, this.tally);
+
+  final PollConfig config;
+  final ElementTally tally;
+
+  int count(String id) => tally[id] ?? 0;
+
+  /// Every pick counted.
+  int get votes =>
+      [for (final a in config.items) count(a.id)].fold(0, (a, b) => a + b);
+
+  /// People who voted.
+  int get voters => tally.voters ?? votes;
+
+  bool get isEmpty => voters == 0;
+
+  /// [id]'s share: of people who voted (pick several), else of votes.
+  double share(String id) {
+    final of = config.type == PollType.several ? voters : votes;
+    return of == 0 ? 0 : count(id) / of;
+  }
+
+  int percent(String id) => (share(id) * 100).round();
+
+  /// Rating: the average to one decimal, or null with no votes.
+  double? get average {
+    if (config.type != PollType.rating || votes == 0) return null;
+    var sum = 0;
+    for (final a in config.items) {
+      sum += int.parse(a.id) * count(a.id);
+    }
+    return (sum / votes * 10).round() / 10;
+  }
+
+  /// "1 vote", "212 votes" — people, so picking several counts once.
+  String get votesLabel => voters == 1 ? '1 vote' : '$voters votes';
+}
+
+String? _pollConfigError(Map<String, dynamic> c) =>
+    PollConfig.fromJson(c).error;
+
+List<String> _pollChoices(Map<String, dynamic> c) => [
+  for (final a in PollConfig.fromJson(c).items) a.id,
+];
+
+int _pollMaxPicks(Map<String, dynamic> c) => PollConfig.fromJson(c).pickLimit;
+
+String _pollLabel(Map<String, dynamic> c, String id) =>
+    PollConfig.fromJson(c).labelOf(id);
+
+/// Mirrors pollServerState: a reset starts a new round and drops the timer;
+/// start sets `closesAt` from the timer length; cancel drops it.
+Map<String, dynamic> _pollOps(
+  Map<String, dynamic> state,
+  Map<String, dynamic> config,
+  ElementOps ops,
+  int now,
+) {
+  final next = {...state};
+  if (ops.reset) {
+    next['round'] = ((state['round'] as num?)?.toInt() ?? 0) + 1;
+    next.remove('closesAt');
+  }
+  if (ops.timer == false) next.remove('closesAt');
+  final sec = ops.timerSec ?? (config['timerSec'] as num?)?.toInt();
+  if (ops.timer == true && sec != null) next['closesAt'] = now + sec * 1000;
+  return next;
 }

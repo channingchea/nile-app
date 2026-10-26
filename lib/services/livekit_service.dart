@@ -220,16 +220,19 @@ class LivekitService {
 
   /// Studio: every element's live state in this show, on air or not, and
   /// the totals of the ones viewers can tap.
-  static Future<({List<LiveElement> elements, Map<String, ElementTally> tallies})>
+  static Future<
+    ({List<LiveElement> elements, Map<String, ElementTally> tallies})
+  >
   listElements({required String eventId}) async {
     final d = await _invoke<Map>({
       'action': 'list-elements',
       'eventId': eventId,
     });
     final tallies = <String, ElementTally>{};
+    final voters = d['voters'] is Map ? d['voters'] as Map : const {};
     if (d['tallies'] case final Map t) {
       t.forEach((k, v) {
-        final tally = tallyFromJson(v);
+        final tally = tallyFromJson(v, voters[k]);
         if (k is String && tally != null) tallies[k] = tally;
       });
     }
@@ -242,38 +245,42 @@ class LivekitService {
     );
   }
 
-  /// Viewer: tap [choice] on an element (a vote, changeable until it
-  /// closes). Returns the choice the server holds for you.
-  static Future<String?> respond({
+  /// Viewer: vote [picks] on an element (one, or several on a pick-several
+  /// poll), replacing any earlier vote; changeable until it closes. Returns
+  /// the picks the server holds for you.
+  static Future<List<String>> respond({
     required String eventId,
     required String elementId,
-    required String choice,
+    required List<String> picks,
   }) async {
     final d = await _invoke<Map>({
       'action': 'respond',
       'eventId': eventId,
       'elementId': elementId,
-      'choice': choice,
+      'picks': picks,
     });
-    return d['mine'] as String?;
+    return _picks(d['picks']) ?? picks;
   }
 
-  /// Viewer: what you have tapped in this show (element id → choice).
-  static Future<Map<String, String>> myResponses({
+  static List<String>? _picks(Object? v) =>
+      v is List ? v.whereType<String>().toList() : null;
+
+  /// Viewer: what you have voted in this show's current rounds (element id →
+  /// picks).
+  static Future<Map<String, List<String>>> myResponses({
     required String eventId,
   }) async {
     final d = await _invoke<Map>({
       'action': 'my-responses',
       'eventId': eventId,
     });
-    final m = d['mine'];
-    return m is Map
-        ? {
-            for (final e in m.entries)
-              if (e.key is String && e.value is String)
-                e.key as String: e.value as String,
-          }
-        : const {};
+    final picks = d['picks'] is Map ? d['picks'] as Map : const {};
+    final mine = d['mine'] is Map ? d['mine'] as Map : const {};
+    return {
+      for (final e in mine.entries)
+        if (e.key is String && e.value is String)
+          e.key as String: _picks(picks[e.key]) ?? [e.value as String],
+    };
   }
 
   /// Studio: where graphics and elements sit on each camera.
@@ -406,7 +413,8 @@ class LivekitService {
   static Future<void> setReady({
     required String eventId,
     required bool ready,
-  }) => _invoke<Map>({'action': 'set-ready', 'eventId': eventId, 'ready': ready});
+  }) =>
+      _invoke<Map>({'action': 'set-ready', 'eventId': eventId, 'ready': ready});
 
   /// Host: stop the replay egress so the recording finalizes. Call when ending
   /// the show. Best-effort — the live show already ended via EventService.end,
@@ -443,9 +451,14 @@ class LivekitService {
   /// Viewer: whether a ready replay exists that this user may watch, plus whether
   /// the caller is authorized at all (so a paid event with no ticket can still
   /// surface a "buy to watch the replay" CTA). Returns a falsey default on error.
-  static Future<ReplayAvailability> replayExists({required String eventId}) async {
+  static Future<ReplayAvailability> replayExists({
+    required String eventId,
+  }) async {
     try {
-      final d = await _invoke<Map>({'action': 'replay-exists', 'eventId': eventId});
+      final d = await _invoke<Map>({
+        'action': 'replay-exists',
+        'eventId': eventId,
+      });
       return ReplayAvailability(
         available: d['available'] as bool? ?? false,
         authorized: d['authorized'] as bool? ?? false,
@@ -467,10 +480,16 @@ class LivekitService {
   /// if no replay is available or the user isn't authorized.
   static Future<ReplayPlayback?> replayUrl({required String eventId}) async {
     try {
-      final d = await _invoke<Map>({'action': 'replay-url', 'eventId': eventId});
+      final d = await _invoke<Map>({
+        'action': 'replay-url',
+        'eventId': eventId,
+      });
       final url = d['url'] as String?;
       if (url == null) return null;
-      return ReplayPlayback(url: url, durationMs: (d['durationMs'] as num?)?.toInt());
+      return ReplayPlayback(
+        url: url,
+        durationMs: (d['durationMs'] as num?)?.toInt(),
+      );
     } catch (_) {
       // 403/404 → no replay for this user; treat as "not available".
       return null;

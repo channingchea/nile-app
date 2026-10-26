@@ -24,7 +24,13 @@ const _goals = StudioElement(
   config: {'label': 'Goals', 'step': 1, 'taps': true},
 );
 
-int _total(ElementTally? t) => t?.values.fold<int>(0, (a, b) => a + b) ?? 0;
+int _total(ElementTally? t) => t?.votes ?? 0;
+
+/// [_goals] open for taps on every camera.
+LiveElement get _openGoals => LiveElement.fromLibrary(_goals).copyWith(
+  state: {'value': 0, 'open': true},
+  targets: const GraphicTargets.all(),
+);
 
 StudioElementsController _local({bool rehearsal = true}) =>
     StudioElementsController(push: (e, _) async => e, rehearsal: rehearsal)
@@ -38,9 +44,7 @@ void main() {
       final told = <String, ElementTally>{};
       demo.onTally = (id, t) => told[id] = t;
 
-      demo.vote({
-        'el-1': ['up', 'down'],
-      });
+      demo.vote([_openGoals]);
       for (var i = 0; i < 5; i++) {
         demo.addVotes();
       }
@@ -55,8 +59,8 @@ void main() {
       }
       expect(_total(demo.tallyOf('el-1')), 19);
 
-      demo.vote(const {});
-      final closed = Map.of(demo.tallyOf('el-1')!);
+      demo.vote(const []);
+      final closed = demo.tallyOf('el-1');
       demo.addVotes();
       expect(demo.tallyOf('el-1'), closed, reason: 'totals stay, none move');
     });
@@ -280,7 +284,7 @@ void main() {
           ElementResults(
             elements: [LiveElement.fromLibrary(_goals)],
             tallies: const {
-              'el-1': {'up': 3, 'down': 1},
+              'el-1': ElementTally({'up': 3, 'down': 1}),
             },
           ),
         ),

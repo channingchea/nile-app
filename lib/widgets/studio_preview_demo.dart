@@ -6,7 +6,14 @@ import 'package:flutter/foundation.dart';
 import '../services/camera_status.dart';
 import '../services/chat_service.dart' show ChatMessage, PinnedMessage;
 import '../services/live_elements.dart'
-    show ElementTally, elementAngleId, isElementAngleId;
+    show
+        ElementKinds,
+        ElementTally,
+        LiveElement,
+        PollConfig,
+        PollType,
+        elementAngleId,
+        isElementAngleId;
 import 'nile_studio.dart';
 
 /// Everything in Studio Preview that would normally come from other people:
@@ -159,8 +166,11 @@ class StudioPreviewDemo extends ChangeNotifier {
   /// Element angles the host turned on (`el:` ids), and the elements open
   /// for taps with their running totals.
   List<String> _elementAngles = const [];
-  final Map<String, List<String>> _voting = {};
+  final Map<String, LiveElement> _voting = {};
   final Map<String, ElementTally> _tallies = {};
+
+  /// Each poll's round when last voting: a reset (new round) starts over.
+  final Map<String, int> _rounds = {};
   Timer? _votes;
 
   /// Told whenever an element's pretend totals move.
@@ -295,16 +305,21 @@ class StudioPreviewDemo extends ChangeNotifier {
   /// Its pretend totals so far (kept after taps close).
   ElementTally? tallyOf(String elementId) => _tallies[elementId];
 
-  /// Viewers tap on exactly these elements (id → its choices); any other
-  /// stops. Totals stay where they got to.
-  void vote(Map<String, List<String>> open) {
+  /// Viewers vote on exactly these elements (open for taps); any other
+  /// stops. Totals stay where they got to, until a reset starts a new round.
+  void vote(Iterable<LiveElement> open) {
     _voting
       ..clear()
-      ..addAll(open);
-    open.forEach(
-      (id, choices) =>
-          _tallies[id] = {for (final c in choices) c: _tallies[id]?[c] ?? 0},
-    );
+      ..addEntries(open.map((e) => MapEntry(e.id, e)));
+    for (final e in open) {
+      final round = (e.state['round'] as num?)?.toInt() ?? 0;
+      if (_rounds[e.id] != round) _tallies.remove(e.id);
+      _rounds[e.id] = round;
+      final t = _tallies[e.id];
+      _tallies[e.id] = ElementTally({
+        for (final c in e.choices) c: t?[c] ?? 0,
+      }, t?.voters);
+    }
     if (_voting.isEmpty) {
       _votes?.cancel();
       _votes = null;
@@ -316,38 +331,71 @@ class StudioPreviewDemo extends ChangeNotifier {
     }
   }
 
+  /// Rating answers lean toward 4 stars.
+  static const _ratingWeights = [1, 2, 5, 9, 6];
+
   /// One beat of the audience voting: a few new votes (fast at first,
   /// slowing as most of the room has voted), now and then someone changing
-  /// their mind. Leans toward the first choice so the race has a leader.
-  /// Public so a test can move totals without waiting on the timer.
+  /// their mind. Leans toward the first choice so the race has a leader;
+  /// ratings spread around 4; pick several honours its limit. Stops on an
+  /// element whose timer ran out. Public so a test can move totals without
+  /// waiting on the timer.
   @visibleForTesting
   void addVotes() {
     final room = _live ? max(viewerCount, 1) : 24;
-    for (final MapEntry(key: id, value: choices) in [..._voting.entries]) {
-      final t = {..._tallies[id] ?? const <String, int>{}};
-      final total = t.values.fold(0, (a, b) => a + b);
-      String pick() =>
-          choices[_random.nextDouble() < 0.45
-              ? 0
-              : _random.nextInt(choices.length)];
-      final left = (room * 0.8).round() - total;
+    for (final e in [..._voting.values]) {
+      final choices = e.openChoices;
+      if (choices.isEmpty) continue;
+      final poll = e.kind == ElementKinds.poll.wire
+          ? PollConfig.fromJson(e.config)
+          : null;
+      final rating = poll?.type == PollType.rating;
+      final limit = e.maxPicks;
+      final old = _tallies[e.id];
+      final t = {...?old?.counts};
+      var voters = old?.people ?? 0;
+      String pick() {
+        if (rating) {
+          var r = _random.nextInt(_ratingWeights.reduce((a, b) => a + b));
+          for (final (i, w) in _ratingWeights.indexed) {
+            if ((r -= w) < 0) return choices[i];
+          }
+        }
+        return choices[_random.nextDouble() < 0.45
+            ? 0
+            : _random.nextInt(choices.length)];
+      }
+
+      final left = (room * 0.8).round() - voters;
       final add = left <= 0
           ? 0
           : 1 + _random.nextInt(max(1, min(4, left ~/ 4)));
       for (var i = 0; i < add; i++) {
-        final c = pick();
-        t[c] = (t[c] ?? 0) + 1;
+        final picks = {pick()};
+        if (limit > 1) {
+          final more = _random.nextInt(limit);
+          for (var k = 0; k < more; k++) {
+            picks.add(choices[_random.nextInt(choices.length)]);
+          }
+        }
+        for (final c in picks) {
+          t[c] = (t[c] ?? 0) + 1;
+        }
+        voters++;
       }
-      if (total > 4 && _random.nextInt(4) == 0) {
+      if (voters > 4 && _random.nextInt(4) == 0) {
         final from = choices[_random.nextInt(choices.length)];
         final to = pick();
-        if (from != to && (t[from] ?? 0) > 0) {
+        if (from != to &&
+            (t[from] ?? 0) > 0 &&
+            (limit == 1 || (t[to] ?? 0) < voters)) {
           t[from] = t[from]! - 1;
           t[to] = (t[to] ?? 0) + 1;
         }
       }
-      _tallies[id] = t;
-      onTally?.call(id, t);
+      final next = ElementTally(t, limit > 1 ? voters : null);
+      _tallies[e.id] = next;
+      onTally?.call(e.id, next);
     }
   }
 

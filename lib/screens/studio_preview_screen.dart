@@ -180,12 +180,12 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
   void _onElements() {
     _demo
       ..elementAngles = [for (final e in _elements.angles) e.id]
-      ..vote({
+      ..vote([
         for (final item in _elements.library)
-          if (_elements.live(item.id)?.openChoices case final c?
-              when c.isNotEmpty)
-            item.id: c,
-      });
+          if (_elements.live(item.id) case final e?
+              when e.openChoices.isNotEmpty)
+            e,
+      ]);
     if (mounted) setState(() {});
   }
 
@@ -629,7 +629,10 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
       elements: state.forSlot(slot),
       layers: _layout.layersFor(slot),
       // The Studio sees the totals; it never votes.
-      interactionFor: (e) => ElementInteraction(tally: _elements.tally(e.id)),
+      interactionFor: (e) => ElementInteraction(
+        tally: _elements.tally(e.id),
+        audience: ElementAudience.staff,
+      ),
     );
   }
 

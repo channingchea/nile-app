@@ -86,6 +86,16 @@ interface KindRule {
   clocks: string[];
   /** What viewers may tap, for this config; empty = nothing to tap. */
   choices?(config: Record<string, unknown>): string[];
+  /** How many choices one vote may hold (default 1). */
+  maxPicks?(config: Record<string, unknown>): number;
+  /** Takes timer/reset ops ([ElementOps]). */
+  ops?: true;
+  /** State only the server writes, from the previous row and this push. */
+  serverState?(prev: Record<string, unknown> | undefined, push: ElementPush, now: number): Record<string, unknown>;
+  /** Whether viewers may see the totals right now (default yes). */
+  totalsPublic?(config: Record<string, unknown>, state: Record<string, unknown>): boolean;
+  /** Whether going from [prev] to [next] changes what votes point at. */
+  reshapes?(prev: Record<string, unknown>, next: Record<string, unknown>): boolean;
 }
 
 export const ELEMENT_KINDS: Record<string, KindRule> = {
@@ -107,7 +117,103 @@ export const ELEMENT_KINDS: Record<string, KindRule> = {
     // With taps on, viewers vote up or down (the test stand-in for a poll).
     choices: (c) => (c.taps === true ? ["up", "down"] : []),
   },
+  // docs/plans/studio-poll.md.
+  poll: {
+    config: cleanPollConfig,
+    state: (r) => ({
+      ...(r.open === true ? { open: true } : {}),
+      ...(r.revealed === true ? { revealed: true } : {}),
+    }),
+    clocks: [],
+    choices: (c) => pollAnswers(c).map((a) => a.id),
+    maxPicks: (c) => (c.type === "several" ? (c.maxPicks as number | undefined) ?? pollAnswers(c).length : 1),
+    ops: true,
+    serverState: pollServerState,
+    totalsPublic: (c, s) => c.results !== "reveal" || s.revealed === true,
+    reshapes: (a, b) =>
+      a.type !== b.type || JSON.stringify(pollAnswers(a).map((x) => x.id)) !== JSON.stringify(pollAnswers(b).map((x) => x.id)),
+  },
 };
+
+// ── Poll ─────────────────────────────────────────────────────────────────────
+
+export const POLL_TYPES = ["choice", "yesno", "rating", "several"] as const;
+export const POLL_RESULTS = ["live", "voted", "reveal"] as const;
+const ANSWER_ID = /^[a-z0-9]{1,12}$/;
+const FIXED_ANSWERS: Record<string, { id: string; text: string }[]> = {
+  yesno: [{ id: "yes", text: "Yes" }, { id: "no", text: "No" }],
+  rating: ["1", "2", "3", "4", "5"].map((n) => ({ id: n, text: n })),
+};
+
+export type PollAnswer = { id: string; text: string };
+export const pollAnswers = (c: Record<string, unknown>): PollAnswer[] =>
+  FIXED_ANSWERS[c.type as string] ?? (Array.isArray(c.answers) ? c.answers as PollAnswer[] : []);
+
+/** A poll's settings, cleaned; null when they can't be saved. Yes/no and rating fill in their own answers. */
+export function cleanPollConfig(r: Record<string, unknown>): Record<string, unknown> | null {
+  const type = r.type ?? "choice";
+  if (!POLL_TYPES.includes(type as typeof POLL_TYPES[number])) return null;
+  const question = typeof r.question === "string" ? r.question.trim() : "";
+  if (question.length < 1 || question.length > 120) return null;
+  const results = r.results ?? "live";
+  if (!POLL_RESULTS.includes(results as typeof POLL_RESULTS[number])) return null;
+  const out: Record<string, unknown> = { type, question, results };
+  if (r.timerSec !== undefined && r.timerSec !== null) {
+    if (!isInt(r.timerSec, 10, 1800)) return null;
+    out.timerSec = r.timerSec;
+  }
+  if (type === "choice" || type === "several") {
+    if (!Array.isArray(r.answers) || r.answers.length < 2 || r.answers.length > 6) return null;
+    const ids = new Set<string>(), texts = new Set<string>();
+    const answers: PollAnswer[] = [];
+    for (const a of r.answers) {
+      if (!isObj(a) || typeof a.id !== "string" || !ANSWER_ID.test(a.id) || typeof a.text !== "string") return null;
+      const text = a.text.trim();
+      if (text.length < 1 || text.length > 40 || ids.has(a.id) || texts.has(text.toLowerCase())) return null;
+      ids.add(a.id);
+      texts.add(text.toLowerCase());
+      answers.push({ id: a.id, text });
+    }
+    out.answers = answers;
+  }
+  if (type === "several" && r.maxPicks !== undefined && r.maxPicks !== null) {
+    if (!isInt(r.maxPicks, 1, (out.answers as PollAnswer[]).length)) return null;
+    out.maxPicks = r.maxPicks;
+  }
+  return out;
+}
+
+/** Timer and reset, run by the server with its own clock. */
+export type ElementOps = { timer?: { op: "start"; sec: number } | { op: "cancel" }; reset?: true };
+
+function cleanOps(raw: unknown, config: Record<string, unknown>): ElementOps | null {
+  if (raw === undefined || raw === null) return {};
+  if (!isObj(raw)) return null;
+  const ops: ElementOps = {};
+  if (raw.reset === true) ops.reset = true;
+  if (raw.timer !== undefined) {
+    const t = raw.timer;
+    if (isObj(t) && t.op === "cancel") ops.timer = { op: "cancel" };
+    else if (isObj(t) && t.op === "start") {
+      const sec = t.sec ?? config.timerSec;
+      if (!isInt(sec, 10, 1800)) return null;
+      ops.timer = { op: "start", sec };
+    } else return null;
+  }
+  return ops;
+}
+
+/**
+ * `closesAt` (server ms) and `round` (up one per reset) carry over from the
+ * stored row; the Studio can't write either. A reset clears the timer.
+ */
+function pollServerState(prev: Record<string, unknown> | undefined, push: ElementPush, now: number) {
+  const round = (isInt(prev?.round, 0, 1e6) ? prev!.round as number : 0) + (push.ops.reset ? 1 : 0);
+  let closesAt = typeof prev?.closesAt === "number" ? prev.closesAt : undefined;
+  if (push.ops.reset || push.ops.timer?.op === "cancel") closesAt = undefined;
+  if (push.ops.timer?.op === "start") closesAt = now + push.ops.timer.sec * 1000;
+  return { round, ...(closesAt !== undefined ? { closesAt } : {}) };
+}
 
 // ── Targets ──────────────────────────────────────────────────────────────────
 // Where an element is on air — the same shape graphics use: every camera
@@ -149,6 +255,7 @@ export interface ElementPush {
   state: Record<string, unknown>;
   version: number;
   clockOps: Record<string, ClockOp>;
+  ops: ElementOps;
   srcAgeMs: number;
 }
 
@@ -194,9 +301,11 @@ export function validateElementPush(
       clockOps[name] = clean;
     }
   }
+  const ops = rule.ops ? cleanOps(raw.ops, config) : raw.ops == null ? {} : null;
+  if (!ops) return { error: "Bad timer or reset command" };
   const srcAgeMs = isInt(raw.srcAgeMs, 0, 5000) ? raw.srcAgeMs : 0;
   const { clocks: _ignored, ...rest } = isObj(raw.state) ? raw.state : {};
-  return { push: { id, kind, spec, state: rule.state(rest), version: raw.version, clockOps, srcAgeMs } };
+  return { push: { id, kind, spec, state: rule.state(rest), version: raw.version, clockOps, ops, srcAgeMs } };
 }
 
 // ── Rows and the room-metadata mirror ────────────────────────────────────────
@@ -230,12 +339,14 @@ export function buildRow(eventId: string, push: ElementPush, prev: ElementRow | 
     const next = op ? applyClockOp(old, op, now) : old;
     if (next) clocks[name] = next;
   }
+  const server = rule.serverState?.(prev?.state, push, now) ?? {};
+  const state = { ...push.state, ...server };
   return {
     event_id: eventId,
     element_id: push.id,
     kind: push.kind,
     spec: push.spec,
-    state: Object.keys(clocks).length ? { ...push.state, clocks } : push.state,
+    state: Object.keys(clocks).length ? { ...state, clocks } : state,
     version: push.version,
     content_at: contentAt(now, push.srcAgeMs),
   };
@@ -332,25 +443,50 @@ export function elementAngleIds(meta: Record<string, unknown>): Set<string> {
 
 // ── Viewer taps (phase 5) ────────────────────────────────────────────────────
 
-/** What a viewer may tap on [row] right now: its choices while it is open, else none. */
-export function openChoices(row: Pick<ElementRow, "kind" | "spec" | "state"> | undefined): string[] {
-  if (!row) return [];
-  const rule = ELEMENT_KINDS[row.kind];
-  if (!rule?.choices || row.state?.open !== true) return [];
+/** Everything a viewer could tap on [row], open or not. */
+export const choicesOf = (row: Pick<ElementRow, "kind" | "spec">) =>
+  ELEMENT_KINDS[row.kind]?.choices?.(row.spec?.config ?? {}) ?? [];
+
+/** Whether voting has ended on its own: a timer ran out. */
+export const timedOut = (state: Record<string, unknown> | undefined, now: number) =>
+  typeof state?.closesAt === "number" && now >= state.closesAt;
+
+/** What a viewer may tap on [row] right now: its choices while it is open (and its timer hasn't run out), else none. */
+export function openChoices(row: Pick<ElementRow, "kind" | "spec" | "state"> | undefined, now = Date.now()): string[] {
+  if (!row || row.state?.open !== true || timedOut(row.state, now)) return [];
   const isLive = row.spec?.angle === true || (row.spec?.targets && onAir(row.spec.targets));
-  return isLive ? rule.choices(row.spec.config ?? {}) : [];
+  return isLive ? choicesOf(row) : [];
 }
 
-/** Whether a viewer's tap counts: the element is open, live, and [choice] is one of its own. */
+/** Whether viewers may see [row]'s totals now (a reveal-mode poll before its reveal: no). */
+export const totalsPublic = (row: Pick<ElementRow, "kind" | "spec" | "state">) =>
+  ELEMENT_KINDS[row.kind]?.totalsPublic?.(row.spec?.config ?? {}, row.state ?? {}) ?? true;
+
+/** Whether [prev] → [next] changes what votes point at (refused while open or holding votes). */
+export const reshapes = (kind: string, prev: Record<string, unknown>, next: Record<string, unknown>) =>
+  ELEMENT_KINDS[kind]?.reshapes?.(prev, next) ?? false;
+
+/**
+ * Whether a viewer's tap counts: the element is open and live, and its picks
+ * are its own — `picks` (a list) or, from older builds, one `choice`. No
+ * duplicates; at most the kind's limit.
+ */
 export function validateResponse(
   row: Pick<ElementRow, "kind" | "spec" | "state"> | undefined,
-  choice: unknown,
-): { choice: string } | { error: string; status: number } {
+  body: { picks?: unknown; choice?: unknown },
+  now = Date.now(),
+): { picks: string[] } | { error: string; status: number } {
   if (!row) return { error: "That isn't on screen", status: 404 };
-  const choices = openChoices(row);
+  const choices = openChoices(row, now);
   if (!choices.length) return { error: "Voting has closed", status: 409 };
-  if (typeof choice !== "string" || !choices.includes(choice)) return { error: "Not a choice", status: 400 };
-  return { choice };
+  const picks = Array.isArray(body.picks) ? body.picks : typeof body.choice === "string" ? [body.choice] : null;
+  if (!picks || !picks.length || !picks.every((p) => typeof p === "string" && choices.includes(p))) {
+    return { error: "Not a choice", status: 400 };
+  }
+  if (new Set(picks).size !== picks.length) return { error: "Pick each answer once", status: 400 };
+  const max = ELEMENT_KINDS[row.kind]?.maxPicks?.(row.spec?.config ?? {}) ?? 1;
+  if (picks.length > max) return { error: max === 1 ? "Pick one answer" : `Pick up to ${max}`, status: 400 };
+  return { picks: picks as string[] };
 }
 
 /** Choice → count, every choice present (zeros included), in the kind's order. */

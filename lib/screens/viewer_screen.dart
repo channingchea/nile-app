@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 import 'package:flutter/foundation.dart'
-    show kIsWeb, defaultTargetPlatform, TargetPlatform;
+    show kIsWeb, defaultTargetPlatform, TargetPlatform, listEquals;
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:livekit_client/livekit_client.dart' hide ChatMessage;
@@ -32,7 +32,9 @@ import '../router.dart';
 import '../theme.dart';
 import 'widgets/moderation_menu.dart';
 import '../widgets/nile_desktop.dart';
-import '../widgets/elements/element_kinds.dart' show ElementInteraction;
+import '../widgets/elements/element_kinds.dart'
+    show ElementInteraction, Ticking;
+import '../widgets/elements/poll.dart' show PollLivePill, showPollVoteSheet;
 import '../widgets/nile_graphics_layer.dart';
 import '../widgets/nile_link_text.dart';
 import '../widgets/rolling_number.dart';
@@ -71,8 +73,7 @@ class CameraFeed {
     this.slotId,
   });
 
-  String get displayName =>
-      isScreenShare ? '$cameraName — Screen' : cameraName;
+  String get displayName => isScreenShare ? '$cameraName — Screen' : cameraName;
 
   /// A live element shown as its own angle (studio live elements, phase 4):
   /// no participant, no track — it draws the element.
@@ -119,8 +120,14 @@ class _ViewerScreenState extends State<ViewerScreen>
   /// Viewer taps (phase 5): each element's totals, this viewer's own choices,
   /// and whether those have been fetched for this show yet.
   final Map<String, ElementTally> _tallies = {};
-  final Map<String, String> _myChoices = {};
+  final Map<String, List<String>> _myChoices = {};
   bool _myChoicesLoaded = false;
+
+  /// Each poll's round as last seen: a reset (new round) clears your vote.
+  final Map<String, int> _rounds = {};
+
+  /// Polls whose "Poll is live" pill this viewer closed.
+  final Set<String> _pillDismissed = {};
 
   /// The camera whose sound played before an element angle was picked — an
   /// element angle never changes the audio (phase 4).
@@ -408,9 +415,8 @@ class _ViewerScreenState extends State<ViewerScreen>
   /// Parses a timestamp off a raw `events` row into local time. Null-safe and
   /// tolerant of a bad value, because the viewer must still open if one field
   /// is malformed.
-  static DateTime? _parseTs(Object? raw) => raw is String
-      ? DateTime.tryParse(raw)?.toLocal()
-      : null;
+  static DateTime? _parseTs(Object? raw) =>
+      raw is String ? DateTime.tryParse(raw)?.toLocal() : null;
 
   /// True once this show is over, whatever `status` claims — a host no-show
   /// stays `scheduled` and an abandoned Sound Check stays `soundcheck` until the
@@ -605,7 +611,8 @@ class _ViewerScreenState extends State<ViewerScreen>
     if (channel == null) return;
     final now = DateTime.now();
     if (_lastReactionSentAt != null &&
-        now.difference(_lastReactionSentAt!) < const Duration(milliseconds: 200)) {
+        now.difference(_lastReactionSentAt!) <
+            const Duration(milliseconds: 200)) {
       return;
     }
     _lastReactionSentAt = now;
@@ -631,7 +638,9 @@ class _ViewerScreenState extends State<ViewerScreen>
       backgroundColor: NileColors.bgSurface,
       isScrollControlled: true,
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(NileRadius.lg)),
+        borderRadius: BorderRadius.vertical(
+          top: Radius.circular(NileRadius.lg),
+        ),
       ),
       builder: (_) => _TipSheet(onPick: _startTip),
     );
@@ -664,7 +673,10 @@ class _ViewerScreenState extends State<ViewerScreen>
     }
   }
 
-  void _showSnack(String msg, {Duration duration = const Duration(seconds: 4)}) {
+  void _showSnack(
+    String msg, {
+    Duration duration = const Duration(seconds: 4),
+  }) {
     if (!mounted) return;
     ScaffoldMessenger.of(
       context,
@@ -908,8 +920,9 @@ class _ViewerScreenState extends State<ViewerScreen>
         _scheduledAt = _parseTs(eventState?['scheduled_at']);
         _endAt = _parseTs(eventState?['end_at']);
         _coverImageUrl = eventState?['cover_image_url'] as String?;
-        _hostUsername = (hostProfile?['display_name'] ??
-            hostProfile?['username']) as String?;
+        _hostUsername =
+            (hostProfile?['display_name'] ?? hostProfile?['username'])
+                as String?;
         _hostAvatarUrl = hostProfile?['avatar_url'] as String?;
         _eventConn = eventConn;
         _chatChannel = chatChannel;
@@ -1104,7 +1117,8 @@ class _ViewerScreenState extends State<ViewerScreen>
 
   void _onParticipantMetadataUpdated(ParticipantMetadataUpdatedEvent event) {
     // The Studio renamed a camera — the angle picker follows.
-    final name = _parseMeta(event.participant.metadata)['cameraName'] as String?;
+    final name =
+        _parseMeta(event.participant.metadata)['cameraName'] as String?;
     if (name != null) {
       final id = event.participant.identity;
       if (_cameras.any((c) => c.identity == id && c.cameraName != name)) {
@@ -1140,7 +1154,10 @@ class _ViewerScreenState extends State<ViewerScreen>
       final id = g.campaignId;
       if (g.kind == GraphicKind.sponsor && id != null && _sponsorSeen.add(id)) {
         unawaited(
-          AdService.logInShowSponsorImpression(campaignId: id, eventId: eventId),
+          AdService.logInShowSponsorImpression(
+            campaignId: id,
+            eventId: eventId,
+          ),
         );
       }
     }
@@ -1211,6 +1228,7 @@ class _ViewerScreenState extends State<ViewerScreen>
           _graphics = graphics;
           _elements = elements;
           _layout = layout;
+          _noteRounds(elements);
         }),
       );
       if (elements.takesTaps) _loadMyChoices();
@@ -1340,12 +1358,67 @@ class _ViewerScreenState extends State<ViewerScreen>
 
   // ── Viewer taps (phase 5) ─────────────────────────────────────────────────
 
-  ElementInteraction _interactionFor(LiveElement e) => ElementInteraction(
-    mine: _myChoices[e.id],
-    tally: _tallies[e.id],
-    // Signed-in viewers vote; anyone else just sees the totals.
-    onTap: supabase.auth.currentUser == null ? null : (c) => _respond(e, c),
-  );
+  ElementInteraction _interactionFor(LiveElement e) {
+    final signedIn = supabase.auth.currentUser != null;
+    return ElementInteraction(
+      mine: _myChoices[e.id] ?? const [],
+      tally: _tallies[e.id],
+      // Signed-in viewers vote; anyone else sees the totals and is asked to
+      // sign in.
+      onTap: signedIn ? (picks) => _respond(e, picks) : null,
+      needsSignIn: !signedIn && e.choices.isNotEmpty,
+    );
+  }
+
+  /// A poll reset since we last looked: your vote and its totals are gone.
+  void _noteRounds(ElementsState elements) {
+    for (final e in elements.items) {
+      final round = (e.state['round'] as num?)?.toInt() ?? 0;
+      final was = _rounds[e.id];
+      _rounds[e.id] = round;
+      if (was != null && was != round) {
+        _myChoices.remove(e.id);
+        _tallies.remove(e.id);
+        _pillDismissed.remove(e.id);
+      }
+    }
+  }
+
+  /// "Poll is live" for an open poll this viewer can't see on [onScreen]
+  /// (the element ids drawn on the angle they're watching) and hasn't voted
+  /// on. Null when there is none.
+  Widget? _pollPill(Set<String> onScreen) {
+    final polls = [
+      for (final e in _elements.items)
+        if (e.kind == ElementKinds.poll.wire &&
+            !onScreen.contains(e.id) &&
+            !_pillDismissed.contains(e.id) &&
+            (_myChoices[e.id] ?? const []).isEmpty &&
+            e.open)
+          e,
+    ];
+    if (polls.isEmpty) return null;
+    return Positioned(
+      top: _syncing ? NileSpacing.s48 : NileSpacing.s12,
+      left: 0,
+      right: 0,
+      child: Center(
+        // Rebuilt while a timer runs, so it goes when voting closes.
+        child: Ticking(
+          running: polls.any((e) => e.state['closesAt'] != null),
+          builder: (context) {
+            final e = polls.where((p) => p.openChoices.isNotEmpty).firstOrNull;
+            if (e == null) return const SizedBox.shrink();
+            return PollLivePill(
+              e: e,
+              onVote: () => showPollVoteSheet(context, e, _interactionFor(e)),
+              onDismiss: () => setState(() => _pillDismissed.add(e.id)),
+            );
+          },
+        ),
+      ),
+    );
+  }
 
   /// What this viewer already picked this show (a rejoin) — once.
   Future<void> _loadMyChoices() async {
@@ -1362,21 +1435,25 @@ class _ViewerScreenState extends State<ViewerScreen>
     }
   }
 
-  /// A tap on an element: shown at once, undone if the server says no.
-  Future<void> _respond(LiveElement e, String choice) async {
+  /// A vote on an element: shown at once, undone if the server says no.
+  Future<void> _respond(LiveElement e, List<String> picks) async {
     final slug = _streamEventId;
-    if (slug == null || _myChoices[e.id] == choice) return;
+    if (slug == null || listEquals(_myChoices[e.id], picks)) return;
     final before = _myChoices[e.id];
-    setState(() => _myChoices[e.id] = choice);
+    setState(() => _myChoices[e.id] = picks);
     try {
       final mine = await LivekitService.respond(
         eventId: slug,
         elementId: e.id,
-        choice: choice,
+        picks: picks,
       );
-      if (mounted && mine != null) setState(() => _myChoices[e.id] = mine);
-      // The kind only — never the choice.
-      NileAnalytics.capture(NileEvent.elementVoteCast, {'kind': e.kind});
+      if (mounted) setState(() => _myChoices[e.id] = mine);
+      // The kind (and a poll's type) only — never the choice.
+      NileAnalytics.capture(NileEvent.elementVoteCast, {
+        'kind': e.kind,
+        if (e.kind == ElementKinds.poll.wire)
+          'poll_type': PollConfig.fromJson(e.config).type.name,
+      });
     } catch (err) {
       if (!mounted) return;
       setState(() {
@@ -1701,7 +1778,9 @@ class _ViewerScreenState extends State<ViewerScreen>
     }
     final target =
         _masterAudioIdentity ??
-        (focused?.isElementAngle ?? false ? _lastCameraAudio : focused?.identity);
+        (focused?.isElementAngle ?? false
+            ? _lastCameraAudio
+            : focused?.identity);
     if (target == null) return;
     for (final entry in _audioPublications.entries) {
       if (entry.key == target) {
@@ -1945,7 +2024,11 @@ class _ViewerScreenState extends State<ViewerScreen>
               child: NileMaxWidth(
                 child: Padding(
                   padding: const EdgeInsets.fromLTRB(
-                      NileSpacing.s16, 0, NileSpacing.s16, NileSpacing.s16),
+                    NileSpacing.s16,
+                    0,
+                    NileSpacing.s16,
+                    NileSpacing.s16,
+                  ),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     mainAxisSize: MainAxisSize.min,
@@ -1978,7 +2061,9 @@ class _ViewerScreenState extends State<ViewerScreen>
     final videoReady = controller != null && controller.value.isInitialized;
     final bgImageUrl = spons == null
         ? _coverImageUrl
-        : (spons.kind == 'image' ? spons.imageUrl : (spons.thumbUrl ?? _coverImageUrl));
+        : (spons.kind == 'image'
+              ? spons.imageUrl
+              : (spons.thumbUrl ?? _coverImageUrl));
 
     return GestureDetector(
       onTap: spons != null ? _openSponsorLink : null,
@@ -1993,13 +2078,13 @@ class _ViewerScreenState extends State<ViewerScreen>
               ),
             )
           : bgImageUrl != null
-              ? Image.network(
-                  bgImageUrl,
-                  fit: BoxFit.cover,
-                  errorBuilder: (_, _, _) =>
-                      ColoredBox(color: NileColors.bgSurface),
-                )
-              : ColoredBox(color: NileColors.bgSurface),
+          ? Image.network(
+              bgImageUrl,
+              fit: BoxFit.cover,
+              errorBuilder: (_, _, _) =>
+                  ColoredBox(color: NileColors.bgSurface),
+            )
+          : ColoredBox(color: NileColors.bgSurface),
     );
   }
 
@@ -2040,7 +2125,9 @@ class _ViewerScreenState extends State<ViewerScreen>
       if (spons != null) ...[
         Container(
           padding: const EdgeInsets.symmetric(
-              horizontal: NileSpacing.s8, vertical: NileSpacing.s4),
+            horizontal: NileSpacing.s8,
+            vertical: NileSpacing.s4,
+          ),
           decoration: BoxDecoration(
             color: Colors.black.withValues(alpha: 0.55),
             borderRadius: BorderRadius.circular(NileRadius.xs),
@@ -2081,8 +2168,11 @@ class _ViewerScreenState extends State<ViewerScreen>
                   ? NetworkImage(_hostAvatarUrl!)
                   : null,
               child: _hostAvatarUrl == null
-                  ? Icon(Icons.person,
-                      size: avatarRadius + 2, color: Colors.white70)
+                  ? Icon(
+                      Icons.person,
+                      size: avatarRadius + 2,
+                      color: Colors.white70,
+                    )
                   : null,
             ),
             const SizedBox(width: NileSpacing.s8),
@@ -2093,17 +2183,13 @@ class _ViewerScreenState extends State<ViewerScreen>
                 overflow: TextOverflow.ellipsis,
                 style:
                     (large ? NileTextStyles.bodyLg() : NileTextStyles.bodySm())
-                        .copyWith(
-                  color: Colors.white.withValues(alpha: 0.85),
-                ),
+                        .copyWith(color: Colors.white.withValues(alpha: 0.85)),
               ),
             ),
             // Tap-to-unmute for video creatives.
             if (videoReady)
               IconButton(
-                icon: Icon(
-                  _sponsorMuted ? Icons.volume_off : Icons.volume_up,
-                ),
+                icon: Icon(_sponsorMuted ? Icons.volume_off : Icons.volume_up),
                 color: Colors.white,
                 iconSize: 20,
                 tooltip: _sponsorMuted ? 'Unmute' : 'Mute',
@@ -2306,7 +2392,10 @@ class _ViewerScreenState extends State<ViewerScreen>
             builder: (_) {
               final inLobby = _inLobby;
               return Container(
-                padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s8, vertical: NileSpacing.s4),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: NileSpacing.s8,
+                  vertical: NileSpacing.s4,
+                ),
                 decoration: BoxDecoration(
                   color: inLobby ? NileColors.volt : NileColors.coral,
                   borderRadius: BorderRadius.circular(NileRadius.xs),
@@ -2560,7 +2649,10 @@ class _ViewerScreenState extends State<ViewerScreen>
         customBorder: const StadiumBorder(),
         onTap: _jumpChatToBottom,
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s12, vertical: NileSpacing.s6),
+          padding: const EdgeInsets.symmetric(
+            horizontal: NileSpacing.s12,
+            vertical: NileSpacing.s6,
+          ),
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -2617,7 +2709,12 @@ class _ViewerScreenState extends State<ViewerScreen>
     }
     return ListView.builder(
       controller: _chatScrollController,
-      padding: const EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s8, NileSpacing.s16, NileSpacing.s8),
+      padding: const EdgeInsets.fromLTRB(
+        NileSpacing.s16,
+        NileSpacing.s8,
+        NileSpacing.s16,
+        NileSpacing.s8,
+      ),
       itemCount: visible.length,
       itemBuilder: (context, i) {
         final m = visible[i];
@@ -2625,13 +2722,18 @@ class _ViewerScreenState extends State<ViewerScreen>
         // Gentle entry animation for the newest message only.
         if (i == visible.length - 1) {
           return TweenAnimationBuilder<double>(
-            key: ValueKey('anim_${m.senderId}_${m.sentAt.microsecondsSinceEpoch}'),
+            key: ValueKey(
+              'anim_${m.senderId}_${m.sentAt.microsecondsSinceEpoch}',
+            ),
             tween: Tween(begin: 0, end: 1),
             duration: const Duration(milliseconds: 220),
             curve: Curves.easeOut,
             builder: (context, t, child) => Opacity(
               opacity: t,
-              child: Transform.translate(offset: Offset(0, (1 - t) * 8), child: child),
+              child: Transform.translate(
+                offset: Offset(0, (1 - t) * 8),
+                child: child,
+              ),
             ),
             child: row,
           );
@@ -2679,7 +2781,10 @@ class _ViewerScreenState extends State<ViewerScreen>
             ),
             ListTile(
               leading: Icon(Icons.block, color: NileColors.txtPrimary),
-              title: Text('Block @${m.username}', style: NileTextStyles.bodyMd()),
+              title: Text(
+                'Block @${m.username}',
+                style: NileTextStyles.bodyMd(),
+              ),
               subtitle: Text(
                 'You stop seeing each other across Nile.',
                 style: NileTextStyles.caption().copyWith(
@@ -2750,15 +2855,15 @@ class _ViewerScreenState extends State<ViewerScreen>
     }
 
     final isHost = _hostId != null && m.senderId == _hostId;
-    final nameColor = nileChatNameColor(
-      m.senderId,
-      isHost: m.isHost || isHost,
-    );
+    final nameColor = nileChatNameColor(m.senderId, isHost: m.isHost || isHost);
 
     final row = Container(
       margin: const EdgeInsets.symmetric(vertical: NileSpacing.s2),
       padding: isHost
-          ? const EdgeInsets.symmetric(horizontal: NileSpacing.s8, vertical: NileSpacing.s6)
+          ? const EdgeInsets.symmetric(
+              horizontal: NileSpacing.s8,
+              vertical: NileSpacing.s6,
+            )
           : EdgeInsets.zero,
       decoration: isHost
           ? BoxDecoration(
@@ -2791,7 +2896,10 @@ class _ViewerScreenState extends State<ViewerScreen>
                     if (isHost) ...[
                       const SizedBox(width: 6),
                       Container(
-                        padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s4, vertical: 1),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: NileSpacing.s4,
+                          vertical: 1,
+                        ),
                         decoration: BoxDecoration(
                           color: NileColors.coral,
                           borderRadius: BorderRadius.circular(NileRadius.xs),
@@ -2843,14 +2951,21 @@ class _ViewerScreenState extends State<ViewerScreen>
       backgroundColor: NileColors.bgRaised,
       child: Text(
         initial,
-        style: NileTextStyles.caption().copyWith(color: NileColors.txtSecondary),
+        style: NileTextStyles.caption().copyWith(
+          color: NileColors.txtSecondary,
+        ),
       ),
     );
   }
 
   Widget _buildChatInput(double bottomInset) {
     return Padding(
-      padding: EdgeInsets.fromLTRB(NileSpacing.s12, NileSpacing.s8, NileSpacing.s12, NileSpacing.s8 + bottomInset),
+      padding: EdgeInsets.fromLTRB(
+        NileSpacing.s12,
+        NileSpacing.s8,
+        NileSpacing.s12,
+        NileSpacing.s8 + bottomInset,
+      ),
       child: Row(
         children: [
           Expanded(
@@ -2903,7 +3018,10 @@ class _ViewerScreenState extends State<ViewerScreen>
   Widget _buildAudioBar() {
     final hasAudio = _masterAudioIdentity != null;
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s16, vertical: NileSpacing.s8),
+      padding: const EdgeInsets.symmetric(
+        horizontal: NileSpacing.s16,
+        vertical: NileSpacing.s8,
+      ),
       color: NileColors.bgSurface,
       child: Row(
         children: [
@@ -3021,20 +3139,32 @@ class _ViewerScreenState extends State<ViewerScreen>
     final element = _elementOf(focused);
     if (element != null) {
       // Its own angle: the element, full screen — no camera graphics on it.
-      return NileElementAngle(
+      final angle = NileElementAngle(
         element: element,
         interaction: _interactionFor(element),
       );
+      final pill = _pollPill({element.id});
+      return pill == null
+          ? angle
+          : Stack(fit: StackFit.expand, children: [angle, pill]);
     }
     final slot = focused.isScreenShare ? null : _slotOf(focused.identity);
     final onAir = _graphics.forSlot(slot);
     // The angle label sits where a lower third or banner goes; graphics win.
     // Corner graphics (logos, sponsor, QR codes) leave it be.
     final bottomTaken = onAir.any(
-      (g) => !const {GraphicKind.logo, GraphicKind.sponsor, GraphicKind.qr}
-          .contains(g.kind),
+      (g) => !const {
+        GraphicKind.logo,
+        GraphicKind.sponsor,
+        GraphicKind.qr,
+      }.contains(g.kind),
     );
     _countSponsor(onAir);
+    final layers = _layout.layersFor(slot);
+    final pill = _pollPill({
+      for (final e in _elements.forSlot(slot))
+        if (!layers.any((l) => l.id == e.id && l.hidden)) e.id,
+    });
     return Stack(
       fit: StackFit.expand,
       children: [
@@ -3046,10 +3176,11 @@ class _ViewerScreenState extends State<ViewerScreen>
         NileGraphicsLayer(
           graphics: onAir,
           elements: _elements.forSlot(slot),
-          layers: _layout.layersFor(slot),
+          layers: layers,
           onTapLink: _openGraphicLink,
           interactionFor: _interactionFor,
         ),
+        ?pill,
         if (_syncing)
           Positioned(
             top: 12,
@@ -3076,18 +3207,21 @@ class _ViewerScreenState extends State<ViewerScreen>
             child: Icon(Icons.album, color: NileColors.volt, size: 18),
           ),
         if (!bottomTaken)
-        Positioned(
-          bottom: 12,
-          left: 12,
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s8, vertical: NileSpacing.s4),
-            decoration: BoxDecoration(
-              color: NileColors.bgPage.withValues(alpha: 0.7),
-              borderRadius: BorderRadius.circular(NileRadius.sm),
+          Positioned(
+            bottom: 12,
+            left: 12,
+            child: Container(
+              padding: const EdgeInsets.symmetric(
+                horizontal: NileSpacing.s8,
+                vertical: NileSpacing.s4,
+              ),
+              decoration: BoxDecoration(
+                color: NileColors.bgPage.withValues(alpha: 0.7),
+                borderRadius: BorderRadius.circular(NileRadius.sm),
+              ),
+              child: Text(focused.displayName, style: NileTextStyles.bodyMd()),
             ),
-            child: Text(focused.displayName, style: NileTextStyles.bodyMd()),
           ),
-        ),
       ],
     );
   }
@@ -3412,9 +3546,7 @@ class _ViewerScreenState extends State<ViewerScreen>
           ),
         // The cover is atmosphere at this point, not content.
         Positioned.fill(
-          child: ColoredBox(
-            color: NileColors.bgPage.withValues(alpha: 0.92),
-          ),
+          child: ColoredBox(color: NileColors.bgPage.withValues(alpha: 0.92)),
         ),
         Center(
           child: ConstrainedBox(
@@ -3501,10 +3633,7 @@ class _ViewerScreenState extends State<ViewerScreen>
                           icon: const Icon(Icons.ios_share, size: 18),
                           label: const Text('Share'),
                         ),
-                      TextButton(
-                        onPressed: _leave,
-                        child: const Text('Close'),
-                      ),
+                      TextButton(onPressed: _leave, child: const Text('Close')),
                     ],
                   ),
                 ],
@@ -3540,9 +3669,7 @@ class _ViewerScreenState extends State<ViewerScreen>
           NileSectionHeader(
             'Live chat',
             dense: true,
-            accent: _inLobby
-                ? NileColors.volt
-                : NileColors.coral,
+            accent: _inLobby ? NileColors.volt : NileColors.coral,
             padding: const EdgeInsets.fromLTRB(
               NileSpacing.s16,
               NileSpacing.s16,
@@ -3760,7 +3887,9 @@ class _TipSheetState extends State<_TipSheet> {
           const SizedBox(height: NileSpacing.s4),
           Text(
             'Support the host. Goes straight to them, minus a small platform fee.',
-            style: NileTextStyles.bodySm().copyWith(color: NileColors.txtSecondary),
+            style: NileTextStyles.bodySm().copyWith(
+              color: NileColors.txtSecondary,
+            ),
           ),
           const SizedBox(height: NileSpacing.s16),
           Wrap(
@@ -3862,14 +3991,15 @@ class _FloatingReactionWidgetState extends State<_FloatingReactionWidget>
     final rnd = Random();
     _drift = (rnd.nextDouble() - 0.5) * 70;
     _startRight = 16 + rnd.nextDouble() * 44;
-    _c = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 2200),
-    )
-      ..addStatusListener((s) {
-        if (s == AnimationStatus.completed) widget.onDone();
-      })
-      ..forward();
+    _c =
+        AnimationController(
+            vsync: this,
+            duration: const Duration(milliseconds: 2200),
+          )
+          ..addStatusListener((s) {
+            if (s == AnimationStatus.completed) widget.onDone();
+          })
+          ..forward();
   }
 
   @override
@@ -3885,8 +4015,10 @@ class _FloatingReactionWidgetState extends State<_FloatingReactionWidget>
       builder: (context, _) {
         final t = _c.value;
         // Fade in quickly, then out over the rest of the rise.
-        final opacity = (t < 0.15 ? t / 0.15 : 1 - (t - 0.15) / 0.85)
-            .clamp(0.0, 1.0);
+        final opacity = (t < 0.15 ? t / 0.15 : 1 - (t - 0.15) / 0.85).clamp(
+          0.0,
+          1.0,
+        );
         return Positioned(
           right: _startRight + _drift * t,
           bottom: 110 + 230 * t,

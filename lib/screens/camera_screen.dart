@@ -464,7 +464,10 @@ class _CameraScreenState extends State<CameraScreen> {
         elementAngleId(e.id): e,
     };
     final slotsById = {for (final s in _slots) s.id: s};
-    for (final id in _show.ordered([...slotsById.keys, ...angles.keys], (id) => id)) {
+    for (final id in _show.ordered([
+      ...slotsById.keys,
+      ...angles.keys,
+    ], (id) => id)) {
       final angle = angles[id];
       if (angle != null) {
         sources.add(
@@ -873,7 +876,12 @@ class _CameraScreenState extends State<CameraScreen> {
   void _syncModChannel() {
     final eventId = _eventId;
     if (eventId == null || _modChannel != null || !_canModerateChat) return;
-    _modChannel = ChatService.subscribeModeration(eventId, _onChatMessage);
+    // Poll totals waiting for their reveal come here, not to viewers.
+    _modChannel = ChatService.subscribeModeration(
+      eventId,
+      _onChatMessage,
+      onTally: _elementsCtl.setTally,
+    );
   }
 
   Future<void> _loadQuickMessages() async {
@@ -2699,7 +2707,9 @@ class _CameraScreenState extends State<CameraScreen> {
   /// On-air elements for [slotId]: the Studio's own (newest) state, plus any
   /// in the room it hasn't loaded yet.
   List<LiveElement> _elementsFor(String? slotId, {bool preview = false}) {
-    final mine = preview ? _elementsCtl.preview(_cue.value) : _elementsCtl.onAir;
+    final mine = preview
+        ? _elementsCtl.preview(_cue.value)
+        : _elementsCtl.onAir;
     final known = {for (final e in mine.items) e.id};
     return [
       ...mine.forSlot(slotId),
@@ -2717,7 +2727,10 @@ class _CameraScreenState extends State<CameraScreen> {
       elements: _elementsFor(slot, preview: preview),
       layers: _layout.layersFor(slot),
       // The Studio sees totals on screen; it never votes.
-      interactionFor: (e) => ElementInteraction(tally: _elementsCtl.tally(e.id)),
+      interactionFor: (e) => ElementInteraction(
+        tally: _elementsCtl.tally(e.id),
+        audience: ElementAudience.staff,
+      ),
     );
   }
 

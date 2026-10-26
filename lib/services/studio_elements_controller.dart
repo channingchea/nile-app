@@ -133,7 +133,9 @@ class StudioElementsController extends ChangeNotifier {
       if (cur == null) continue;
       final next = cur.withLibrary(e, kit: kit);
       if (next != cur) {
-        unawaited(update(e.id, (_) => next, undoable: false, pushOffAir: false));
+        unawaited(
+          update(e.id, (_) => next, undoable: false, pushOffAir: false),
+        );
       }
     }
     notifyListeners();
@@ -150,20 +152,24 @@ class StudioElementsController extends ChangeNotifier {
   bool canUndo(String id) => _undo[id]?.isNotEmpty ?? false;
 
   /// Change one element: [change] gets the current state; [clockOps] run its
-  /// clocks. Applied here at once, then pushed. Off-air elements with no
-  /// state on the server yet are kept locally until they first go on air,
-  /// unless [pushOffAir].
+  /// clocks and [ops] its timer or a reset (polls). Applied here at once,
+  /// then pushed. Off-air elements with no state on the server yet are kept
+  /// locally until they first go on air, unless [pushOffAir].
   Future<bool> update(
     String id,
     LiveElement Function(LiveElement current) change, {
     Map<String, ClockOp> clockOps = const {},
+    ElementOps ops = ElementOps.none,
     bool undoable = true,
     bool pushOffAir = true,
   }) async {
     final base = current(id);
     if (base == null) return false;
-    var next = change(base).withClockOps(clockOps, ServerClock.now());
-    next = next.copyWith(version: base.version + 1);
+    final now = ServerClock.now();
+    var next = change(base).withClockOps(clockOps, now).withOps(ops, now);
+    next = next.copyWith(version: base.version + 1, ops: ElementOps.none);
+    // A reset clears every vote; the server's zero totals follow.
+    if (ops.reset) _tallies[id] = ElementTally.empty;
     if (undoable) {
       final stack = _undo.putIfAbsent(id, () => []);
       stack.add(base);
@@ -175,7 +181,7 @@ class StudioElementsController extends ChangeNotifier {
       _track(base, next);
       return true;
     }
-    final ok = await _send(next, clockOps);
+    final ok = await _send(next.copyWith(ops: ops), clockOps);
     if (ok) _track(base, next);
     return ok;
   }
@@ -183,7 +189,13 @@ class StudioElementsController extends ChangeNotifier {
   /// PostHog: what the host did with an element — its kind and counts, never
   /// its name or values.
   void _track(LiveElement was, LiveElement now) {
-    final props = <String, Object>{'kind': now.kind, 'preview': rehearsal};
+    final props = <String, Object>{
+      'kind': now.kind,
+      'preview': rehearsal,
+      // The poll's type only — never its question or answers.
+      if (now.kind == ElementKinds.poll.wire)
+        'poll_type': PollConfig.fromJson(now.config).type.name,
+    };
     final t = now.targets;
     if (was.targets.isNone && !t.isNone) {
       NileAnalytics.capture(NileEvent.elementTaken, {
@@ -269,7 +281,7 @@ class StudioElementsController extends ChangeNotifier {
     final prev = _queue[e.id] ?? Future.value();
     _queue[e.id] = prev.then((_) async {
       try {
-        final stored = await push(e, ops);
+        final stored = (await push(e, ops)).copyWith(ops: ElementOps.none);
         // Don't clobber anything newer made while this was in flight.
         if ((_live[e.id]?.version ?? 0) <= stored.version) {
           _live[e.id] = stored;
@@ -278,7 +290,7 @@ class StudioElementsController extends ChangeNotifier {
         done.complete(true);
       } on ElementStale catch (s) {
         final cur = s.current;
-        if (cur != null) _live[e.id] = cur;
+        if (cur != null) _live[e.id] = cur.copyWith(ops: ElementOps.none);
         notifyListeners();
         onError?.call(s.toString());
         done.complete(false);

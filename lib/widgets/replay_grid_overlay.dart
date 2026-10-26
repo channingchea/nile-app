@@ -15,7 +15,7 @@ class ReplayGridOverlay extends StatelessWidget {
 
   ElementInteraction? _results(LiveElement e) {
     final t = frame.tallies[e.id];
-    return t == null ? null : ElementInteraction(tally: t);
+    return ElementInteraction(tally: t, audience: ElementAudience.replay);
   }
 
   Widget _tile(ReplayTile t) {

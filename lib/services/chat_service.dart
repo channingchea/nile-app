@@ -1,4 +1,5 @@
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'live_elements.dart' show ElementTally, tallyFromJson;
 import 'supabase_client.dart';
 
 // ── Model ─────────────────────────────────────────────────────────────────────
@@ -326,7 +327,7 @@ class ChatService {
     String eventId,
     void Function(ChatMessage) onMessage, {
     void Function(PinnedMessage? pinned)? onPin,
-    void Function(String elementId, Map<String, int> tally)? onTally,
+    void Function(String elementId, ElementTally tally)? onTally,
   }) {
     final channel = supabase.channel(
       _systemChannelName(eventId),
@@ -347,32 +348,36 @@ class ChatService {
             onPin(PinnedMessage.fromJson(_body(payload)['pinned'])),
       );
     }
-    if (onTally != null) {
-      channel.onBroadcast(
-        event: 'tally',
-        callback: (payload) {
-          final b = _body(payload);
-          final id = b['elementId'], t = b['tally'];
-          if (id is! String || t is! Map) return;
-          onTally(id, {
-            for (final e in t.entries)
-              if (e.key is String && e.value is num)
-                e.key as String: (e.value as num).toInt(),
-          });
-        },
-      );
-    }
+    if (onTally != null) _onTally(channel, onTally);
     channel.subscribe();
     return channel;
   }
 
+  /// Element totals on [channel]: `{elementId, tally, voters?}`.
+  static void _onTally(
+    RealtimeChannel channel,
+    void Function(String elementId, ElementTally tally) onTally,
+  ) => channel.onBroadcast(
+    event: 'tally',
+    callback: (payload) {
+      final b = _body(payload);
+      final id = b['elementId'];
+      final t = tallyFromJson(b['tally'], b['voters']);
+      if (id is String && t != null) onTally(id, t);
+    },
+  );
+
   /// Moderators: lines held back by the host's blocked words, as they are
   /// sent. Only a moderator can join this topic; anyone else is refused by
   /// the Realtime policy and simply hears nothing.
+  ///
+  /// [onTally] hears totals viewers can't see yet (a poll waiting for its
+  /// reveal) — the host's Studio shows them.
   static RealtimeChannel subscribeModeration(
     String eventId,
-    void Function(ChatMessage) onFiltered,
-  ) {
+    void Function(ChatMessage) onFiltered, {
+    void Function(String elementId, ElementTally tally)? onTally,
+  }) {
     final channel = supabase.channel(
       _modChannelName(eventId),
       opts: const RealtimeChannelConfig(private: true),
@@ -381,10 +386,13 @@ class ChatService {
       event: _event,
       callback: (payload) {
         try {
-          onFiltered(ChatMessage.fromJson(_body(payload)).copyWith(filtered: true));
+          onFiltered(
+            ChatMessage.fromJson(_body(payload)).copyWith(filtered: true),
+          );
         } catch (_) {}
       },
     );
+    if (onTally != null) _onTally(channel, onTally);
     channel.subscribe();
     return channel;
   }
@@ -496,11 +504,7 @@ class ChatService {
   static Future<void> banSender({
     required String eventId,
     required String targetId,
-  }) => _moderate({
-    'action': 'ban',
-    'eventId': eventId,
-    'targetId': targetId,
-  });
+  }) => _moderate({'action': 'ban', 'eventId': eventId, 'targetId': targetId});
 
   /// Host: change how the room behaves — whether crew may moderate, slow mode,
   /// and who may speak. Partial: only the keys present in [patch] are written,

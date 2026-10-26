@@ -125,7 +125,9 @@ class _NileGraphicsLayerState extends State<NileGraphicsLayer> {
   void _schedulePurge(int now) {
     _purgeTimer?.cancel();
     if (_gone.isEmpty) return;
-    final next = _gone.values.map((g) => g.until).reduce((a, b) => a < b ? a : b);
+    final next = _gone.values
+        .map((g) => g.until)
+        .reduce((a, b) => a < b ? a : b);
     _purgeTimer = Timer(Duration(milliseconds: next - now + 10), () {
       if (mounted) setState(_recompute);
     });
@@ -155,7 +157,9 @@ class _NileGraphicsLayerState extends State<NileGraphicsLayer> {
     ];
     final onTapLink = widget.onTapLink;
     final fullZ = _placed.where((p) => p.isFull).map((p) => p.z);
-    final topFull = fullZ.isEmpty ? null : fullZ.reduce((a, b) => a > b ? a : b);
+    final topFull = fullZ.isEmpty
+        ? null
+        : fullZ.reduce((a, b) => a > b ? a : b);
 
     return LayoutBuilder(
       builder: (context, box) {
@@ -178,10 +182,8 @@ class _NileGraphicsLayerState extends State<NileGraphicsLayer> {
         ElementInteraction? interactionOf(PlacedItem p) {
           final e = p.element;
           final i = e == null ? null : widget.interactionFor?.call(e);
-          if (i == null || i.onTap == null) return i;
-          return e!.openChoices.isEmpty || covered(p)
-              ? ElementInteraction(mine: i.mine, tally: i.tally)
-              : i;
+          if (i == null || !i.tappable) return i;
+          return e!.openChoices.isEmpty || covered(p) ? i.readOnly : i;
         }
 
         Widget channel(({String key, PlacedItem at, PlacedItem? item}) c) {
@@ -191,7 +193,7 @@ class _NileGraphicsLayerState extends State<NileGraphicsLayer> {
             key: ValueKey(c.key),
             ignoring:
                 item == null ||
-                (tapFor(item) == null && interaction?.onTap == null),
+                (tapFor(item) == null && !(interaction?.tappable ?? false)),
             child: AnimatedSwitcher(
               duration: NileGraphicsLayer.fade,
               child: item == null
@@ -211,13 +213,20 @@ class _NileGraphicsLayerState extends State<NileGraphicsLayer> {
         final bottomInset = bannerAt(LayoutSpot.bc) ? bannerH : 0.0;
 
         final layers = <({int z, Widget child})>[];
-        final bySpot = <LayoutSpot, List<({String key, PlacedItem at, PlacedItem? item})>>{};
+        final bySpot =
+            <
+              LayoutSpot,
+              List<({String key, PlacedItem at, PlacedItem? item})>
+            >{};
         for (final c in channels) {
           final at = c.at;
           if (at.isFull) {
             layers.add((
               z: at.z,
-              child: Positioned.fill(key: ValueKey('at:${c.key}'), child: channel(c)),
+              child: Positioned.fill(
+                key: ValueKey('at:${c.key}'),
+                child: channel(c),
+              ),
             ));
           } else if (at.isBanner) {
             layers.add((
@@ -394,12 +403,7 @@ class NileElementAngle extends StatelessWidget {
                   frame.width / 100,
                   full: true,
                   interaction: element.openChoices.isEmpty
-                      ? interaction == null
-                            ? null
-                            : ElementInteraction(
-                                mine: interaction!.mine,
-                                tally: interaction!.tally,
-                              )
+                      ? interaction?.readOnly
                       : interaction,
                 ),
               ),
@@ -427,7 +431,9 @@ class _LowerThird extends StatelessWidget {
       child: Container(
         decoration: BoxDecoration(
           color: look.panel.withValues(alpha: 0.92),
-          border: Border(left: BorderSide(color: look.accent, width: u * 0.8)),
+          border: Border(
+            left: BorderSide(color: look.accent, width: u * 0.8),
+          ),
         ),
         padding: EdgeInsets.symmetric(horizontal: u * 2, vertical: u * 1.2),
         child: Column(
@@ -549,11 +555,13 @@ class _Logo extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final side = u * switch (g.size) {
-      's' => 8.0,
-      'l' => 18.0,
-      _ => 12.0,
-    };
+    final side =
+        u *
+        switch (g.size) {
+          's' => 8.0,
+          'l' => 18.0,
+          _ => 12.0,
+        };
     final url = g.imageUrl;
     if (url == null) return const SizedBox.shrink();
     return SizedBox(
@@ -642,11 +650,13 @@ class _Qr extends StatelessWidget {
     final url = g.url;
     if (url == null) return const SizedBox.shrink();
     final look = _lookOf(g);
-    final side = u * switch (g.size) {
-      's' => 9.0,
-      'l' => 18.0,
-      _ => 13.0,
-    };
+    final side =
+        u *
+        switch (g.size) {
+          's' => 9.0,
+          'l' => 18.0,
+          _ => 13.0,
+        };
     final caption = g.caption ?? '';
     final card = Container(
       padding: EdgeInsets.all(u * 0.8),
@@ -731,7 +741,12 @@ class _Banner extends StatelessWidget {
       padding: EdgeInsets.symmetric(horizontal: g.scrolling ? 0 : u * 3),
       child: g.scrolling
           ? _Marquee(text: text, style: style, gap: u * 12)
-          : Text(text, maxLines: 1, overflow: TextOverflow.ellipsis, style: style),
+          : Text(
+              text,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: style,
+            ),
     );
   }
 }
@@ -748,7 +763,8 @@ class _Marquee extends StatefulWidget {
   State<_Marquee> createState() => _MarqueeState();
 }
 
-class _MarqueeState extends State<_Marquee> with SingleTickerProviderStateMixin {
+class _MarqueeState extends State<_Marquee>
+    with SingleTickerProviderStateMixin {
   late final AnimationController _c = AnimationController(vsync: this);
 
   @override
@@ -766,7 +782,10 @@ class _MarqueeState extends State<_Marquee> with SingleTickerProviderStateMixin 
     )..layout();
     final run = painter.width + widget.gap;
     // ~ one screen-percent of travel every 60 ms, whatever the size.
-    final ms = (run / (widget.style.fontSize ?? 14) * 400).round().clamp(2000, 60000);
+    final ms = (run / (widget.style.fontSize ?? 14) * 400).round().clamp(
+      2000,
+      60000,
+    );
     if (_c.duration?.inMilliseconds != ms) {
       _c.duration = Duration(milliseconds: ms);
       _c.repeat();
