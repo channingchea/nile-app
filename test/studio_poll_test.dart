@@ -161,6 +161,7 @@ void main() {
       expect(see('live', hidden, ElementAudience.viewer), isTrue);
       expect(see('voted', hidden, ElementAudience.viewer), isFalse);
       expect(see('voted', hidden, ElementAudience.viewer, voted: true), isTrue);
+      expect(see('voted', shown, ElementAudience.viewer), isTrue);
       expect(
         see('reveal', hidden, ElementAudience.viewer, voted: true),
         isFalse,
@@ -528,6 +529,10 @@ void main() {
       expect(acts.last, const ElementOps(timer: true, timerSec: 30));
       expect(e.open, isTrue);
 
+      // Reveal is always there: filled with a tick once viewers see totals.
+      expect(find.text('Reveal  (V)'), findsNothing);
+      expect(find.text('Revealed'), findsOneWidget, reason: 'live results');
+
       await t.pumpWidget(build());
       await t.tap(find.text('Reset'));
       await t.pumpAndSettle();
@@ -536,12 +541,45 @@ void main() {
       expect(acts.last.reset, isTrue);
     });
 
+    testWidgets('Reveal turns into a filled Revealed, and back', (t) async {
+      var e = _poll(results: 'reveal');
+      Widget build() => panel(
+        elementKindUis['poll']!.controls(e, (
+          change, {
+          clockOps = const {},
+          ops = ElementOps.none,
+        }) {
+          e = change(e);
+        }, _tally),
+      );
+      await t.pumpWidget(build());
+      await t.tap(find.text('Reveal  (V)'));
+      await t.pumpWidget(build());
+      expect(e.state['revealed'], isTrue);
+      expect(find.text('Revealed'), findsOneWidget);
+      await t.tap(find.text('Revealed'));
+      await t.pumpWidget(build());
+      expect(find.text('Reveal  (V)'), findsOneWidget);
+    });
+
     test('shortcuts: O, V, T', () {
       final keys = [for (final s in elementKindUis['poll']!.shortcuts) s.label];
-      expect(keys, ['Open / close', 'Reveal', 'Start timer']);
-      final reveal = pollReveal(_poll(results: 'reveal'));
-      expect(reveal.change(_poll(results: 'reveal')).state['revealed'], isTrue);
-      expect(pollReveal(_poll()).change(_poll()).state['revealed'], isNull);
+      expect(keys, ['Open / close', 'Reveal / hide results', 'Start timer']);
+      final hidden = _poll(results: 'reveal');
+      final shown = pollReveal(hidden).change(hidden);
+      expect(shown.state['revealed'], isTrue);
+      expect(
+        pollReveal(shown).change(shown).state['revealed'],
+        isNull,
+        reason: 'V again hides',
+      );
+      final voted = _poll(results: 'voted');
+      expect(pollReveal(voted).change(voted).state['revealed'], isTrue);
+      expect(
+        pollReveal(_poll()).change(_poll()).state['revealed'],
+        isNull,
+        reason: 'live: always shown',
+      );
       final timer = pollStartTimer(_poll(state: const {}));
       expect(timer.ops, const ElementOps(timer: true, timerSec: 60));
       expect(timer.change(_poll(state: const {})).open, isTrue);

@@ -1063,7 +1063,8 @@ class PollState {
 }
 
 /// Whether [audience] sees a poll's totals: live = always; after you vote =
-/// once this viewer has; only when revealed = after the reveal. The Studio
+/// once this viewer has (or the host reveals them); only when revealed =
+/// after the reveal. The Studio
 /// and host always do; replays follow the reveal.
 bool pollResultsVisible(
   PollConfig c,
@@ -1075,7 +1076,7 @@ bool pollResultsVisible(
   ElementAudience.replay => c.results != PollResultsMode.reveal || s.revealed,
   ElementAudience.viewer => switch (c.results) {
     PollResultsMode.live => true,
-    PollResultsMode.voted => voted,
+    PollResultsMode.voted => voted || s.revealed,
     PollResultsMode.reveal => s.revealed,
   },
 };

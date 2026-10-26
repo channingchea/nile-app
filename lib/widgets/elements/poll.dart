@@ -27,7 +27,7 @@ final pollUi = ElementKindUi(
     ),
     ElementShortcut(
       const [SingleActivator(LogicalKeyboardKey.keyV)],
-      'Reveal',
+      'Reveal / hide results',
       pollReveal,
     ),
     ElementShortcut(
@@ -84,11 +84,18 @@ ElementChange _cancelTimer(LiveElement e) => (
   ops: const ElementOps(timer: false),
 );
 
-/// Show the totals to everyone (reveal mode; nothing otherwise).
+/// Live results: viewers always see the totals, so there's nothing to reveal.
+bool _alwaysShown(LiveElement e) => _config(e).results == PollResultsMode.live;
+
+/// Show the totals to every viewer, or hide them again. "After you vote"
+/// polls reveal to people who haven't voted too; live ones always show.
 ElementChange pollReveal(LiveElement e) => (
-  change: (cur) => _config(cur).results == PollResultsMode.reveal
-      ? cur.copyWith(state: {...cur.state, 'revealed': true})
-      : cur,
+  change: (cur) {
+    if (_alwaysShown(cur)) return cur;
+    final s = {...cur.state};
+    s['revealed'] == true ? s.remove('revealed') : s['revealed'] = true;
+    return cur.copyWith(state: s);
+  },
   clockOps: const {},
   ops: ElementOps.none,
 );
@@ -958,11 +965,11 @@ class _PollControls extends StatelessWidget {
                       ),
                     ),
                   ),
-                if (c.results == PollResultsMode.reveal)
-                  OutlinedButton(
-                    onPressed: s.revealed ? null : () => _run(pollReveal(e)),
-                    child: Text(s.revealed ? 'Revealed' : 'Reveal  (V)'),
-                  ),
+                _RevealButton(
+                  revealed: s.revealed || _alwaysShown(e),
+                  fixed: _alwaysShown(e),
+                  onPressed: () => _run(pollReveal(e)),
+                ),
                 if (started)
                   TextButton(
                     onPressed: () => _confirmReset(context),
@@ -1014,6 +1021,51 @@ class _PollControls extends StatelessWidget {
           ],
         );
       },
+    );
+  }
+}
+
+/// Reveal, always in the row: outlined while viewers can't all see the
+/// totals, filled volt with a tick once they can. Live polls show it filled
+/// and fixed — their totals are never hidden.
+class _RevealButton extends StatelessWidget {
+  const _RevealButton({
+    required this.revealed,
+    required this.fixed,
+    required this.onPressed,
+  });
+
+  final bool revealed;
+  final bool fixed;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!revealed) {
+      return Tooltip(
+        message: 'Show the results to every viewer',
+        child: OutlinedButton.icon(
+          onPressed: onPressed,
+          icon: const Icon(Icons.visibility_outlined, size: 18),
+          label: const Text('Reveal  (V)'),
+        ),
+      );
+    }
+    return Tooltip(
+      message: fixed
+          ? 'Live results: viewers always see them'
+          : 'Viewers see the results. Press to hide them again',
+      child: FilledButton.icon(
+        onPressed: fixed ? null : onPressed,
+        style: FilledButton.styleFrom(
+          backgroundColor: NileColors.volt,
+          foregroundColor: NileColors.onVolt,
+          disabledBackgroundColor: NileColors.volt.withValues(alpha: 0.5),
+          disabledForegroundColor: NileColors.onVolt,
+        ),
+        icon: const Icon(Icons.check, size: 18),
+        label: const Text('Revealed'),
+      ),
     );
   }
 }
