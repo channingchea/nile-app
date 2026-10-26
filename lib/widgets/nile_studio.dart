@@ -1131,7 +1131,11 @@ class _SourceTile extends StatelessWidget {
             child: Stack(
               fit: StackFit.expand,
               children: [
-                _VideoPane(source: s, compact: true),
+                _VideoPane(
+                  source: s,
+                  compact: true,
+                  interactionFor: extras.interactionFor,
+                ),
                 // What a viewer of this angle sees, scaled to the tile.
                 NileGraphicsLayer(
                   graphics: graphics,
@@ -1512,7 +1516,11 @@ class _LabelledPane extends StatelessWidget {
             child: Stack(
               fit: StackFit.expand,
               children: [
-                _VideoPane(source: source, compact: false),
+                _VideoPane(
+                  source: source,
+                  compact: false,
+                  interactionFor: extras.interactionFor,
+                ),
                 NileGraphicsLayer(
                   graphics: graphics,
                   elements: extras.elements,
@@ -1568,16 +1576,29 @@ class _LabelledPane extends StatelessWidget {
 
 /// A feed, or an honest placeholder saying why there isn't one.
 class _VideoPane extends StatelessWidget {
-  const _VideoPane({required this.source, required this.compact});
+  const _VideoPane({
+    required this.source,
+    required this.compact,
+    this.interactionFor,
+  });
 
   final NileStudioSource? source;
   final bool compact;
+
+  /// Totals (and, in Studio Preview, votes) for an element shown as its own
+  /// angle.
+  final ElementInteraction? Function(LiveElement e)? interactionFor;
 
   @override
   Widget build(BuildContext context) {
     final track = source?.track;
     final element = source?.element;
-    if (element != null) return NileElementAngle(element: element);
+    if (element != null) {
+      return NileElementAngle(
+        element: element,
+        interaction: interactionFor?.call(element),
+      );
+    }
     return Container(
       color: Colors.black,
       child: track != null

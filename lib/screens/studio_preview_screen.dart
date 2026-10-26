@@ -112,6 +112,10 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
   )..addListener(_onElements);
   final _elementLibrary = PreviewElementLibrary();
 
+  /// Your own test votes, per element, with the round they belong to (a
+  /// reset clears them).
+  final Map<String, ({int round, List<String> picks})> _myVotes = {};
+
   /// Spots and layer order per camera (each tile's Layout sheet).
   OverlayLayout _layout = OverlayLayout.empty;
 
@@ -619,20 +623,50 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
     kit: _brandKit?.style,
   );
 
+  /// Preview shows elements the way a viewer sees them — a poll's totals
+  /// hidden until you reveal them (or until you vote) — and you can vote too;
+  /// your vote joins the pretend audience's. The Elements panel still shows
+  /// the full totals.
+  ElementInteraction _viewerView(LiveElement e) {
+    final round = (e.state['round'] as num?)?.toInt() ?? 0;
+    final mine = _myVotes[e.id];
+    return ElementInteraction(
+      tally: _elements.tally(e.id),
+      mine: mine != null && mine.round == round ? mine.picks : const [],
+      onTap: (picks) => _vote(e, picks),
+    );
+  }
+
+  void _vote(LiveElement e, List<String> picks) {
+    final live = _elements.live(e.id) ?? e;
+    if (live.openChoices.isEmpty) return;
+    final round = (live.state['round'] as num?)?.toInt() ?? 0;
+    final before = _myVotes[e.id];
+    _demo.castVote(
+      live,
+      picks,
+      previous: before != null && before.round == round
+          ? before.picks
+          : const [],
+    );
+    setState(() => _myVotes[e.id] = (round: round, picks: picks));
+  }
+
   NileOverlayExtras _overlayFor(NileStudioSource s, {bool preview = false}) {
+    // An element's own angle: no camera overlay, but votes and totals.
     if (s.element != null) {
-      return (elements: const [], layers: const [], interactionFor: null);
+      return (
+        elements: const [],
+        layers: const [],
+        interactionFor: _viewerView,
+      );
     }
     final slot = s.isScreenShare ? null : s.slotId;
     final state = preview ? _elements.preview(_cue.value) : _elements.onAir;
     return (
       elements: state.forSlot(slot),
       layers: _layout.layersFor(slot),
-      // The Studio sees the totals; it never votes.
-      interactionFor: (e) => ElementInteraction(
-        tally: _elements.tally(e.id),
-        audience: ElementAudience.staff,
-      ),
+      interactionFor: _viewerView,
     );
   }
 

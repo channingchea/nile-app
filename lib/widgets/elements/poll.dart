@@ -270,6 +270,10 @@ class _PollViewState extends State<PollView> {
               child: Text(
                 [
                   if (visible) results.votesLabel,
+                  if (audience == ElementAudience.staff &&
+                      c.results == PollResultsMode.reveal &&
+                      !s.revealed)
+                    'Hidden from viewers',
                   ?hint,
                   if (canVote && phone) 'Tap to vote',
                   if (several && open && c.maxPicks != null)

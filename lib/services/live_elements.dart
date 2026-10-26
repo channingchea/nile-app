@@ -186,8 +186,9 @@ String? _counterConfigError(Map<String, dynamic> c) {
   }
   final step = c['step'] ?? 1;
   if (step is! int || step < 1 || step > 100) return 'Step is 1 to 100.';
-  if (c['taps'] != null && c['taps'] is! bool)
+  if (c['taps'] != null && c['taps'] is! bool) {
     return 'Taps setting is malformed.';
+  }
   return null;
 }
 
@@ -300,8 +301,9 @@ class ElementStyle {
     for (final c in [accent, panel, text, onAccent]) {
       if (c != null && !isBrandHex(c)) return 'Colours are #RRGGBB.';
     }
-    if (font != null && !brandFonts.contains(font))
+    if (font != null && !brandFonts.contains(font)) {
       return 'Pick a listed font.';
+    }
     return null;
   }
 
@@ -965,8 +967,9 @@ class PollConfig {
   String? get error {
     final q = question.trim();
     if (q.isEmpty) return 'Write the question.';
-    if (q.length > maxQuestion)
+    if (q.length > maxQuestion) {
       return 'The question is $maxQuestion characters at most.';
+    }
     if (!ownAnswers) return null;
     if (answers.length < minAnswers) return 'Add at least two answers.';
     if (answers.length > maxAnswers) return 'Six answers at most.';
@@ -974,8 +977,9 @@ class PollConfig {
     for (final a in answers) {
       final t = a.text.trim();
       if (t.isEmpty) return 'Fill in every answer, or remove the empty one.';
-      if (t.length > maxAnswer)
+      if (t.length > maxAnswer) {
         return 'Answers are $maxAnswer characters at most.';
+      }
       if (!seen.add(t.toLowerCase())) return '“$t” is in there twice.';
     }
     final m = maxPicks;

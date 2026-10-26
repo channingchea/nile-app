@@ -2718,19 +2718,22 @@ class _CameraScreenState extends State<CameraScreen> {
     ];
   }
 
+  ElementInteraction _staffView(LiveElement e) => ElementInteraction(
+    tally: _elementsCtl.tally(e.id),
+    audience: ElementAudience.staff,
+  );
+
   NileOverlayExtras _overlayFor(NileStudioSource s, {bool preview = false}) {
+    // An element's own angle: no camera overlay, but its totals.
     if (s.element != null) {
-      return (elements: const [], layers: const [], interactionFor: null);
+      return (elements: const [], layers: const [], interactionFor: _staffView);
     }
     final slot = s.isScreenShare ? null : s.slotId;
     return (
       elements: _elementsFor(slot, preview: preview),
       layers: _layout.layersFor(slot),
       // The Studio sees totals on screen; it never votes.
-      interactionFor: (e) => ElementInteraction(
-        tally: _elementsCtl.tally(e.id),
-        audience: ElementAudience.staff,
-      ),
+      interactionFor: _staffView,
     );
   }
 

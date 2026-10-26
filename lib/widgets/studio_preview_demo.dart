@@ -331,6 +331,30 @@ class StudioPreviewDemo extends ChangeNotifier {
     }
   }
 
+  /// The host's own test vote in Studio Preview: [picks] replace [previous]
+  /// (empty = a first vote) in the pretend totals.
+  void castVote(
+    LiveElement e,
+    List<String> picks, {
+    List<String> previous = const [],
+  }) {
+    final round = (e.state['round'] as num?)?.toInt() ?? 0;
+    if (_rounds[e.id] != round) _tallies.remove(e.id);
+    _rounds[e.id] = round;
+    final old = _tallies[e.id];
+    final t = {for (final c in e.choices) c: old?[c] ?? 0};
+    for (final c in previous) {
+      if ((t[c] ?? 0) > 0) t[c] = t[c]! - 1;
+    }
+    for (final c in picks) {
+      t[c] = (t[c] ?? 0) + 1;
+    }
+    final voters = (old?.people ?? 0) + (previous.isEmpty ? 1 : 0);
+    final next = ElementTally(t, e.maxPicks > 1 ? voters : null);
+    _tallies[e.id] = next;
+    onTally?.call(e.id, next);
+  }
+
   /// Rating answers lean toward 4 stars.
   static const _ratingWeights = [1, 2, 5, 9, 6];
 

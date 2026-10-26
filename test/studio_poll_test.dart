@@ -583,6 +583,53 @@ void main() {
     );
   });
 
+  group('Studio Preview as a viewer', () {
+    test('your test vote joins the pretend totals and can change', () {
+      final demo = StudioPreviewDemo(random: Random(1));
+      addTearDown(demo.dispose);
+      final e = _poll(type: 'several');
+      demo.castVote(e, ['a1', 'a2']);
+      expect(
+        demo.tallyOf('p1'),
+        const ElementTally({'a1': 1, 'a2': 1, 'a3': 0}, 1),
+      );
+      demo.castVote(e, ['a3'], previous: ['a1', 'a2']);
+      expect(
+        demo.tallyOf('p1'),
+        const ElementTally({'a1': 0, 'a2': 0, 'a3': 1}, 1),
+      );
+      // A reset round starts from nothing.
+      demo.castVote(e.copyWith(state: const {'open': true, 'round': 1}), [
+        'a2',
+      ]);
+      expect(demo.tallyOf('p1')!.counts['a3'], 0);
+    });
+
+    testWidgets(
+      'the host sees hidden totals, tagged; a viewer sees "Results soon"',
+      (t) async {
+        Widget at(ElementAudience a) => MaterialApp(
+          home: Scaffold(
+            body: SizedBox(
+              width: 640,
+              height: 360,
+              child: NileElementAngle(
+                element: _poll(results: 'reveal'),
+                interaction: ElementInteraction(tally: _tally, audience: a),
+              ),
+            ),
+          ),
+        );
+        await t.pumpWidget(at(ElementAudience.staff));
+        expect(find.text('60%'), findsOneWidget);
+        expect(find.textContaining('Hidden from viewers'), findsOneWidget);
+        await t.pumpWidget(at(ElementAudience.viewer));
+        expect(find.text('60%'), findsNothing);
+        expect(find.textContaining('Results soon'), findsOneWidget);
+      },
+    );
+  });
+
   group('results page', () {
     testWidgets('answer text and people who voted', (t) async {
       await t.pumpWidget(
