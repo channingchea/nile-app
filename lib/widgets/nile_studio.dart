@@ -258,6 +258,7 @@ class NileStudio extends StatelessWidget {
     required this.showChatColumn,
     this.chat,
     this.banner,
+    this.hud,
     this.leading,
     this.trailing,
     this.meter,
@@ -299,6 +300,10 @@ class NileStudio extends StatelessWidget {
 
   /// The external-mic suggestion strip, when one is showing.
   final Widget? banner;
+
+  /// The element HUD strip, between the monitor and the control bar
+  /// (docs/plans/studio-element-hud.md). It sizes itself to nothing when idle.
+  final Widget? hud;
 
   /// Slots at either end of the stats row. The Studio has no app bar — a
   /// second title strip above a row that already says LIVE would be noise — so
@@ -400,6 +405,7 @@ class NileStudio extends StatelessWidget {
                         isCued: isCued,
                       ),
                     ),
+                    ?hud,
                     _StudioControlBar(child: controls),
                   ],
                 ),

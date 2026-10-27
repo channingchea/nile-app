@@ -10,6 +10,7 @@ import '../services/studio_graphics.dart';
 import '../theme.dart';
 import 'elements/element_kinds.dart';
 import 'nile_graphics_layer.dart';
+import 'studio_element_hud.dart' show ElementHudControls;
 import 'studio_graphics_panel.dart'
     show StudioGraphicsHotkeys, StudioSlotRef, showGraphicTargetsDialog;
 
@@ -124,6 +125,7 @@ Future<void> showElementsPanel(
   required Future<void> Function() onTake,
   ElementLibrary library = const ElementLibrary(),
   BrandStyle? kit,
+  String? initialSelected,
 }) => showDialog<void>(
   context: context,
   builder: (_) => Dialog(
@@ -138,6 +140,7 @@ Future<void> showElementsPanel(
         onTake: onTake,
         library: library,
         kit: kit,
+        initialSelected: initialSelected,
       ),
     ),
   ),
@@ -152,7 +155,11 @@ class ElementsPanel extends StatefulWidget {
     required this.onTake,
     this.library = const ElementLibrary(),
     this.kit,
+    this.initialSelected,
   });
+
+  /// Opened from a HUD card: that element, expanded.
+  final String? initialSelected;
 
   final StudioElementsController controller;
   final List<StudioSlotRef> slots;
@@ -168,7 +175,7 @@ class ElementsPanel extends StatefulWidget {
 class _ElementsPanelState extends State<ElementsPanel> {
   bool _loading = true;
   String? _error;
-  String? _selected;
+  late String? _selected = widget.initialSelected;
   bool _taking = false;
 
   StudioElementsController get _c => widget.controller;
@@ -493,6 +500,11 @@ class _ElementsPanelState extends State<ElementsPanel> {
     final cue = widget.cue.value.elementById(e.id);
     final shown = cue != null && !on ? cue.targets : live.targets;
     final selected = _selected == e.id;
+    void act(
+      LiveElement Function(LiveElement) change, {
+      Map<String, ClockOp> clockOps = const {},
+      ElementOps ops = ElementOps.none,
+    }) => _act(e.id, change, clockOps: clockOps, ops: ops);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -597,12 +609,13 @@ class _ElementsPanelState extends State<ElementsPanel> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  ui.controls(
-                    live,
-                    (change, {clockOps = const {}, ops = ElementOps.none}) =>
-                        _act(e.id, change, clockOps: clockOps, ops: ops),
-                    _c.tally(e.id),
-                  ),
+                  ui.controls?.call(live, act, _c.tally(e.id)) ??
+                      ElementHudControls(
+                        element: live,
+                        tally: _c.tally(e.id),
+                        act: act,
+                        wrap: true,
+                      ),
                   SwitchListTile(
                     contentPadding: EdgeInsets.zero,
                     dense: true,

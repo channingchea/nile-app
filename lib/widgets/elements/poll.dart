@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../../services/element_hud.dart';
 import '../../services/live_elements.dart';
 import '../../services/overlay_clock.dart';
 import '../../services/server_clock.dart';
@@ -19,6 +20,8 @@ final pollUi = ElementKindUi(
   editor: (config, onChanged, {required locked}) =>
       _PollEditor(config: config, onChanged: onChanged, locked: locked),
   controls: (e, act, tally) => _PollControls(e: e, act: act, tally: tally),
+  hud: pollHud,
+  hudAct: pollHudAct,
   shortcuts: [
     ElementShortcut(
       const [SingleActivator(LogicalKeyboardKey.keyO)],
@@ -99,6 +102,70 @@ ElementChange pollReveal(LiveElement e) => (
   clockOps: const {},
   ops: ElementOps.none,
 );
+
+// ── HUD card (docs/plans/studio-element-hud.md) ────────────────────────────
+
+/// Quick controls only — Reset, Edit and per-answer totals stay in the panel.
+List<HudItem> pollHud(LiveElement e, ElementTally? tally, int now) {
+  final c = _config(e), s = _state(e);
+  final results = PollResults(c, tally ?? ElementTally.empty);
+  final open = s.openAt(now);
+  final started = s.open || !results.isEmpty;
+  final left = s.secondsLeft(now);
+  final fixed = _alwaysShown(e);
+  final revealed = s.revealed || fixed;
+  return [
+    HudButton(
+      action: 'open',
+      label: open
+          ? 'Close'
+          : started
+          ? 'Reopen'
+          : 'Open',
+      style: open ? HudStyle.danger : HudStyle.primary,
+    ),
+    HudTimer(
+      start: 'timer',
+      stop: 'stopTimer',
+      running: open && left != null,
+      ms: left == null ? null : left * 1000,
+      presets: [?c.timerSec, ...pollTimerChoices.where((t) => t != c.timerSec)],
+      defaultSec: c.timerSec,
+    ),
+    HudButton(
+      action: 'reveal',
+      label: revealed ? 'Revealed' : 'Reveal',
+      icon: revealed ? 'check' : 'visibility',
+      active: revealed,
+      enabled: !fixed,
+    ),
+    HudReadout(
+      results.isEmpty ? 'No votes yet' : results.votesLabel,
+      strong: !results.isEmpty,
+    ),
+    if (results.average case final avg?)
+      HudReadout('★ ${avg.toStringAsFixed(1)} average'),
+    if (!open && started) const HudReadout('Closed', tone: HudTone.dim),
+    if (fixed)
+      const HudReadout('Viewers always see totals', tone: HudTone.dim)
+    else if (!s.revealed)
+      HudReadout(
+        c.results == PollResultsMode.voted
+            ? 'Shown after voting'
+            : 'Hidden from viewers',
+        tone: HudTone.dim,
+      ),
+  ];
+}
+
+ElementChange? pollHudAct(LiveElement e, String action, Object? value) =>
+    switch (action) {
+      'open' => pollToggleOpen(e),
+      'timer' => pollStartTimer(e, value is num ? value.toInt() : null),
+      'stopTimer' => _cancelTimer(e),
+      'reveal' => pollReveal(e),
+      _ => null,
+    };
 
 /// Clear every vote and start again: closed, hidden, no timer.
 ElementChange _reset(LiveElement e) => (
@@ -939,7 +1006,7 @@ class _PollControls extends StatelessWidget {
                     color: NileColors.bgRaised,
                     onSelected: (sec) => _run(pollStartTimer(e, sec)),
                     itemBuilder: (_) => [
-                      for (final sec in {?c.timerSec, ..._timerChoices})
+                      for (final sec in {?c.timerSec, ...pollTimerChoices})
                         PopupMenuItem(
                           value: sec,
                           child: Text(
@@ -1070,7 +1137,8 @@ class _RevealButton extends StatelessWidget {
   }
 }
 
-const _timerChoices = [30, 60, 120, 300];
+/// Countdown lengths offered next to the poll's own default.
+const pollTimerChoices = [30, 60, 120, 300];
 
 String _timerLabel(int sec) => sec < 60
     ? '$sec s'
@@ -1102,7 +1170,7 @@ class _PollEditorState extends State<_PollEditor> {
   late final _question = TextEditingController(text: _c.question);
   final Map<String, TextEditingController> _answers = {};
   late final _customTimer = TextEditingController(
-    text: _c.timerSec != null && !_timerChoices.contains(_c.timerSec)
+    text: _c.timerSec != null && !pollTimerChoices.contains(_c.timerSec)
         ? '${_c.timerSec}'
         : '',
   );
@@ -1317,7 +1385,7 @@ class _PollEditorState extends State<_PollEditor> {
               dropdownColor: NileColors.bgRaised,
               items: [
                 const DropdownMenuItem(value: 0, child: Text('None')),
-                for (final sec in _timerChoices)
+                for (final sec in pollTimerChoices)
                   DropdownMenuItem(value: sec, child: Text(_timerLabel(sec))),
                 const DropdownMenuItem(value: -1, child: Text('Custom')),
               ],

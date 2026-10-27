@@ -27,6 +27,7 @@ import '../widgets/elements/element_kinds.dart' show ElementInteraction;
 import '../widgets/nile_studio.dart';
 import '../widgets/screen_share_picker.dart';
 import '../widgets/studio_chat_tools.dart';
+import '../widgets/studio_element_hud.dart';
 import '../widgets/studio_elements_panel.dart';
 import '../widgets/studio_layout_sheet.dart';
 import '../widgets/studio_preview_demo.dart';
@@ -613,7 +614,7 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
     return true;
   }
 
-  void _openElements() => showElementsPanel(
+  void _openElements([String? select]) => showElementsPanel(
     context,
     controller: _elements,
     slots: _slots,
@@ -621,6 +622,18 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
     onTake: () async => _take(),
     library: _elementLibrary,
     kit: _brandKit?.style,
+    initialSelected: select,
+  );
+
+  /// A HUD card's Take: just that element; the rest of the cue waits.
+  Future<void> _takeOne(ElementCue c) async {
+    await _elements.setTargets(c.id, c.targets);
+    _cue.value = _cue.value.without(c.id);
+  }
+
+  String _camerasOf(GraphicTargets t) => t.summary(
+    (id) => _slots.where((r) => r.id == id).firstOrNull?.label ?? 'Camera',
+    [for (final r in _slots) r.id],
   );
 
   /// Preview shows elements the way a viewer sees them — a poll's totals
@@ -1158,6 +1171,13 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
                 ),
                 if (_cue.value.isNotEmpty) _cueBar(),
               ],
+            ),
+            hud: ElementHudStrip(
+              controller: _elements,
+              cue: _cue,
+              cameraSummary: _camerasOf,
+              onTakeOne: _takeOne,
+              onOpenPanel: _openElements,
             ),
             meter: Column(
               mainAxisSize: MainAxisSize.min,

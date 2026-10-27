@@ -90,7 +90,7 @@ Findings that shaped this plan:
 - [ ] Bump `min_build` at ship.
 - [x] Post-show element results available to the host; PostHog events for element use.
 - [x] Full test pass (Flutter + Deno), analyze clean, iOS/Android/macOS builds.
-- [ ] On-device checklist: layout on phones upright/sideways, hold-back timing vs video, Studio drop/reconnect, element angle + master audio, grid replay (overlays on the right tiles, camera sync, start offset).
+- [ ] On-device checklist: layout on phones upright/sideways, hold-back timing vs video, Studio drop/reconnect, element angle + master audio, grid replay (overlays on the right tiles, camera sync, start offset), element HUD strip (cards follow on/off air and cue, Off air + Undo, Take one, strip height on the smallest Studio window — docs/plans/studio-element-hud.md).
 
 ## Implementation notes — phases 1-3 (2026-10-23)
 - Migration 0138 (applied to prod): `studio_elements` uses `owner_id` (matches `studio_graphics`), kind checked by shape only so new kinds need no migration; `live_element_state` adds a `spec` column (name/config/style/targets/presentedBy) and `content_at` (hold-back stamp). No RLS policies on live state — the Studio reads it via the new `list-elements` action, which also re-mirrors on-air elements into a room that came back without them.

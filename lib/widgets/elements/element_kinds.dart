@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../../services/element_hud.dart';
 import '../../services/live_elements.dart';
 import '../../services/overlay_clock.dart';
 import '../../services/server_clock.dart';
@@ -82,7 +83,9 @@ class ElementKindUi {
   const ElementKindUi({
     required this.render,
     required this.editor,
-    required this.controls,
+    this.controls,
+    this.hud,
+    this.hudAct,
     this.shortcuts = const [],
   });
 
@@ -106,8 +109,19 @@ class ElementKindUi {
   editor;
 
   /// The live controls in the Elements panel; [tally] = its totals, if any.
-  final Widget Function(LiveElement e, ElementAct act, ElementTally? tally)
+  /// Null = the panel draws the [hud] items instead (plugin kinds).
+  final Widget Function(LiveElement e, ElementAct act, ElementTally? tally)?
   controls;
+
+  /// Its HUD card's quick controls, as data (docs/plans/studio-element-hud.md);
+  /// [now] is server ms. Null = no card controls.
+  final List<HudItem> Function(LiveElement e, ElementTally? tally, int now)?
+  hud;
+
+  /// Runs a HUD action by id, with a timer's seconds or an input's value.
+  /// Null = an action this kind doesn't know.
+  final ElementChange? Function(LiveElement e, String action, Object? value)?
+  hudAct;
   final List<ElementShortcut> shortcuts;
 }
 
@@ -144,11 +158,73 @@ ElementChange _bump(LiveElement e, int by) => (
   ops: ElementOps.none,
 );
 
+ElementChange _toggleTaps(LiveElement e) => (
+  change: (cur) {
+    final next = {...cur.state};
+    cur.open ? next.remove('open') : next['open'] = true;
+    return cur.copyWith(state: next);
+  },
+  clockOps: const {},
+  ops: ElementOps.none,
+);
+
 ElementChange _toggleClock(LiveElement e) => (
   change: (cur) => cur,
   clockOps: {'main': e.clock('main').running ? ClockOp.pause : ClockOp.start},
   ops: ElementOps.none,
 );
+
+/// The test counter's card uses every HUD block: buttons, a readout, an
+/// input and a clock.
+List<HudItem> _counterHud(LiveElement e, ElementTally? tally, int now) {
+  final step = _step(e);
+  final clock = e.clock('main');
+  return [
+    HudButton(action: 'down', label: '−$step'),
+    HudButton(action: 'up', label: '+$step', style: HudStyle.primary),
+    const HudInput(
+      action: 'set',
+      label: 'Set to',
+      number: true,
+      min: -99999,
+      max: 99999,
+    ),
+    HudTimer(
+      start: 'clock',
+      stop: 'clock',
+      running: clock.running,
+      ms: clock.valueAt(now),
+      startLabel: 'Start clock',
+      stopLabel: 'Pause',
+    ),
+    if (e.choices.isNotEmpty)
+      HudButton(action: 'taps', label: 'Taps open', active: e.open),
+    HudReadout('Value ${_value(e)}', strong: true),
+    if (e.choices.isNotEmpty)
+      HudReadout(
+        [
+          for (final c in e.choices)
+            '${c == 'up' ? '▲' : '▼'} ${tally?[c] ?? 0}',
+        ].join('  '),
+      ),
+  ];
+}
+
+ElementChange? _counterHudAct(LiveElement e, String action, Object? value) =>
+    switch (action) {
+      'down' => _bump(e, -_step(e)),
+      'up' => _bump(e, _step(e)),
+      'set' when value is num => (
+        change: (cur) => cur.copyWith(
+          state: {...cur.state, 'value': value.toInt().clamp(-99999, 99999)},
+        ),
+        clockOps: const {},
+        ops: ElementOps.none,
+      ),
+      'clock' => _toggleClock(e),
+      'taps' => _toggleTaps(e),
+      _ => null,
+    };
 
 final _counterUi = ElementKindUi(
   render: (e, u, {required full, interaction}) =>
@@ -156,6 +232,8 @@ final _counterUi = ElementKindUi(
   editor: (config, onChanged, {required locked}) =>
       _CounterEditor(config: config, onChanged: onChanged),
   controls: (e, act, tally) => _CounterControls(e: e, act: act, tally: tally),
+  hud: _counterHud,
+  hudAct: _counterHudAct,
   shortcuts: [
     ElementShortcut(
       const [
@@ -529,11 +607,7 @@ class _CounterControls extends StatelessWidget {
         if (e.choices.isNotEmpty) ...[
           const SizedBox(width: NileSpacing.s8),
           OutlinedButton(
-            onPressed: () => act((cur) {
-              final next = {...cur.state};
-              cur.open ? next.remove('open') : next['open'] = true;
-              return cur.copyWith(state: next);
-            }),
+            onPressed: () => act(_toggleTaps(e).change),
             child: Text(e.open ? 'Close taps' : 'Open taps'),
           ),
           Text(

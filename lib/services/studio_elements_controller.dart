@@ -85,6 +85,60 @@ class StudioElementsController extends ChangeNotifier {
 
   LiveElement? live(String id) => _live[id];
 
+  /// Everything viewers can see (on a camera or as its own angle), in
+  /// library order — the HUD's live cards.
+  List<LiveElement> get liveElements {
+    final order = {for (final (i, e) in _library.indexed) e.id: i};
+    int rank(LiveElement e) => order[e.id] ?? order.length;
+    return [
+      for (final e in _live.values)
+        if (e.live) e,
+    ]..sort((a, b) {
+      final r = rank(a).compareTo(rank(b));
+      return r != 0 ? r : a.name.compareTo(b.name);
+    });
+  }
+
+  // ── HUD (docs/plans/studio-element-hud.md) ─────────────────────────────────
+
+  /// Cards the host closed with ✕ this session. A card comes back by itself
+  /// when its element goes on or off air.
+  final Set<String> _hudHidden = {};
+
+  bool hudHidden(String id) => _hudHidden.contains(id);
+
+  void setHudHidden(String id, bool hidden) {
+    if (!(hidden ? _hudHidden.add(id) : _hudHidden.remove(id))) return;
+    notifyListeners();
+    if (hidden) {
+      final kind = current(id)?.kind;
+      NileAnalytics.capture(NileEvent.elementHudHidden, {
+        'kind': ?kind,
+        'preview': rehearsal,
+      });
+    }
+  }
+
+  void showAllHud() {
+    if (_hudHidden.isEmpty) return;
+    _hudHidden.clear();
+    notifyListeners();
+  }
+
+  /// Off every camera and its own angle at once (votes and values kept).
+  Future<bool> takeOffAir(String id) => update(
+    id,
+    (e) => e.copyWith(targets: GraphicTargets.none, angle: false),
+    undoable: false,
+  );
+
+  /// Undo for [takeOffAir]: back where it was.
+  Future<bool> putBack(String id, GraphicTargets targets, bool angle) => update(
+    id,
+    (e) => e.copyWith(targets: targets, angle: angle),
+    undoable: false,
+  );
+
   /// Every element on air, as viewers see it.
   ElementsState get onAir => ElementsState(
     items: [
@@ -176,6 +230,7 @@ class StudioElementsController extends ChangeNotifier {
       if (stack.length > undoDepth) stack.removeAt(0);
     }
     _live[id] = next;
+    if (base.live != next.live) _hudHidden.remove(id);
     notifyListeners();
     if (!pushOffAir && !next.onAir && base.version == 0) {
       _track(base, next);

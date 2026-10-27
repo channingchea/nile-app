@@ -40,6 +40,7 @@ import '../widgets/camera_slot_sheet.dart';
 import '../widgets/nile_graphics_layer.dart';
 import '../widgets/nile_link_text.dart';
 import '../widgets/studio_chat_tools.dart';
+import '../widgets/studio_element_hud.dart';
 import '../widgets/studio_elements_panel.dart';
 import '../widgets/studio_graphics_panel.dart';
 import '../widgets/studio_layout_sheet.dart';
@@ -2687,14 +2688,34 @@ class _CameraScreenState extends State<CameraScreen> {
   }
 
   /// Studio: the Elements panel.
-  Future<void> _openElements() => showElementsPanel(
+  Future<void> _openElements([String? select]) => showElementsPanel(
     context,
     controller: _elementsCtl,
     slots: _slotRefs,
     cue: _cue,
     onTake: _takeCue,
     kit: _brandKit?.style,
+    initialSelected: select,
   );
+
+  /// A HUD card's Take: just that element; the rest of the cue waits.
+  Future<void> _takeOneElement(ElementCue c) async {
+    final ok = await _elementsCtl.setTargets(c.id, c.targets);
+    if (!mounted) return;
+    if (ok) {
+      _cue.value = _cue.value.without(c.id);
+    } else {
+      _toast('Couldn’t put that on air. Try again.');
+    }
+  }
+
+  String _camerasOf(GraphicTargets t) {
+    final refs = _slotRefs;
+    return t.summary(
+      (id) => refs.where((r) => r.id == id).firstOrNull?.label ?? 'Camera',
+      [for (final r in refs) r.id],
+    );
+  }
 
   /// Cued elements go on air (Take).
   Future<bool> _takeElementCues(List<ElementCue> cues) async {
@@ -4929,6 +4950,16 @@ class _CameraScreenState extends State<CameraScreen> {
               children: [_buildCameraMeter(height: 120)],
             ),
       controls: _buildStudioControls(context, hasChat),
+      // Quick controls for live and cued elements — the control room's alone.
+      hud: _isStudio
+          ? ElementHudStrip(
+              controller: _elementsCtl,
+              cue: _cue,
+              cameraSummary: _camerasOf,
+              onTakeOne: _takeOneElement,
+              onOpenPanel: _openElements,
+            )
+          : null,
       showChatColumn: hasChat,
       chat: hasChat
           ? NileStudioChat(

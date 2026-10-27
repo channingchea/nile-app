@@ -43,8 +43,11 @@ class NileAnalytics {
     // Read the preference even when analytics is unconfigured, so the Settings
     // switch shows what the user last chose rather than silently resetting.
     try {
-      _optedOut = (await SharedPreferences.getInstance()).getBool(_optOutKey) ?? false;
-    } catch (_) {/* a missing store just means "not opted out" */}
+      _optedOut =
+          (await SharedPreferences.getInstance()).getBool(_optOutKey) ?? false;
+    } catch (_) {
+      /* a missing store just means "not opted out" */
+    }
 
     if (posthogApiKey.isEmpty) return;
     try {
@@ -72,7 +75,9 @@ class NileAnalytics {
     if (!_ready) return;
     try {
       await Posthog().identify(userId: userId);
-    } catch (_) {/* never surface analytics failures */}
+    } catch (_) {
+      /* never surface analytics failures */
+    }
   }
 
   /// Forget the current user. MUST be called on sign-out, or the next person
@@ -81,7 +86,9 @@ class NileAnalytics {
     if (!_ready) return;
     try {
       await Posthog().reset();
-    } catch (_) {/* never surface analytics failures */}
+    } catch (_) {
+      /* never surface analytics failures */
+    }
   }
 
   /// Tests: when set, every [capture] is recorded here too (configured or
@@ -99,8 +106,13 @@ class NileAnalytics {
     // having succeeded.
     if (!_ready || _optedOut) return;
     try {
-      await Posthog().capture(eventName: event.name, properties: props ?? const {});
-    } catch (_) {/* never surface analytics failures */}
+      await Posthog().capture(
+        eventName: event.name,
+        properties: props ?? const {},
+      );
+    } catch (_) {
+      /* never surface analytics failures */
+    }
   }
 
   /// Honoured locally by the SDK: queued events are dropped and nothing further
@@ -111,12 +123,19 @@ class NileAnalytics {
   static Future<void> setOptOut(bool optedOut) async {
     _optedOut = optedOut;
     try {
-      await (await SharedPreferences.getInstance()).setBool(_optOutKey, optedOut);
-    } catch (_) {/* best effort — the in-memory flag still holds for this run */}
+      await (await SharedPreferences.getInstance()).setBool(
+        _optOutKey,
+        optedOut,
+      );
+    } catch (_) {
+      /* best effort — the in-memory flag still holds for this run */
+    }
     if (!_ready) return;
     try {
       optedOut ? await Posthog().disable() : await Posthog().enable();
-    } catch (_) {/* never surface analytics failures */}
+    } catch (_) {
+      /* never surface analytics failures */
+    }
   }
 }
 
@@ -149,7 +168,10 @@ enum NileEvent {
   elementAngleShown('element_angle_shown'),
   elementTapsOpened('element_taps_opened'),
   elementTapsClosed('element_taps_closed'),
-  elementVoteCast('element_vote_cast');
+  elementVoteCast('element_vote_cast'),
+  // The Studio's HUD strip: which action (by id) on which kind.
+  elementHudAction('element_hud_action'),
+  elementHudHidden('element_hud_hidden');
 
   const NileEvent(this.name);
 

@@ -514,7 +514,7 @@ void main() {
       final acts = <ElementOps>[];
       var e = _poll(timerSec: 30, state: const {});
       Widget build() => panel(
-        elementKindUis['poll']!.controls(e, (
+        elementKindUis['poll']!.controls!(e, (
           change, {
           clockOps = const {},
           ops = ElementOps.none,
@@ -544,7 +544,7 @@ void main() {
     testWidgets('Reveal turns into a filled Revealed, and back', (t) async {
       var e = _poll(results: 'reveal');
       Widget build() => panel(
-        elementKindUis['poll']!.controls(e, (
+        elementKindUis['poll']!.controls!(e, (
           change, {
           clockOps = const {},
           ops = ElementOps.none,
