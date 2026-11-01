@@ -14,6 +14,7 @@ import '../services/live_elements.dart'
         PollType,
         elementAngleId,
         isElementAngleId;
+import '../services/show_control.dart';
 import 'nile_studio.dart';
 
 /// Everything in Studio Preview that would normally come from other people:
@@ -270,6 +271,33 @@ class StudioPreviewDemo extends ChangeNotifier {
       _angleViewers
         ..clear()
         ..[slotId] = total;
+    }
+    notifyListeners();
+  }
+
+  /// Show control in the real Studio's shape — what Layouts save and apply.
+  ShowControl get show => ShowControl(
+    offAir: {..._offAir},
+    defaultSlot: _defaultSlot,
+    slotOrder: order,
+  );
+
+  /// A layout was applied: off air, default angle and order at once. Anyone
+  /// on an angle that went off air moves to the default, as on a real show.
+  void applyShow(ShowControl s) {
+    _offAir
+      ..clear()
+      ..addAll(s.offAir);
+    _defaultSlot = s.defaultSlot;
+    if (s.slotOrder.isNotEmpty) {
+      _order = [
+        ...s.slotOrder,
+        ..._order.where((x) => !s.slotOrder.contains(x)),
+      ];
+    }
+    final to = _fallback;
+    for (final off in s.offAir) {
+      if (to != null && to != off) _move(off, to);
     }
     notifyListeners();
   }

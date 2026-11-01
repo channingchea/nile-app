@@ -24,6 +24,7 @@ import '../services/live_elements.dart';
 import '../services/overlay_layout.dart';
 import '../services/server_clock.dart';
 import '../services/studio_elements_controller.dart';
+import '../services/layout_templates.dart';
 import '../services/studio_layouts.dart';
 import '../services/studio_layouts_controller.dart';
 import '../services/realsync.dart';
@@ -2870,8 +2871,15 @@ class _CameraScreenState extends State<CameraScreen> {
     _rebuildRemoteSources();
   }
 
-  Future<void> _openLayouts() =>
-      showLayoutsPanel(context, controller: _layouts, slots: _slotRefs);
+  Future<void> _openLayouts() => showLayoutsPanel(
+    context,
+    controller: _layouts,
+    slots: _slotRefs,
+    templates: layoutTemplates(
+      logoPath: _brandKit?.logoPath,
+      hostName: _hostUsername ?? 'Your name',
+    ),
+  );
 
   /// The cue bar / Enter: apply the cued layout.
   Future<void> _applyLayoutCue() async {

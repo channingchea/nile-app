@@ -74,26 +74,45 @@ Layouts are saved show setups kept in an account-wide library and opened from a 
 **Implementation notes (2026-11-01):** the panel is a dialog like Graphics and Elements (not a side panel), `lib/widgets/studio_layouts_panel.dart`; logic in `lib/services/studio_layouts_controller.dart` (`StudioLayoutsController`, `LayoutsBackend` so Studio Preview/tests can swap storage). `LivekitService.applyLayout`; `StudioElementsController.all/applied`; `layoutAppliedFromRoomMetadata`, `layoutChanges`, `describeChange` in studio_layouts.dart. ⌥1–9 via `StudioGraphicsHotkeys.onAltDigit`, matched by PHYSICAL key (⌥1 types "¡" on a Mac); also handled inside the panel. One cue at a time is implemented: cueing a layout clears the graphics cue and vice versa; the Studio cue bar shows "Layout · name" with Apply/Clear, and Enter/Esc follow whichever is cued. Thumbnail = Camera 1 drawn by NileGraphicsLayer at 640×360, scaled down; off-air cameras get a dark veil. Badges: ON AIR, CUED, CHANGED SINCE APPLIED, N MISSING. 12 tests in `test/studio_layouts_ui_test.dart`.
 
 ## Phase 5: Layout editor
-- [ ] Full dialog: a tab per camera position (+/− count), live preview frame
-- [ ] Per camera: add library graphics/elements, spot grid + layer list (reuse "Layers…" widgets), on/off-air switch, element-angle toggles
-- [ ] Layout-wide: default angle picker, camera order list, "Copy to all cameras"
+- [x] Full dialog: a tab per camera position (+/− count), live preview frame
+- [x] Per camera: add library graphics/elements, spot grid + layer list (reuse "Layers…" widgets), on/off-air switch, element-angle toggles
+- [x] Layout-wide: default angle picker, camera order list, "Copy to all cameras"
+
+**Implementation notes (2026-11-01):** `lib/widgets/studio_layout_editor.dart` (`showLayoutEditor`, returns the edited layout; the panel saves it through `StudioLayoutsController.save`, which creates when there's no id). Opened from a card's "Edit…" and the panel's "New layout" (one camera per camera in the show). Layer rows reuse `SpotGrid`; spots a kind can't use are disabled. Items deleted from the library show as "Deleted from your library" and can be removed. The preview is `LayoutThumbnail` (now takes a camera index). Saving an on-air layout shows the re-Apply warning in the editor and in the panel message.
 
 ## Phase 6: Templates
-- [ ] "New from template" copies into the library, creating needed library graphics and using the brand kit:
+- [x] "New from template" copies into the library, creating needed library graphics and using the brand kit:
   - Starting Soon: full-screen slate + countdown to show start
   - Be Right Back: slate; Cameras 2+ off air
   - Ending: thanks slate + QR to profile
   - Main show: logo bug + lower third on Camera 1
-- [ ] Tests: each template resolves cleanly on 1-camera and 3-camera shows
+- [x] Tests: each template resolves cleanly on 1-camera and 3-camera shows
+
+**Implementation notes (2026-11-01):** `lib/services/layout_templates.dart` (`layoutTemplates({logoPath, hostName})`). Templates are sized to the show's camera count when added. Main show puts the brand-kit logo on every camera and the lower third (host's username, else "Your name") on Camera 1; with no kit logo it is just the lower third. Ending: QR (profile, bottom right, large) in front of the slate on every camera. Starting soon counts down to the show's start (presets' `showStart` mode). A template graphic identical to one already in the library (deep JSON compare — jsonb reorders keys) is reused, so adding a template twice doesn't duplicate graphics. "From template" menu in the panel. Tests in `test/studio_layouts_more_test.dart`.
 
 ## Phase 7: Studio Preview, analytics, ship
-- [ ] Studio Preview: library read-only, Apply in memory (follow PreviewElementLibrary pattern + preview safety test)
-- [ ] PostHog: `layout_saved`, `layout_cued`, `layout_applied`, `layout_missing_items` (counts only, `preview` flag)
-- [ ] Grid replay check: an Apply appears as one change
-- [ ] Bump `min_build` at ship; add Layouts to the on-device checklist
+- [x] Studio Preview: library read-only, Apply in memory (follow PreviewElementLibrary pattern + preview safety test)
+- [x] PostHog: `layout_saved`, `layout_cued`, `layout_applied`, `layout_missing_items` (counts only, `preview` flag)
+- [x] Grid replay check: an Apply appears as one change
+- [ ] Bump `min_build` at ship (left for ship day, like the elements work)
+- [x] Add Layouts to the on-device checklist (below)
+
+**Implementation notes (2026-11-01):** Studio Preview gets the Layouts icon, cue bar, ⌥1–9 and Enter. Its `LayoutsBackend.rehearsal` reads your saved layouts and graphics once and keeps every change in memory (answers the open question: Preview never writes the real library); Apply updates the preview's graphics, layers, elements and the demo's off air/default/order (`StudioPreviewDemo.show` / `applyShow`). The preview safety test still passes (no banned services in the screen). PostHog `layout_saved` (`how`: current_look/editor/template), `layout_cued`, `layout_applied` (`covered`, `elements_changed`), `layout_missing_items` (`missing`) — camera count, template id and `preview` only, never names. Grid replay: the recorder logs a mark per RoomMetadataChanged and apply-layout is one metadata write, so an Apply is one change in the replay.
+
+## On-device checklist (Layouts)
+- [ ] Studio: Save current look with graphics on two cameras and an element; the card thumbnail matches Camera 1
+- [ ] Cue it (button and ⌥1): the summary is right; Enter applies; viewers on a phone see everything change at once (one fade)
+- [ ] A layout with a camera off air: a viewer on that camera moves to the default angle
+- [ ] Live poll with votes, then Apply a layout that keeps it: votes and timer carry on
+- [ ] Edit the on-air layout: "Changed since applied" shows until re-applied
+- [ ] Delete a graphic a layout uses: card shows "1 MISSING"; Apply skips it and says so
+- [ ] Each template on a 1-camera and a 3-camera show
+- [ ] Studio Preview: layouts load, edits and Apply stay in the preview (check the real library after)
+- [ ] Older app build as a viewer during an Apply (expect missed off-air/order until min_build bump)
 
 ## Open questions / risks
-- One cue at a time? Default: cueing a layout clears cued graphics and vice versa, so Enter never applies two things.
-- Should "Save current look" in Studio Preview write to the real library? Default: no (keeps Preview touching nothing real).
-- Room-metadata size for big layouts — measure against LiveKit's metadata limit in Phase 3.
+- RESOLVED: one cue at a time — cueing a layout clears cued graphics and vice versa.
+- RESOLVED: Studio Preview never writes the real library.
+- RESOLVED: metadata size — ~33 KB worst case vs LiveKit's 512 KiB.
 - Older builds miss off-air/order changes until the `min_build` bump.
+- Not yet tested in a real live show.

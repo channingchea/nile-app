@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../services/layout_templates.dart';
 import '../services/live_elements.dart';
 import '../services/studio_graphics.dart';
 import '../services/studio_layouts.dart';
@@ -8,6 +9,7 @@ import '../services/studio_layouts_controller.dart';
 import '../theme.dart';
 import 'nile_graphics_layer.dart';
 import 'nile_studio.dart' show NileCuedChip;
+import 'studio_layout_editor.dart';
 import 'studio_graphics_panel.dart' show StudioGraphicsHotkeys, StudioSlotRef;
 
 /// The Studio toolbar's Layouts panel (docs/plans/studio-layouts.md, phase
@@ -18,6 +20,7 @@ Future<void> showLayoutsPanel(
   BuildContext context, {
   required StudioLayoutsController controller,
   required List<StudioSlotRef> slots,
+  List<LayoutTemplate> templates = const [],
 }) => showDialog<void>(
   context: context,
   builder: (_) => Dialog(
@@ -25,7 +28,11 @@ Future<void> showLayoutsPanel(
     insetPadding: const EdgeInsets.all(NileSpacing.s24),
     child: ConstrainedBox(
       constraints: const BoxConstraints(maxWidth: 600, maxHeight: 720),
-      child: LayoutsPanel(controller: controller, slots: slots),
+      child: LayoutsPanel(
+        controller: controller,
+        slots: slots,
+        templates: templates,
+      ),
     ),
   ),
 );
@@ -50,10 +57,14 @@ class LayoutsPanel extends StatefulWidget {
     super.key,
     required this.controller,
     required this.slots,
+    this.templates = const [],
   });
 
   final StudioLayoutsController controller;
   final List<StudioSlotRef> slots;
+
+  /// "New from template" choices (with the host's brand logo and name).
+  final List<LayoutTemplate> templates;
 
   @override
   State<LayoutsPanel> createState() => _LayoutsPanelState();
@@ -189,8 +200,42 @@ class _LayoutsPanelState extends State<LayoutsPanel> {
     });
   }
 
+  Future<void> _edit(StudioLayout l) async {
+    final next = await showLayoutEditor(
+      context,
+      layout: l,
+      controller: _c,
+      onAir: _c.isOnAir(l),
+    );
+    if (next == null || !mounted) return;
+    await _run(() async {
+      final saved = await _c.save(next);
+      return _c.isOnAir(saved)
+          ? 'Saved “${saved.name}”. Apply it again to send it.'
+          : 'Saved “${saved.name}”.';
+    });
+  }
+
+  /// A blank layout with one camera per camera in this show.
+  Future<void> _newLayout() {
+    final n = _c.current().positions.length;
+    return _edit(
+      StudioLayout(
+        name: 'Layout ${_c.layouts.length + 1}',
+        cameras: List.filled(n < 1 ? 1 : n, const LayoutCamera()),
+      ),
+    );
+  }
+
+  Future<void> _fromTemplate(LayoutTemplate t) => _run(() async {
+    final saved = await _c.newFromTemplate(t);
+    return 'Added “${saved.name}”. Cue it to see what it changes.';
+  });
+
   Future<void> _menu(StudioLayout l, _CardAction a) async {
     switch (a) {
+      case _CardAction.edit:
+        await _edit(l);
       case _CardAction.update:
         await _run(() async {
           final left = await _c.updateFromCurrent(l);
@@ -298,13 +343,45 @@ class _LayoutsPanelState extends State<LayoutsPanel> {
             NileSpacing.s24,
             NileSpacing.s8,
           ),
-          child: Align(
-            alignment: Alignment.centerLeft,
-            child: OutlinedButton.icon(
-              onPressed: _loading || _error != null ? null : _saveCurrent,
-              icon: const Icon(Icons.add, size: 18),
-              label: const Text('Save current look'),
-            ),
+          child: Wrap(
+            spacing: NileSpacing.s8,
+            runSpacing: NileSpacing.s8,
+            children: [
+              OutlinedButton.icon(
+                onPressed: _loading || _error != null ? null : _saveCurrent,
+                icon: const Icon(Icons.add, size: 18),
+                label: const Text('Save current look'),
+              ),
+              OutlinedButton.icon(
+                onPressed: _loading || _error != null ? null : _newLayout,
+                icon: const Icon(Icons.edit_outlined, size: 18),
+                label: const Text('New layout'),
+              ),
+              if (widget.templates.isNotEmpty)
+                PopupMenuButton<LayoutTemplate>(
+                  enabled: !_loading && _error == null,
+                  tooltip: 'New from template',
+                  onSelected: _fromTemplate,
+                  itemBuilder: (_) => [
+                    for (final t in widget.templates)
+                      PopupMenuItem(
+                        value: t,
+                        child: ListTile(
+                          contentPadding: EdgeInsets.zero,
+                          title: Text(t.name),
+                          subtitle: Text(t.description),
+                        ),
+                      ),
+                  ],
+                  child: IgnorePointer(
+                    child: OutlinedButton.icon(
+                      onPressed: _loading || _error != null ? null : () {},
+                      icon: const Icon(Icons.auto_awesome_outlined, size: 18),
+                      label: const Text('From template'),
+                    ),
+                  ),
+                ),
+            ],
           ),
         ),
         Flexible(
@@ -464,6 +541,10 @@ class _LayoutsPanelState extends State<LayoutsPanel> {
                   onSelected: (a) => _menu(l, a),
                   itemBuilder: (_) => const [
                     PopupMenuItem(
+                      value: _CardAction.edit,
+                      child: Text('Edit…'),
+                    ),
+                    PopupMenuItem(
                       value: _CardAction.update,
                       child: Text('Update from current look'),
                     ),
@@ -548,23 +629,29 @@ class _LayoutsPanelState extends State<LayoutsPanel> {
   );
 }
 
-enum _CardAction { update, rename, duplicate, delete }
+enum _CardAction { edit, update, rename, duplicate, delete }
 
-/// Camera 1 of a layout, drawn the way viewers would see it (on a dark video
-/// frame, scaled down from 640×360).
+/// One camera of a layout (Camera 1 by default), drawn the way viewers would
+/// see it (on a dark video frame, scaled down from 640×360).
 class LayoutThumbnail extends StatelessWidget {
   const LayoutThumbnail({
     super.key,
     required this.layout,
     required this.controller,
+    this.camera = 0,
   });
 
   final StudioLayout layout;
   final StudioLayoutsController controller;
 
+  /// Position index (0 = Camera 1).
+  final int camera;
+
   @override
   Widget build(BuildContext context) {
-    final cam = layout.cameras.firstOrNull ?? const LayoutCamera();
+    final cam = camera < layout.cameras.length
+        ? layout.cameras[camera]
+        : const LayoutCamera();
     final graphics = <LiveGraphic>[];
     final elements = <LiveElement>[];
     for (final item in cam.items) {

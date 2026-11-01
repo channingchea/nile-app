@@ -18,8 +18,11 @@ import '../services/live_elements.dart';
 import '../services/overlay_layout.dart';
 import '../services/screen_capture_permission.dart';
 import '../services/share_urls.dart';
+import '../services/layout_templates.dart';
 import '../services/studio_elements_controller.dart';
 import '../services/studio_graphics.dart';
+import '../services/studio_layouts.dart';
+import '../services/studio_layouts_controller.dart';
 import '../services/studio_prefs.dart';
 import '../theme.dart';
 import '../widgets/audio_meter.dart';
@@ -30,6 +33,7 @@ import '../widgets/studio_chat_tools.dart';
 import '../widgets/studio_element_hud.dart';
 import '../widgets/studio_elements_panel.dart';
 import '../widgets/studio_layers_sheet.dart';
+import '../widgets/studio_layouts_panel.dart';
 import '../widgets/studio_preview_demo.dart';
 import '../widgets/studio_graphics_panel.dart';
 import '../widgets/studio_settings_sheet.dart';
@@ -113,6 +117,18 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
   )..addListener(_onElements);
   final _elementLibrary = PreviewElementLibrary();
 
+  /// Layouts rehearsed locally: your saved layouts and graphics load, but
+  /// nothing saves anywhere and Apply only changes this preview.
+  late final _layouts = StudioLayoutsController(
+    current: _showNow,
+    build: _layoutGraphic,
+    send: _applyLayoutLocally,
+    backend: LayoutsBackend.rehearsal(elements: _elementLibrary.list),
+    kit: () => _brandKit?.style,
+    onCue: () => _cue.value = CueSet.empty,
+    rehearsal: true,
+  )..addListener(_onDemo);
+
   /// Your own test votes, per element, with the round they belong to (a
   /// reset clears them).
   final Map<String, ({int round, List<String> picks})> _myVotes = {};
@@ -135,6 +151,8 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
       ..onTally = _elements.setTally;
     StudioPrefs.load().then<void>((p) => _prefs = p, onError: (_) {});
     _cue.addListener(() {
+      // One cue at a time: cueing a graphic clears a cued layout.
+      if (_cue.value.isNotEmpty) _layouts.cue(null);
       if (mounted) setState(() {});
     });
     // Rehearse in the real kit; edits here stay in the preview.
@@ -172,6 +190,9 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
       ..dispose();
     _elements
       ..removeListener(_onElements)
+      ..dispose();
+    _layouts
+      ..removeListener(_onDemo)
       ..dispose();
     _stopTracks();
     super.dispose();
@@ -604,6 +625,68 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
     _takeElementCues(cues.elements);
     _cue.value = CueSet.empty;
   }
+
+  // ── Layouts ────────────────────────────────────────────────────────────────
+
+  StudioShowNow _showNow() => (
+    positions: [
+      StudioPreviewDemo.selfSlot,
+      for (final c in StudioPreviewDemo.crew) c.slotId!,
+    ],
+    graphics: _graphics,
+    elements: _elements.all,
+    overlay: _layout,
+    show: _demo.show,
+  );
+
+  LiveGraphic _layoutGraphic(StudioGraphic g, int? autoHide) =>
+      LiveGraphic.snapshot(
+        g,
+        publicUrl: GraphicsService.publicUrl,
+        now: DateTime.now(),
+        autoHideSeconds: autoHide,
+        showStartAt: _showStartAt,
+        resolveLink: _resolveLink,
+      );
+
+  Future<void> _applyLayoutLocally(StudioLayout l, ResolvedLayout r) async {
+    await _push(r.graphics);
+    _elements.applied([
+      for (final e in r.elements) e.copyWith(version: e.version + 1),
+    ]);
+    _demo.applyShow(r.show);
+    if (mounted) setState(() => _layout = r.overlay);
+  }
+
+  void _openLayouts() => showLayoutsPanel(
+    context,
+    controller: _layouts,
+    slots: _slots,
+    templates: layoutTemplates(
+      logoPath: _brandKit?.logoPath,
+      hostName: 'Your name',
+    ),
+  );
+
+  Future<void> _applyLayoutCue() async {
+    final l = _layouts.cued;
+    if (l == null) return;
+    try {
+      final r = await _layouts.apply(l);
+      if (r != null) _toast(appliedMessage(l, r));
+    } catch (e) {
+      _toast(e.toString().replaceFirst('Exception: ', ''));
+    }
+  }
+
+  Widget _layoutCueBar(StudioLayout l) => NileStudioCueBar(
+    name: 'Layout · ${l.name}',
+    targets:
+        '${l.cameras.length} ${l.cameras.length == 1 ? 'camera' : 'cameras'}',
+    busy: _layouts.busy,
+    onTake: _applyLayoutCue,
+    onClear: () => _layouts.cue(null),
+  );
 
   // ── Elements + layout ──────────────────────────────────────────────────────
 
@@ -1122,8 +1205,17 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
       // Not while a dialog (the graphics panel among them) is over the Studio.
       enabled: ModalRoute.of(context)?.isCurrent ?? true,
       onDigit: _hotkey,
-      onTake: _cue.value.isEmpty ? null : _take,
-      onClear: _cue.value.isEmpty ? null : () => _cue.value = CueSet.empty,
+      onAltDigit: _layouts.cueNumber,
+      onTake: _layouts.cued != null
+          ? _applyLayoutCue
+          : _cue.value.isEmpty
+          ? null
+          : _take,
+      onClear: _layouts.cued != null
+          ? () => _layouts.cue(null)
+          : _cue.value.isEmpty
+          ? null
+          : () => _cue.value = CueSet.empty,
       child: Stack(
         children: [
           NileStudio(
@@ -1169,7 +1261,10 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
                   live: live,
                   onChanged: (v) => _demo.isLive = v,
                 ),
-                if (_cue.value.isNotEmpty) _cueBar(),
+                if (_layouts.cued case final l?)
+                  _layoutCueBar(l)
+                else if (_cue.value.isNotEmpty)
+                  _cueBar(),
               ],
             ),
             hud: ElementHudStrip(
@@ -1237,6 +1332,12 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
                   icon: Icons.widgets_outlined,
                   active:
                       !_elements.onAir.isEmpty || _elements.angles.isNotEmpty,
+                ),
+                NileStudioIconButton(
+                  onPressed: _openLayouts,
+                  tooltip: 'Layouts',
+                  icon: Icons.dashboard_customize_outlined,
+                  active: _layouts.applied != null,
                 ),
               ],
             ),

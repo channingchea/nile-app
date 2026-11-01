@@ -171,7 +171,14 @@ enum NileEvent {
   elementVoteCast('element_vote_cast'),
   // The Studio's HUD strip: which action (by id) on which kind.
   elementHudAction('element_hud_action'),
-  elementHudHidden('element_hud_hidden');
+  elementHudHidden('element_hud_hidden'),
+
+  // Studio Layouts: camera counts, the template id and how it was saved —
+  // never a layout's name. `preview` as for elements.
+  layoutSaved('layout_saved'),
+  layoutCued('layout_cued'),
+  layoutApplied('layout_applied'),
+  layoutMissingItems('layout_missing_items');
 
   const NileEvent(this.name);
 

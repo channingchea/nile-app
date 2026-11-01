@@ -1,8 +1,10 @@
 import 'package:flutter/foundation.dart';
 
+import 'analytics.dart';
 import 'brand_kit.dart';
 import 'elements_service.dart';
 import 'graphics_service.dart';
+import 'layout_templates.dart';
 import 'layouts_service.dart';
 import 'live_elements.dart';
 import 'overlay_layout.dart';
@@ -21,6 +23,13 @@ typedef StudioShowNow = ({
   ShowControl show,
 });
 
+Future<StudioGraphic> _createGraphic(StudioGraphic g) => GraphicsService.create(
+  kind: g.kind,
+  name: g.name,
+  payload: g.payload,
+  sort: g.sort,
+);
+
 /// Where layouts and the libraries they point at come from. The real Studio
 /// uses the services; Studio Preview and tests pass their own.
 class LayoutsBackend {
@@ -32,7 +41,29 @@ class LayoutsBackend {
     this.reorder = LayoutsService.reorder,
     this.graphics = GraphicsService.list,
     this.elements = ElementsService.list,
+    this.createGraphic = _createGraphic,
   });
+
+  /// Studio Preview: starts from your saved layouts and graphics (read once)
+  /// but saves nowhere — every change lives in memory and is gone when you
+  /// leave. [elements] is the preview's own element library.
+  factory LayoutsBackend.rehearsal({
+    required Future<List<StudioElement>> Function() elements,
+    Future<List<StudioLayout>> Function() savedLayouts = LayoutsService.list,
+    Future<List<StudioGraphic>> Function() savedGraphics = GraphicsService.list,
+  }) {
+    final m = _Memory(savedLayouts, savedGraphics);
+    return LayoutsBackend(
+      list: m.list,
+      create: m.create,
+      update: m.update,
+      delete: m.delete,
+      reorder: (_) async {},
+      graphics: m.graphicsList,
+      elements: elements,
+      createGraphic: m.createGraphic,
+    );
+  }
 
   final Future<List<StudioLayout>> Function() list;
   final Future<StudioLayout> Function(StudioLayout) create;
@@ -41,6 +72,102 @@ class LayoutsBackend {
   final Future<void> Function(List<StudioLayout>) reorder;
   final Future<List<StudioGraphic>> Function() graphics;
   final Future<List<StudioElement>> Function() elements;
+
+  /// Templates save the graphics they need here.
+  final Future<StudioGraphic> Function(StudioGraphic) createGraphic;
+}
+
+/// Deep equality for JSON-shaped values (jsonb comes back with its keys
+/// reordered, so encoded strings can't be compared).
+bool _sameJson(Object? a, Object? b) {
+  if (a is Map && b is Map) {
+    return a.length == b.length &&
+        a.keys.every((k) => b.containsKey(k) && _sameJson(a[k], b[k]));
+  }
+  if (a is List && b is List) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (!_sameJson(a[i], b[i])) return false;
+    }
+    return true;
+  }
+  return a == b;
+}
+
+/// In-memory layouts and graphics, seeded once from the account.
+class _Memory {
+  _Memory(this._savedLayouts, this._savedGraphics);
+
+  final Future<List<StudioLayout>> Function() _savedLayouts;
+  final Future<List<StudioGraphic>> Function() _savedGraphics;
+  List<StudioLayout> _layouts = [];
+  final List<StudioGraphic> _graphics = [];
+  Future<void>? _seeded;
+  int _next = 0;
+
+  // Offline or signed out: start empty.
+  Future<void> _seed() => _seeded ??= () async {
+    try {
+      _layouts = [...await _savedLayouts()];
+    } catch (_) {}
+    try {
+      _graphics.addAll(await _savedGraphics());
+    } catch (_) {}
+  }();
+
+  String _id() =>
+      '00000000-0000-4000-8000-${(_next++).toString().padLeft(12, '0')}';
+
+  Future<List<StudioLayout>> list() async {
+    await _seed();
+    return [..._layouts];
+  }
+
+  StudioLayout _stamp(StudioLayout l, String id) => StudioLayout.fromPayload(
+    l.payload,
+    id: id,
+    name: l.name.trim(),
+    template: l.template,
+    sort: l.sort,
+    updatedAt: DateTime.now().toUtc(),
+  );
+
+  Future<StudioLayout> create(StudioLayout l) async {
+    await _seed();
+    final error = l.error;
+    if (error != null) throw ArgumentError(error);
+    final saved = _stamp(l, _id());
+    _layouts.add(saved);
+    return saved;
+  }
+
+  Future<StudioLayout> update(StudioLayout l) async {
+    final error = l.error;
+    if (error != null) throw ArgumentError(error);
+    final saved = _stamp(l, l.id);
+    _layouts = [for (final x in _layouts) x.id == l.id ? saved : x];
+    return saved;
+  }
+
+  Future<void> delete(StudioLayout l) async =>
+      _layouts.removeWhere((x) => x.id == l.id);
+
+  Future<List<StudioGraphic>> graphicsList() async {
+    await _seed();
+    return [..._graphics];
+  }
+
+  Future<StudioGraphic> createGraphic(StudioGraphic g) async {
+    final saved = StudioGraphic(
+      id: 'preview-graphic-${_next++}',
+      kind: g.kind,
+      name: g.name,
+      payload: g.payload,
+      sort: g.sort,
+    );
+    _graphics.add(saved);
+    return saved;
+  }
 }
 
 /// The Studio's side of Layouts (docs/plans/studio-layouts.md, phase 4): the
@@ -54,7 +181,11 @@ class StudioLayoutsController extends ChangeNotifier {
     this.backend = const LayoutsBackend(),
     this.kit,
     this.onCue,
+    this.rehearsal = false,
   });
+
+  /// Studio Preview: analytics marks what it reports as a rehearsal.
+  final bool rehearsal;
 
   final StudioShowNow Function() current;
   final LiveGraphic Function(StudioGraphic g, int? autoHide) build;
@@ -131,7 +262,10 @@ class StudioLayoutsController extends ChangeNotifier {
     final next = l == null || l.id == _cued?.id ? null : l;
     if (next?.id == _cued?.id) return;
     _cued = next;
-    if (next != null) onCue?.call();
+    if (next != null) {
+      onCue?.call();
+      _capture(NileEvent.layoutCued, next);
+    }
     notifyListeners();
   }
 
@@ -212,6 +346,15 @@ class StudioLayoutsController extends ChangeNotifier {
     try {
       final r = resolve(layout);
       await send(layout, r);
+      _capture(NileEvent.layoutApplied, layout, {
+        'covered': r.covered.length,
+        'elements_changed': r.elements.length,
+      });
+      if (r.missingCount > 0) {
+        _capture(NileEvent.layoutMissingItems, layout, {
+          'missing': r.missingCount,
+        });
+      }
       _applied = (id: layout.id, updatedAt: layout.updatedAt);
       if (_cued?.id == layout.id) _cued = null;
       return r;
@@ -234,6 +377,7 @@ class StudioLayoutsController extends ChangeNotifier {
       snap.layout.copyWith(sort: _layouts.length),
     );
     _layouts = [..._layouts, saved];
+    _capture(NileEvent.layoutSaved, saved, {'how': 'current_look'});
     notifyListeners();
     return (layout: saved, leftOut: snap.leftOut);
   }
@@ -254,6 +398,68 @@ class StudioLayoutsController extends ChangeNotifier {
     );
     return snap.leftOut;
   }
+
+  /// Save what the editor made: a new layout (no id yet) or an edit.
+  Future<StudioLayout> save(StudioLayout l) async {
+    if (l.id.isNotEmpty) {
+      await _replace(l);
+      final saved = _layouts.firstWhere((x) => x.id == l.id);
+      _capture(NileEvent.layoutSaved, saved, {'how': 'editor'});
+      return saved;
+    }
+    final saved = await backend.create(l.copyWith(sort: _layouts.length));
+    _layouts = [..._layouts, saved];
+    _capture(NileEvent.layoutSaved, saved, {'how': 'editor'});
+    notifyListeners();
+    return saved;
+  }
+
+  /// "New from template": the graphics it needs go into the library (an
+  /// identical one already there is reused), then a layout sized to this
+  /// show's cameras.
+  Future<StudioLayout> newFromTemplate(LayoutTemplate t) async {
+    await load();
+    final ids = <String, String>{};
+    for (final draft in t.graphics) {
+      final same = _graphics.values.where(
+        (g) => g.kind == draft.kind && _sameJson(g.payload, draft.payload),
+      );
+      if (same.isNotEmpty) {
+        ids[draft.id] = same.first.id;
+        continue;
+      }
+      final saved = await backend.createGraphic(
+        StudioGraphic(
+          id: '',
+          kind: draft.kind,
+          name: draft.name,
+          payload: draft.payload,
+          sort: _graphics.length,
+        ),
+      );
+      _graphics = {..._graphics, saved.id: saved};
+      ids[draft.id] = saved.id;
+    }
+    final cameras = current().positions.length;
+    final layout = t.build((k) => ids[k]!, cameras < 1 ? 1 : cameras);
+    final saved = await backend.create(layout.copyWith(sort: _layouts.length));
+    _layouts = [..._layouts, saved];
+    _capture(NileEvent.layoutSaved, saved, {'how': 'template'});
+    notifyListeners();
+    return saved;
+  }
+
+  /// PostHog: counts and the template id only — never a name.
+  void _capture(
+    NileEvent event,
+    StudioLayout l, [
+    Map<String, Object> extra = const {},
+  ]) => NileAnalytics.capture(event, {
+    'cameras': l.cameras.length,
+    'template': ?l.template,
+    'preview': rehearsal,
+    ...extra,
+  });
 
   Future<void> rename(StudioLayout l, String name) =>
       _replace(l.copyWith(name: name));
