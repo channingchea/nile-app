@@ -403,7 +403,7 @@ class _TargetsDialogState extends State<_TargetsDialog> {
 /// hotkey.
 ///
 /// Cue before air: picking cameras for a graphic that is off adds it to [cue]
-/// (only the Studio sees it) — several can wait at once; Take — the footer
+/// (only the Studio sees it) — several can wait at once; Apply — the footer
 /// button or Enter — puts them all on air together. Re-targeting or removing a
 /// graphic already on air is immediate.
 ///
@@ -489,7 +489,7 @@ class _PushPanel extends StatefulWidget {
   final ValueChanged<BrandKit?>? onBrandKit;
   final bool brandKitDemo;
 
-  /// Puts cued live elements on air with the graphics at Take. Null = they
+  /// Puts cued live elements on air with the graphics at Apply. Null = they
   /// stay cued.
   final Future<bool> Function(List<ElementCue> cues)? takeElements;
 
@@ -606,7 +606,7 @@ class _PushPanelState extends State<_PushPanel> {
     }
     widget.onTargetsUsed?.call(g.id, choice.targets);
     final next = _cueOf(g, choice.targets, choice.autoHideSeconds);
-    // Off → add it to the cue; Take puts the lot on air. Already on air →
+    // Off → add it to the cue; Apply puts the lot on air. Already on air →
     // change it now.
     if (current.isNone) {
       widget.cue.value = widget.cue.value.adding(next);
@@ -717,8 +717,8 @@ class _PushPanelState extends State<_PushPanel> {
               padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s24),
               child: Text(
                 'Pick cameras to cue graphics — as many as you like — then '
-                'Take puts them on air together. Keys 1–9 cue your first '
-                'nine; Enter takes.',
+                'Apply puts them on air together. Keys 1–9 cue your first '
+                'nine; Enter applies.',
                 style: NileTextStyles.bodySm().copyWith(
                   color: NileColors.txtSecondary,
                 ),
@@ -811,7 +811,7 @@ class _PushPanelState extends State<_PushPanel> {
                         backgroundColor: NileColors.volt,
                         foregroundColor: NileColors.onVolt,
                       ),
-                      child: Text(cues.length == 1 ? 'Take' : 'Take all'),
+                      child: Text(cues.length == 1 ? 'Apply' : 'Apply all'),
                     ),
                   ],
                 ),

@@ -866,9 +866,9 @@ class GraphicsState {
   int get hashCode => jsonEncode(toJson()).hashCode;
 }
 
-/// A graphic waiting in the Studio for "Take" (cue before air). Lives only in
+/// A graphic waiting in the Studio for "Apply" (cue before air). Lives only in
 /// the Studio — nothing is sent until [take]. [build] snapshots the graphic at
-/// the moment it is called, so a countdown or auto-hide starts at Take, not
+/// the moment it is called, so a countdown or auto-hide starts at Apply, not
 /// when it was cued.
 @immutable
 class GraphicCue {
@@ -920,18 +920,18 @@ class GraphicCue {
       current.withTargets(build(now).copyWith(clearHide: true), targets);
 }
 
-/// Everything waiting for Take — several graphics (and live elements) can be
+/// Everything waiting for Apply — several graphics (and live elements) can be
 /// cued at once and go on air together. Cueing a graphic again replaces its
 /// entry; cueing one that would take another's place on screen (same spot,
 /// overlapping cameras) drops the older one, so the monitor never previews
-/// what Take won't send.
+/// what Apply won't send.
 @immutable
 class CueSet {
   const CueSet([this.items = const [], this.elements = const []]);
 
   static const empty = CueSet();
 
-  /// In the order they were cued; Take applies them in this order.
+  /// In the order they were cued; Apply applies them in this order.
   final List<GraphicCue> items;
 
   /// Live elements cued alongside (studio live elements, phase 3).

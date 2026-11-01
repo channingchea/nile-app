@@ -43,7 +43,7 @@ import '../widgets/studio_chat_tools.dart';
 import '../widgets/studio_element_hud.dart';
 import '../widgets/studio_elements_panel.dart';
 import '../widgets/studio_graphics_panel.dart';
-import '../widgets/studio_layout_sheet.dart';
+import '../widgets/studio_layers_sheet.dart';
 import '../widgets/studio_settings_sheet.dart';
 import '../widgets/viewer_preview_overlay.dart';
 import '../router.dart';
@@ -1325,7 +1325,7 @@ class _CameraScreenState extends State<CameraScreen> {
   final Map<String, GraphicTargets> _lastTargets = {};
   List<StudioGraphic> _graphicsLibrary = const [];
 
-  /// Studio: the graphic waiting for Take (cue before air), the host's brand
+  /// Studio: the graphic waiting for Apply (cue before air), the host's brand
   /// kit (attached to every push), the show's sponsor as a built-in graphic,
   /// and the host's username for "Your profile" QR codes.
   final _cue = ValueNotifier<CueSet>(CueSet.empty);
@@ -2698,7 +2698,7 @@ class _CameraScreenState extends State<CameraScreen> {
     initialSelected: select,
   );
 
-  /// A HUD card's Take: just that element; the rest of the cue waits.
+  /// A HUD card's Apply: just that element; the rest of the cue waits.
   Future<void> _takeOneElement(ElementCue c) async {
     final ok = await _elementsCtl.setTargets(c.id, c.targets);
     if (!mounted) return;
@@ -2717,7 +2717,7 @@ class _CameraScreenState extends State<CameraScreen> {
     );
   }
 
-  /// Cued elements go on air (Take).
+  /// Cued elements go on air (Apply).
   Future<bool> _takeElementCues(List<ElementCue> cues) async {
     final results = await Future.wait([
       for (final c in cues) _elementsCtl.setTargets(c.id, c.targets),
@@ -2758,12 +2758,12 @@ class _CameraScreenState extends State<CameraScreen> {
     );
   }
 
-  /// A tile's "Layout…": spots and layer order for that camera.
-  Future<void> _openLayout(NileStudioSource s) async {
+  /// A tile's "Layers…": spots and layer order for that camera.
+  Future<void> _openLayers(NileStudioSource s) async {
     final eventId = _eventId;
     final slot = s.slotId;
     if (eventId == null || slot == null) return;
-    final choice = await showLayoutSheet(
+    final choice = await showLayersSheet(
       context,
       cameraLabel: s.label,
       graphics: _graphics.withBrand(_brandKit?.style).forSlot(slot),
@@ -2841,7 +2841,7 @@ class _CameraScreenState extends State<CameraScreen> {
     }
   }
 
-  /// Take: everything cued goes on air together, countdowns and auto-hides
+  /// Apply: everything cued goes on air together, countdowns and auto-hides
   /// starting now.
   Future<void> _takeCue() async {
     final cues = _cue.value;
@@ -2944,7 +2944,7 @@ class _CameraScreenState extends State<CameraScreen> {
         seconds: seconds,
       );
 
-  /// A chat line, cued for Take; its timer starts when it goes on air.
+  /// A chat line, cued for Apply; its timer starts when it goes on air.
   GraphicCue _chatCue(ChatMessage m, GraphicTargets targets, int seconds) =>
       GraphicCue(
         id: _chatGraphic(m, seconds).id,
@@ -3008,7 +3008,7 @@ class _CameraScreenState extends State<CameraScreen> {
           onNudge: (s, text) => _sendNudge(s.identity, text),
           onCommand: (s, c) => _sendCommand(s.identity, c),
           onReorder: _reorderSources,
-          onLayout: _openLayout,
+          onLayers: _openLayers,
         );
 
   Future<void> _setShow({

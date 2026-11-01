@@ -274,7 +274,7 @@ class StudioElementsController extends ChangeNotifier {
   Future<bool> setAngle(String id, bool on) =>
       update(id, (e) => e.copyWith(angle: on), undoable: false);
 
-  /// Put [id] on [targets] (none = off air) — Take, or a retarget.
+  /// Put [id] on [targets] (none = off air) — Apply, or a retarget.
   Future<bool> setTargets(String id, GraphicTargets targets) =>
       update(id, (e) => e.copyWith(targets: targets), undoable: false);
 

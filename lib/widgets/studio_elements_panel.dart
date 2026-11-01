@@ -111,7 +111,7 @@ class PreviewElementLibrary extends MemoryElementLibrary {
 
 /// The Studio toolbar's Elements panel (studio live elements, phase 3): every
 /// saved element with a "Cameras" button and, for the selected one, its live
-/// controls. Picking cameras for an element that is off air cues it — Take
+/// controls. Picking cameras for an element that is off air cues it — Apply
 /// (here, Enter, or the Studio's cue bar) puts it on air with any cued
 /// graphics. Live controls and re-targeting act at once.
 ///
@@ -366,7 +366,7 @@ class _ElementsPanelState extends State<ElementsPanel> {
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s24),
             child: Text(
-              'Pick cameras to cue an element; Take puts it on air with any '
+              'Pick cameras to cue an element; Apply puts it on air with any '
               'cued graphics. Live controls change it for every viewer at '
               'once. Keys work on the selected element while this panel is '
               'open.',
@@ -446,7 +446,7 @@ class _ElementsPanelState extends State<ElementsPanel> {
                       backgroundColor: NileColors.volt,
                       foregroundColor: NileColors.onVolt,
                     ),
-                    child: Text(cues.length == 1 ? 'Take' : 'Take all'),
+                    child: Text(cues.length == 1 ? 'Apply' : 'Apply all'),
                   ),
                 ],
               ),

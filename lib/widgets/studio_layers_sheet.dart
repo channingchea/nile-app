@@ -7,30 +7,30 @@ import '../theme.dart';
 import 'nile_graphics_layer.dart';
 import 'nile_studio.dart' show graphicKindIcon;
 
-/// What the Layout sheet came back with.
-typedef LayoutChoice = ({List<LayerEntry> layers, bool copyToAll});
+/// What the Layers sheet came back with.
+typedef LayersChoice = ({List<LayerEntry> layers, bool copyToAll});
 
-/// A camera tile's "Layout…" (studio live elements, phase 2): a small screen
+/// A camera tile's "Layers…" (studio live elements, phase 2): a small screen
 /// preview, and every graphic and element on that camera as a layer list —
 /// drag to reorder (top = front), pick a spot, eye to hide. "Copy to all"
-/// gives every camera the same layout. The Studio warns when something covers
+/// gives every camera the same layers. The Studio warns when something covers
 /// something else but never blocks it.
 ///
 /// Returns null when cancelled.
-Future<LayoutChoice?> showLayoutSheet(
+Future<LayersChoice?> showLayersSheet(
   BuildContext context, {
   required String cameraLabel,
   required List<LiveGraphic> graphics,
   List<LiveElement> elements = const [],
   required List<LayerEntry> layers,
-}) => showDialog<LayoutChoice>(
+}) => showDialog<LayersChoice>(
   context: context,
   builder: (_) => Dialog(
     backgroundColor: NileColors.bgSurface,
     insetPadding: const EdgeInsets.all(NileSpacing.s24),
     child: ConstrainedBox(
       constraints: const BoxConstraints(maxWidth: 560, maxHeight: 720),
-      child: _LayoutSheet(
+      child: _LayersSheet(
         cameraLabel: cameraLabel,
         graphics: graphics,
         elements: elements,
@@ -58,14 +58,18 @@ List<LayerEntry> initialLayers({
   final shown = {for (final p in placed) p.id};
   return [
     for (final p in placed)
-      LayerEntry(p.id, spot: byId[p.id]?.spot, hidden: byId[p.id]?.hidden ?? false),
+      LayerEntry(
+        p.id,
+        spot: byId[p.id]?.spot,
+        hidden: byId[p.id]?.hidden ?? false,
+      ),
     for (final l in layers)
       if (!shown.contains(l.id)) l,
   ];
 }
 
-class _LayoutSheet extends StatefulWidget {
-  const _LayoutSheet({
+class _LayersSheet extends StatefulWidget {
+  const _LayersSheet({
     required this.cameraLabel,
     required this.graphics,
     required this.elements,
@@ -78,10 +82,10 @@ class _LayoutSheet extends StatefulWidget {
   final List<LayerEntry> layers;
 
   @override
-  State<_LayoutSheet> createState() => _LayoutSheetState();
+  State<_LayersSheet> createState() => _LayersSheetState();
 }
 
-class _LayoutSheetState extends State<_LayoutSheet> {
+class _LayersSheetState extends State<_LayersSheet> {
   late List<LayerEntry> _draft = initialLayers(
     graphics: widget.graphics,
     elements: widget.elements,
@@ -97,8 +101,10 @@ class _LayoutSheetState extends State<_LayoutSheet> {
       p.id: p,
   };
 
-  List<LayerEntry> get _visibleRows =>
-      [for (final l in _draft) if (_items.containsKey(l.id)) l];
+  List<LayerEntry> get _visibleRows => [
+    for (final l in _draft)
+      if (_items.containsKey(l.id)) l,
+  ];
 
   void _set(LayerEntry next) => setState(
     () => _draft = [for (final l in _draft) l.id == next.id ? next : l],
@@ -108,7 +114,10 @@ class _LayoutSheetState extends State<_LayoutSheet> {
     final rows = _visibleRows;
     final moved = rows.removeAt(from);
     rows.insert(to, moved);
-    final rest = [for (final l in _draft) if (!_items.containsKey(l.id)) l];
+    final rest = [
+      for (final l in _draft)
+        if (!_items.containsKey(l.id)) l,
+    ];
     setState(() => _draft = [...rows, ...rest]);
   }
 
@@ -159,7 +168,7 @@ class _LayoutSheetState extends State<_LayoutSheet> {
             children: [
               Expanded(
                 child: Text(
-                  'Layout · ${widget.cameraLabel}',
+                  'Layers · ${widget.cameraLabel}',
                   style: NileTextStyles.headingMd(),
                 ),
               ),
@@ -249,7 +258,7 @@ class _LayoutSheetState extends State<_LayoutSheet> {
           child: Row(
             children: [
               Tooltip(
-                message: 'Every camera gets this layout',
+                message: 'Every camera gets these layers',
                 child: TextButton.icon(
                   onPressed: () =>
                       Navigator.pop(context, (layers: _draft, copyToAll: true)),
@@ -308,7 +317,9 @@ class _LayoutSheetState extends State<_LayoutSheet> {
           const SizedBox(width: NileSpacing.s8),
           Icon(
             g != null ? graphicKindIcon(g.kind) : Icons.widgets_outlined,
-            color: entry.hidden ? NileColors.txtTertiary : NileColors.txtSecondary,
+            color: entry.hidden
+                ? NileColors.txtTertiary
+                : NileColors.txtSecondary,
           ),
         ],
       ),
@@ -351,7 +362,9 @@ class _LayoutSheetState extends State<_LayoutSheet> {
                   ? Icons.visibility_off_outlined
                   : Icons.visibility_outlined,
             ),
-            color: entry.hidden ? NileColors.txtTertiary : NileColors.txtSecondary,
+            color: entry.hidden
+                ? NileColors.txtTertiary
+                : NileColors.txtSecondary,
             onPressed: () => _set(entry.copyWith(hidden: !entry.hidden)),
           ),
         ],

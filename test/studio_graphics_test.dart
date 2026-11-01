@@ -310,12 +310,12 @@ void main() {
       // All cameras is the starting point; untick Camera 2.
       await t.tap(find.widgetWithText(CheckboxListTile, 'Camera 2'));
       await t.pump();
-      // Cue before air: nothing goes out until Take.
+      // Cue before air: nothing goes out until Apply.
       await t.tap(find.text('Cue'));
       await t.pumpAndSettle();
       expect(pushed, isEmpty);
       expect(find.text('CUED'), findsWidgets);
-      await t.tap(find.text('Take'));
+      await t.tap(find.text('Apply'));
       await t.pumpAndSettle();
       final brb = pushed.single.all.single;
       expect(brb.id, 'preset:brb');
@@ -357,7 +357,7 @@ void main() {
       await t.pumpAndSettle();
       await t.tap(find.text('Cue'));
       await t.pumpAndSettle();
-      await t.tap(find.text('Take'));
+      await t.tap(find.text('Apply'));
       await t.pumpAndSettle();
       expect(pushed.last.all.single.id, 'preset:thanks');
       await t.tap(find.text('Clear all'));
@@ -368,7 +368,7 @@ void main() {
       expect(pushed.last.isEmpty, isTrue);
     });
 
-    testWidgets('several graphics cue together and one Take sends them all', (
+    testWidgets('several graphics cue together and one Apply sends them all', (
       t,
     ) async {
       // Room for the sponsor section above the presets.
@@ -400,7 +400,7 @@ void main() {
       await t.pumpAndSettle();
       expect(pushed, isEmpty);
       expect(find.textContaining('Cued (2)'), findsOneWidget);
-      await t.tap(find.text('Take all'));
+      await t.tap(find.text('Apply all'));
       await t.pumpAndSettle();
       expect(pushed.single.all.map((g) => g.id), ['preset:brb', 'sponsor:c1']);
       expect(find.textContaining('Cued'), findsNothing);
@@ -411,7 +411,7 @@ void main() {
       await openCameras(t, 'Be right back');
       await t.tap(find.text('Cue'));
       await t.pumpAndSettle();
-      await t.tap(find.text('Take'));
+      await t.tap(find.text('Apply'));
       await t.pumpAndSettle();
       expect(
         find.text('Couldn’t update the show’s graphics. Try again.'),

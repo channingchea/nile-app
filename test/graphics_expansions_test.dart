@@ -212,7 +212,7 @@ void main() {
       },
     );
 
-    test('countdown and auto-hide start at Take, not at cue', () {
+    test('countdown and auto-hide start at Apply, not at cue', () {
       final cue = GraphicCue.of(
         slate,
         targets: const GraphicTargets.all(),
@@ -245,7 +245,7 @@ void main() {
       payload: {'title': 'Sam'},
     );
 
-    test('several cues wait together and go on air in one Take', () {
+    test('several cues wait together and go on air in one Apply', () {
       final cues = CueSet.empty
           .adding(cueOf(slate, const GraphicTargets.all()))
           .adding(cueOf(lt, const GraphicTargets.only({'s1'})));
@@ -375,7 +375,7 @@ void main() {
         ),
       );
       expect(find.text('CUED'), findsOneWidget);
-      await t.tap(find.text('Take (Enter)'));
+      await t.tap(find.text('Apply (Enter)'));
       expect(took, 1);
     });
   });

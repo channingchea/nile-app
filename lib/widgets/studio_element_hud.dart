@@ -30,7 +30,7 @@ class ElementHudStrip extends StatelessWidget {
   /// "All cameras", "Cam 1, Cam 2" for a cued element's targets.
   final String Function(GraphicTargets targets) cameraSummary;
 
-  /// Take just this cued element.
+  /// Apply just this cued element.
   final Future<void> Function(ElementCue cue) onTakeOne;
 
   /// The Elements panel, opened on this element.
@@ -219,7 +219,7 @@ class HudCard extends StatelessWidget {
   }
 }
 
-/// A cued element: dimmed, with Take for just this one.
+/// A cued element: dimmed, with Apply for just this one.
 class HudCuedCard extends StatelessWidget {
   const HudCuedCard({
     super.key,
@@ -252,7 +252,11 @@ class HudCuedCard extends StatelessWidget {
     ],
     body: HudItemsView(
       items: [
-        const HudButton(action: 'take', label: 'Take', style: HudStyle.primary),
+        const HudButton(
+          action: 'take',
+          label: 'Apply',
+          style: HudStyle.primary,
+        ),
         const HudButton(
           action: 'remove',
           label: 'Remove from cue',

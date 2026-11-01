@@ -152,7 +152,7 @@ class NileStudioSourceActions {
     this.onNudge,
     this.onCommand,
     this.onReorder,
-    this.onLayout,
+    this.onLayers,
   });
 
   final ValueChanged<NileStudioSource>? onToggleOffAir;
@@ -178,8 +178,8 @@ class NileStudioSourceActions {
   /// Tiles dragged into a new order: the slot ids, top to bottom.
   final ValueChanged<List<String>>? onReorder;
 
-  /// "Layout…": where this camera's graphics and elements sit.
-  final ValueChanged<NileStudioSource>? onLayout;
+  /// "Layers…": where this camera's graphics and elements sit.
+  final ValueChanged<NileStudioSource>? onLayers;
 }
 
 /// Signal strength for the top row. Mapped from LiveKit's `ConnectionQuality`
@@ -854,7 +854,7 @@ enum _TileAction {
   setDefault,
   sendEveryone,
   offAir,
-  layout,
+  layers,
   nudge,
   controls,
   remove,
@@ -923,8 +923,8 @@ class _SourceTile extends StatelessWidget {
           s.isOffAir ? 'Put back on air' : 'Take off air',
         ),
       // An element angle draws no camera graphics, so nothing to lay out.
-      if (s.isAngle && s.element == null && actions.onLayout != null)
-        item(_TileAction.layout, 'Layout…'),
+      if (s.isAngle && s.element == null && actions.onLayers != null)
+        item(_TileAction.layers, 'Layers…'),
     ];
     final operator = [
       if (_talkable && actions.onNudge != null)
@@ -958,8 +958,8 @@ class _SourceTile extends StatelessWidget {
         actions.onSendEveryone?.call(s);
       case _TileAction.offAir:
         actions.onToggleOffAir?.call(s);
-      case _TileAction.layout:
-        actions.onLayout?.call(s);
+      case _TileAction.layers:
+        actions.onLayers?.call(s);
       case _TileAction.nudge:
         final text = await showNudgeDialog(context, s.label);
         if (text != null) actions.onNudge?.call(s, text);
@@ -2981,7 +2981,7 @@ class _ToolbarPill extends StatelessWidget {
 
 // ── Cue before air ───────────────────────────────────────────────────────────
 
-/// "CUED" — a graphic waiting for Take, seen only in the Studio.
+/// "CUED" — a graphic waiting for Apply, seen only in the Studio.
 class NileCuedChip extends StatelessWidget {
   const NileCuedChip({super.key});
 
@@ -3006,7 +3006,7 @@ class NileCuedChip extends StatelessWidget {
 }
 
 /// The Studio's cue strip (under the stats row): what is cued — one graphic
-/// or several — and Take / Clear. Enter and Esc do the same.
+/// or several — and Apply / Clear. Enter and Esc do the same.
 class NileStudioCueBar extends StatelessWidget {
   const NileStudioCueBar({
     super.key,
@@ -3024,7 +3024,7 @@ class NileStudioCueBar extends StatelessWidget {
   /// One graphic: "All cameras", "Cam 1, Cam 3"…; several: their names.
   final String targets;
 
-  /// How many are cued — they all go on air with one Take.
+  /// How many are cued — they all go on air with one Apply.
   final int count;
   final VoidCallback onTake;
   final VoidCallback onClear;
@@ -3070,7 +3070,7 @@ class NileStudioCueBar extends StatelessWidget {
             foregroundColor: NileColors.onVolt,
           ),
           icon: const Icon(Icons.play_arrow, size: 18),
-          label: Text(count == 1 ? 'Take (Enter)' : 'Take all (Enter)'),
+          label: Text(count == 1 ? 'Apply (Enter)' : 'Apply all (Enter)'),
         ),
       ],
     ),

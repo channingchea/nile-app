@@ -145,7 +145,7 @@ void main() {
               showChatColumn: false,
               sourceActions: NileStudioSourceActions(
                 onToggleOffAir: (_) {},
-                onLayout: (_) {},
+                onLayers: (_) {},
               ),
             ),
           ),
@@ -154,13 +154,13 @@ void main() {
       final menus = find.byTooltip('Source options');
       await t.tap(menus.at(0));
       await t.pumpAndSettle();
-      expect(find.text('Layout…'), findsOneWidget);
+      expect(find.text('Layers…'), findsOneWidget);
       await t.tapAt(Offset.zero);
       await t.pumpAndSettle();
       await t.tap(menus.at(1));
       await t.pumpAndSettle();
       expect(find.text('Take off air'), findsOneWidget);
-      expect(find.text('Layout…'), findsNothing);
+      expect(find.text('Layers…'), findsNothing);
     });
   });
 
@@ -175,7 +175,7 @@ void main() {
         final ctl = _local();
         addTearDown(ctl.dispose);
         await ctl.setTargets('el-1', GraphicTargets.only({'s1', 's2'}));
-        // A retarget is not a second Take.
+        // A retarget is not a second Apply.
         await ctl.setTargets('el-1', const GraphicTargets.all());
         await ctl.setAngle('el-1', true);
         await ctl.update(

@@ -293,7 +293,7 @@ void main() {
       expect((back.targets.all, back.angle), (true, true));
     });
 
-    testWidgets('a cued element gets a dimmed card with Take', (t) async {
+    testWidgets('a cued element gets a dimmed card with Apply', (t) async {
       cue.value = cue.value.addingElement(
         const ElementCue(
           id: 'p1',
@@ -304,7 +304,7 @@ void main() {
       await t.pumpWidget(app());
       expect(find.byType(HudCuedCard), findsOneWidget);
       expect(find.text('Goes on All cameras'), findsOneWidget);
-      await t.tap(find.text('Take'));
+      await t.tap(find.text('Apply'));
       expect(taken, ['p1']);
 
       await t.tap(find.text('Remove from cue'));

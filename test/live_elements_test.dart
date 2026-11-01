@@ -20,7 +20,7 @@ import 'package:nile_app/widgets/elements/element_kinds.dart';
 import 'package:nile_app/widgets/nile_graphics_layer.dart';
 import 'package:nile_app/widgets/studio_elements_panel.dart';
 import 'package:nile_app/widgets/studio_graphics_panel.dart' show StudioSlotRef;
-import 'package:nile_app/widgets/studio_layout_sheet.dart';
+import 'package:nile_app/widgets/studio_layers_sheet.dart';
 
 const _counter = StudioElement(
   id: 'el-1',
@@ -379,7 +379,7 @@ void main() {
       expect(c.live('el-1')!.state['value'], 1);
     });
 
-    test('Take puts it on air; the monitor previews a cued one', () async {
+    test('Apply puts it on air; the monitor previews a cued one', () async {
       final cues = CueSet.empty.addingElement(
         const ElementCue(
           id: 'el-1',
@@ -522,12 +522,12 @@ void main() {
     });
 
     testWidgets('saves spots, order and copy to all', (t) async {
-      LayoutChoice? got;
+      LayersChoice? got;
       await t.pumpWidget(
         MaterialApp(
           home: Builder(
             builder: (context) => TextButton(
-              onPressed: () async => got = await showLayoutSheet(
+              onPressed: () async => got = await showLayersSheet(
                 context,
                 cameraLabel: 'Camera 1',
                 graphics: const [_lt, _logo],
@@ -540,7 +540,7 @@ void main() {
       );
       await t.tap(find.text('open'));
       await t.pumpAndSettle();
-      expect(find.text('Layout · Camera 1'), findsOneWidget);
+      expect(find.text('Layers · Camera 1'), findsOneWidget);
       await t.tap(find.byTooltip('Hide').first);
       await t.pump();
       await t.tap(find.text('Copy to all'));

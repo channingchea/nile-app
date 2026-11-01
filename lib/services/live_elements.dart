@@ -794,8 +794,8 @@ class ElementOps {
   int get hashCode => Object.hash(timer, timerSec, reset);
 }
 
-/// An element waiting in the Studio for Take, next to cued graphics. Only
-/// where it goes is cued; its values are whatever they are at Take.
+/// An element waiting in the Studio for Apply, next to cued graphics. Only
+/// where it goes is cued; its values are whatever they are at Apply.
 @immutable
 class ElementCue {
   const ElementCue({

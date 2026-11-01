@@ -29,7 +29,7 @@ import '../widgets/screen_share_picker.dart';
 import '../widgets/studio_chat_tools.dart';
 import '../widgets/studio_element_hud.dart';
 import '../widgets/studio_elements_panel.dart';
-import '../widgets/studio_layout_sheet.dart';
+import '../widgets/studio_layers_sheet.dart';
 import '../widgets/studio_preview_demo.dart';
 import '../widgets/studio_graphics_panel.dart';
 import '../widgets/studio_settings_sheet.dart';
@@ -117,7 +117,7 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
   /// reset clears them).
   final Map<String, ({int round, List<String> picks})> _myVotes = {};
 
-  /// Spots and layer order per camera (each tile's Layout sheet).
+  /// Spots and layer order per camera (each tile's Layers sheet).
   OverlayLayout _layout = OverlayLayout.empty;
 
   /// Fiction for "count down to show start": ten minutes after you start.
@@ -625,7 +625,7 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
     initialSelected: select,
   );
 
-  /// A HUD card's Take: just that element; the rest of the cue waits.
+  /// A HUD card's Apply: just that element; the rest of the cue waits.
   Future<void> _takeOne(ElementCue c) async {
     await _elements.setTargets(c.id, c.targets);
     _cue.value = _cue.value.without(c.id);
@@ -683,11 +683,11 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
     );
   }
 
-  /// A camera tile's "Layout…": spots and layer order, kept locally.
-  Future<void> _openLayout(NileStudioSource s) async {
+  /// A camera tile's "Layers…": spots and layer order, kept locally.
+  Future<void> _openLayers(NileStudioSource s) async {
     final slot = s.slotId;
     if (slot == null || s.element != null) return;
-    final choice = await showLayoutSheet(
+    final choice = await showLayersSheet(
       context,
       cameraLabel: s.label,
       graphics: _graphics.forSlot(slot),
@@ -822,7 +822,7 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
       );
     },
     onReorder: _demo.reorder,
-    onLayout: _openLayout,
+    onLayers: _openLayers,
   );
 
   Future<void> _sendEveryone(NileStudioSource s) async {
