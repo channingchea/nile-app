@@ -24,6 +24,8 @@ import '../services/live_elements.dart';
 import '../services/overlay_layout.dart';
 import '../services/server_clock.dart';
 import '../services/studio_elements_controller.dart';
+import '../services/studio_layouts.dart';
+import '../services/studio_layouts_controller.dart';
 import '../services/realsync.dart';
 import '../services/report_service.dart';
 import '../services/screen_capture_permission.dart';
@@ -44,6 +46,7 @@ import '../widgets/studio_element_hud.dart';
 import '../widgets/studio_elements_panel.dart';
 import '../widgets/studio_graphics_panel.dart';
 import '../widgets/studio_layers_sheet.dart';
+import '../widgets/studio_layouts_panel.dart';
 import '../widgets/studio_settings_sheet.dart';
 import '../widgets/viewer_preview_overlay.dart';
 import '../router.dart';
@@ -87,6 +90,8 @@ class _CameraScreenState extends State<CameraScreen> {
     ShakeDetector.instance.pause();
     // The cue bar, monitor preview and Enter/Esc follow the cue.
     _cue.addListener(() {
+      // One cue at a time: cueing a graphic clears a cued layout.
+      if (_cue.value.isNotEmpty) _layouts.cue(null);
       if (mounted) setState(() {});
     });
     if (widget.initialEventId != null) {
@@ -1355,6 +1360,15 @@ class _CameraScreenState extends State<CameraScreen> {
     onError: (msg) => _toast(msg),
   )..addListener(_onElementsChanged);
 
+  /// Studio: saved layouts — the cued one and the one on air.
+  late final StudioLayoutsController _layouts = StudioLayoutsController(
+    current: _showNow,
+    build: _layoutGraphic,
+    send: _sendLayout,
+    kit: () => _brandKit?.style,
+    onCue: () => _cue.value = CueSet.empty,
+  )..addListener(_onLayoutsChanged);
+
   /// Studio, RealSync measuring: how old each camera's picture is here. The
   /// monitor's one goes with every push so viewers further behind hold the
   /// change back to match.
@@ -1637,6 +1651,7 @@ class _CameraScreenState extends State<CameraScreen> {
   void dispose() {
     _cue.dispose();
     _elementsCtl.dispose();
+    _layouts.dispose();
     ShakeDetector.instance.resume();
     // A drop or back-swipe never ends a live show anymore — the show stays
     // 'live' and viewers' resilience logic treats it as reconnect-and-wait.
@@ -2554,6 +2569,7 @@ class _CameraScreenState extends State<CameraScreen> {
       });
       if (elements.hasClocks) unawaited(ServerClock.ensure());
     }
+    _layouts.setApplied(layoutAppliedFromRoomMetadata(raw));
     final show = ShowControl.fromRoomMetadata(raw);
     if (show != _show && mounted) {
       final reordered = !listEquals(show.slotOrder, _show.slotOrder);
@@ -2786,6 +2802,89 @@ class _CameraScreenState extends State<CameraScreen> {
     }
   }
 
+  // ── Layouts (docs/plans/studio-layouts.md) ─────────────────────────────────
+
+  void _onLayoutsChanged() {
+    if (mounted) setState(() {});
+  }
+
+  /// The show as this Studio holds it — what layouts save and apply against.
+  /// Elements: this Studio's own (newest), plus any in the room it hasn't
+  /// loaded yet.
+  StudioShowNow _showNow() {
+    final mine = {for (final e in _elementsCtl.all) e.id: e};
+    return (
+      positions: positionsOf(_slots),
+      graphics: _graphics,
+      elements: [
+        ...mine.values,
+        for (final e in _elements.items)
+          if (!mine.containsKey(e.id)) e,
+      ],
+      overlay: _layout,
+      show: _show,
+    );
+  }
+
+  LiveGraphic _layoutGraphic(StudioGraphic g, int? autoHide) =>
+      LiveGraphic.snapshot(
+        g,
+        publicUrl: GraphicsService.publicUrl,
+        now: DateTime.now(),
+        autoHideSeconds: autoHide,
+        showStartAt: _scheduledAt,
+        resolveLink: _resolveLink,
+      );
+
+  /// One apply-layout request; then this Studio's own state follows.
+  Future<void> _sendLayout(StudioLayout l, ResolvedLayout r) async {
+    final eventId = _eventId;
+    if (eventId == null) throw Exception('Not connected to a show.');
+    final graphics = r.graphics.withBrand(_brandKit?.style);
+    final List<LiveElement> stored;
+    try {
+      stored = await LivekitService.applyLayout(
+        eventId: eventId,
+        layoutId: l.id,
+        updatedAt: l.updatedAt,
+        graphics: graphics,
+        layout: r.overlay,
+        show: r.show,
+        elements: [
+          for (final e in r.elements) e.copyWith(version: e.version + 1),
+        ],
+        srcAgeMs: _monitorAgeMs,
+      );
+    } on ElementStale {
+      unawaited(_elementsCtl.restore());
+      throw Exception('An element changed while applying — try again.');
+    }
+    _elementsCtl.applied(stored);
+    if (!mounted) return;
+    setState(() {
+      _graphics = graphics;
+      _layout = r.overlay;
+      _show = r.show;
+    });
+    _armAutoHide();
+    _rebuildRemoteSources();
+  }
+
+  Future<void> _openLayouts() =>
+      showLayoutsPanel(context, controller: _layouts, slots: _slotRefs);
+
+  /// The cue bar / Enter: apply the cued layout.
+  Future<void> _applyLayoutCue() async {
+    final l = _layouts.cued;
+    if (l == null) return;
+    try {
+      final r = await _layouts.apply(l);
+      if (r != null) _toast(appliedMessage(l, r));
+    } catch (e) {
+      _toast(e.toString().replaceFirst('Exception: ', ''));
+    }
+  }
+
   /// Studio: the brand kit, the show's sponsor and the host's username —
   /// each best-effort; graphics work without them.
   void _loadGraphicsExtras(String eventId) {
@@ -2879,6 +2978,17 @@ class _CameraScreenState extends State<CameraScreen> {
       s.element == null && _cue.value.lands(s.isScreenShare ? null : s.slotId);
 
   Widget? _buildCueBar() {
+    final layout = _layouts.cued;
+    if (_isStudio && layout != null) {
+      final n = layout.cameras.length;
+      return NileStudioCueBar(
+        name: 'Layout · ${layout.name}',
+        targets: '$n ${n == 1 ? 'camera' : 'cameras'}',
+        busy: _layouts.busy,
+        onTake: _applyLayoutCue,
+        onClear: () => _layouts.cue(null),
+      );
+    }
     final cues = _cue.value;
     if (!_isStudio || cues.isEmpty) return null;
     final refs = _slotRefs;
@@ -3662,6 +3772,8 @@ class _CameraScreenState extends State<CameraScreen> {
     _lastTargets.clear();
     _graphicsLibrary = const [];
     _cue.value = CueSet.empty;
+    _layouts.cue(null);
+    _layouts.setApplied(null);
     _sponsorItem = null;
     // Stop screen capture explicitly — disconnect unpublishes the track but
     // doesn't always halt the native capturer promptly.
@@ -5012,8 +5124,15 @@ class _CameraScreenState extends State<CameraScreen> {
     return _isStudio
         ? StudioGraphicsHotkeys(
             onDigit: _onGraphicsHotkey,
-            onTake: _cue.value.isEmpty ? null : _takeCue,
-            onClear: _cue.value.isEmpty
+            onAltDigit: _layouts.cueNumber,
+            onTake: _layouts.cued != null
+                ? _applyLayoutCue
+                : _cue.value.isEmpty
+                ? null
+                : _takeCue,
+            onClear: _layouts.cued != null
+                ? () => _layouts.cue(null)
+                : _cue.value.isEmpty
                 ? null
                 : () => _cue.value = CueSet.empty,
             child: studio,
@@ -5104,6 +5223,12 @@ class _CameraScreenState extends State<CameraScreen> {
         tooltip: 'Elements',
         icon: Icons.widgets_outlined,
         active: !_elementsCtl.onAir.isEmpty || !_elements.isEmpty,
+      ),
+      NileStudioIconButton(
+        onPressed: _openLayouts,
+        tooltip: 'Layouts',
+        icon: Icons.dashboard_customize_outlined,
+        active: _layouts.applied != null,
       ),
       NileStudioIconButton(
         onPressed: _confirmResync,

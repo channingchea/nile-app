@@ -139,6 +139,21 @@ class StudioElementsController extends ChangeNotifier {
     undoable: false,
   );
 
+  /// Every element in the show, on air or not.
+  List<LiveElement> get all => [..._live.values];
+
+  /// A layout was applied (apply-layout): take the elements as the server
+  /// stored them, unless something newer was made meanwhile.
+  void applied(List<LiveElement> stored) {
+    for (final e in stored) {
+      final mine = _live[e.id];
+      if (mine != null && mine.version > e.version) continue;
+      if (mine?.live != e.live) _hudHidden.remove(e.id);
+      _live[e.id] = e.copyWith(ops: ElementOps.none);
+    }
+    if (stored.isNotEmpty) notifyListeners();
+  }
+
   /// Every element on air, as viewers see it.
   ElementsState get onAir => ElementsState(
     items: [

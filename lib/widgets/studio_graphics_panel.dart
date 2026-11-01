@@ -70,14 +70,15 @@ String graphicSubtitle(StudioGraphic g) {
 
 /// Keys 1–9 act on the first nine items of the host's library (see
 /// [graphicsHotkeyAction]); Enter takes everything cued, Escape clears the
-/// cue. Wrap the
-/// Studio in this; it ignores keys while a text field has focus and any key
-/// with ⌘/Ctrl/Alt held (⌘1–⌘9 belong to the nav rail).
+/// cue; ⌥1–9 go to [StudioGraphicsHotkeys.onAltDigit] (Layouts). Wrap the
+/// Studio in this; it ignores keys while a text field has focus and any other
+/// key with ⌘/Ctrl/Alt held (⌘1–⌘9 belong to the nav rail).
 class StudioGraphicsHotkeys extends StatefulWidget {
   const StudioGraphicsHotkeys({
     super.key,
     required this.onDigit,
     required this.child,
+    this.onAltDigit,
     this.onTake,
     this.onClear,
     this.enabled = true,
@@ -86,6 +87,9 @@ class StudioGraphicsHotkeys extends StatefulWidget {
   /// 1-9.
   final ValueChanged<int> onDigit;
 
+  /// ⌥1–9 (Alt+1–9): Layouts. Null = the keys pass through.
+  final ValueChanged<int>? onAltDigit;
+
   /// Enter / numpad Enter. Null = the key passes through.
   final VoidCallback? onTake;
 
@@ -93,6 +97,28 @@ class StudioGraphicsHotkeys extends StatefulWidget {
   final VoidCallback? onClear;
   final Widget child;
   final bool enabled;
+
+  static final _physicalDigits = {
+    PhysicalKeyboardKey.digit1: 1,
+    PhysicalKeyboardKey.digit2: 2,
+    PhysicalKeyboardKey.digit3: 3,
+    PhysicalKeyboardKey.digit4: 4,
+    PhysicalKeyboardKey.digit5: 5,
+    PhysicalKeyboardKey.digit6: 6,
+    PhysicalKeyboardKey.digit7: 7,
+    PhysicalKeyboardKey.digit8: 8,
+    PhysicalKeyboardKey.digit9: 9,
+  };
+
+  /// 1–9 when [e] is ⌥/Alt + a digit key (and nothing else held), else null.
+  /// Matched by physical key: on a Mac ⌥1 types "¡", not "1".
+  static int? altDigit(KeyEvent e) {
+    final kb = HardwareKeyboard.instance;
+    if (!kb.isAltPressed || kb.isMetaPressed || kb.isControlPressed) {
+      return null;
+    }
+    return _physicalDigits[e.physicalKey];
+  }
 
   /// True when typing would go to a text field right now.
   static bool typing() =>
@@ -128,6 +154,17 @@ class _StudioGraphicsHotkeysState extends State<StudioGraphicsHotkeys> {
 
   bool _onKey(KeyEvent e) {
     if (!widget.enabled || e is! KeyDownEvent) return false;
+    final alt = widget.onAltDigit == null
+        ? null
+        : StudioGraphicsHotkeys.altDigit(e);
+    if (alt != null) {
+      if (StudioGraphicsHotkeys.typing()) return false;
+      if (!mounted || !(ModalRoute.of(context)?.isCurrent ?? true)) {
+        return false;
+      }
+      widget.onAltDigit!(alt);
+      return true;
+    }
     final key = e.logicalKey;
     final digit = _digits[key];
     final VoidCallback? action = digit != null
@@ -321,41 +358,44 @@ class _TargetsDialogState extends State<_TargetsDialog> {
                 }),
               ),
             if (widget.showAutoHide) ...[
-            const SizedBox(height: NileSpacing.s12),
-            Row(
-              children: [
-                Text('Hide after', style: NileTextStyles.bodyMd()),
-                const Spacer(),
-                DropdownButton<int>(
-                  value: isCustom ? -1 : _hide,
-                  dropdownColor: NileColors.bgRaised,
-                  items: [
-                    for (final c in autoHideChoices)
-                      DropdownMenuItem(value: c, child: Text(autoHideLabel(c))),
-                    const DropdownMenuItem(value: -1, child: Text('Custom…')),
-                  ],
-                  onChanged: (v) => setState(() {
-                    if (v == null) return;
-                    _hide = v == -1 ? (int.tryParse(_custom.text) ?? 20) : v;
-                    if (v == -1 && _custom.text.isEmpty) {
-                      _custom.text = '$_hide';
-                    }
-                  }),
-                ),
-              ],
-            ),
-            if (isCustom)
-              TextField(
-                controller: _custom,
-                keyboardType: TextInputType.number,
-                inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                decoration: const InputDecoration(
-                  labelText: 'Seconds (1–3600)',
-                ),
-                onChanged: (v) => setState(
-                  () => _hide = (int.tryParse(v) ?? 1).clamp(1, 3600),
-                ),
+              const SizedBox(height: NileSpacing.s12),
+              Row(
+                children: [
+                  Text('Hide after', style: NileTextStyles.bodyMd()),
+                  const Spacer(),
+                  DropdownButton<int>(
+                    value: isCustom ? -1 : _hide,
+                    dropdownColor: NileColors.bgRaised,
+                    items: [
+                      for (final c in autoHideChoices)
+                        DropdownMenuItem(
+                          value: c,
+                          child: Text(autoHideLabel(c)),
+                        ),
+                      const DropdownMenuItem(value: -1, child: Text('Custom…')),
+                    ],
+                    onChanged: (v) => setState(() {
+                      if (v == null) return;
+                      _hide = v == -1 ? (int.tryParse(_custom.text) ?? 20) : v;
+                      if (v == -1 && _custom.text.isEmpty) {
+                        _custom.text = '$_hide';
+                      }
+                    }),
+                  ),
+                ],
               ),
+              if (isCustom)
+                TextField(
+                  controller: _custom,
+                  keyboardType: TextInputType.number,
+                  inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                  decoration: const InputDecoration(
+                    labelText: 'Seconds (1–3600)',
+                  ),
+                  onChanged: (v) => setState(
+                    () => _hide = (int.tryParse(v) ?? 1).clamp(1, 3600),
+                  ),
+                ),
             ],
           ],
         ),

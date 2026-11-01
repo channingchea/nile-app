@@ -583,3 +583,84 @@ ResolvedLayout resolveLayout(
     skippedCameras: layout.cameras.length - n,
   );
 }
+
+// ── On air ───────────────────────────────────────────────────────────────────
+
+/// Room metadata `layoutApplied`: the saved layout last applied, and the save
+/// of it that went out — a newer save shows "Changed since applied".
+typedef LayoutApplied = ({String id, DateTime? updatedAt});
+
+LayoutApplied? layoutAppliedFromRoomMetadata(String? raw) {
+  try {
+    final m = jsonDecode(raw ?? '{}');
+    final a = m is Map ? m['layoutApplied'] : null;
+    if (a is! Map || a['id'] is! String) return null;
+    return (
+      id: a['id'] as String,
+      updatedAt: DateTime.tryParse(a['updatedAt'] as String? ?? ''),
+    );
+  } catch (_) {
+    return null;
+  }
+}
+
+/// What Apply would change on one camera: names added and removed, and its
+/// new on-air state when that changes.
+typedef CameraChange = ({
+  String camera,
+  List<String> added,
+  List<String> removed,
+  bool? onAir,
+});
+
+/// Per camera, what applying [to] changes against the show as it is now.
+/// Cameras with nothing to change are left out. [labelOf] names a slot;
+/// [nameOf] names a graphic or element id.
+List<CameraChange> layoutChanges({
+  required ResolvedLayout to,
+  required String Function(String slotId) labelOf,
+  required String Function(String id) nameOf,
+  GraphicsState graphics = GraphicsState.empty,
+  Iterable<LiveElement> elements = const [],
+  ShowControl show = ShowControl.empty,
+  int? nowMs,
+}) {
+  final now = nowMs ?? DateTime.now().millisecondsSinceEpoch;
+  final after = {
+    for (final e in elements) e.id: e,
+    for (final e in to.elements) e.id: e,
+  };
+  Set<String> on(GraphicsState g, Iterable<LiveElement> els, String slot) => {
+    for (final x in g.forSlot(slot, nowMs: now)) x.id,
+    for (final e in els)
+      if (e.targets.includes(slot)) e.id,
+  };
+  final out = <CameraChange>[];
+  for (final slot in to.covered) {
+    final before = on(graphics, elements, slot);
+    final next = on(to.graphics, after.values, slot);
+    final wasOn = show.isOnAir(slot);
+    final isOn = to.show.isOnAir(slot);
+    final added = [for (final id in next.difference(before)) nameOf(id)];
+    final removed = [for (final id in before.difference(next)) nameOf(id)];
+    if (added.isEmpty && removed.isEmpty && wasOn == isOn) continue;
+    out.add((
+      camera: labelOf(slot),
+      added: added,
+      removed: removed,
+      onAir: wasOn == isOn ? null : isOn,
+    ));
+  }
+  return out;
+}
+
+/// "Camera 1: + Lower third · − Logo · goes off air".
+String describeChange(CameraChange c) {
+  final parts = [
+    if (c.added.isNotEmpty) '+ ${c.added.join(', ')}',
+    if (c.removed.isNotEmpty) '− ${c.removed.join(', ')}',
+    if (c.onAir == false) 'goes off air',
+    if (c.onAir == true) 'back on air',
+  ];
+  return '${c.camera}: ${parts.join(' · ')}';
+}

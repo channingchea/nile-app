@@ -1,6 +1,7 @@
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'live_elements.dart';
 import 'overlay_layout.dart';
+import 'show_control.dart';
 import 'studio_graphics.dart';
 import 'supabase_client.dart';
 
@@ -295,6 +296,58 @@ class LivekitService {
     'layout': layout.toJson(),
     'srcAgeMs': ?srcAgeMs,
   });
+
+  /// Studio: apply a saved layout (docs/plans/studio-layouts.md). Everything
+  /// resolveLayout worked out goes in one request and lands as one room
+  /// metadata update. [elements] carry their next versions; an element already
+  /// in the show keeps its values server-side — only cameras and angle change.
+  /// Returns the elements as stored. Throws [ElementStale] when one is behind.
+  static Future<List<LiveElement>> applyLayout({
+    required String eventId,
+    required String layoutId,
+    required DateTime? updatedAt,
+    required GraphicsState graphics,
+    required OverlayLayout layout,
+    required ShowControl show,
+    required List<LiveElement> elements,
+    int? srcAgeMs,
+  }) async {
+    final body = {
+      'action': 'apply-layout',
+      'eventId': eventId,
+      'studio': true,
+      'applied': {
+        'id': layoutId,
+        'updatedAt': updatedAt?.toUtc().toIso8601String() ?? '',
+      },
+      'graphics': graphics.toJson(),
+      'layout': layout.toJson(),
+      'show': {
+        'offAir': [...show.offAir]..sort(),
+        'defaultSlot': show.defaultSlot,
+        'slotOrder': show.slotOrder,
+      },
+      'elements': [for (final e in elements) e.toJson()],
+      'srcAgeMs': ?srcAgeMs,
+    };
+    try {
+      final res = await supabase.functions.invoke('livekit', body: body);
+      final list = (res.data as Map)['elements'];
+      return [
+        if (list is List)
+          ...list.map(LiveElement.fromJson).whereType<LiveElement>(),
+      ];
+    } on FunctionException catch (e) {
+      final d = e.details;
+      if (e.status == 409 && d is Map && d['error'] == 'stale') {
+        throw ElementStale(LiveElement.fromJson(d['current']));
+      }
+      throw Exception(
+        (d is Map ? d['error']?.toString() : null) ??
+            'livekit function failed (${e.status})',
+      );
+    }
+  }
 
   /// Show control: off-air angles, the default angle, "Send everyone here".
   /// Partial — pass only what changes. Host only.

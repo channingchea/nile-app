@@ -19,6 +19,7 @@
 //   set-element       host    → { success, element } ← Studio pushes one live element (state + metadata)
 //   list-elements     host    → { elements, serverNow } ← Studio reloads every element's live state
 //   set-layout        host    → { success: true }   ← per-camera spots + layer order (room metadata)
+//   apply-layout      host    → { success, … }      ← a saved layout: graphics + layers + show + elements in one write
 //   respond           viewer  → { success, mine, picks } ← a viewer taps a live element (vote; changeable until close)
 //   my-responses      viewer  → { mine, picks }     ← the caller's own taps this round (rejoin)
 //   resync            host    → { success, resyncAt } ← every viewer re-aligns cameras + audio
@@ -82,6 +83,7 @@ import {
   validateLayout,
 } from "../_shared/elements.ts";
 import { cleanShowPatch, planReorder } from "../_shared/show.ts";
+import { angleIdsOf, cleanAppliedShow, planElements, validateApply } from "../_shared/layouts.ts";
 import { timelineOf } from "../_shared/replay_marks.ts";
 
 // CORS headers are per-request, so the JSON responder is built per-request too
@@ -412,6 +414,8 @@ async function handle(req: Request, ctx: ReqCtx, json: Json): Promise<Response> 
       return await listElements(body, user.id, admin, json);
     case "set-layout":
       return await setLayout(body, user.id, admin, json);
+    case "apply-layout":
+      return await applyLayout(body, user.id, admin, json);
     case "respond":
       return await respond(body, user.id, admin, json);
     case "my-responses":
@@ -1353,6 +1357,85 @@ async function setLayout(body: any, userId: string, admin: any, json: Json): Pro
   const meta = await roomMetaOf(roomName);
   await roomService.updateRoomMetadata(roomName, JSON.stringify(mergeRoomMeta(meta, { layout })));
   return json({ success: true, layout });
+}
+
+// apply-layout — the Studio applies a saved layout (docs/plans/studio-layouts.md).
+//
+// Body: { eventId, studio: true, applied: { id, updatedAt },
+//         graphics, layout, show: { offAir, defaultSlot, slotOrder },
+//         elements: [element push], srcAgeMs? }
+// The Studio resolves the layout against the show; this validates it with the
+// same rules as set-graphics / set-layout / set-show / set-element and writes
+// graphics, layers, show control, elements and `layoutApplied` in ONE room
+// metadata update, so viewers never see half a layout. Elements already in
+// the show keep their stored settings and live values — only cameras and
+// angle change. Camera order goes into metadata only (slot_index is left
+// alone, so "Camera 2" means the same camera the next time).
+async function applyLayout(body: any, userId: string, admin: any, json: Json): Promise<Response> {
+  const { eventId } = body;
+  if (!eventId) return json({ error: "eventId is required" }, 400);
+
+  const gate = await requireHost(eventId, userId, admin, json);
+  if (gate instanceof Response) return gate;
+
+  const roomName = roomNameFor(eventId);
+  if (body.studio !== true || !studioConnected(await peersOf(roomName))) {
+    return json({ error: "Layouts are run from the Studio." }, 409);
+  }
+
+  const slots = await slotsFor(gate.event.id, admin);
+  const slotIds = new Set(slots.map((s) => s.id));
+  const storage = `${Deno.env.get("SUPABASE_URL")}/storage/v1/object/public/`;
+  const raw = JSON.stringify([body.graphics ?? {}, body.elements ?? []]);
+  const sponsor = raw.includes('"sponsor"') || raw.includes('"presentedBy"')
+    ? await sponsorFor(gate.event.id, admin, storage)
+    : null;
+  const v = validateApply(body, {
+    imagePrefix: `${storage}studio-graphics/`,
+    avatarPrefix: storage,
+    slotIds,
+    sponsor,
+    sponsorCampaignId: sponsor?.campaignId,
+  });
+  if ("error" in v) return json({ error: v.error }, 400);
+
+  const now = Date.now();
+  const p = planElements(v.plan.elements, await elementRows(gate.event.id, admin), gate.event.id, now);
+  if ("error" in p) {
+    return p.error === "stale"
+      ? json({ error: "stale", current: p.current }, 409)
+      : json({ error: p.error }, 400);
+  }
+  const show = cleanAppliedShow(body.show, new Set([...slotIds, ...angleIdsOf(p.next)]));
+
+  // Same conditional writes as set-element: only over an older version.
+  const table = admin.from("live_element_state");
+  for (const { row, prev } of p.writes) {
+    const values = { kind: row.kind, spec: row.spec, state: row.state, version: row.version, content_at: row.content_at, updated_at: new Date(now).toISOString() };
+    if (prev) {
+      const { data, error } = await table.update(values)
+        .eq("event_id", row.event_id).eq("element_id", row.element_id).lt("version", row.version)
+        .select("element_id");
+      if (error) throw error;
+      if (!data?.length) return json({ error: "stale", current: rowToLive(prev) }, 409);
+    } else {
+      const { error } = await table.insert({ event_id: row.event_id, element_id: row.element_id, ...values });
+      if (error?.code === "23505") return json({ error: "stale" }, 409);
+      if (error) throw error;
+    }
+  }
+
+  const at = contentAt(now, body.srcAgeMs);
+  const patch = {
+    graphics: { ...v.plan.graphics, at },
+    layout: { ...v.plan.layout, at },
+    elements: liveSnapshot(p.next),
+    ...show,
+    layoutApplied: { ...v.plan.applied, at: now },
+  };
+  const meta = await roomMetaOf(roomName);
+  await roomService.updateRoomMetadata(roomName, JSON.stringify(mergeRoomMeta(meta, patch)));
+  return json({ success: true, ...patch, elements: p.writes.map((w) => rowToLive(w.row)) });
 }
 
 // The event's accepted Pre-Show sponsor — the only sponsor a Studio may put on

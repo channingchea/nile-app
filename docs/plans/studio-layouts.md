@@ -51,18 +51,27 @@ Layouts are saved show setups kept in an account-wide library and opened from a 
 - Snapshot leaves out anything not in the library (chat on screen, sponsor logos) and names it in `leftOut`; saved auto-hide is null (= the library graphic's own).
 
 ## Phase 3: Server Apply
-- [ ] `_shared/layouts.ts`: validate a resolved layout, reusing graphics/layout/show/element validators
-- [ ] livekit action `apply-layout`: one room-metadata write for graphics + layout + show (offAir, defaultSlot, slotOrder) so viewers never see half a layout; stores `layoutApplied: {id, updatedAt}`
-- [ ] Elements through the existing versioned element push: live ones keep state, new ones start from library config, elements not in the layout come off air on covered cameras
-- [ ] Deno tests: atomic write, extra cameras untouched, element state kept, non-host refused
+- [x] `_shared/layouts.ts`: validate a resolved layout, reusing graphics/layout/show/element validators
+- [x] livekit action `apply-layout`: one room-metadata write for graphics + layout + show (offAir, defaultSlot, slotOrder) so viewers never see half a layout; stores `layoutApplied: {id, updatedAt}`
+- [x] Elements through the existing versioned element push: live ones keep state, new ones start from library config, elements not in the layout come off air on covered cameras
+- [x] Deno tests: atomic write, extra cameras untouched, element state kept, non-host refused
+
+**Implementation notes (2026-11-01):** `_shared/layouts.ts` (`validateApply`, `planElements`, `cleanAppliedShow`, `angleIdsOf`) + `livekit` action `apply-layout`, deployed. 7 Deno tests in `tests/studio_layouts_test.ts`; non-host refusal is the shared `requireHost`. Decisions:
+- An element already in the show keeps its STORED config and values server-side; only `targets` and `angle` come from the request (so a stale Studio can't overwrite votes or settings through Apply).
+- Show ids the server doesn't know (a camera removed meanwhile) are dropped, not an error; `sendAll` is never touched.
+- Camera order goes into metadata `slotOrder` only — `event_cameras.slot_index` is left alone, so positions don't shift. Note: a manual drag reorder (`reorder-cameras`) DOES rewrite slot_index, so after dragging tiles "Camera 2" means the camera now labelled Camera 2.
+- Size: LiveKit allows 512 KiB of room metadata; the existing caps (graphics 8 KB, layout 8 KB, elements 16 KB) keep an Apply around 33 KB.
+- Element rows are written before the single metadata write; a stale element mid-way returns 409 and the Studio reloads its elements.
 
 ## Phase 4: Toolbar icon + Layouts panel
-- [ ] Layouts icon in the control bar between Elements and Resync; opens a side panel
-- [ ] Cards: thumbnail (Camera 1 rendered with NileGraphicsLayer on the brand background), name, badges "On air", "Cued", "Changed since applied", "N missing"
-- [ ] Card menu: Rename, Duplicate, Delete (confirm); drag to reorder
-- [ ] "Save current look" (name prompt) and "Update from current look"
-- [ ] Cue → Apply: cue shows a per-camera summary of changes (off air, items added/removed); Apply or Enter sends it
-- [ ] Hotkeys: ⌥1–9 cues the first nine layouts from anywhere in the Studio; Enter applies; plain 1–9 stays with Graphics
+- [x] Layouts icon in the control bar between Elements and Resync; opens a side panel
+- [x] Cards: thumbnail (Camera 1 rendered with NileGraphicsLayer on the brand background), name, badges "On air", "Cued", "Changed since applied", "N missing"
+- [x] Card menu: Rename, Duplicate, Delete (confirm); drag to reorder
+- [x] "Save current look" (name prompt) and "Update from current look"
+- [x] Cue → Apply: cue shows a per-camera summary of changes (off air, items added/removed); Apply or Enter sends it
+- [x] Hotkeys: ⌥1–9 cues the first nine layouts from anywhere in the Studio; Enter applies; plain 1–9 stays with Graphics
+
+**Implementation notes (2026-11-01):** the panel is a dialog like Graphics and Elements (not a side panel), `lib/widgets/studio_layouts_panel.dart`; logic in `lib/services/studio_layouts_controller.dart` (`StudioLayoutsController`, `LayoutsBackend` so Studio Preview/tests can swap storage). `LivekitService.applyLayout`; `StudioElementsController.all/applied`; `layoutAppliedFromRoomMetadata`, `layoutChanges`, `describeChange` in studio_layouts.dart. ⌥1–9 via `StudioGraphicsHotkeys.onAltDigit`, matched by PHYSICAL key (⌥1 types "¡" on a Mac); also handled inside the panel. One cue at a time is implemented: cueing a layout clears the graphics cue and vice versa; the Studio cue bar shows "Layout · name" with Apply/Clear, and Enter/Esc follow whichever is cued. Thumbnail = Camera 1 drawn by NileGraphicsLayer at 640×360, scaled down; off-air cameras get a dark veil. Badges: ON AIR, CUED, CHANGED SINCE APPLIED, N MISSING. 12 tests in `test/studio_layouts_ui_test.dart`.
 
 ## Phase 5: Layout editor
 - [ ] Full dialog: a tab per camera position (+/− count), live preview frame
