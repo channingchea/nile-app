@@ -15,7 +15,9 @@ import 'package:nile_app/screens/studio_preview_screen.dart';
 import 'package:nile_app/services/nile_badges.dart';
 import 'package:nile_app/services/studio_prefs.dart';
 import 'package:nile_app/widgets/nile_app_shell.dart';
+import 'package:nile_app/services/studio_mode.dart';
 import 'package:nile_app/widgets/nile_studio.dart';
+import 'package:nile_app/widgets/nile_studio_mode_switch.dart';
 import 'package:nile_app/widgets/nile_top_bar.dart';
 import 'package:nile_app/widgets/studio_preview_demo.dart';
 
@@ -63,6 +65,10 @@ Widget _previewStudio(StudioPreviewDemo demo, {required bool chatColumn}) {
       readyCount: demo.readyCount,
       crewCount: demo.crewCount,
       audioSourceLabel: 'Your mic',
+    ),
+    center: NileStudioModeSwitch(
+      value: StudioMode.multicam,
+      onChanged: (_) {},
     ),
     banner: StudioPreviewBanner(live: demo.isLive, onChanged: (_) {}),
     controls: NileStudioControlBar(
@@ -268,7 +274,7 @@ void main() {
         }
         await tester.pumpWidget(_wrap(_previewStudio(demo, chatColumn: chatColumn)));
         expect(tester.takeException(), isNull);
-        expect(find.text('Preview — not live. Only you can see this.'),
+        expect(find.text('Rehearsal — not live. Only you can see this.'),
             findsOneWidget);
 
         demo.isLive = true;

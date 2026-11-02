@@ -468,7 +468,7 @@ class _BrandKitEditorState extends State<_BrandKitEditor> {
         if (widget.demo) ...[
           const SizedBox(height: NileSpacing.s8),
           Text(
-            'Logo upload isn’t available in Studio Preview — nothing here is saved.',
+            'Logo upload isn’t available in Studio Setup — nothing here is saved.',
             style: NileTextStyles.caption(),
           ),
         ],

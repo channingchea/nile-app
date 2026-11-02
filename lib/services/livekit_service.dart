@@ -3,6 +3,7 @@ import 'live_elements.dart';
 import 'overlay_layout.dart';
 import 'show_control.dart';
 import 'studio_graphics.dart';
+import 'studio_mode.dart';
 import 'supabase_client.dart';
 
 /// Client for the `livekit` Supabase Edge Function (the former nile-backend).
@@ -363,6 +364,18 @@ class LivekitService {
     'offAir': ?offAir,
     if (defaultSlot != null || clearDefault) 'defaultSlot': defaultSlot,
     'sendAll': ?sendAll,
+  });
+
+  /// The Studio's mode switch (docs/plans/studio-modes.md). Host only;
+  /// refused once live.
+  static Future<void> setMode({
+    required String eventId,
+    required StudioMode mode,
+  }) => _invoke<Map>({
+    'action': 'set-mode',
+    'eventId': eventId,
+    'mode': mode.wire,
+    'studio': true,
   });
 
   /// New camera order (every slot id once). Default "Camera N" names follow

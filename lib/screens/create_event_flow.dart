@@ -10,12 +10,14 @@ import '../services/ad_service.dart';
 import '../services/crew_service.dart';
 import '../services/share_urls.dart';
 import '../services/event_service.dart';
+import '../services/studio_mode.dart';
 import '../services/livekit_service.dart';
 import '../services/pricing_service.dart';
 import '../services/profile_service.dart';
 import '../router.dart';
 import '../theme.dart';
 import '../widgets/crew_editor.dart';
+import '../widgets/nile_studio_mode_switch.dart';
 import '../widgets/duration_field.dart';
 import '../widgets/nile_desktop.dart';
 import '../widgets/payout_gate.dart';
@@ -34,6 +36,9 @@ class EventDraft {
   int durationMinutes = 60; // default 1h
   int? priceCents;
   int? ticketLimit;
+
+  /// How the Studio runs the show; changeable in the Studio until live.
+  StudioMode studioMode = StudioMode.multicam;
 
   /// Host opt-in: let a brand sponsor this event's Pre-Show lobby (0079).
   bool sponsorshipOpen = false;
@@ -553,6 +558,7 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
         price: _draft.priceCents,
         ticketLimit: _draft.ticketLimit,
         cameraCount: _draft.crew.cameraCount,
+        studioMode: _draft.studioMode,
         asDraft: true,
         topicIds: _draft.topicIds.toList(),
         sponsorshipOpen: _draft.sponsorshipOpen,
@@ -731,6 +737,13 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
             onUnitChanged: _changeUnit,
             preview: _durationPreview(),
             maxMinutes: _pricing.maxStreamMinutes,
+          ),
+          const SizedBox(height: 20),
+          _SectionLabel('Studio Mode'),
+          const SizedBox(height: 6),
+          StudioModeField(
+            value: _draft.studioMode,
+            onChanged: (m) => setState(() => _draft.studioMode = m),
           ),
           const SizedBox(height: 20),
           _SectionLabel('Cameras'),

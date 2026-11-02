@@ -67,7 +67,7 @@ const NileGlassDestination kNotificationsDestination = NileGlassDestination(
 const NileGlassDestination kStudioPreviewDestination = NileGlassDestination(
   icon: Icons.videocam_outlined,
   selectedIcon: Icons.videocam,
-  label: 'Studio Preview',
+  label: 'Studio Setup',
 );
 
 const NileGlassDestination kTicketsDestination = NileGlassDestination(

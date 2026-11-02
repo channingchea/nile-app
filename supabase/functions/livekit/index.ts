@@ -83,6 +83,7 @@ import {
   validateLayout,
 } from "../_shared/elements.ts";
 import { cleanShowPatch, planReorder } from "../_shared/show.ts";
+import { checkModeChange } from "../_shared/studio_mode.ts";
 import { angleIdsOf, cleanAppliedShow, planElements, validateApply } from "../_shared/layouts.ts";
 import { timelineOf } from "../_shared/replay_marks.ts";
 
@@ -422,6 +423,8 @@ async function handle(req: Request, ctx: ReqCtx, json: Json): Promise<Response> 
       return await myResponses(body, user.id, admin, json);
     case "set-show":
       return await setShow(body, user.id, admin, json);
+    case "set-mode":
+      return await setMode(body, user.id, admin, json);
     case "reorder-cameras":
       return await reorderCameras(body, user.id, admin, json);
     case "resync":
@@ -1485,6 +1488,38 @@ async function setShow(body: any, userId: string, admin: any, json: Json): Promi
 
   await roomService.updateRoomMetadata(roomName, JSON.stringify(mergeRoomMeta(meta, result.patch)));
   return json({ success: true, ...result.patch });
+}
+
+// set-mode — the Studio's Multicam / Interview / Premiere switch
+// (docs/plans/studio-modes.md). Body: { eventId, mode, studio }. Host only, and
+// while the Studio is in the room only the Studio may change it. Refused once
+// live. Writes events.studio_mode, then mirrors it into room metadata `mode` so
+// viewers already in the lobby follow without a refetch.
+async function setMode(body: any, userId: string, admin: any, json: Json): Promise<Response> {
+  const { eventId } = body;
+  if (!eventId) return json({ error: "eventId is required" }, 400);
+
+  const gate = await requireHost(eventId, userId, admin, json);
+  if (gate instanceof Response) return gate;
+  const roomName = roomNameFor(eventId);
+  if (body.studio !== true && studioConnected(await peersOf(roomName))) {
+    return json({ error: "Your Studio is running this show — use the Studio's controls." }, 409);
+  }
+
+  const { data: row, error } = await admin.from("events").select("status").eq("id", gate.event.id).single();
+  if (error) throw error;
+  const meta = await roomMetaOf(roomName);
+  const check = checkModeChange(body.mode, row.status, meta);
+  if ("error" in check) return json({ error: check.error }, check.status);
+
+  const { error: upd } = await admin.from("events").update({ studio_mode: check.mode }).eq("id", gate.event.id);
+  if (upd) throw upd;
+  try {
+    await roomService.updateRoomMetadata(roomName, JSON.stringify(mergeRoomMeta(meta, { mode: check.mode })));
+  } catch {
+    // No room yet — the event row is enough; viewers read it when they join.
+  }
+  return json({ success: true, mode: check.mode });
 }
 
 // reorder-cameras — the host drags the Studio's camera tiles into a new order.

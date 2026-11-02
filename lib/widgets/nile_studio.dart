@@ -1,3 +1,5 @@
+import 'dart:math' show max;
+
 import 'package:flutter/material.dart';
 import 'package:livekit_client/livekit_client.dart' hide ChatMessage;
 
@@ -261,6 +263,7 @@ class NileStudio extends StatelessWidget {
     this.hud,
     this.leading,
     this.trailing,
+    this.center,
     this.meter,
     this.onRemoveSource,
     this.onRenameSource,
@@ -310,6 +313,9 @@ class NileStudio extends StatelessWidget {
   /// leaving and opening settings live here.
   final Widget? leading;
   final Widget? trailing;
+
+  /// Centered in the stats row — the Studio mode switch.
+  final Widget? center;
 
   /// Ejects a source from the room. Null hides the affordance entirely — only
   /// the host gets it, and only on sources marked [NileStudioSource.isRemovable].
@@ -367,7 +373,12 @@ class NileStudio extends StatelessWidget {
 
     return Column(
       children: [
-        _StudioStatsRow(stats: stats, leading: leading, trailing: trailing),
+        _StudioStatsRow(
+          stats: stats,
+          leading: leading,
+          trailing: trailing,
+          center: center,
+        ),
         ?banner,
         Expanded(
           child: Row(
@@ -430,30 +441,121 @@ class _StudioDivider extends StatelessWidget {
       Container(width: 1, color: NileColors.border);
 }
 
+/// Stats row with a centered widget: the center is laid out first (at most
+/// 60% of the row), then each side gets exactly half of what is left.
+class _CenteredBarLayout extends MultiChildLayoutDelegate {
+  static const left = 'left', center = 'center', right = 'right';
+
+  @override
+  void performLayout(Size size) {
+    final mid = layoutChild(
+      center,
+      BoxConstraints(maxWidth: size.width * 0.6, maxHeight: size.height),
+    );
+    final side = max(0.0, (size.width - mid.width) / 2 - NileSpacing.s12);
+    final sideBox = BoxConstraints.tightFor(width: side, height: size.height);
+    final l = layoutChild(left, sideBox.loosen());
+    layoutChild(right, sideBox);
+    positionChild(left, Offset(0, (size.height - l.height) / 2));
+    positionChild(
+      center,
+      Offset((size.width - mid.width) / 2, (size.height - mid.height) / 2),
+    );
+    positionChild(right, Offset(size.width - side, 0));
+  }
+
+  @override
+  bool shouldRelayout(_CenteredBarLayout oldDelegate) => false;
+}
+
 // ── Stats row ────────────────────────────────────────────────────────────────
 // One line across the top answering the questions a host asks mid-show without
 // wanting to hunt: am I live, how long have I been, how long is left, is anyone
 // watching, is my crew ready, whose audio is going out, and is my link healthy.
 
 class _StudioStatsRow extends StatelessWidget {
-  const _StudioStatsRow({required this.stats, this.leading, this.trailing});
+  const _StudioStatsRow({
+    required this.stats,
+    this.leading,
+    this.trailing,
+    this.center,
+  });
 
   final NileStudioStats stats;
   final Widget? leading;
   final Widget? trailing;
+  final Widget? center;
 
   @override
   Widget build(BuildContext context) {
     final remaining = stats.remaining;
     final urgent = remaining != null && remaining <= const Duration(minutes: 2);
+    final decoration = BoxDecoration(
+      color: NileColors.bgSurface,
+      border: Border(bottom: BorderSide(color: NileColors.border)),
+    );
+    const padding = EdgeInsets.symmetric(horizontal: NileSpacing.s16);
+
+    // With a center widget it sits in the true middle (scaled down if the
+    // window is very narrow) and each side scrolls rather than overflow.
+    if (center case final mid?) {
+      return Container(
+        height: 56,
+        padding: padding,
+        decoration: decoration,
+        child: CustomMultiChildLayout(
+          delegate: _CenteredBarLayout(),
+          children: [
+            LayoutId(
+              id: _CenteredBarLayout.left,
+              child: SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (leading != null) ...[
+                      leading!,
+                      const SizedBox(width: NileSpacing.s8),
+                    ],
+                    _StatusChip(isLive: stats.isLive),
+                    ..._statChips(stats, urgent),
+                  ],
+                ),
+              ),
+            ),
+            LayoutId(
+              id: _CenteredBarLayout.center,
+              child: FittedBox(fit: BoxFit.scaleDown, child: mid),
+            ),
+            LayoutId(
+              id: _CenteredBarLayout.right,
+              child: Align(
+                alignment: Alignment.centerRight,
+                child: SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  reverse: true,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      _QualityChip(quality: stats.quality),
+                      if (trailing != null) ...[
+                        const SizedBox(width: NileSpacing.s8),
+                        trailing!,
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
 
     return Container(
       height: 56,
-      padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s16),
-      decoration: BoxDecoration(
-        color: NileColors.bgSurface,
-        border: Border(bottom: BorderSide(color: NileColors.border)),
-      ),
+      padding: padding,
+      decoration: decoration,
       child: Row(
         children: [
           if (leading != null) ...[

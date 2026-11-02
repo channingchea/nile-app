@@ -5,11 +5,13 @@ import 'package:flutter/services.dart';
 import '../services/ad_service.dart';
 import '../services/crew_service.dart';
 import '../services/event_service.dart';
+import '../services/studio_mode.dart';
 import '../services/pricing_service.dart';
 import '../services/profile_service.dart';
 import '../services/topic_service.dart';
 import '../theme.dart';
 import '../widgets/crew_editor.dart';
+import '../widgets/nile_studio_mode_switch.dart';
 import '../widgets/duration_field.dart';
 import '../widgets/payout_gate.dart';
 import '../widgets/payout_preview_card.dart';
@@ -78,6 +80,7 @@ class _EditEventScreenState extends State<EditEventScreen> {
 
   // Pre-Show sponsorship opt-in (0079); seeded from the event row.
   late bool _sponsorshipOpen;
+  late StudioMode _studioMode = widget.event.studioMode;
   late bool _sponsorshipAutoAccept; // 0096
   late final TextEditingController _minOfferController;
 
@@ -532,6 +535,7 @@ class _EditEventScreenState extends State<EditEventScreen> {
         cameraCount: _crew.cameraCount != widget.event.cameraCount
             ? _crew.cameraCount
             : null,
+        studioMode: _studioMode != widget.event.studioMode ? _studioMode : null,
         topicIds: _setEquals(_topicIds, _savedTopicIds)
             ? null
             : _topicIds.toList(),
@@ -684,6 +688,14 @@ class _EditEventScreenState extends State<EditEventScreen> {
                     onUnitChanged: _changeUnit,
                     preview: _durationPreview(),
                     maxMinutes: _pricing.maxStreamMinutes,
+                  ),
+                  const SizedBox(height: 20),
+                  _SectionLabel('Studio Mode'),
+                  const SizedBox(height: 6),
+                  StudioModeField(
+                    value: _studioMode,
+                    onChanged: (m) => setState(() => _studioMode = m),
+                    locked: !StudioMode.canSwitch(isLive: widget.event.isLive),
                   ),
                   const SizedBox(height: 20),
                   _SectionLabel('Cameras'),

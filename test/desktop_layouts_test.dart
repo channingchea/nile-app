@@ -207,7 +207,7 @@ void main() {
       expect(
         kNileRailDestinations.map((d) => d.label).toList(),
         ['Home', 'Schedule', 'Discover', 'Currents', 'Messages',
-         'Studio Preview', 'My Tickets'],
+         'Studio Setup', 'My Tickets'],
       );
     });
 

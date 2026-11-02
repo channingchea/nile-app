@@ -6,6 +6,7 @@ import 'event_repost_service.dart';
 import 'like_service.dart';
 import 'net.dart';
 import 'pagination.dart';
+import 'studio_mode.dart';
 import 'supabase_client.dart';
 import 'topic_service.dart';
 
@@ -30,6 +31,9 @@ class Event {
   final DateTime? replayPublishedAt; // null = replay not published to fans
   final int? ticketLimit;
   final int cameraCount;
+
+  /// How the Studio runs this show (0145).
+  final StudioMode studioMode;
 
   /// Host opt-in to Pre-Show sponsorship (0079).
   final bool sponsorshipOpen;
@@ -72,6 +76,7 @@ class Event {
     this.replayPublishedAt,
     this.ticketLimit,
     this.cameraCount = 1,
+    this.studioMode = StudioMode.multicam,
     this.sponsorshipOpen = false,
     this.sponsorshipMinOfferCents,
     this.sponsorshipAutoAccept = false,
@@ -110,6 +115,7 @@ class Event {
       replayPublishedAt: replayPublishedAt,
       ticketLimit: ticketLimit,
       cameraCount: cameraCount,
+      studioMode: studioMode,
       sponsorshipOpen: sponsorshipOpen,
       sponsorshipMinOfferCents: sponsorshipMinOfferCents,
       sponsorshipAutoAccept: sponsorshipAutoAccept,
@@ -204,6 +210,7 @@ class Event {
           : null,
       ticketLimit: (json['ticket_limit'] as num?)?.toInt(),
       cameraCount: (json['camera_count'] as num?)?.toInt() ?? 1,
+      studioMode: StudioMode.fromWire(json['studio_mode']),
       sponsorshipOpen: json['sponsorship_open'] as bool? ?? false,
       sponsorshipMinOfferCents:
           (json['sponsorship_min_offer_cents'] as num?)?.toInt(),
@@ -443,6 +450,7 @@ class EventService {
     int? price, // cents
     int? ticketLimit,
     int? cameraCount,
+    StudioMode studioMode = StudioMode.multicam,
     bool asDraft = false,
     List<String>? topicIds,
     bool sponsorshipOpen = false, // host opt-in to Pre-Show sponsorship (0079)
@@ -470,6 +478,7 @@ class EventService {
           'price': ?price,
           'ticket_limit': ?ticketLimit,
           'camera_count': ?cameraCount,
+          'studio_mode': studioMode.wire,
           if (sponsorshipOpen) 'sponsorship_open': true,
           // Both only mean anything with the toggle on, and writing them for a
           // closed event would resurrect stale terms if it were reopened later.
@@ -505,6 +514,7 @@ class EventService {
     int? ticketLimit,
     bool clearTicketLimit = false,
     int? cameraCount,
+    StudioMode? studioMode, // locked by the server once live (0145)
     List<String>? topicIds, // null = leave tags untouched; [] = clear all
     bool? sponsorshipOpen, // Pre-Show sponsorship opt-in (0079)
     int? sponsorshipMinOfferCents, // 0096
@@ -529,6 +539,7 @@ class EventService {
       'ticket_limit': ?ticketLimit,
       if (clearTicketLimit) 'ticket_limit': null,
       'camera_count': ?cameraCount,
+      'studio_mode': ?studioMode?.wire,
       'sponsorship_open': ?sponsorshipOpen,
       'sponsorship_min_offer_cents': ?sponsorshipMinOfferCents,
       if (clearSponsorshipMinOffer) 'sponsorship_min_offer_cents': null,
@@ -784,7 +795,7 @@ class EventService {
         .from('events')
         .select(
           'id, host_id, title, viewer_count, status, '
-          'scheduled_at, end_at, started_at, '
+          'scheduled_at, end_at, started_at, studio_mode, '
           // Pre-Show lobby (0079): cover + host identity for the upgraded lobby.
           'description, cover_image_url, '
           'profiles!events_host_id_fkey(username, display_name, avatar_url)',

@@ -23,11 +23,13 @@ import '../services/studio_elements_controller.dart';
 import '../services/studio_graphics.dart';
 import '../services/studio_layouts.dart';
 import '../services/studio_layouts_controller.dart';
+import '../services/studio_mode.dart';
 import '../services/studio_prefs.dart';
 import '../theme.dart';
 import '../widgets/audio_meter.dart';
 import '../widgets/elements/element_kinds.dart' show ElementInteraction;
 import '../widgets/nile_studio.dart';
+import '../widgets/nile_studio_mode_switch.dart';
 import '../widgets/screen_share_picker.dart';
 import '../widgets/studio_chat_tools.dart';
 import '../widgets/studio_element_hud.dart';
@@ -67,6 +69,10 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
   StudioPrefs? _prefs;
 
   bool _started = false;
+
+  /// The mode switch, rehearsed: nothing is saved and only the switch moves
+  /// until each mode's layout ships (docs/plans/studio-modes.md).
+  StudioMode _mode = StudioMode.multicam;
   bool _starting = false;
   String? _error;
 
@@ -984,10 +990,10 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
   }
 
   void _previewOnly([Object? _]) =>
-      _toast('Preview only — nothing is broadcast.');
+      _toast('Rehearsal only — nothing is broadcast.');
 
   void _startShowTapped() => _toast(
-    'Preview only — nothing is broadcast. Use the Live switch above to see '
+    'Rehearsal only — nothing is broadcast. Use the Live switch above to see '
     'the live layout.',
   );
 
@@ -1006,7 +1012,7 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
                 icon: const Icon(Icons.arrow_back),
                 tooltip: 'Back',
               ),
-              title: Text('Studio Preview', style: NileTextStyles.headingMd()),
+              title: Text('Studio Setup', style: NileTextStyles.headingMd()),
               backgroundColor: Colors.transparent,
             ),
       body: _started && !window.isCompact
@@ -1067,7 +1073,7 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
             const SizedBox(height: NileSpacing.s24),
             if (compact)
               Text(
-                'Studio Preview needs a wider window. Make this window wider '
+                'Studio Setup needs a wider window. Make this window wider '
                 'to continue.',
                 style: NileTextStyles.bodyMd().copyWith(
                   color: NileColors.amber,
@@ -1255,7 +1261,14 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
               onPressed: _exit,
               icon: const Icon(Icons.arrow_back),
               color: NileColors.txtPrimary,
-              tooltip: 'Exit preview',
+              tooltip: 'Exit Studio Setup',
+            ),
+            center: NileStudioModeSwitch(
+              value: _mode,
+              onChanged: StudioMode.canSwitch(isLive: live)
+                  ? (m) => setState(() => _mode = m)
+                  : null,
+              lockedReason: 'The mode can’t change while you’re live',
             ),
             trailing: IconButton(
               onPressed: _openSettings,
@@ -1405,7 +1418,7 @@ class StudioPreviewBanner extends StatelessWidget {
             const SizedBox(width: NileSpacing.s8),
             Expanded(
               child: Text(
-                'Preview — not live. Only you can see this.',
+                'Rehearsal — not live. Only you can see this.',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: NileTextStyles.bodySm().copyWith(

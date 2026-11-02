@@ -34,10 +34,12 @@ import '../services/shake_detector.dart';
 import '../services/show_control.dart';
 import '../services/studio_prefs.dart';
 import '../services/studio_graphics.dart';
+import '../services/studio_mode.dart';
 import '../services/studio_roles.dart';
 import '../widgets/audio_meter.dart';
 import '../widgets/elements/element_kinds.dart' show ElementInteraction;
 import '../widgets/nile_studio.dart';
+import '../widgets/nile_studio_mode_switch.dart';
 import '../widgets/screen_share_picker.dart';
 import '../widgets/camera_slot_sheet.dart';
 import '../widgets/nile_graphics_layer.dart';
@@ -1302,6 +1304,10 @@ class _CameraScreenState extends State<CameraScreen> {
   /// This device joined as the Studio.
   bool _isStudio = false;
 
+  /// Multicam / Interview / Premiere (docs/plans/studio-modes.md). From the
+  /// event row, then room metadata `mode` once the Studio has set one.
+  StudioMode _showMode = StudioMode.multicam;
+
   /// Another of the host's own devices is publishing (a phone running a
   /// camera). The Studio leaving Sound Check doesn't cancel the show then.
   bool _otherHostDevice = false;
@@ -1524,6 +1530,7 @@ class _CameraScreenState extends State<CameraScreen> {
             : null;
         _captureStartedAt(state['started_at']);
         _viewerCount = (state['viewer_count'] as num?)?.toInt() ?? _viewerCount;
+        _showMode = StudioMode.fromWire(state['studio_mode']);
       });
     } catch (_) {
       /* best-effort */
@@ -2571,6 +2578,10 @@ class _CameraScreenState extends State<CameraScreen> {
       if (elements.hasClocks) unawaited(ServerClock.ensure());
     }
     _layouts.setApplied(layoutAppliedFromRoomMetadata(raw));
+    final mode = StudioMode.fromRoomMetadata(raw);
+    if (mode != null && mode != _showMode && mounted) {
+      setState(() => _showMode = mode);
+    }
     final show = ShowControl.fromRoomMetadata(raw);
     if (show != _show && mounted) {
       final reordered = !listEquals(show.slotOrder, _show.slotOrder);
@@ -3143,6 +3154,20 @@ class _CameraScreenState extends State<CameraScreen> {
           onReorder: _reorderSources,
           onLayers: _openLayers,
         );
+
+  /// The mode switch: optimistic, put back if the server refuses.
+  Future<void> _setMode(StudioMode mode) async {
+    final eventId = _eventId;
+    if (eventId == null) return;
+    final before = _showMode;
+    setState(() => _showMode = mode);
+    try {
+      await LivekitService.setMode(eventId: eventId, mode: mode);
+    } catch (e) {
+      if (mounted) setState(() => _showMode = before);
+      _toast(e.toString().replaceFirst('Exception: ', ''));
+    }
+  }
 
   Future<void> _setShow({
     List<String>? offAir,
@@ -5072,6 +5097,14 @@ class _CameraScreenState extends State<CameraScreen> {
         color: NileColors.txtPrimary,
         tooltip: 'Leave',
       ),
+      // The mode is the host's call, made from the Studio.
+      center: _isStudio && widget.isHost
+          ? NileStudioModeSwitch(
+              value: _showMode,
+              onChanged: StudioMode.canSwitch(isLive: live) ? _setMode : null,
+              lockedReason: 'The mode can’t change while you’re live',
+            )
+          : null,
       trailing: IconButton(
         onPressed: _openAudioSettings,
         icon: const Icon(Icons.settings),
