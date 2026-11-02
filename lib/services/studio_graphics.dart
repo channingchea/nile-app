@@ -611,6 +611,16 @@ class GraphicTargets {
   bool includes(String slotId) =>
       all ? !except.contains(slotId) : slots.contains(slotId);
 
+  /// The same, minus one camera.
+  GraphicTargets without(String slotId) => all
+      ? GraphicTargets.all(except: {...except, slotId})
+      : GraphicTargets.only({...slots}..remove(slotId));
+
+  /// The same, plus one camera.
+  GraphicTargets plus(String slotId) => all
+      ? GraphicTargets.all(except: {...except}..remove(slotId))
+      : GraphicTargets.only({...slots, slotId});
+
   /// "Off", "All cameras", "All but Cam 2", "Cam 1, Cam 3". [labelOf] names a
   /// slot; [order] lists slots in display order.
   String summary(String Function(String slotId) labelOf, List<String> order) {
@@ -801,6 +811,25 @@ class GraphicsState {
       ]);
     }
     return s;
+  }
+
+  /// Move [graphicId] from one camera to another; every other camera keeps
+  /// it as it is.
+  GraphicsState movedTo(String graphicId, String from, String to) {
+    final g = [
+      ...targetList(from),
+      ...all,
+    ].where((x) => x.id == graphicId).firstOrNull;
+    if (g == null) return this;
+    final s = withoutOnSlot(graphicId, from);
+    final inAll = s.all.where((x) => x.id == graphicId).firstOrNull;
+    if (inAll == null) return s.withOn(to, g.copyWith(except: const []));
+    return s._withTarget(null, [
+      for (final x in s.all)
+        x.id == graphicId
+            ? x.copyWith(except: x.except.where((e) => e != to).toList())
+            : x,
+    ]);
   }
 
   GraphicsState withoutEverywhere(String graphicId) {
@@ -1027,10 +1056,9 @@ class CueSet {
   ) => length == 1
       ? (
           name: label,
-          targets: (items.isEmpty
-                  ? elements.single.targets
-                  : items.single.targets)
-              .summary(labelOf, order),
+          targets:
+              (items.isEmpty ? elements.single.targets : items.single.targets)
+                  .summary(labelOf, order),
         )
       : (name: label, targets: _names.join(', '));
 
@@ -1048,5 +1076,6 @@ class CueSet {
       listEquals(other.elements, elements);
 
   @override
-  int get hashCode => Object.hash(Object.hashAll(items), Object.hashAll(elements));
+  int get hashCode =>
+      Object.hash(Object.hashAll(items), Object.hashAll(elements));
 }

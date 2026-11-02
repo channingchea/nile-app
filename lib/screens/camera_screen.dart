@@ -2780,24 +2780,39 @@ class _CameraScreenState extends State<CameraScreen> {
     final eventId = _eventId;
     final slot = s.slotId;
     if (eventId == null || slot == null) return;
+    final elements = _elementsFor(slot);
     final choice = await showLayersSheet(
       context,
       cameraLabel: s.label,
       graphics: _graphics.withBrand(_brandKit?.style).forSlot(slot),
-      elements: _elementsFor(slot),
+      elements: elements,
       layers: _layout.layersFor(slot),
+      slotId: slot,
+      cameras: _slotRefs,
     );
     if (choice == null || !mounted) return;
-    final next = choice.copyToAll
-        ? _layout.copiedToAll(choice.layers)
-        : _layout.withLayers(slot, choice.layers);
+    final r = applyLayersChoice(
+      choice,
+      slotId: slot,
+      graphics: _graphics,
+      elements: elements,
+      layout: _layout,
+    );
     try {
+      if (r.graphics != null && !await _pushGraphics(r.graphics!)) {
+        throw Exception('Couldn’t move or remove that graphic. Try again.');
+      }
+      for (final t in r.elementTargets.entries) {
+        if (!await _elementsCtl.setTargets(t.key, t.value)) {
+          throw Exception('Couldn’t move or remove that element. Try again.');
+        }
+      }
       await LivekitService.setLayout(
         eventId: eventId,
-        layout: next,
+        layout: r.layout,
         srcAgeMs: _monitorAgeMs,
       );
-      if (mounted) setState(() => _layout = next);
+      if (mounted) setState(() => _layout = r.layout);
     } catch (e) {
       _toast(e.toString().replaceFirst('Exception: ', ''));
     }

@@ -548,6 +548,97 @@ void main() {
       expect(got!.copyToAll, isTrue);
       expect(got!.layers.first.hidden, isTrue);
     });
+
+    testWidgets('row menu moves or removes, Undo puts it back', (t) async {
+      t.view.physicalSize = const Size(1200, 1600);
+      t.view.devicePixelRatio = 1;
+      addTearDown(t.view.reset);
+      LayersChoice? got;
+      await t.pumpWidget(
+        MaterialApp(
+          home: Builder(
+            builder: (context) => TextButton(
+              onPressed: () async => got = await showLayersSheet(
+                context,
+                cameraLabel: 'Camera 1',
+                graphics: const [_lt, _logo],
+                layers: const [],
+                slotId: 'c1',
+                cameras: const [
+                  (id: 'c1', label: 'Camera 1'),
+                  (id: 'c2', label: 'Camera 2'),
+                ],
+              ),
+              child: const Text('open'),
+            ),
+          ),
+        ),
+      );
+      await t.tap(find.text('open'));
+      await t.pumpAndSettle();
+      await t.tap(find.byTooltip('More').first);
+      await t.pumpAndSettle();
+      expect(find.text('Move to Camera 1'), findsNothing);
+      await t.tap(find.text('Move to Camera 2'));
+      await t.pumpAndSettle();
+      expect(find.text('Moves to Camera 2 when you save'), findsOneWidget);
+      await t.tap(find.text('Undo'));
+      await t.pumpAndSettle();
+      expect(find.text('Moves to Camera 2 when you save'), findsNothing);
+      await t.tap(find.byTooltip('More').first);
+      await t.pumpAndSettle();
+      await t.tap(find.text('Remove from this camera'));
+      await t.pumpAndSettle();
+      await t.tap(find.byTooltip('More').first);
+      await t.pumpAndSettle();
+      await t.tap(find.text('Move to Camera 2'));
+      await t.pumpAndSettle();
+      await t.tap(find.text('Save'));
+      await t.pumpAndSettle();
+      expect(got!.removed.length, 1);
+      expect(got!.moves.length, 1);
+      expect(got!.removed.intersection(got!.moves.keys.toSet()), isEmpty);
+    });
+
+    test('apply: graphics and elements leave this camera only', () {
+      final graphics = const GraphicsState(
+        all: [_lt],
+        bySlot: {
+          'c1': [_logo],
+        },
+      );
+      final poll = LiveElement(
+        id: 'p',
+        kind: 'poll',
+        name: 'Poll',
+        targets: const GraphicTargets.only({'c1', 'c3'}),
+      );
+      final r = applyLayersChoice(
+        (
+          layers: const [LayerEntry('p', spot: LayoutSpot.mr)],
+          copyToAll: false,
+          removed: {'lt'},
+          moves: {'logo': 'c2', 'p': 'c2'},
+        ),
+        slotId: 'c1',
+        graphics: graphics,
+        elements: [poll],
+        layout: OverlayLayout.empty,
+      );
+      final g = r.graphics!;
+      expect(g.forSlot('c1').map((x) => x.id), isEmpty);
+      expect(g.forSlot('c2').map((x) => x.id), unorderedEquals(['lt', 'logo']));
+      expect(g.forSlot('c3').map((x) => x.id), ['lt']);
+      expect(r.elementTargets['p'], const GraphicTargets.only({'c2', 'c3'}));
+      expect(r.layout.layersFor('c2').first.spot, LayoutSpot.mr);
+    });
+
+    test('apply: moving an all-cameras graphic back clears its exception', () {
+      final g = const GraphicsState(
+        all: [_lt],
+      ).withoutOnSlot('lt', 'c2').movedTo('lt', 'c1', 'c2');
+      expect(g.targetsOf('lt'), const GraphicTargets.all(except: {'c1'}));
+    });
   });
 
   group('Elements panel', () {

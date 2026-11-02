@@ -770,19 +770,29 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
   Future<void> _openLayers(NileStudioSource s) async {
     final slot = s.slotId;
     if (slot == null || s.element != null) return;
+    final elements = _elements.onAir.forSlot(slot);
     final choice = await showLayersSheet(
       context,
       cameraLabel: s.label,
       graphics: _graphics.forSlot(slot),
-      elements: _elements.onAir.forSlot(slot),
+      elements: elements,
       layers: _layout.layersFor(slot),
+      slotId: slot,
+      cameras: _slots,
     );
     if (choice == null || !mounted) return;
-    setState(
-      () => _layout = choice.copyToAll
-          ? _layout.copiedToAll(choice.layers)
-          : _layout.withLayers(slot, choice.layers),
+    final r = applyLayersChoice(
+      choice,
+      slotId: slot,
+      graphics: _graphics,
+      elements: elements,
+      layout: _layout,
     );
+    if (r.graphics != null) await _push(r.graphics!);
+    for (final t in r.elementTargets.entries) {
+      await _elements.setTargets(t.key, t.value);
+    }
+    if (mounted) setState(() => _layout = r.layout);
   }
 
   Widget _cueBar() {
