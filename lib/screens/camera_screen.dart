@@ -14,11 +14,15 @@ import '../services/chat_tools_service.dart';
 import '../services/crew_service.dart';
 import '../services/event_service.dart';
 import '../services/ad_service.dart';
+import '../services/backstage.dart' show BackstageLine;
 import '../services/brand_kit.dart';
 import '../services/graphics_service.dart';
 import '../services/profile_service.dart';
 import '../services/share_urls.dart';
 import '../services/install_id.dart';
+import '../services/interview.dart';
+import '../services/interview_service.dart';
+import '../services/layouts_service.dart';
 import '../services/livekit_service.dart';
 import '../services/live_elements.dart';
 import '../services/overlay_layout.dart';
@@ -38,6 +42,10 @@ import '../services/studio_mode.dart';
 import '../services/studio_roles.dart';
 import '../widgets/audio_meter.dart';
 import '../widgets/elements/element_kinds.dart' show ElementInteraction;
+import '../widgets/host_notes_panel.dart';
+import '../widgets/interview_green_room.dart';
+import '../widgets/interview_invite_sheet.dart';
+import '../widgets/interview_stage.dart';
 import '../widgets/nile_studio.dart';
 import '../widgets/nile_studio_mode_switch.dart';
 import '../widgets/screen_share_picker.dart';
@@ -1308,6 +1316,40 @@ class _CameraScreenState extends State<CameraScreen> {
   /// event row, then room metadata `mode` once the Studio has set one.
   StudioMode _showMode = StudioMode.multicam;
 
+  // ── Interview (docs/plans/studio-modes.md, phase 4) ─────────────────────
+  // The host's Studio only, in Interview mode only. [_syncInterview] starts
+  // and stops all of it as the mode, the room and the event id arrive.
+
+  /// `events.id` — the guest list and notes key on it, not the LiveKit slug.
+  String? _eventPk;
+
+  /// Who is on stage, in what arrangement (room metadata `stage`).
+  StageState _stage = StageState.empty;
+  final _guests = ValueNotifier<List<InterviewGuest>>(const []);
+  RealtimeChannel? _guestsChannel;
+  String? _guestsFor;
+
+  /// Its own room listener, so the Multicam roster code never sees guests.
+  EventsListener<RoomEvent>? _interviewListener;
+
+  /// Guests and crew cameras in the room, refreshed on room events.
+  List<RemoteParticipant> _peers = const [];
+  BackstageLine? _backstage;
+
+  /// The guest the host is talking to privately (and hearing back).
+  String? _talkingWith;
+  bool _talkingAll = false;
+
+  /// Ticks on-stage timers and countdowns while anyone is on stage.
+  Timer? _stageTicker;
+
+  /// Stage entries (`id@at`) whose name lower third has gone out.
+  final Set<String> _announced = {};
+  bool _notesOpen = false;
+
+  bool get _interview =>
+      _isStudio && widget.isHost && _showMode == StudioMode.interview;
+
   /// Another of the host's own devices is publishing (a phone running a
   /// camera). The Studio leaving Sound Check doesn't cancel the show then.
   bool _otherHostDevice = false;
@@ -1372,6 +1414,7 @@ class _CameraScreenState extends State<CameraScreen> {
     current: _showNow,
     build: _layoutGraphic,
     send: _sendLayout,
+    backend: LayoutsBackend(create: _createLayout),
     kit: () => _brandKit?.style,
     onCue: () => _cue.value = CueSet.empty,
   )..addListener(_onLayoutsChanged);
@@ -1531,7 +1574,9 @@ class _CameraScreenState extends State<CameraScreen> {
         _captureStartedAt(state['started_at']);
         _viewerCount = (state['viewer_count'] as num?)?.toInt() ?? _viewerCount;
         _showMode = StudioMode.fromWire(state['studio_mode']);
+        _eventPk = state['id'] as String?;
       });
+      _syncInterview();
     } catch (_) {
       /* best-effort */
     }
@@ -1657,6 +1702,8 @@ class _CameraScreenState extends State<CameraScreen> {
 
   @override
   void dispose() {
+    _stopInterview();
+    _guests.dispose();
     _cue.dispose();
     _elementsCtl.dispose();
     _layouts.dispose();
@@ -2582,6 +2629,8 @@ class _CameraScreenState extends State<CameraScreen> {
     if (mode != null && mode != _showMode && mounted) {
       setState(() => _showMode = mode);
     }
+    final stage = StageState.fromRoomMetadata(raw);
+    if (stage != _stage && mounted) setState(() => _stage = stage);
     final show = ShowControl.fromRoomMetadata(raw);
     if (show != _show && mounted) {
       final reordered = !listEquals(show.slotOrder, _show.slotOrder);
@@ -2603,6 +2652,7 @@ class _CameraScreenState extends State<CameraScreen> {
       if (ServerClock.offsetMs != null) unawaited(ServerClock.remeasure());
       _resyncMonitor();
     }
+    _syncInterview();
   }
 
   /// The Studio monitor does what every viewer does on a resync: drop and
@@ -2895,16 +2945,34 @@ class _CameraScreenState extends State<CameraScreen> {
     });
     _armAutoHide();
     _rebuildRemoteSources();
+    // Interview: the stage arrangement goes with it.
+    final stage = l.stage;
+    if (_interview && stage != null && stage != _stage.layout) {
+      await LivekitService.setStage(eventId: eventId, layout: stage);
+    }
   }
+
+  /// Interview: a layout saved here records the stage arrangement too, so
+  /// "Save current look" brings the stage back on Apply.
+  Future<StudioLayout> _createLayout(StudioLayout l) => LayoutsService.create(
+    _interview && l.stage == null ? l.copyWith(stage: _stage.layout) : l,
+  );
 
   Future<void> _openLayouts() => showLayoutsPanel(
     context,
     controller: _layouts,
     slots: _slotRefs,
-    templates: layoutTemplates(
-      logoPath: _brandKit?.logoPath,
-      hostName: _hostUsername ?? 'Your name',
-    ),
+    templates: [
+      if (_interview)
+        ...interviewTemplates(
+          logoPath: _brandKit?.logoPath,
+          hostName: _hostUsername ?? 'Your name',
+        ),
+      ...layoutTemplates(
+        logoPath: _brandKit?.logoPath,
+        hostName: _hostUsername ?? 'Your name',
+      ),
+    ],
   );
 
   /// The cue bar / Enter: apply the cued layout.
@@ -3161,12 +3229,639 @@ class _CameraScreenState extends State<CameraScreen> {
     if (eventId == null) return;
     final before = _showMode;
     setState(() => _showMode = mode);
+    _syncInterview();
     try {
       await LivekitService.setMode(eventId: eventId, mode: mode);
     } catch (e) {
       if (mounted) setState(() => _showMode = before);
+      _syncInterview();
       _toast(e.toString().replaceFirst('Exception: ', ''));
     }
+  }
+
+  // ── Interview (docs/plans/studio-modes.md, phase 4) ─────────────────────
+
+  /// Start or stop the Interview machinery to match the mode. Idempotent:
+  /// runs on every mode, stage, room or event-id change.
+  void _syncInterview() {
+    final room = _room;
+    if (!_interview || room == null) {
+      _stopInterview();
+      return;
+    }
+    if (_interviewListener == null) {
+      void refresh(Object _) {
+        _syncInterviewRoom();
+        if (mounted) setState(() {});
+      }
+
+      _interviewListener = room.createListener()
+        ..on<ParticipantConnectedEvent>(refresh)
+        ..on<ParticipantDisconnectedEvent>(refresh)
+        ..on<ParticipantMetadataUpdatedEvent>(refresh)
+        ..on<TrackPublishedEvent>(refresh)
+        ..on<TrackUnpublishedEvent>(refresh)
+        ..on<TrackSubscribedEvent>(refresh)
+        ..on<TrackUnsubscribedEvent>(refresh)
+        ..on<TrackMutedEvent>(refresh)
+        ..on<TrackUnmutedEvent>(refresh)
+        ..on<ParticipantConnectionQualityUpdatedEvent>(refresh)
+        ..on<ActiveSpeakersChangedEvent>(refresh);
+    }
+    final pk = _eventPk;
+    if (pk != null && pk != _guestsFor) {
+      _guestsFor = pk;
+      _guestsChannel?.unsubscribe();
+      _guestsChannel = InterviewService.watch(pk, _loadGuests);
+      _loadGuests();
+    }
+    _syncInterviewRoom();
+    _syncStageTicker();
+    _announceArrivals();
+  }
+
+  void _stopInterview() {
+    final listener = _interviewListener;
+    if (listener == null && _guestsChannel == null && _backstage == null) {
+      return;
+    }
+    _interviewListener = null;
+    unawaited(listener?.dispose());
+    _guestsChannel?.unsubscribe();
+    _guestsChannel = null;
+    _guestsFor = null;
+    _guests.value = const [];
+    _backstage?.dispose();
+    _backstage = null;
+    _talkingWith = null;
+    _talkingAll = false;
+    _notesOpen = false;
+    _announced.clear();
+    _syncStageTicker();
+    _syncInterviewRoom();
+  }
+
+  Future<void> _loadGuests() async {
+    final pk = _guestsFor;
+    if (pk == null) return;
+    try {
+      final list = await InterviewService.guests(pk);
+      if (!mounted || pk != _guestsFor) return;
+      setState(() => _guests.value = list);
+    } catch (_) {
+      // Best-effort: the next change re-reads.
+    }
+  }
+
+  /// Interview subscriptions (the Studio joins with autoSubscribe off):
+  /// guests' video while Interview runs — adaptiveStream keeps the small tiles
+  /// on low layers — and their audio only when the host must hear them: on
+  /// stage, or in a private talk. Crew cameras' video is Multicam's job.
+  void _syncInterviewRoom() {
+    final room = _room;
+    final on = _interviewListener != null;
+    final hear = {..._stage.ids, ?_talkingWith};
+    final peers = <RemoteParticipant>[];
+    void want(RemoteTrackPublication pub, bool yes) {
+      if (yes && !pub.subscribed) {
+        unawaited(pub.subscribe());
+      } else if (!yes && pub.subscribed) {
+        unawaited(pub.unsubscribe());
+      }
+    }
+
+    for (final p in room?.remoteParticipants.values ?? <RemoteParticipant>[]) {
+      final role = _metaOf(p)['role'];
+      if (on && (role == NileRole.guest || role == NileRole.camera)) {
+        peers.add(p);
+      }
+      if (role != NileRole.guest) continue;
+      for (final pub in p.videoTrackPublications) {
+        want(pub, on);
+      }
+      for (final pub in p.audioTrackPublications) {
+        want(pub, on && hear.contains(p.identity));
+      }
+    }
+    _peers = peers;
+  }
+
+  void _syncStageTicker() {
+    final run = _interviewListener != null && _stage.entries.isNotEmpty;
+    if (run == (_stageTicker != null)) return;
+    _stageTicker?.cancel();
+    _stageTicker = run
+        ? Timer.periodic(const Duration(seconds: 1), (_) {
+            _announceArrivals();
+            if (mounted) setState(() {});
+          })
+        : null;
+  }
+
+  /// A guest's name lower third on All cameras (the stage) as their
+  /// countdown ends — once per bring-on. Anyone already on well before (the
+  /// Studio rejoining mid-show) isn't announced again.
+  void _announceArrivals() {
+    if (_interviewListener == null) return;
+    final now = ServerClock.now();
+    for (final e in _stage.entries) {
+      if (e.at > now || !_announced.add('${e.id}@${e.at}')) continue;
+      final userId = guestUserIdOf(e.id);
+      if (userId == null || now - e.at > 10000) continue;
+      final p = _room?.remoteParticipants[e.id];
+      final meta = p == null ? null : GuestMeta.fromJson(_metaOf(p));
+      final row = _guests.value.where((g) => g.userId == userId).firstOrNull;
+      final name = row?.name ?? meta?.name;
+      if (name == null) continue;
+      final title = row?.title ?? meta?.title;
+      final g = LiveGraphic(
+        id: 'guest-name:$userId',
+        kind: GraphicKind.lowerThird,
+        title: name.length > 60 ? name.substring(0, 60) : name,
+        subtitle: title == null || title.isEmpty
+            ? null
+            : title.length > 120
+            ? title.substring(0, 120)
+            : title,
+        hideAt: DateTime.now()
+            .add(const Duration(seconds: 8))
+            .millisecondsSinceEpoch,
+      );
+      unawaited(_pushGraphics(_graphics.withOn(null, g)));
+    }
+  }
+
+  Future<void> _moveGuest(GreenRoomEntry e, GuestStatus to) async {
+    final eventId = _eventId;
+    if (eventId == null) return;
+    if (to == GuestStatus.onStage && _talkingWith == e.identity) {
+      await _togglePrivateTalk(e);
+    }
+    try {
+      await LivekitService.moveGuest(
+        eventId: eventId,
+        identity: e.identity,
+        to: to,
+      );
+    } catch (err) {
+      final msg = err.toString().replaceFirst('Exception: ', '');
+      _toast(
+        msg.contains('stage_full')
+            ? 'The stage is full — send someone back first.'
+            : msg,
+      );
+    }
+  }
+
+  Future<void> _removeGuest(GreenRoomEntry e) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: NileColors.bgSurface,
+        title: Text('Remove ${e.name}?', style: NileTextStyles.headingMd()),
+        content: Text(
+          'They leave the stage and the green room for this show.',
+          style: NileTextStyles.bodyMd(),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text('Remove', style: TextStyle(color: NileColors.error)),
+          ),
+        ],
+      ),
+    );
+    if (ok == true) await _moveGuest(e, GuestStatus.removed);
+  }
+
+  Future<void> _muteGuest(GreenRoomEntry e, bool muted) async {
+    final eventId = _eventId;
+    if (eventId == null) return;
+    // The Studio's mic follows the master-audio rule; muting it here would
+    // fight that.
+    if (e.kind == GreenRoomKind.host) {
+      _toast('Your mic follows the show audio. Change it from the toolbar.');
+      return;
+    }
+    try {
+      await LivekitService.muteParticipant(
+        eventId: eventId,
+        identity: e.identity,
+        muted: muted,
+      );
+      if (!muted) _toast('Asked ${e.name} to unmute.');
+    } catch (err) {
+      _toast(err.toString().replaceFirst('Exception: ', ''));
+    }
+  }
+
+  /// Guests in the green room (connected, not on stage).
+  Set<String> get _waitingGuests => {
+    for (final p in _peers)
+      if (_metaOf(p)['role'] == NileRole.guest && !_stage.contains(p.identity))
+        p.identity,
+  };
+
+  Set<String> get _lineTargets =>
+      _talkingAll ? _waitingGuests : {?_talkingWith};
+
+  /// Point the talkback line at [_lineTargets]. Checked again afterwards: a
+  /// release while the line was still connecting must close it, not leave
+  /// the mic open.
+  Future<void> _applyLine() async {
+    final eventId = _eventId;
+    if (eventId == null) return;
+    var line = _backstage;
+    if (line == null) {
+      line = BackstageLine(eventId);
+      line.addListener(() {
+        if (mounted) setState(() {});
+      });
+      _backstage = line;
+    }
+    final want = _lineTargets;
+    await line.talkTo(want);
+    if (!setEquals(want, _lineTargets)) await line.talkTo(_lineTargets);
+    // The show mic isn't the talkback: viewers still hear it.
+    if (_lineTargets.isNotEmpty &&
+        _isMainAudioSource &&
+        _state == CameraState.live) {
+      _toast('Your show mic is still live. Viewers can hear you too.');
+    }
+  }
+
+  Future<void> _togglePrivateTalk(GreenRoomEntry e) async {
+    final ending = _talkingWith == e.identity;
+    setState(() {
+      _talkingWith = ending ? null : e.identity;
+      _talkingAll = false;
+    });
+    _syncInterviewRoom();
+    try {
+      await _applyLine();
+    } catch (_) {
+      if (mounted) setState(() => _talkingWith = null);
+      _syncInterviewRoom();
+      _toast('Couldn’t open a private line. Try again.');
+    }
+  }
+
+  Future<void> _talkToAll(bool on) async {
+    if (on == _talkingAll) return;
+    setState(() {
+      _talkingAll = on;
+      if (on) _talkingWith = null;
+    });
+    _syncInterviewRoom();
+    try {
+      await _applyLine();
+    } catch (_) {
+      if (mounted) setState(() => _talkingAll = false);
+      _toast('Couldn’t reach the green room. Try again.');
+    }
+  }
+
+  Future<void> _setStage({
+    StageLayout? layout,
+    String? focus,
+    String? content,
+    bool clearContent = false,
+  }) async {
+    final eventId = _eventId;
+    if (eventId == null) return;
+    try {
+      await LivekitService.setStage(
+        eventId: eventId,
+        layout: layout,
+        focus: focus,
+        content: content,
+        clearContent: clearContent,
+      );
+    } catch (e) {
+      _toast(e.toString().replaceFirst('Exception: ', ''));
+    }
+  }
+
+  void _openInvite() {
+    final eventId = _eventId;
+    if (eventId == null) return;
+    showInterviewInviteSheet(
+      context,
+      eventId: eventId,
+      guests: _guests,
+      hostId: supabase.auth.currentUser?.id,
+    );
+  }
+
+  bool _isSpeaking(String identity) {
+    final local = _room?.localParticipant;
+    if (local != null && local.identity == identity) return local.isSpeaking;
+    return _room?.remoteParticipants[identity]?.isSpeaking ?? false;
+  }
+
+  /// The green room: this Studio, every guest and crew camera in the room,
+  /// then invited guests who haven't joined.
+  List<GreenRoomEntry> _greenRoomEntries() {
+    final now = ServerClock.now();
+    final talking = _backstage?.talkingTo ?? const <String>{};
+    GuestStatus statusOf(String id) =>
+        _stage.contains(id) ? GuestStatus.onStage : GuestStatus.greenRoom;
+    Duration? onFor(String id) {
+      final e = _stage.entries.where((x) => x.id == id).firstOrNull;
+      return e == null || e.at > now
+          ? null
+          : Duration(milliseconds: now - e.at);
+    }
+
+    VideoTrack? cameraOf(RemoteParticipant p) {
+      final pub = p.videoTrackPublications
+          .where((x) => x.source != TrackSource.screenShareVideo)
+          .firstOrNull;
+      return pub != null && pub.subscribed && !pub.muted
+          ? pub.track as VideoTrack?
+          : null;
+    }
+
+    final out = <GreenRoomEntry>[];
+    final local = _room?.localParticipant;
+    if (local != null) {
+      out.add(
+        GreenRoomEntry(
+          identity: local.identity,
+          name: 'You',
+          title: 'Studio',
+          kind: GreenRoomKind.host,
+          status: statusOf(local.identity),
+          track: _videoEnabled ? _localVideoTrack : null,
+          mirror: _selectedCameraId == null && _isFrontCamera,
+          level: local.audioLevel,
+          micMuted: !_isMainAudioSource,
+          quality: _quality,
+          countdown: _stage.countdownFor(local.identity, now),
+          onStageFor: onFor(local.identity),
+        ),
+      );
+    }
+    final joined = <String>{};
+    for (final p in _peers) {
+      final meta = _metaOf(p);
+      final guest = GuestMeta.fromJson(meta);
+      final row = guest == null
+          ? null
+          : _guests.value.where((g) => g.userId == guest.userId).firstOrNull;
+      if (guest != null) joined.add(guest.userId);
+      if (guest == null && meta['role'] != NileRole.camera) continue;
+      out.add(
+        GreenRoomEntry(
+          identity: p.identity,
+          name: guest == null
+              ? (meta['cameraName'] as String?) ??
+                    (p.name.isNotEmpty ? p.name : 'Camera')
+              : row?.name ?? guest.name,
+          title: guest == null
+              ? (meta['username'] == null ? null : '@${meta['username']}')
+              : row?.title ?? guest.title,
+          avatarUrl: row?.avatarUrl ?? guest?.avatarUrl,
+          kind: guest == null ? GreenRoomKind.camera : GreenRoomKind.guest,
+          status: statusOf(p.identity),
+          track: cameraOf(p),
+          level: p.audioLevel,
+          micMuted: !p.isMicrophoneEnabled(),
+          quality: _mapQuality(p.connectionQuality),
+          countdown: _stage.countdownFor(p.identity, now),
+          onStageFor: onFor(p.identity),
+          talking: talking.contains(p.identity),
+        ),
+      );
+    }
+    for (final g in _guests.value) {
+      if (g.status == GuestStatus.removed || joined.contains(g.userId)) {
+        continue;
+      }
+      out.add(
+        GreenRoomEntry(
+          identity: g.identity,
+          name: g.name,
+          title: g.title,
+          avatarUrl: g.avatarUrl,
+          kind: GreenRoomKind.guest,
+          status: GuestStatus.invited,
+        ),
+      );
+    }
+    return out;
+  }
+
+  Widget _buildGreenRoom(List<GreenRoomEntry> people) =>
+      InterviewGreenRoomColumn(
+        entries: people,
+        talkingToAll: _talkingAll,
+        actions: GreenRoomActions(
+          onBringOn: (e) => _moveGuest(e, GuestStatus.onStage),
+          onSendBack: (e) => _moveGuest(e, GuestStatus.greenRoom),
+          onRemove: _removeGuest,
+          onMute: _muteGuest,
+          onTalk: _togglePrivateTalk,
+          onTalkAll: _talkToAll,
+          onFocus: (e) => _setStage(focus: e.identity),
+          onInvite: _openInvite,
+        ),
+        footer: _room?.localParticipant == null
+            ? null
+            : Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [_buildCameraMeter(height: 120)],
+              ),
+      );
+
+  /// What the stage's extra viewer angle can hold: a screen share or an
+  /// element angle.
+  List<({String id, String label})> get _contentOptions {
+    final local = _room?.localParticipant;
+    return [
+      if (local != null && _screenShareTrack != null)
+        (id: '${local.identity}#share', label: 'Your screen'),
+      for (final p in _peers)
+        if (p.videoTrackPublications.any(
+          (x) => x.source == TrackSource.screenShareVideo,
+        ))
+          (
+            id: '${p.identity}#share',
+            label: '${GuestMeta.fromJson(_metaOf(p))?.name ?? p.name} — screen',
+          ),
+      for (final e in _elementsCtl.angles)
+        (id: elementAngleId(e.id), label: e.name),
+    ];
+  }
+
+  Widget _buildStageToolbar() {
+    final options = _contentOptions;
+    final current = _stage.content == null
+        ? 'None'
+        : options.where((o) => o.id == _stage.content).firstOrNull?.label ??
+              'Unavailable';
+    return Padding(
+      padding: const EdgeInsets.symmetric(
+        horizontal: NileSpacing.s12,
+        vertical: NileSpacing.s4,
+      ),
+      child: Row(
+        children: [
+          StageLayoutPicker(
+            value: _stage.layout,
+            onChanged: (l) => _setStage(layout: l),
+          ),
+          const SizedBox(width: NileSpacing.s8),
+          Flexible(
+            child: PopupMenuButton<String>(
+              tooltip: 'Content angle',
+              onSelected: (id) => id.isEmpty
+                  ? _setStage(clearContent: true)
+                  : _setStage(content: id),
+              itemBuilder: (_) => [
+                CheckedPopupMenuItem(
+                  value: '',
+                  checked: _stage.content == null,
+                  child: const Text('None'),
+                ),
+                for (final o in options)
+                  CheckedPopupMenuItem(
+                    value: o.id,
+                    checked: _stage.content == o.id,
+                    child: Text(o.label),
+                  ),
+              ],
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    Icons.add_to_queue,
+                    size: 18,
+                    color: _stage.content == null
+                        ? NileColors.txtSecondary
+                        : NileColors.volt,
+                  ),
+                  const SizedBox(width: NileSpacing.s6),
+                  Flexible(
+                    child: Text(
+                      'Content angle: $current',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: NileTextStyles.labelSm().copyWith(
+                        color: NileColors.txtSecondary,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const Spacer(),
+          IconButton(
+            onPressed: _eventPk == null
+                ? null
+                : () => setState(() => _notesOpen = !_notesOpen),
+            isSelected: _notesOpen,
+            icon: const Icon(Icons.sticky_note_2_outlined),
+            selectedIcon: Icon(Icons.sticky_note_2, color: NileColors.volt),
+            color: NileColors.txtSecondary,
+            tooltip: _notesOpen ? 'Hide notes' : 'Notes',
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Interview's monitor: the stage as viewers see it (pending guests show
+  /// their countdown), with timers and the All-cameras graphics, cue included.
+  Widget _buildStageMonitor(List<GreenRoomEntry> people) {
+    final now = ServerClock.now();
+    final byId = {for (final e in people) e.identity: e};
+    final tiles = [
+      for (final s in _stage.entries)
+        if (byId[s.id] case final e?)
+          StageTile(
+            identity: e.identity,
+            name: e.name,
+            title: e.title,
+            avatarUrl: e.avatarUrl,
+            track: e.track,
+            mirror: e.mirror,
+            speaking: _isSpeaking(e.identity),
+            muted: e.micMuted,
+            onStageFor: e.onStageFor,
+            countdown: e.countdown,
+          )
+        else
+          StageTile(
+            identity: s.id,
+            name: 'Not connected',
+            countdown: _stage.countdownFor(s.id, now),
+          ),
+    ];
+    final graphics = _cue.value
+        .preview(_graphics.withBrand(_brandKit?.style), DateTime.now())
+        .forSlot(null);
+    final stage = Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _buildStageToolbar(),
+        Expanded(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(
+              NileSpacing.s16,
+              0,
+              NileSpacing.s16,
+              NileSpacing.s16,
+            ),
+            child: Center(
+              child: InterviewStageView(
+                tiles: tiles,
+                layout: _stage.layout,
+                focusIndex: _stage.focusIndexIn(_stage.ids),
+                showTimers: true,
+                onTapTile: (t) => _setStage(focus: t.identity),
+                overlay: Positioned.fill(
+                  child: IgnorePointer(
+                    child: NileGraphicsLayer(
+                      graphics: graphics,
+                      elements: _elementsFor(null, preview: true),
+                      layers: _layout.layersFor(null),
+                      interactionFor: _staffView,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+    final pk = _eventPk;
+    return ColoredBox(
+      color: NileColors.bgPage,
+      child: !_notesOpen || pk == null
+          ? stage
+          : Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Expanded(child: stage),
+                Container(width: 1, color: NileColors.border),
+                SizedBox(
+                  width: 280,
+                  child: HostNotesPanel(
+                    key: ValueKey(pk),
+                    eventPk: pk,
+                    onClose: () => setState(() => _notesOpen = false),
+                  ),
+                ),
+              ],
+            ),
+    );
   }
 
   Future<void> _setShow({
@@ -3797,6 +4492,7 @@ class _CameraScreenState extends State<CameraScreen> {
   }
 
   Future<void> _teardownRoom() async {
+    _stopInterview();
     _statusChannel?.unsubscribe();
     _statusChannel = null;
     _chatChannel?.unsubscribe();
@@ -3849,6 +4545,8 @@ class _CameraScreenState extends State<CameraScreen> {
       _slots = const [];
       _graphics = GraphicsState.empty;
       _show = ShowControl.empty;
+      _stage = StageState.empty;
+      _eventPk = null;
       _angleCounts = null;
       _scheduledAt = null;
       _pinned = null;
@@ -5044,10 +5742,15 @@ class _CameraScreenState extends State<CameraScreen> {
     final hasChat = _hasChatColumn(context);
     final live = _state == CameraState.live;
     final started = _startedAt;
+    final interview = _interview;
+    final people = interview ? _greenRoomEntries() : const <GreenRoomEntry>[];
 
     final studio = NileStudio(
       sources: sources,
       sourceActions: _sourceActions,
+      // Interview: the green room and the stage replace cameras and monitor.
+      sourceColumn: interview ? _buildGreenRoom(people) : null,
+      monitor: interview ? _buildStageMonitor(people) : null,
       selectedIdentity: _selectedSourceId,
       onSelectSource: (id) => setState(() => _selectedSourceId = id),
       // Ejecting someone is the host's call, not an operator's — same bar as
@@ -5158,7 +5861,9 @@ class _CameraScreenState extends State<CameraScreen> {
               onRelease: _canModerateChat ? _releaseMessage : null,
               // Only the control room puts things on screen.
               onShowOnScreen: _isStudio ? _showChatOnScreen : null,
-              onShowOnScreenOptions: _isStudio
+              // Interview's stage shows "All cameras" graphics only, so
+              // picking cameras there would put a line nowhere.
+              onShowOnScreenOptions: _isStudio && !interview
                   ? _showChatOnScreenOptions
                   : null,
             )

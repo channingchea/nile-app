@@ -1,3 +1,4 @@
+import 'interview.dart' show StageLayout;
 import 'overlay_layout.dart';
 import 'studio_graphics.dart';
 import 'studio_layouts.dart';
@@ -170,6 +171,86 @@ List<LayoutTemplate> layoutTemplates({
         ),
         defaultAngle: const AngleRef.camera(1),
       ),
+    ),
+  ];
+}
+
+/// Interview mode's four (docs/plans/studio-modes.md, phase 4). Each sets the
+/// stage arrangement Apply switches to. The stage shows "All cameras"
+/// graphics, so anything here goes on every camera; guests get their own
+/// name lower third when brought on, so only "host only" carries one.
+List<LayoutTemplate> interviewTemplates({
+  String? logoPath,
+  String hostName = 'Your name',
+}) {
+  final hasLogo = logoPath != null && logoPath.isNotEmpty;
+  LayoutTemplate template(
+    String id,
+    String name,
+    String description,
+    StageLayout stage, {
+    bool lowerThird = false,
+  }) => LayoutTemplate(
+    id: id,
+    name: name,
+    description: description,
+    graphics: [
+      if (hasLogo)
+        StudioGraphic(
+          id: 'logo',
+          kind: GraphicKind.logo,
+          name: 'Logo',
+          payload: {'imagePath': logoPath, 'corner': 'tr', 'size': 's'},
+        ),
+      if (lowerThird)
+        StudioGraphic(
+          id: 'lt',
+          kind: GraphicKind.lowerThird,
+          name: hostName,
+          payload: {'title': hostName},
+        ),
+    ],
+    build: (ref, n) => StudioLayout(
+      name: name,
+      template: id,
+      cameras: [
+        for (var i = 0; i < n; i++)
+          LayoutCamera(
+            items: [
+              if (lowerThird)
+                LayoutItem.graphic(ref('lt'), spot: LayoutSpot.bl),
+              if (hasLogo) LayoutItem.graphic(ref('logo')),
+            ],
+          ),
+      ],
+      stage: stage,
+    ),
+  );
+  return [
+    template(
+      'interview_host_only',
+      'Interview: host only',
+      'Just you, full frame, with your name.',
+      StageLayout.solo,
+      lowerThird: true,
+    ),
+    template(
+      'interview_one_guest',
+      'Interview: one guest',
+      'You and a guest side by side.',
+      StageLayout.side,
+    ),
+    template(
+      'interview_panel',
+      'Interview: panel',
+      'Everyone on stage in a grid.',
+      StageLayout.grid,
+    ),
+    template(
+      'interview_spotlight',
+      'Interview: spotlight',
+      'One person large, everyone else down the side.',
+      StageLayout.spotlight,
     ),
   ];
 }

@@ -111,10 +111,14 @@ void main() {
         'publishData',
         'AngleWatchers',
         'setShow',
+        // Interview's guest list and talkback reach the server too.
+        'InterviewService',
+        'Backstage',
       ];
       for (final path in [
         'lib/screens/studio_preview_screen.dart',
         'lib/widgets/studio_preview_demo.dart',
+        'lib/widgets/studio_setup_interview_demo.dart',
       ]) {
         // Comments may describe what the file avoids; code may not use it.
         final code = File(path)

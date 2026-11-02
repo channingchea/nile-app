@@ -9,6 +9,7 @@
 //
 //   2. Web landing pages with Open Graph / Twitter Card meta:
 //        GET /e/<eventId>   GET /p/<postId>   GET /u/<username>
+//        GET /g/<code>  (Interview guest invite — deliberately generic)
 //
 //   3. Ad-platform host-boost portal (A-2), checkout on the web (off IAP):
 //        GET /boost?event=<id>   → serves the standalone boost portal page.
@@ -79,6 +80,7 @@ serve(async (req) => {
     if (kind === "e") return await eventPage(value);
     if (kind === "p") return await postPage(value);
     if (kind === "u") return await profilePage(value);
+    if (kind === "g") return guestPage(value);
   } catch (_) {
     return html(genericPage(), 200);
   }
@@ -128,7 +130,7 @@ function aasa(): Response {
   const body = {
     applinks: {
       apps: [],
-      details: [{ appID: IOS_APP_ID, paths: ["/e/*", "/p/*", "/u/*"] }],
+      details: [{ appID: IOS_APP_ID, paths: ["/e/*", "/p/*", "/u/*", "/g/*"] }],
     },
   };
   return new Response(JSON.stringify(body), {
@@ -218,6 +220,21 @@ async function profilePage(username: string): Promise<Response> {
   }));
 }
 
+// A host's guest invite. Never looks the code up: the page would otherwise
+// tell anyone holding a forwarded link which (possibly private) show it's for.
+// The app joins the guest list once the guest is signed in.
+function guestPage(code: string): Response {
+  // Codes are 10 chars of [a-z2-9] (_shared/interview.ts isInviteCode).
+  if (!/^[a-z2-9]{10}$/.test(code)) return html(genericPage(), 404);
+  return html(page({
+    title: "You're invited to be a guest on Nile",
+    description: "Open the invite in the Nile app to join the host's green room.",
+    image: null,
+    canonical: `/g/${code}`,
+    stores: true,
+  }));
+}
+
 // ── HTML rendering ──
 
 interface Meta {
@@ -225,6 +242,8 @@ interface Meta {
   description: string;
   image: string | null;
   canonical: string;
+  /** Show App Store / Google Play links under the button. */
+  stores?: boolean;
 }
 
 function page(m: Meta): string {
@@ -235,11 +254,15 @@ function page(m: Meta): string {
   const imgTags = img
     ? `<meta property="og:image" content="${img}"/>\n    <meta name="twitter:card" content="summary_large_image"/>\n    <meta name="twitter:image" content="${img}"/>`
     : `<meta name="twitter:card" content="summary"/>`;
-  return `<!doctype html><html lang="en"><head>\n    <meta charset="utf-8"/>\n    <meta name="viewport" content="width=device-width,initial-scale=1"/>\n    <title>${t}</title>\n    <meta name="description" content="${d}"/>\n    <link rel="canonical" href="${url}"/>\n    <meta property="og:type" content="website"/>\n    <meta property="og:site_name" content="${SITE_NAME}"/>\n    <meta property="og:title" content="${t}"/>\n    <meta property="og:description" content="${d}"/>\n    <meta property="og:url" content="${url}"/>\n    <meta name="twitter:title" content="${t}"/>\n    <meta name="twitter:description" content="${d}"/>\n    ${imgTags}\n    ${storeRedirectScript()}\n    <style>\n      body{margin:0;background:#0A0A0A;color:#fff;font-family:-apple-system,system-ui,sans-serif;display:flex;min-height:100vh;align-items:center;justify-content:center;text-align:center;padding:24px}\n      .card{max-width:480px}\n      ${img ? `.cover{width:100%;max-width:360px;border-radius:16px;margin:0 0 20px;object-fit:cover}` : ""}\n      h1{font-size:24px;margin:0 0 8px}\n      p{color:#A1A1AA;margin:0 0 24px;line-height:1.5}\n      a.cta{display:inline-block;background:#C8FF00;color:#0A0A0A;font-weight:700;text-decoration:none;padding:14px 28px;border-radius:999px}\n    </style></head><body><div class="card">\n    ${img ? `<img class="cover" src="${img}" alt=""/>` : ""}\n    <h1>${t}</h1><p>${d}</p>\n    <a class="cta" href="${url}">Open in ${SITE_NAME}</a>\n    </div></body></html>`;
+  return `<!doctype html><html lang="en"><head>\n    <meta charset="utf-8"/>\n    <meta name="viewport" content="width=device-width,initial-scale=1"/>\n    <title>${t}</title>\n    <meta name="description" content="${d}"/>\n    <link rel="canonical" href="${url}"/>\n    <meta property="og:type" content="website"/>\n    <meta property="og:site_name" content="${SITE_NAME}"/>\n    <meta property="og:title" content="${t}"/>\n    <meta property="og:description" content="${d}"/>\n    <meta property="og:url" content="${url}"/>\n    <meta name="twitter:title" content="${t}"/>\n    <meta name="twitter:description" content="${d}"/>\n    ${imgTags}\n    ${storeRedirectScript()}\n    <style>\n      body{margin:0;background:#0A0A0A;color:#fff;font-family:-apple-system,system-ui,sans-serif;display:flex;min-height:100vh;align-items:center;justify-content:center;text-align:center;padding:24px}\n      .card{max-width:480px}\n      ${img ? `.cover{width:100%;max-width:360px;border-radius:16px;margin:0 0 20px;object-fit:cover}` : ""}\n      h1{font-size:24px;margin:0 0 8px}\n      p{color:#A1A1AA;margin:0 0 24px;line-height:1.5}\n      a.cta{display:inline-block;background:#C8FF00;color:#0A0A0A;font-weight:700;text-decoration:none;padding:14px 28px;border-radius:999px}\n      .stores{margin-top:20px;font-size:14px}\n      .stores a{color:#A1A1AA;margin:0 10px}\n    </style></head><body><div class="card">\n    ${img ? `<img class="cover" src="${img}" alt=""/>` : ""}\n    <h1>${t}</h1><p>${d}</p>\n    <a class="cta" href="${url}">Open in ${SITE_NAME}</a>\n    ${m.stores ? storeLinks() : ""}\n    </div></body></html>`;
 }
 
 function storeRedirectScript(): string {
   return `<script>\n    (function(){\n      var p=location.pathname.replace(/^\\/share/,'').split('/').filter(Boolean);\n      var kind=p[0], val=p[1];\n      if(!kind||!val) return;\n      var scheme = kind==='e' ? 'nile://event/'+val : kind==='p' ? 'nile://post/'+val : null;\n      var ua=navigator.userAgent||'';\n      var store = /android/i.test(ua) ? ${JSON.stringify(PLAY_STORE_URL)} : /iphone|ipad|ipod/i.test(ua) ? ${JSON.stringify(APP_STORE_URL)} : null;\n      if(!store) return;\n      var t=Date.now();\n      if(scheme){ window.location.href=scheme; }\n      setTimeout(function(){ if(Date.now()-t<1600) window.location.href=store; }, 1200);\n    })();\n  </script>`;
+}
+
+function storeLinks(): string {
+  return `<p class="stores">Don't have Nile? <a href="${esc(APP_STORE_URL)}">App Store</a><a href="${esc(PLAY_STORE_URL)}">Google Play</a></p>`;
 }
 
 function genericPage(): string {

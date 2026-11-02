@@ -222,6 +222,8 @@ class _NotificationTile extends StatelessWidget {
       'A brand offered to sponsor your event — tap to review it',
     NotificationType.sponsorshipOfferExpiring =>
       'A sponsorship offer on your event expires in 24 hours',
+    NotificationType.guestInvited =>
+      '@${notification.actorUsername} invited you to be a guest on their show',
   };
 
   IconData _icon() => switch (notification.type) {
@@ -241,6 +243,7 @@ class _NotificationTile extends StatelessWidget {
     NotificationType.feedbackResolved => Icons.bug_report,
     NotificationType.sponsorshipOffer => Icons.workspace_premium,
     NotificationType.sponsorshipOfferExpiring => Icons.hourglass_bottom,
+    NotificationType.guestInvited => Icons.mic_external_on,
   };
 
   Color _iconColor() => switch (notification.type) {
@@ -260,6 +263,7 @@ class _NotificationTile extends StatelessWidget {
     NotificationType.feedbackResolved => NileColors.azure,
     NotificationType.sponsorshipOffer => NileColors.volt,
     NotificationType.sponsorshipOfferExpiring => NileColors.coral,
+    NotificationType.guestInvited => NileColors.azure,
   };
 
   String _timeAgo(DateTime dt) {

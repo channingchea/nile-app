@@ -15,6 +15,9 @@ import '../services/block_service.dart';
 import '../services/chat_service.dart';
 import '../services/deep_link_service.dart';
 import '../services/event_service.dart';
+import '../services/follow_service.dart';
+import '../services/interview.dart' show StageState;
+import '../services/interview_viewer.dart';
 import '../services/livekit_service.dart';
 import '../services/live_elements.dart';
 import '../services/overlay_layout.dart';
@@ -25,6 +28,7 @@ import '../services/server_clock.dart';
 import '../services/share_urls.dart';
 import '../services/show_control.dart';
 import '../services/studio_graphics.dart';
+import '../services/studio_mode.dart';
 import '../services/studio_roles.dart';
 import '../services/supabase_client.dart';
 import '../services/tip_service.dart';
@@ -35,10 +39,12 @@ import '../widgets/nile_desktop.dart';
 import '../widgets/elements/element_kinds.dart'
     show ElementInteraction, Ticking;
 import '../widgets/elements/poll.dart' show PollLivePill, showPollVoteSheet;
+import '../widgets/interview_stage.dart' show InterviewStageView, StageTile;
 import '../widgets/nile_graphics_layer.dart';
 import '../widgets/nile_link_text.dart';
 import '../widgets/rolling_number.dart';
 import '../widgets/share_to_sheet.dart';
+import '../widgets/stage_profile_sheet.dart';
 
 class ViewerScreen extends StatefulWidget {
   final String? initialEventId;
@@ -145,6 +151,17 @@ class _ViewerScreenState extends State<ViewerScreen>
   /// joined, so a late joiner never replays it.
   int? _seenSendAllNonce;
 
+  // Interview mode (studio modes phase 5): the mode (event row, then room
+  // metadata `mode`) and the stage (room metadata `stage`). Who is visibly on
+  // stage is worked out on the fly (stageLineup); [_stageTimer] wakes the
+  // screen when the next "you're on in 5" countdown ends.
+  StudioMode _mode = StudioMode.multicam;
+  StageState _stage = StageState.empty;
+  Timer? _stageTimer;
+
+  /// Watching the host's content angle instead of the stage.
+  bool _watchingContent = false;
+
   /// Cameras' video lands over the first seconds after a join, in no fixed
   /// order. Until this time the viewer is settled onto the start angle as each
   /// one arrives; cleared the moment they (or the host) pick one.
@@ -208,6 +225,9 @@ class _ViewerScreenState extends State<ViewerScreen>
   String? _coverImageUrl;
   String? _hostUsername;
   String? _hostAvatarUrl;
+
+  /// The host's @username (the profile sheet), next to the name above.
+  String? _hostHandle;
   LobbySponsorship? _sponsorship;
   VideoPlayerController? _sponsorController;
   bool _sponsorMuted = true;
@@ -321,6 +341,8 @@ class _ViewerScreenState extends State<ViewerScreen>
     _systemChannel = null;
     _angleHeartbeat?.cancel();
     _angleHeartbeat = null;
+    _stageTimer?.cancel();
+    _stageTimer = null;
   }
 
   /// Re-pull authoritative event state after a realtime drop/rejoin, so a status
@@ -778,6 +800,9 @@ class _ViewerScreenState extends State<ViewerScreen>
         }
       }
 
+      // The room metadata's mode wins once the Studio has set one.
+      _mode = StudioMode.fromWire(eventState?['studio_mode']);
+
       // Viewer identity now comes from the signed-in user's JWT (the Edge
       // Function reads it server-side) — we no longer send a viewerId.
       final conn = await LivekitService.viewerToken(eventId: eventId);
@@ -806,6 +831,7 @@ class _ViewerScreenState extends State<ViewerScreen>
         ..on<ParticipantMetadataUpdatedEvent>(_onParticipantMetadataUpdated)
         ..on<RoomMetadataChangedEvent>((e) => _applyRoomMetadata(e.metadata))
         ..on<RoomDisconnectedEvent>(_onRoomDisconnected);
+      _listenStage(listener);
 
       // Fail loudly instead of hanging on "Joining stream…" forever.
       await room
@@ -924,6 +950,7 @@ class _ViewerScreenState extends State<ViewerScreen>
             (hostProfile?['display_name'] ?? hostProfile?['username'])
                 as String?;
         _hostAvatarUrl = hostProfile?['avatar_url'] as String?;
+        _hostHandle = hostProfile?['username'] as String?;
         _eventConn = eventConn;
         _chatChannel = chatChannel;
         _state = ViewerState.watching;
@@ -955,6 +982,10 @@ class _ViewerScreenState extends State<ViewerScreen>
   // ── LiveKit event handlers ────────────────────────────────────────────────
 
   void _onTrackSubscribed(TrackSubscribedEvent event) {
+    if (_interview) {
+      _onStageEvent(event);
+      return;
+    }
     // Don't gate on TrackSource (can be `unknown` at subscribe time) — _addCamera
     // checks the participant's role == 'camera' authoritatively.
     if (event.track is VideoTrack) {
@@ -992,6 +1023,12 @@ class _ViewerScreenState extends State<ViewerScreen>
   }
 
   void _onTrackUnsubscribed(TrackUnsubscribedEvent event) {
+    // Interview reads tracks straight off the room: just redraw. No resync
+    // here — _syncStage is usually what dropped it.
+    if (_interview) {
+      setState(() {});
+      return;
+    }
     if (event.track is VideoTrack) {
       final isScreen = _isScreenSharePub(event.participant, event.publication);
       final idx = _cameras.indexWhere(
@@ -1060,6 +1097,7 @@ class _ViewerScreenState extends State<ViewerScreen>
         _delayedSubscribeVideo(event.participant, publication);
       }
     }
+    if (_interview) _onStageEvent(event);
   }
 
   // ── Camera sync ───────────────────────────────────────────────────────────
@@ -1095,6 +1133,9 @@ class _ViewerScreenState extends State<ViewerScreen>
     // An off-air angle isn't pulled at all; _syncOffAir picks it up when it
     // comes back.
     if (!_onAirParticipant(participant)) return;
+    // Interview: _syncStage decides, and nothing waits — it's a live
+    // conversation, not angles lined up to one audio timeline.
+    if (_interview) return;
     if (_realSyncOn || publication.source == TrackSource.screenShareVideo) {
       publication.subscribe();
       return;
@@ -1142,6 +1183,8 @@ class _ViewerScreenState extends State<ViewerScreen>
       setState(() => _masterAudioIdentity = newIdentity);
       _updateAudioRouting();
     }
+    // A guest's name or title changed.
+    if (_interview) _onStageEvent(event);
   }
 
   // ── Room metadata: graphics + show control + resync ───────────────────────
@@ -1250,6 +1293,7 @@ class _ViewerScreenState extends State<ViewerScreen>
   }
 
   void _applyRoomMetadata(String? raw, {bool joining = false}) {
+    _applyStage(raw);
     _applyOverlay(raw, joining: joining);
     // On (re)join the caller syncs subscriptions and focus once the cameras
     // are in; only a live change is acted on here.
@@ -1273,7 +1317,7 @@ class _ViewerScreenState extends State<ViewerScreen>
   Future<void> _resyncNow() async {
     final room = _room;
     final focused = _focused;
-    if (room == null || focused == null || _syncing) return;
+    if (room == null || focused == null || _syncing || _interview) return;
     final cam = room.remoteParticipants[focused.identity];
     final videoPubs = [
       ...?cam?.videoTrackPublications.where(
@@ -1309,6 +1353,8 @@ class _ViewerScreenState extends State<ViewerScreen>
   void _startRealSync(Room room) {
     _realSync?.dispose();
     _realSync = null;
+    // Interview feeds aren't held to the show audio (see _syncStage).
+    if (_interview) return;
     RealSyncConfig.correcting().then((on) {
       if (!mounted || _room != room) return;
       _realSyncOn = on;
@@ -1520,7 +1566,7 @@ class _ViewerScreenState extends State<ViewerScreen>
   /// on air; they're picked up through the usual subscribe path.
   void _syncOffAir({Set<String> back = const {}}) {
     final room = _room;
-    if (room == null) return;
+    if (room == null || _interview) return;
     for (final p in room.remoteParticipants.values) {
       final slot = _parseMeta(p.metadata)['slotId'] as String?;
       if (slot == null) continue;
@@ -1538,7 +1584,8 @@ class _ViewerScreenState extends State<ViewerScreen>
   /// show control, keep the per-angle count current. [watching] is the angle
   /// the viewer was on before the change (it may just have been hidden).
   void _afterAnglesChanged({CameraFeed? watching}) {
-    if (!mounted) return;
+    // Interview has no camera angles to settle on, move or count.
+    if (!mounted || _interview) return;
     _settleStartAngle();
     _applyShowMove(watching ?? _focused);
     _reportAngle();
@@ -1599,6 +1646,7 @@ class _ViewerScreenState extends State<ViewerScreen>
     final slug = _streamEventId;
     final f = _focused;
     if (slug == null || f == null || supabase.auth.currentUser == null) return;
+    if (_interview) return;
     final angle = (slot: f.isScreenShare ? null : f.slotId);
     if (!force && angle == _reportedAngle) return;
     _reportedAngle = angle;
@@ -1695,6 +1743,7 @@ class _ViewerScreenState extends State<ViewerScreen>
       ..on<ParticipantMetadataUpdatedEvent>(_onParticipantMetadataUpdated)
       ..on<RoomMetadataChangedEvent>((e) => _applyRoomMetadata(e.metadata))
       ..on<RoomDisconnectedEvent>(_onRoomDisconnected);
+    _listenStage(listener);
 
     await room
         .connect(conn.wsUrl, conn.token)
@@ -1765,6 +1814,11 @@ class _ViewerScreenState extends State<ViewerScreen>
   }
 
   void _updateAudioRouting() {
+    // Interview mixes the master audio with every guest on stage instead.
+    if (_interview) {
+      _syncStage();
+      return;
+    }
     if (!_audioEnabled) {
       for (final pub in _audioPublications.values) {
         pub.unsubscribe();
@@ -1793,6 +1847,8 @@ class _ViewerScreenState extends State<ViewerScreen>
 
   String _masterAudioName() {
     if (_masterAudioIdentity == null) return '';
+    // Interview keeps no camera list; name them as the stage does.
+    if (_interview) return _stagePerson(_masterAudioIdentity!).name;
     for (final c in _cameras) {
       if (c.identity == _masterAudioIdentity) return c.cameraName;
     }
@@ -1837,6 +1893,9 @@ class _ViewerScreenState extends State<ViewerScreen>
     VideoTrack track, {
     bool isScreenShare = false,
   }) {
+    // Interview composes its own stage (guests included); angles are
+    // multicam's.
+    if (_interview) return;
     Map<String, dynamic> meta;
     try {
       meta = jsonDecode(participant.metadata ?? '{}') as Map<String, dynamic>;
@@ -1876,6 +1935,170 @@ class _ViewerScreenState extends State<ViewerScreen>
     _afterAnglesChanged();
   }
 
+  // ── Interview (studio modes phase 5) ──────────────────────────────────────
+
+  bool get _interview => _mode == StudioMode.interview;
+
+  /// Room metadata `mode` and `stage`. The mode only changes before the show
+  /// is live (the server locks it, and going live rejoins), so there are no
+  /// feeds to hand over between modes here.
+  void _applyStage(String? raw) {
+    final mode = StudioMode.fromRoomMetadata(raw) ?? _mode;
+    final stage = StageState.fromRoomMetadata(raw);
+    if (mode == _mode && stage == _stage) return;
+    void apply() {
+      _mode = mode;
+      _stage = stage;
+      // The content angle went away under the viewer: back to the stage.
+      if (ContentAngle.parse(stage.content) == null) _watchingContent = false;
+    }
+
+    mounted ? setState(apply) : apply();
+    // Countdowns are server times: look again once the clock is measured.
+    if (_interview &&
+        stage.entries.isNotEmpty &&
+        ServerClock.offsetMs == null) {
+      ServerClock.ensure().then((_) => _onStageTick());
+    }
+    _onStageTick();
+  }
+
+  /// Countdowns end without any event, so: redraw, pull the feeds of whoever
+  /// is on now, and sleep until the next countdown runs out.
+  void _onStageTick() {
+    _stageTimer?.cancel();
+    _stageTimer = null;
+    if (!mounted || !_interview) return;
+    final wait = nextStageReveal(_stage, ServerClock.now());
+    if (wait != null) {
+      _stageTimer = Timer(Duration(milliseconds: wait + 20), _onStageTick);
+    }
+    setState(() {});
+    _syncStage();
+  }
+
+  /// Room events only Interview needs. Each is a no-op in multicam.
+  void _listenStage(EventsListener<RoomEvent> listener) => listener
+    // A guest brought on stage lifts their track restriction: subscribe now.
+    ..on<TrackSubscriptionPermissionChangedEvent>(_onStageEvent)
+    ..on<TrackPublishedEvent>(_onStageEvent)
+    ..on<TrackMutedEvent>(_onStageRedraw)
+    ..on<TrackUnmutedEvent>(_onStageRedraw)
+    ..on<ActiveSpeakersChangedEvent>(_onStageRedraw);
+
+  void _onStageEvent(RoomEvent _) {
+    if (!mounted || !_interview) return;
+    setState(() {});
+    _syncStage();
+  }
+
+  void _onStageRedraw(RoomEvent _) {
+    if (mounted && _interview) setState(() {});
+  }
+
+  /// Every remote participant's role, by identity.
+  Map<String, String?> _roles() => {
+    for (final p in [...?_room?.remoteParticipants.values])
+      p.identity: switch (_parseMeta(p.metadata)['role']) {
+        final String r => r,
+        _ => null,
+      },
+  };
+
+  /// Who is on stage for this viewer right now, in layout order.
+  List<String> _stageNow([Map<String, String?>? roles]) =>
+      stageLineup(_stage, ServerClock.now(), present: roles ?? _roles());
+
+  /// Pull exactly what the stage needs (stageFeeds) and drop everything else.
+  /// Run on every stage, participant and track change. A green-room guest's
+  /// tracks refuse the subscribe; their permission change runs this again.
+  void _syncStage() {
+    final room = _room;
+    if (room == null || !_interview) return;
+    final roles = _roles();
+    final feeds = stageFeeds(
+      stage: _stage,
+      visible: _stageNow(roles),
+      roles: roles,
+      masterAudio: _masterAudioIdentity,
+      audioOn: _audioEnabled,
+    );
+    for (final p in room.remoteParticipants.values) {
+      final id = p.identity;
+      for (final pub in p.videoTrackPublications) {
+        final want = pub.source == TrackSource.screenShareVideo
+            ? feeds.share == id
+            : feeds.video.contains(id);
+        want ? pub.subscribe() : pub.unsubscribe();
+      }
+      for (final pub in p.audioTrackPublications) {
+        feeds.audio.contains(id) ? pub.subscribe() : pub.unsubscribe();
+      }
+    }
+  }
+
+  StagePerson _stagePerson(String identity) {
+    final p = _room?.remoteParticipants[identity];
+    return stagePersonOf(
+      identity,
+      _parseMeta(p?.metadata),
+      hostId: _hostId,
+      hostName: _hostUsername,
+      hostUsername: _hostHandle,
+      hostAvatarUrl: _hostAvatarUrl,
+      participantName: p?.name,
+    );
+  }
+
+  StageTile _stageTile(String identity) {
+    final p = _room?.remoteParticipants[identity];
+    final person = _stagePerson(identity);
+    final cam = p?.videoTrackPublications
+        .where((v) => v.source != TrackSource.screenShareVideo && !v.muted)
+        .firstOrNull;
+    final mic = p?.audioTrackPublications
+        .where((a) => a.source != TrackSource.screenShareAudio)
+        .firstOrNull;
+    return StageTile(
+      identity: identity,
+      name: person.name,
+      title: person.title,
+      avatarUrl: person.avatarUrl,
+      track: cam?.track,
+      speaking: p?.isSpeaking ?? false,
+      // Crew phones are video only; a muted badge on them would be noise.
+      muted: person.kind == StagePersonKind.guest && (mic?.muted ?? false),
+    );
+  }
+
+  VideoTrack? _shareTrackOf(String identity) => _room
+      ?.remoteParticipants[identity]
+      ?.videoTrackPublications
+      .where((v) => v.source == TrackSource.screenShareVideo)
+      .firstOrNull
+      ?.track;
+
+  /// A guest's or the host's profile over the show. Crew phones have none.
+  void _openStageProfile(StagePerson person) {
+    final userId = person.userId;
+    if (userId == null) return;
+    final me = supabase.auth.currentUser?.id;
+    final canFollow = me != null && me != userId;
+    showStageProfileSheet(
+      context,
+      person: person,
+      isFollowing: canFollow ? () => FollowService.isFollowing(userId) : null,
+      onFollow: canFollow
+          ? (follow) => follow
+                ? FollowService.follow(userId)
+                : FollowService.unfollow(userId)
+          : null,
+      // /u/:id and /watch/:id are both top-level routes, so the profile opens
+      // over the show, which stays connected underneath; Back returns to it.
+      onViewProfile: () => context.push(NileRoutes.profile(userId)),
+    );
+  }
+
   // ── Leave ─────────────────────────────────────────────────────────────────
 
   Future<void> _leave() async {
@@ -1908,6 +2131,10 @@ class _ViewerScreenState extends State<ViewerScreen>
       _pinnedExpanded = false;
       _pinLive = false;
       _show = ShowControl.empty;
+      _mode = StudioMode.multicam;
+      _stage = StageState.empty;
+      _watchingContent = false;
+      _hostHandle = null;
       _seenSendAllNonce = null;
       _settleUntil = null;
       _resume = null;
@@ -2297,7 +2524,9 @@ class _ViewerScreenState extends State<ViewerScreen>
         Column(
           children: [
             _buildTopBar(),
-            if (_onAir.isEmpty)
+            if (_interview)
+              Expanded(child: _buildInterviewShow())
+            else if (_onAir.isEmpty)
               Expanded(child: _buildWaitingForCameras())
             else
               Expanded(
@@ -3329,6 +3558,246 @@ class _ViewerScreenState extends State<ViewerScreen>
     );
   }
 
+  // ── Interview layout ──────────────────────────────────────────────────────
+
+  /// Interview: the stage (or the host's content angle), the angle choice and
+  /// who's on, in place of multicam's main camera and thumbnails. Phone
+  /// landscape puts the choice and the people down the side, like the rail.
+  Widget _buildInterviewShow({bool desktop = false}) {
+    // Before the show (or one that never happened) reads as multicam's does.
+    if (_eventStatus != 'live' && !_streamEnded) {
+      return _buildWaitingForCameras();
+    }
+    final lineup = _stageNow();
+    final angles = interviewAngles(
+      _stage.content,
+      hasElement: (id) => _elements.byId(id) != null,
+    );
+    final content = angles.length > 1 ? angles[1] : null;
+    final picture = _buildInterviewPicture(
+      lineup,
+      _watchingContent ? content : null,
+    );
+    return OrientationBuilder(
+      builder: (context, orientation) {
+        final side = !desktop && orientation == Orientation.landscape;
+        final strip = StagePeopleStrip(
+          people: [for (final id in lineup) _stagePerson(id)],
+          onTap: _openStageProfile,
+          vertical: side,
+        );
+        final picker = content == null
+            ? null
+            : _buildInterviewAngles(lineup, content, vertical: side);
+        // Desktop: bursts and the react rail over the picture only, never
+        // across chat (as multicam's desktop body does).
+        final main = desktop
+            ? Stack(
+                children: [
+                  Positioned.fill(child: picture),
+                  _buildReactionOverlay(),
+                  if (_canReact) _buildReactionRail(),
+                ],
+              )
+            : picture;
+        return Column(
+          children: [
+            _buildAudioBar(),
+            Expanded(
+              child: side
+                  ? Row(
+                      children: [
+                        Expanded(child: main),
+                        SizedBox(
+                          width: 110 * _thumbScale,
+                          child: Column(
+                            children: [
+                              ?picker,
+                              Expanded(child: strip),
+                            ],
+                          ),
+                        ),
+                      ],
+                    )
+                  : Column(
+                      children: [
+                        Expanded(child: main),
+                        ?picker,
+                        strip,
+                      ],
+                    ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  /// The stage composed from everyone's own feed, with the "All cameras"
+  /// graphics over it — or, when picked, the content angle full size.
+  Widget _buildInterviewPicture(List<String> lineup, ContentAngle? content) {
+    final Widget picture;
+    final Widget? pill;
+    final element = content?.elementId == null
+        ? null
+        : _elements.byId(content!.elementId!);
+    if (element != null) {
+      picture = NileElementAngle(
+        element: element,
+        interaction: _interactionFor(element),
+      );
+      pill = _pollPill({element.id});
+    } else if (content?.shareOf case final who?) {
+      picture = _buildShareView(who, large: true);
+      pill = _pollPill(const {});
+    } else {
+      final graphics = _graphics.forSlot(null);
+      final elements = _elements.forSlot(null);
+      final layers = _layout.layersFor(null);
+      _countSponsor(graphics);
+      picture = Center(
+        child: InterviewStageView(
+          tiles: [for (final id in lineup) _stageTile(id)],
+          layout: _stage.layout,
+          focusIndex: _stage.focusIndexIn(lineup),
+          onTapTile: (t) => _openStageProfile(_stagePerson(t.identity)),
+          overlay: Positioned.fill(
+            child: NileGraphicsLayer(
+              graphics: graphics,
+              elements: elements,
+              layers: layers,
+              onTapLink: _openGraphicLink,
+              interactionFor: _interactionFor,
+            ),
+          ),
+        ),
+      );
+      pill = _pollPill({
+        for (final e in elements)
+          if (!layers.any((l) => l.id == e.id && l.hidden)) e.id,
+      });
+    }
+    return ColoredBox(
+      color: Colors.black,
+      child: Stack(fit: StackFit.expand, children: [picture, ?pill]),
+    );
+  }
+
+  /// A participant's screen share, letterboxed; a quiet wait until it lands.
+  Widget _buildShareView(String identity, {required bool large}) {
+    final track = _shareTrackOf(identity);
+    if (track != null) {
+      return VideoTrackRenderer(track, fit: VideoViewFit.contain);
+    }
+    return Center(
+      child: large
+          ? Text(
+              'Waiting for the screen share…',
+              style: NileTextStyles.bodyMd().copyWith(
+                color: NileColors.txtTertiary,
+              ),
+            )
+          : Icon(Icons.screen_share_outlined, color: NileColors.txtTertiary),
+    );
+  }
+
+  /// Stage | content angle, as thumbnails in multicam's visual language.
+  Widget _buildInterviewAngles(
+    List<String> lineup,
+    ContentAngle content, {
+    required bool vertical,
+  }) {
+    final element = content.elementId == null
+        ? null
+        : _elements.byId(content.elementId!);
+    final contentLabel =
+        element?.name ?? '${_stagePerson(content.shareOf ?? '').name} — Screen';
+    Widget tile(
+      String label, {
+      required bool isContent,
+      required Widget child,
+    }) {
+      final selected = _watchingContent == isContent;
+      return GestureDetector(
+        onTap: () => setState(() => _watchingContent = isContent),
+        child: Container(
+          margin: EdgeInsets.only(
+            right: vertical ? 0 : NileSpacing.s8,
+            bottom: vertical ? NileSpacing.s8 : 0,
+          ),
+          decoration: BoxDecoration(
+            border: Border.all(
+              color: selected ? NileColors.volt : Colors.transparent,
+              width: 2,
+            ),
+            borderRadius: BorderRadius.circular(NileRadius.sm),
+          ),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(NileRadius.sm - 2),
+            child: AspectRatio(
+              aspectRatio: 16 / 9,
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  ColoredBox(
+                    color: Colors.black,
+                    child: IgnorePointer(child: child),
+                  ),
+                  Positioned(
+                    bottom: 4,
+                    left: 4,
+                    right: 4,
+                    child: Text(
+                      label,
+                      style: NileTextStyles.caption().copyWith(
+                        color: NileColors.txtPrimary,
+                        shadows: const [Shadow(blurRadius: 4)],
+                      ),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    final tiles = [
+      tile(
+        'Stage',
+        isContent: false,
+        child: Center(
+          child: InterviewStageView(
+            tiles: [for (final id in lineup) _stageTile(id)],
+            layout: _stage.layout,
+            focusIndex: _stage.focusIndexIn(lineup),
+            showNames: false,
+            highlightSpeaker: false,
+            compact: true,
+            emptyLabel: '',
+          ),
+        ),
+      ),
+      tile(
+        contentLabel,
+        isContent: true,
+        child: element != null
+            ? NileElementAngle(element: element)
+            : _buildShareView(content.shareOf ?? '', large: false),
+      ),
+    ];
+    return Container(
+      color: NileColors.bgPage,
+      padding: const EdgeInsets.all(NileSpacing.s8),
+      height: vertical ? null : 100 * _thumbScale,
+      child: vertical
+          ? Column(mainAxisSize: MainAxisSize.min, children: tiles)
+          : Row(children: tiles),
+    );
+  }
+
   // ── Desktop ───────────────────────────────────────────────────────────────
   //
   // One route, three states: the countdown before the show, the show itself,
@@ -3493,7 +3962,9 @@ class _ViewerScreenState extends State<ViewerScreen>
           child: Column(
             children: [
               _buildTopBar(showChatToggle: false),
-              if (_onAir.isEmpty)
+              if (_interview)
+                Expanded(child: _buildInterviewShow(desktop: true))
+              else if (_onAir.isEmpty)
                 Expanded(child: _buildWaitingForCameras())
               else ...[
                 _buildAudioBar(),

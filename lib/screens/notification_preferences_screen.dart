@@ -136,8 +136,8 @@ class _NotificationPreferencesScreenState
           (v) => _set(p.copyWith(replayReady: v), p),
         ),
         _toggle(
-          'Crew invites',
-          'When a host adds you as a camera operator',
+          'Crew and guest invites',
+          'When a host adds you to their crew or invites you on their show',
           p.operatorAssigned,
           (v) => _set(p.copyWith(operatorAssigned: v), p),
         ),

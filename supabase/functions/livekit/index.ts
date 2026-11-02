@@ -84,6 +84,21 @@ import {
 } from "../_shared/elements.ts";
 import { cleanShowPatch, planReorder } from "../_shared/show.ts";
 import { checkModeChange } from "../_shared/studio_mode.ts";
+import {
+  backstageIdentity,
+  cleanStagePatch,
+  cleanTitle,
+  emptyStage,
+  guestIdentity,
+  type GuestStatus,
+  guestUserIdOf,
+  isInviteCode,
+  newInviteCode,
+  planMove,
+  type Stage,
+  stageOf,
+  stageSecondsSince,
+} from "../_shared/interview.ts";
 import { angleIdsOf, cleanAppliedShow, planElements, validateApply } from "../_shared/layouts.ts";
 import { timelineOf } from "../_shared/replay_marks.ts";
 
@@ -104,6 +119,7 @@ import {
   EncodingOptionsPreset,
   RoomServiceClient,
   S3Upload,
+  TrackSource,
 } from "https://esm.sh/livekit-server-sdk@2.9.7?target=deno";
 
 const LIVEKIT_URL = Deno.env.get("LIVEKIT_URL")!;
@@ -425,6 +441,26 @@ async function handle(req: Request, ctx: ReqCtx, json: Json): Promise<Response> 
       return await setShow(body, user.id, admin, json);
     case "set-mode":
       return await setMode(body, user.id, admin, json);
+    case "invite-guest":
+      return await inviteGuest(body, user.id, admin, json);
+    case "guest-link":
+      return await guestLink(body, user.id, admin, json);
+    case "guest-join":
+      return await guestJoin(body, user.id, admin, json);
+    case "guest-token":
+      return await guestToken(body, user.id, admin, json);
+    case "set-guest-title":
+      return await setGuestTitle(body, user.id, admin, json);
+    case "move-guest":
+      return await moveGuest(body, user.id, admin, json);
+    case "remove-guest":
+      return await moveGuest({ ...body, to: "removed" }, user.id, admin, json);
+    case "set-stage":
+      return await setStage(body, user.id, admin, json);
+    case "mute-participant":
+      return await muteParticipant(body, user.id, admin, json);
+    case "backstage-token":
+      return await backstageToken(body, user.id, admin, json);
     case "reorder-cameras":
       return await reorderCameras(body, user.id, admin, json);
     case "resync":
@@ -1514,12 +1550,370 @@ async function setMode(body: any, userId: string, admin: any, json: Json): Promi
 
   const { error: upd } = await admin.from("events").update({ studio_mode: check.mode }).eq("id", gate.event.id);
   if (upd) throw upd;
+  // Entering Interview with no stage yet: the host's Studio starts on it.
+  const patch: Record<string, unknown> = { mode: check.mode };
+  if (check.mode === "interview" && !meta.stage) {
+    patch.stage = emptyStage([{ id: studioIdentity(eventId), at: Date.now() }]);
+  }
   try {
-    await roomService.updateRoomMetadata(roomName, JSON.stringify(mergeRoomMeta(meta, { mode: check.mode })));
+    await roomService.updateRoomMetadata(roomName, JSON.stringify(mergeRoomMeta(meta, patch)));
   } catch {
     // No room yet — the event row is enough; viewers read it when they join.
   }
   return json({ success: true, mode: check.mode });
+}
+
+// ── Interview mode: guests and the stage (docs/plans/studio-modes.md) ─────────
+//
+// Guests are Nile users the host invites by username (invite-guest, with a push)
+// or by share link (guest-link → guest-join). They join the show's room as
+// role "guest" (guest-token) and wait in the green room: their own client keeps
+// their tracks subscribable only by the host, crew and other guests until the
+// stage metadata says they are on, so viewers can't see or hear them early —
+// the SFU enforces that, not the viewer app. move-guest puts them on stage a
+// countdown ahead ("you're on in 5"), sends them back, or removes them.
+
+const GUEST_SELECT = "id, user_id, status, title, stage_since, stage_seconds, updated_at";
+
+/** The caller's own guest row for an event, if any. */
+async function guestRowOf(eventPk: string, uid: string, admin: any) {
+  const { data } = await admin
+    .from("event_guests")
+    .select(GUEST_SELECT)
+    .eq("event_id", eventPk)
+    .eq("user_id", uid)
+    .maybeSingle();
+  return data as {
+    id: string;
+    user_id: string;
+    status: GuestStatus;
+    title: string | null;
+    stage_since: string | null;
+    stage_seconds: number;
+    updated_at: string | null;
+  } | null;
+}
+
+/** Studio gate shared by the stage actions: while the Studio is in the room, only it may run them. */
+async function studioOnly(body: any, roomName: string, json: Json): Promise<Response | null> {
+  if (body.studio !== true && studioConnected(await peersOf(roomName))) {
+    return json({ error: "Your Studio is running this show — use the Studio's controls." }, 409);
+  }
+  return null;
+}
+
+/** False when the room isn't up (nobody joined yet, or it timed out). */
+async function writeStage(roomName: string, meta: Record<string, unknown>, stage: Stage): Promise<boolean> {
+  try {
+    await roomService.updateRoomMetadata(roomName, JSON.stringify(mergeRoomMeta(meta, { stage })));
+    return true;
+  } catch (err) {
+    log("warn", { action: "write-stage", roomName, error: String(err) });
+    return false;
+  }
+}
+
+// invite-guest — { eventId, userId, title? }. Host only. Re-inviting someone
+// who was removed puts them back on the list.
+async function inviteGuest(body: any, userId: string, admin: any, json: Json): Promise<Response> {
+  const { eventId, userId: guestId } = body;
+  if (!eventId || typeof guestId !== "string") return json({ error: "eventId and userId are required" }, 400);
+  const gate = await requireHost(eventId, userId, admin, json);
+  if (gate instanceof Response) return gate;
+  if (guestId === userId) return json({ error: "You're already the host" }, 400);
+  const title = cleanTitle(body.title);
+  if (title === undefined && body.title !== undefined) return json({ error: "Titles are up to 60 characters" }, 400);
+
+  const { data: profile } = await admin.from("profiles").select("id").eq("id", guestId).maybeSingle();
+  if (!profile) return json({ error: "That account doesn't exist" }, 404);
+
+  const existing = await guestRowOf(gate.event.id, guestId, admin);
+  const row = {
+    event_id: gate.event.id,
+    user_id: guestId,
+    invited_by: userId,
+    ...(existing?.status === "removed" || !existing ? { status: "invited" } : {}),
+    ...(title !== undefined ? { title } : {}),
+  };
+  const { data: saved, error } = await admin
+    .from("event_guests")
+    .upsert(row, { onConflict: "event_id,user_id" })
+    .select(GUEST_SELECT)
+    .single();
+  if (error) throw error;
+
+  // One push per invite: none when they've blocked the host, and none for a
+  // remove-and-reinvite inside 6 hours (no push loop on someone's phone).
+  const recentlyRemoved = existing?.status === "removed" && existing.updated_at &&
+    Date.now() - Date.parse(existing.updated_at) < 6 * 3600_000;
+  if ((!existing || existing.status === "removed") && !recentlyRemoved) {
+    const [{ data: enabled }, { data: blocked }] = await Promise.all([
+      admin.rpc("notif_enabled", { p_uid: guestId, p_type: "guest_invited" }),
+      admin.rpc("is_blocked", { a: guestId, b: userId }),
+    ]);
+    if (enabled !== false && blocked !== true) {
+      await admin.from("notifications").insert({
+        recipient_id: guestId,
+        actor_id: userId,
+        type: "guest_invited",
+        entity_id: gate.event.id,
+      });
+    }
+  }
+  return json({ success: true, guest: saved });
+}
+
+// guest-link — { eventId, rotate? }. Host only. Returns the share code,
+// making one if the event has none; rotate replaces it (the old link dies).
+async function guestLink(body: any, userId: string, admin: any, json: Json): Promise<Response> {
+  const { eventId } = body;
+  if (!eventId) return json({ error: "eventId is required" }, 400);
+  const gate = await requireHost(eventId, userId, admin, json);
+  if (gate instanceof Response) return gate;
+
+  // event_guest_links is service-role only (0148): events rows are public.
+  const { data: link, error } = await admin
+    .from("event_guest_links")
+    .select("code")
+    .eq("event_id", gate.event.id)
+    .maybeSingle();
+  if (error) throw error;
+  if (link?.code && body.rotate !== true) return json({ code: link.code });
+  for (let i = 0; i < 3; i++) {
+    const code = newInviteCode();
+    const { error: upd } = await admin
+      .from("event_guest_links")
+      .upsert({ event_id: gate.event.id, code, created_at: new Date().toISOString() }, { onConflict: "event_id" });
+    if (!upd) return json({ code });
+    if (upd.code !== "23505") throw upd; // unique clash: try another code
+  }
+  return json({ error: "Couldn't make a link — try again" }, 500);
+}
+
+// guest-join — { code }. Any signed-in user with the share link. Adds them to
+// the guest list (unless the host removed them) and returns the event slug.
+async function guestJoin(body: any, userId: string, admin: any, json: Json): Promise<Response> {
+  if (!isInviteCode(body.code)) return json({ error: "That invite link isn't valid" }, 400);
+  const { data: link } = await admin
+    .from("event_guest_links")
+    .select("events(id, host_id, livekit_room, status)")
+    .eq("code", body.code)
+    .maybeSingle();
+  const ev = link?.events as { id: string; host_id: string; livekit_room: string; status: string } | null | undefined;
+  if (!ev) return json({ error: "That invite link has expired" }, 404);
+  if (ev.status === "ended") return json({ error: "This show has ended" }, 409);
+  if (ev.host_id === userId) return json({ eventId: ev.livekit_room, host: true });
+
+  const existing = await guestRowOf(ev.id, userId, admin);
+  if (existing?.status === "removed") return json({ error: "The host removed you from this show" }, 403);
+  if (!existing) {
+    const { error } = await admin.from("event_guests").insert({
+      event_id: ev.id,
+      user_id: userId,
+      invited_by: ev.host_id,
+    });
+    if (error && error.code !== "23505") throw error;
+  }
+  return json({ eventId: ev.livekit_room });
+}
+
+// guest-token — { eventId, title? }. The caller must be on the event's guest
+// list. Marks them in the green room (someone rejoining while on stage stays
+// on stage) and mints a guest token.
+async function guestToken(body: any, userId: string, admin: any, json: Json): Promise<Response> {
+  const { eventId } = body;
+  if (!eventId) return json({ error: "eventId is required" }, 400);
+  const { data: ev } = await admin
+    .from("events")
+    .select("id, title, status, studio_mode")
+    .eq("livekit_room", eventId)
+    .maybeSingle();
+  if (!ev) return json({ error: "Event not found" }, 404);
+  if (ev.status === "ended") return json({ error: "This show has ended" }, 409);
+  const row = await guestRowOf(ev.id, userId, admin);
+  if (!row || row.status === "removed") return json({ error: "You're not on this show's guest list" }, 403);
+  const { data: ban } = await admin
+    .from("live_chat_bans")
+    .select("user_id")
+    .eq("event_id", ev.id)
+    .eq("user_id", userId)
+    .maybeSingle();
+  if (ban) return json({ error: "You've been removed from this event" }, 403);
+
+  const title = cleanTitle(body.title);
+  const roomName = roomNameFor(eventId);
+  const identity = guestIdentity(userId);
+  const onStage = stageOf(await roomMetaOf(roomName)).ids.some((e) => e.id === identity);
+  const status: GuestStatus = onStage ? "on_stage" : "green_room";
+  const { error } = await admin.from("event_guests").update({
+    status,
+    joined_at: new Date().toISOString(),
+    ...(title !== undefined ? { title } : {}),
+  }).eq("id", row.id);
+  if (error) throw error;
+
+  await ensureRoom(eventId, admin);
+  const { data: p } = await admin.from("profiles").select("username, display_name, avatar_url").eq("id", userId).maybeSingle();
+  const name = (p?.display_name as string | null) || (p?.username as string | null) || "Guest";
+  const token = await buildToken({
+    identity,
+    name,
+    roomName,
+    canPublish: true,
+    canSubscribe: true,
+    metadata: JSON.stringify({
+      role: "guest",
+      userId,
+      username: p?.username ?? null,
+      displayName: name,
+      avatarUrl: p?.avatar_url ?? null,
+      title: title !== undefined ? title : row.title,
+      status,
+      joinedAt: Date.now(),
+      device: deviceLabel(body.device),
+    }),
+  });
+  return json({ token, wsUrl: LIVEKIT_URL, identity, status, eventTitle: ev.title, mode: ev.studio_mode });
+}
+
+// set-guest-title — { eventId, title }. A guest edits their own name tag.
+async function setGuestTitle(body: any, userId: string, admin: any, json: Json): Promise<Response> {
+  const { eventId } = body;
+  const title = cleanTitle(body.title);
+  if (!eventId || title === undefined) return json({ error: "eventId and a title of up to 60 characters are required" }, 400);
+  const { data: ev } = await admin.from("events").select("id").eq("livekit_room", eventId).maybeSingle();
+  if (!ev) return json({ error: "Event not found" }, 404);
+  const row = await guestRowOf(ev.id, userId, admin);
+  if (!row || row.status === "removed") return json({ error: "You're not on this show's guest list" }, 403);
+  const { error } = await admin.from("event_guests").update({ title }).eq("id", row.id);
+  if (error) throw error;
+  const roomName = roomNameFor(eventId);
+  const peer = (await peersOf(roomName)).find((x) => x.identity === guestIdentity(userId));
+  if (peer) await patchPeer(roomName, peer, { title });
+  return json({ success: true, title });
+}
+
+// move-guest — { eventId, identity, to: on_stage | green_room | removed,
+// countdownS? (0-10, default 5) }. Host/Studio only. Works for guests, crew
+// cameras (in-room phones) and the Studio itself; only guests have a list row.
+async function moveGuest(body: any, userId: string, admin: any, json: Json): Promise<Response> {
+  const { eventId, identity, to } = body;
+  if (!eventId || typeof identity !== "string" || !["on_stage", "green_room", "removed"].includes(to)) {
+    return json({ error: "eventId, identity and to (on_stage, green_room or removed) are required" }, 400);
+  }
+  const gate = await requireHost(eventId, userId, admin, json);
+  if (gate instanceof Response) return gate;
+  const roomName = roomNameFor(eventId);
+  const refused = await studioOnly(body, roomName, json);
+  if (refused) return refused;
+
+  const guestId = guestUserIdOf(identity);
+  const peers = await peersOf(roomName);
+  const peer = peers.find((x) => x.identity === identity);
+  if (!guestId) {
+    // Not a guest: must be someone already publishing in the room.
+    if (!peer || !isPublisher(peer)) return json({ error: "They aren't in the room" }, 404);
+    if (to === "removed") return json({ error: "Use Remove on the camera instead" }, 400);
+  }
+  const row = guestId ? await guestRowOf(gate.event.id, guestId, admin) : null;
+  if (guestId && (!row || row.status === "removed")) return json({ error: "They aren't on the guest list" }, 404);
+  if (guestId && to === "on_stage" && !peer) return json({ error: "They haven't joined yet" }, 409);
+
+  const meta = await roomMetaOf(roomName);
+  const countdownS = typeof body.countdownS === "number" ? body.countdownS : 5;
+  const now = Date.now();
+  const plan = planMove(stageOf(meta), identity, to, now, countdownS * 1000);
+  if ("error" in plan) return json({ error: plan.error }, plan.status);
+  // Taking someone off the list must work before the show's room is up.
+  if (!(await writeStage(roomName, meta, plan.stage)) && to === "on_stage") {
+    return json({ error: "The show's room isn't open yet" }, 409);
+  }
+
+  if (row) {
+    const status: GuestStatus = to;
+    const leaving = row.status === "on_stage" && to !== "on_stage";
+    const { error } = await admin.from("event_guests").update({
+      status,
+      stage_since: to === "on_stage" ? (row.stage_since ?? new Date(now).toISOString()) : null,
+      stage_seconds: row.stage_seconds + (leaving ? stageSecondsSince(row.stage_since, now) : 0),
+    }).eq("id", row.id);
+    if (error) throw error;
+    if (peer && to !== "removed") await patchPeer(roomName, peer, { status });
+  }
+  if (to === "removed" && peer) {
+    try {
+      await roomService.removeParticipant(roomName, identity);
+    } catch (err) {
+      log("warn", { action: "move-guest", identity, error: String(err) });
+    }
+  }
+  return json({ success: true, stage: plan.stage });
+}
+
+// set-stage — { eventId, layout?, focus?, content?, order? }. Host/Studio only.
+async function setStage(body: any, userId: string, admin: any, json: Json): Promise<Response> {
+  const { eventId } = body;
+  if (!eventId) return json({ error: "eventId is required" }, 400);
+  const gate = await requireHost(eventId, userId, admin, json);
+  if (gate instanceof Response) return gate;
+  const roomName = roomNameFor(eventId);
+  const refused = await studioOnly(body, roomName, json);
+  if (refused) return refused;
+
+  const meta = await roomMetaOf(roomName);
+  const peers = await peersOf(roomName);
+  const contentIds = new Set([
+    ...elementAngleIds(meta),
+    ...peers.filter((p) => isPublisher(p) || p.meta.role === "guest").map((p) => `${p.identity}#share`),
+  ]);
+  const result = cleanStagePatch(body, stageOf(meta), contentIds);
+  if ("error" in result) return json({ error: result.error }, 400);
+  if (!(await writeStage(roomName, meta, result.stage))) {
+    return json({ error: "The show's room isn't open yet" }, 409);
+  }
+  return json({ success: true, stage: result.stage });
+}
+
+// mute-participant — { eventId, identity, muted }. Host only: mutes (or asks
+// LiveKit to unmute) someone's microphone, e.g. a guest with a noisy room.
+async function muteParticipant(body: any, userId: string, admin: any, json: Json): Promise<Response> {
+  const { eventId, identity, muted } = body;
+  if (!eventId || typeof identity !== "string" || typeof muted !== "boolean") {
+    return json({ error: "eventId, identity and muted are required" }, 400);
+  }
+  const gate = await requireHost(eventId, userId, admin, json);
+  if (gate instanceof Response) return gate;
+  const roomName = roomNameFor(eventId);
+  let target;
+  try {
+    target = await roomService.getParticipant(roomName, identity);
+  } catch {
+    return json({ error: "They aren't in the room" }, 404);
+  }
+  const mic = target.tracks.find((t: any) => t.source === TrackSource.MICROPHONE);
+  if (!mic) return json({ error: "They have no microphone on" }, 409);
+  await roomService.mutePublishedTrack(roomName, identity, mic.sid, muted);
+  return json({ success: true });
+}
+
+// backstage-token — { eventId }. Host only. The Studio's second connection:
+// a talkback mic that only the guests the host is talking to may hear (the
+// Studio sets that with subscription permissions). Never subscribes.
+async function backstageToken(body: any, userId: string, admin: any, json: Json): Promise<Response> {
+  const { eventId } = body;
+  if (!eventId) return json({ error: "eventId is required" }, 400);
+  const gate = await requireHost(eventId, userId, admin, json);
+  if (gate instanceof Response) return gate;
+  const roomName = roomNameFor(eventId);
+  const token = await buildToken({
+    identity: backstageIdentity(eventId),
+    name: "Backstage",
+    roomName,
+    canPublish: true,
+    canSubscribe: false,
+    metadata: JSON.stringify({ role: "backstage", userId }),
+  });
+  return json({ token, wsUrl: LIVEKIT_URL });
 }
 
 // reorder-cameras — the host drags the Studio's camera tiles into a new order.

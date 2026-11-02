@@ -1,6 +1,7 @@
 // Supabase Edge Function: livekit-webhook
 //
-// Receives LiveKit Cloud webhooks. Today it handles one event: egress_ended,
+// Receives LiveKit Cloud webhooks: room_finished, participant_joined (kicks a
+// removed Interview guest), and egress_ended,
 // which is how a replay recording (started in the `livekit` fn's start-show)
 // becomes playable. LiveKit egress is async — the MP4 isn't finalized when the
 // show ends — so this webhook is the moment we flip the replay row to
@@ -20,7 +21,7 @@
 
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { WebhookReceiver, EgressClient } from "https://esm.sh/livekit-server-sdk@2.9.7?target=deno";
+import { EgressClient, RoomServiceClient, WebhookReceiver } from "https://esm.sh/livekit-server-sdk@2.9.7?target=deno";
 
 const receiver = new WebhookReceiver(
   Deno.env.get("LIVEKIT_API_KEY")!,
@@ -33,6 +34,12 @@ const LIVEKIT_HTTP_URL = Deno.env.get("LIVEKIT_URL")!
   .replace(/^wss:/, "https:")
   .replace(/^ws:/, "http:");
 const egressClient = new EgressClient(
+  LIVEKIT_HTTP_URL,
+  Deno.env.get("LIVEKIT_API_KEY")!,
+  Deno.env.get("LIVEKIT_API_SECRET")!,
+);
+
+const roomService = new RoomServiceClient(
   LIVEKIT_HTTP_URL,
   Deno.env.get("LIVEKIT_API_KEY")!,
   Deno.env.get("LIVEKIT_API_SECRET")!,
@@ -123,6 +130,28 @@ serve(async (req) => {
         } else {
           log("info", { event: "room_finished", roomName, action: "ended-event" });
         }
+      }
+    }
+    return new Response("ok", { status: 200 });
+  }
+
+  // Interview mode: a guest the host removed can still hold a join token that
+  // hasn't expired (15 min) and walk back in. The room is `nile-event-<slug>`.
+  if (event.event === "participant_joined" && event.room && event.participant) {
+    const m = /^guest-([0-9a-f-]{36})$/i.exec(event.participant.identity);
+    const slug = event.room.name.replace(/^nile-event-/, "");
+    if (m) {
+      const { data: row } = await admin
+        .from("event_guests")
+        .select("status, events!inner(livekit_room)")
+        .eq("user_id", m[1])
+        .eq("events.livekit_room", slug)
+        .maybeSingle();
+      if (row?.status === "removed") {
+        await roomService.removeParticipant(event.room.name, event.participant.identity).catch((err) =>
+          log("warn", { event: "participant_joined", identity: event.participant!.identity, error: String(err) })
+        );
+        log("info", { event: "participant_joined", action: "kicked-removed-guest", slug });
       }
     }
     return new Response("ok", { status: 200 });

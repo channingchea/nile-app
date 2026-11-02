@@ -14,6 +14,7 @@ import '../services/chat_service.dart' show ChatMessage;
 import '../services/brand_kit.dart';
 import '../services/chat_tools_service.dart';
 import '../services/graphics_service.dart';
+import '../services/interview.dart';
 import '../services/live_elements.dart';
 import '../services/overlay_layout.dart';
 import '../services/screen_capture_permission.dart';
@@ -28,6 +29,9 @@ import '../services/studio_prefs.dart';
 import '../theme.dart';
 import '../widgets/audio_meter.dart';
 import '../widgets/elements/element_kinds.dart' show ElementInteraction;
+import '../widgets/interview_green_room.dart';
+import '../widgets/interview_stage.dart';
+import '../widgets/nile_graphics_layer.dart';
 import '../widgets/nile_studio.dart';
 import '../widgets/nile_studio_mode_switch.dart';
 import '../widgets/screen_share_picker.dart';
@@ -37,6 +41,7 @@ import '../widgets/studio_elements_panel.dart';
 import '../widgets/studio_layers_sheet.dart';
 import '../widgets/studio_layouts_panel.dart';
 import '../widgets/studio_preview_demo.dart';
+import '../widgets/studio_setup_interview_demo.dart';
 import '../widgets/studio_graphics_panel.dart';
 import '../widgets/studio_settings_sheet.dart';
 
@@ -54,7 +59,20 @@ import '../widgets/studio_settings_sheet.dart';
 /// What it does change is [StudioPrefs], on purpose — the camera, mic mode and
 /// chat column picked here are what the next real Sound Check opens with.
 class StudioPreviewScreen extends StatefulWidget {
-  const StudioPreviewScreen({super.key});
+  const StudioPreviewScreen({
+    super.key,
+    this.openDevices = true,
+    this.interviewDemo,
+  });
+
+  /// Off in widget tests, which have no camera or mic to open.
+  @visibleForTesting
+  final bool openDevices;
+
+  /// A test's own Interview demo (with its own clock). The screen owns it and
+  /// disposes it.
+  @visibleForTesting
+  final StudioSetupInterviewDemo? interviewDemo;
 
   @override
   State<StudioPreviewScreen> createState() => _StudioPreviewScreenState();
@@ -70,9 +88,22 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
 
   bool _started = false;
 
-  /// The mode switch, rehearsed: nothing is saved and only the switch moves
-  /// until each mode's layout ships (docs/plans/studio-modes.md).
+  /// The mode switch, rehearsed: nothing is saved. Interview swaps in the
+  /// green room and stage; Premiere keeps the multicam layout until it ships
+  /// (docs/plans/studio-modes.md).
   StudioMode _mode = StudioMode.multicam;
+
+  /// Interview rehearsed: demo guests, the green room and the stage, all
+  /// local. Its timer runs only while Interview is on screen.
+  late final StudioSetupInterviewDemo _interview =
+      (widget.interviewDemo ?? StudioSetupInterviewDemo())
+        ..addListener(_onDemo)
+        ..onCameOn = _introduce
+        ..onJoined = (g) => _toast('${g.name} joined the green room.');
+
+  /// Host-only notes on the stage monitor. Rehearsal notes are never saved.
+  bool _notesOpen = false;
+  final _notes = TextEditingController();
   bool _starting = false;
   String? _error;
 
@@ -200,6 +231,10 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
     _layouts
       ..removeListener(_onDemo)
       ..dispose();
+    _interview
+      ..removeListener(_onDemo)
+      ..dispose();
+    _notes.dispose();
     _stopTracks();
     super.dispose();
   }
@@ -276,21 +311,23 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
       _disableAgc = prefs.externalMicProcessing;
       _chatVisible = prefs.chatVisible;
       _videoEnabled = !prefs.videoStartsOff;
-      await _refreshDevices();
-
-      if (_videoEnabled) {
-        _camera = await LocalVideoTrack.createCameraTrack(_cameraOptions);
+      if (widget.openDevices) {
+        await _refreshDevices();
+        if (_videoEnabled) {
+          _camera = await LocalVideoTrack.createCameraTrack(_cameraOptions);
+        }
+        await _openMic();
+        _deviceSub = Hardware.instance.onDeviceChange.stream.listen(
+          (_) => _refreshDevices(),
+        );
       }
-      await _openMic();
-      _deviceSub = Hardware.instance.onDeviceChange.stream.listen(
-        (_) => _refreshDevices(),
-      );
       if (!mounted) return;
       _demo.start();
       _showStartAt = DateTime.now().add(const Duration(minutes: 10));
       unawaited(_loadLibrary());
       unawaited(_loadQuickMessages());
       setState(() => _started = true);
+      _syncInterview();
       NileAnalytics.capture(NileEvent.studioPreviewStarted);
     } catch (_) {
       await _stopTracks();
@@ -661,6 +698,9 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
       for (final e in r.elements) e.copyWith(version: e.version + 1),
     ]);
     _demo.applyShow(r.show);
+    if (_mode == StudioMode.interview && l.stage != null) {
+      _interview.setLayout(l.stage!);
+    }
     if (mounted) setState(() => _layout = r.overlay);
   }
 
@@ -668,10 +708,15 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
     context,
     controller: _layouts,
     slots: _slots,
-    templates: layoutTemplates(
-      logoPath: _brandKit?.logoPath,
-      hostName: 'Your name',
-    ),
+    // Interview lists its stage templates first.
+    templates: [
+      if (_mode == StudioMode.interview)
+        ...interviewTemplates(
+          logoPath: _brandKit?.logoPath,
+          hostName: 'Your name',
+        ),
+      ...layoutTemplates(logoPath: _brandKit?.logoPath, hostName: 'Your name'),
+    ],
   );
 
   Future<void> _applyLayoutCue() async {
@@ -997,6 +1042,298 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
     'the live layout.',
   );
 
+  // ── Interview ──────────────────────────────────────────────────────────────
+
+  void _setMode(StudioMode m) {
+    setState(() => _mode = m);
+    _syncInterview();
+  }
+
+  /// Interview's demo only runs while it is on screen.
+  void _syncInterview() => _mode == StudioMode.interview && _started
+      ? _interview.start()
+      : _interview.stop();
+
+  /// A guest's countdown ran out: their name lower third on every camera for
+  /// 8 s, as the real Studio introduces them.
+  void _introduce(DemoGuest g) => _push(
+    _graphics.withOn(
+      null,
+      LiveGraphic(
+        id: 'intro:${g.id}',
+        kind: GraphicKind.lowerThird,
+        title: g.name,
+        subtitle: g.title,
+        hideAt: DateTime.now()
+            .add(const Duration(seconds: StudioSetupInterviewDemo.introSeconds))
+            .millisecondsSinceEpoch,
+      ),
+    ),
+  );
+
+  static const _privateLine =
+      'In a real show, only they hear you — viewers can’t.';
+
+  GreenRoomActions get _greenRoomActions => GreenRoomActions(
+    onBringOn: (e) {
+      if (!_interview.bringOn(e.identity)) {
+        _toast('The stage is full — $kStageMax people at most.');
+      }
+    },
+    onSendBack: (e) => _interview.sendBack(e.identity),
+    onRemove: (e) {
+      _interview.remove(e.identity);
+      _toast('${e.name} left the show. Invite brings them back.');
+    },
+    onMute: (e, muted) {
+      _interview.setMuted(e.identity, muted);
+      if (!muted && e.kind == GreenRoomKind.guest) {
+        _toast('Asked ${e.name} to unmute.');
+      }
+    },
+    onTalk: (e) {
+      if (_interview.talk(e.identity)) _toast(_privateLine);
+    },
+    onTalkAll: (on) {
+      _interview.talkToAll(on);
+      if (on) _toast(_privateLine);
+    },
+    onInvite: _openInvite,
+    onFocus: (e) => _interview.feature(e.identity),
+  );
+
+  Future<void> _openInvite() => showDialog<void>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      backgroundColor: NileColors.bgSurface,
+      title: Text('Invite guests', style: NileTextStyles.headingMd()),
+      content: Text(
+        'In a real show, you invite guests from your show’s Studio: search '
+        'by username or share a link. Guests need a Nile account and wait in '
+        'the green room until you bring them on.',
+        style: NileTextStyles.bodyMd().copyWith(color: NileColors.txtSecondary),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(ctx),
+          child: const Text('Close'),
+        ),
+        TextButton(
+          onPressed: _interview.canAddGuest
+              ? () {
+                  Navigator.pop(ctx);
+                  final g = _interview.addGuest();
+                  if (g != null) _toast('${g.name} is on the way.');
+                }
+              : null,
+          child: const Text('Add a demo guest back'),
+        ),
+      ],
+    ),
+  );
+
+  /// Your real camera for you; a drifting stand-in for each demo guest.
+  Widget _interviewPicture(String id) {
+    if (id == _selfId) {
+      final cam = _videoEnabled ? _camera : null;
+      return cam != null
+          ? VideoTrackRenderer(cam, fit: VideoViewFit.cover)
+          : const StageAvatar(name: 'You');
+    }
+    final g = StudioSetupInterviewDemo.guestById(id);
+    if (g == null) return const SizedBox.shrink();
+    return DemoGuestPicture(
+      guest: g,
+      phase: _interview.phase,
+      level: _interview.levelOf(id),
+      dimmed: _interview.statusOf(id) == GuestStatus.invited,
+    );
+  }
+
+  Widget _greenRoomColumn() => InterviewGreenRoomColumn(
+    entries: _interview.greenRoomEntries(
+      hostTrack: _videoEnabled ? _camera : null,
+      hostLevel: _level,
+    ),
+    actions: _greenRoomActions,
+    tileBuilder: (e) => _interviewPicture(e.identity),
+    talkingToAll: _interview.talkingToAll,
+  );
+
+  /// What the Content angle can hold here: your screen share while you share,
+  /// and any element angles.
+  Map<String, String> get _contentOptions => {
+    if (_share != null) _shareId: 'Your screen',
+    for (final e in _elements.angles) elementAngleId(e.id): e.name,
+  };
+
+  Widget _buildStageMonitor() {
+    final stage = _interview.stage;
+    final tiles = _interview.stageTiles(
+      hostTrack: _videoEnabled ? _camera : null,
+      hostLevel: _level,
+    );
+    final options = _contentOptions;
+    final content = options[stage.content];
+    final label = NileTextStyles.labelSm().copyWith(
+      color: NileColors.txtTertiary,
+      letterSpacing: 1.2,
+    );
+    return Container(
+      color: NileColors.bgPage,
+      padding: const EdgeInsets.all(NileSpacing.s16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  'STAGE · ${stage.layout.label.toUpperCase()}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: label,
+                ),
+              ),
+              StageLayoutPicker(
+                value: stage.layout,
+                onChanged: _interview.setLayout,
+              ),
+              const SizedBox(width: NileSpacing.s4),
+              PopupMenuButton<String>(
+                tooltip: 'Content angle',
+                initialValue: content == null ? '' : stage.content,
+                onSelected: (v) => _interview.setContent(v.isEmpty ? null : v),
+                itemBuilder: (_) => [
+                  const PopupMenuItem(value: '', child: Text('None')),
+                  for (final o in options.entries)
+                    PopupMenuItem(value: o.key, child: Text(o.value)),
+                ],
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: NileSpacing.s8,
+                    vertical: NileSpacing.s6,
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        Icons.add_to_queue,
+                        size: 18,
+                        color: content == null
+                            ? NileColors.txtSecondary
+                            : NileColors.volt,
+                      ),
+                      const SizedBox(width: NileSpacing.s6),
+                      ConstrainedBox(
+                        constraints: const BoxConstraints(maxWidth: 140),
+                        child: Text(
+                          'Content: ${content ?? 'None'}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: NileTextStyles.labelSm(),
+                        ),
+                      ),
+                      Icon(
+                        Icons.arrow_drop_down,
+                        size: 18,
+                        color: NileColors.txtSecondary,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              IconButton(
+                tooltip: 'Notes',
+                isSelected: _notesOpen,
+                onPressed: () => setState(() => _notesOpen = !_notesOpen),
+                icon: const Icon(Icons.sticky_note_2_outlined),
+                selectedIcon: Icon(Icons.sticky_note_2, color: NileColors.volt),
+                color: NileColors.txtSecondary,
+              ),
+            ],
+          ),
+          const SizedBox(height: NileSpacing.s8),
+          Expanded(
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Expanded(
+                  child: Center(
+                    child: InterviewStageView(
+                      tiles: tiles,
+                      layout: stage.layout,
+                      focusIndex: stage.focusIndexIn([
+                        for (final t in tiles) t.identity,
+                      ]),
+                      showTimers: true,
+                      tileBuilder: (t) => _interviewPicture(t.identity),
+                      onTapTile: (t) => _interview.feature(t.identity),
+                      overlay: Positioned.fill(
+                        child: NileGraphicsLayer(
+                          graphics: _cue.value
+                              .preview(
+                                _graphics.withBrand(_brandKit?.style),
+                                DateTime.now(),
+                              )
+                              .forSlot(null),
+                          elements: _elements.preview(_cue.value).forSlot(null),
+                          interactionFor: _viewerView,
+                        ),
+                      ),
+                      emptyLabel: 'Bring someone on from the green room',
+                    ),
+                  ),
+                ),
+                if (_notesOpen) ...[
+                  const SizedBox(width: NileSpacing.s12),
+                  SizedBox(width: 220, child: _buildNotes(label)),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildNotes(TextStyle label) => Container(
+    padding: const EdgeInsets.all(NileSpacing.s12),
+    decoration: BoxDecoration(
+      color: NileColors.bgSurface,
+      borderRadius: BorderRadius.circular(NileRadius.md),
+      border: Border.all(color: NileColors.border),
+    ),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text('NOTES', style: label),
+        const SizedBox(height: NileSpacing.s4),
+        Text(
+          'Only you see these. Rehearsal notes aren’t saved.',
+          style: NileTextStyles.caption().copyWith(
+            color: NileColors.txtTertiary,
+          ),
+        ),
+        const SizedBox(height: NileSpacing.s8),
+        Expanded(
+          child: TextField(
+            controller: _notes,
+            expands: true,
+            maxLines: null,
+            textAlignVertical: TextAlignVertical.top,
+            style: NileTextStyles.bodySm(),
+            decoration: const InputDecoration(
+              hintText: 'Questions, names, cues…',
+              border: InputBorder.none,
+              isCollapsed: true,
+            ),
+          ),
+        ),
+      ],
+    ),
+  );
+
   // ── Build ──────────────────────────────────────────────────────────────────
 
   @override
@@ -1216,6 +1553,7 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
 
   Widget _buildStudio(bool hasChatColumn) {
     final live = _demo.isLive;
+    final interview = _mode == StudioMode.interview;
     final selfIsMaster = _demo.master == _selfId;
     return StudioGraphicsHotkeys(
       // Not while a dialog (the graphics panel among them) is over the Studio.
@@ -1247,6 +1585,8 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
             overlayFor: _overlayFor,
             previewOverlayFor: (s) => _overlayFor(s, preview: true),
             sourceActions: _sourceActions,
+            sourceColumn: interview ? _greenRoomColumn() : null,
+            monitor: interview ? _buildStageMonitor() : null,
             stats: NileStudioStats(
               isLive: live,
               elapsed: _demo.elapsed,
@@ -1265,9 +1605,7 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
             ),
             center: NileStudioModeSwitch(
               value: _mode,
-              onChanged: StudioMode.canSwitch(isLive: live)
-                  ? (m) => setState(() => _mode = m)
-                  : null,
+              onChanged: StudioMode.canSwitch(isLive: live) ? _setMode : null,
               lockedReason: 'The mode can’t change while you’re live',
             ),
             trailing: IconButton(

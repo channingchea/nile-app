@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 
 import 'brand_kit.dart';
+import 'interview.dart' show StageLayout;
 import 'live_elements.dart';
 import 'livekit_service.dart' show CameraSlot;
 import 'overlay_layout.dart';
@@ -165,6 +166,7 @@ class StudioLayout {
     this.angles = const [],
     this.defaultAngle,
     this.order = const [],
+    this.stage,
     this.template,
     this.sort = 0,
     this.updatedAt,
@@ -195,6 +197,7 @@ class StudioLayout {
     final cams = m['cameras'];
     final angles = m['angles'];
     final order = m['order'];
+    final stage = m['stage'];
     return StudioLayout(
       id: id,
       name: name,
@@ -206,6 +209,7 @@ class StudioLayout {
       order: order is List
           ? order.map(AngleRef.fromJson).whereType<AngleRef>().toList()
           : const [],
+      stage: stage is Map ? StageLayout.fromWire(stage['layout']) : null,
       template: template,
       sort: sort,
       updatedAt: updatedAt,
@@ -227,6 +231,10 @@ class StudioLayout {
   /// Camera order. Empty = leave the show's order as it is.
   final List<AngleRef> order;
 
+  /// Interview mode: the stage arrangement Apply switches to. Null = leave
+  /// the stage as it is (and always, in Multicam).
+  final StageLayout? stage;
+
   /// The template it was made from, if any.
   final String? template;
   final int sort;
@@ -240,6 +248,7 @@ class StudioLayout {
     if (angles.isNotEmpty) 'angles': angles,
     'defaultAngle': ?defaultAngle?.toJson(),
     if (order.isNotEmpty) 'order': [for (final o in order) o.toJson()],
+    if (stage != null) 'stage': {'layout': stage!.wire},
   };
 
   /// Every library id it uses.
@@ -256,6 +265,8 @@ class StudioLayout {
     AngleRef? defaultAngle,
     bool clearDefault = false,
     List<AngleRef>? order,
+    StageLayout? stage,
+    bool clearStage = false,
     int? sort,
   }) => StudioLayout(
     id: id,
@@ -264,6 +275,7 @@ class StudioLayout {
     angles: angles ?? this.angles,
     defaultAngle: clearDefault ? null : defaultAngle ?? this.defaultAngle,
     order: order ?? this.order,
+    stage: clearStage ? null : stage ?? this.stage,
     template: template,
     sort: sort ?? this.sort,
     updatedAt: updatedAt,

@@ -37,6 +37,7 @@ import 'screens/edit_post_screen.dart';
 import 'screens/edit_profile_screen.dart';
 import 'screens/event_detail_screen.dart';
 import 'screens/follow_list_screen.dart';
+import 'screens/guest_green_room_screen.dart';
 import 'screens/home_screen.dart';
 import 'screens/like_list_screen.dart';
 import 'screens/messages_screen.dart';
@@ -128,6 +129,12 @@ class NileRoutes {
   static String eventAttendees(String id) => '/event/$id/attendees';
   static String eventCrew(String id, {bool audio = false}) =>
       '/event/$id/crew?audio=$audio';
+
+  /// Interview mode: an invited guest's green room for event [id] (PK).
+  static String eventGreenRoom(String id) => '/event/$id/green-room';
+
+  /// A host's guest share link (`links.joinnile.com/g/<code>`).
+  static String guestLink(String code) => '/g/$code';
   static String watch(String liveKitEventId) => '/watch/$liveKitEventId';
   static String stream(
     String liveKitEventId, {
@@ -437,6 +444,11 @@ final GoRouter _router = NileGoRouter(
             path: 'likes',
             builder: (_, s) => LikeListScreen.event(s.pathParameters['id']!),
           ),
+          GoRoute(
+            path: 'green-room',
+            builder: (_, s) =>
+                GuestGreenRoomScreen(eventId: s.pathParameters['id']!),
+          ),
         ],
       ),
       GoRoute(
@@ -461,6 +473,11 @@ final GoRouter _router = NileGoRouter(
                   initialCameraName: s.uri.queryParameters['name'],
                 );
         },
+      ),
+      // Joins the guest list, then the same green room by LiveKit slug.
+      GoRoute(
+        path: '/g/:code',
+        builder: (_, s) => GuestLinkScreen(code: s.pathParameters['code']!),
       ),
 
       // ── Posts ───────────────────────────────────────────────────────────────

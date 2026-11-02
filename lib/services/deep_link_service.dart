@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:app_links/app_links.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 
 import '../router.dart';
 import 'destinations.dart';
@@ -10,7 +11,8 @@ import 'share_urls.dart';
 ///
 /// Two link shapes resolve to the same destinations:
 ///   • Universal Links / App Links (real https, work whether or not the app is
-///     installed): `https://<shareDomain>/e/<id>`, `/p/<id>`, `/u/<username>`.
+///     installed): `https://<shareDomain>/e/<id>`, `/p/<id>`, `/u/<username>`,
+///     `/g/<code>` (a host's guest invite).
 ///   • Legacy custom scheme (only fires when the app is installed):
 ///     `nile://event/<id>`, `nile://post/<id>`.
 class DeepLinkService {
@@ -35,10 +37,13 @@ class DeepLinkService {
     _sub = null;
   }
 
+  @visibleForTesting
+  static ({String kind, String value})? parse(Uri uri) => _parse(uri);
+
   /// Normalizes an inbound URI to `(kind, value)` where kind ∈ {event, post,
-  /// profile}, or null if it's not a recognized Nile link.
+  /// profile, guest}, or null if it's not a recognized Nile link.
   static ({String kind, String value})? _parse(Uri uri) {
-    // Universal / App Links: https://<shareDomain>/{e|p|u}/<value>
+    // Universal / App Links: https://<shareDomain>/{e|p|u|g}/<value>
     if ((uri.scheme == 'https' || uri.scheme == 'http') &&
         uri.host == ShareUrls.shareDomain) {
       final segs = uri.pathSegments;
@@ -50,6 +55,8 @@ class DeepLinkService {
           return (kind: 'post', value: segs[1]);
         case 'u':
           return (kind: 'profile', value: segs[1]);
+        case 'g':
+          return (kind: 'guest', value: segs[1]);
       }
       return null;
     }

@@ -14,6 +14,13 @@ abstract final class NileRole {
   static const streamAudio = 'master-audio';
   static const studio = 'studio';
 
+  /// Interview mode: a remote guest (green room / stage). Not a publisher in
+  /// the camera sense — never an angle, never the show's master audio.
+  static const guest = 'guest';
+
+  /// The Studio's private talkback connection to the green room.
+  static const backstage = 'backstage';
+
   static bool isPublisher(Object? role) =>
       role == camera || role == streamAudio || role == studio;
 }

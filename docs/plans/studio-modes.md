@@ -43,35 +43,49 @@ Implementation notes (2026-11-01):
 - Tests: `test/studio_modes_test.dart` (value, Event parsing, switch, centered without overflow at 740/1024/1440). Studio Setup's full-chat overflow test now includes the switch.
 
 ## Phase 2: Interview — guests and server
-- [ ] Migration: `event_guests` (event_id, user_id, invited_by, status invited/green_room/on_stage/removed, title, joined_at, stage_seconds) with RLS; `events.guest_invite_code`
-- [ ] livekit fn actions: `invite-guest` (by user, push notification), `guest-link` (create/rotate code), `guest-token` (new role `guest`), `move-guest` (green_room ↔ on_stage ↔ removed; 409 `stage_full` past 6), `remove-guest` (also RemoveParticipant)
-- [ ] Green-room privacy enforced by the SFU: guest tracks use publisher subscription permissions limited to host/Studio/crew until on stage
-- [ ] Backstage talk: Studio publishes a second mic track only green-room identities may subscribe to
-- [ ] Backstage chat topic (host, crew, guests only)
-- [ ] Deep link that opens the app into the green room for that event
-- [ ] In-room phones join via the existing crew camera flow, appear in the green room, mic off by default; one in-room device carries room audio (master-audio rule)
+- [x] Migration: `event_guests` (event_id, user_id, invited_by, status invited/green_room/on_stage/removed, title, joined_at, stage_seconds) with RLS; `events.guest_invite_code`
+- [x] livekit fn actions: `invite-guest` (by user, push notification), `guest-link` (create/rotate code), `guest-token` (new role `guest`), `move-guest` (green_room ↔ on_stage ↔ removed; 409 `stage_full` past 6), `remove-guest` (also RemoveParticipant)
+- [x] Green-room privacy enforced by the SFU: guest tracks use publisher subscription permissions limited to host/Studio/crew until on stage
+- [x] Backstage talk: Studio publishes a second mic track only green-room identities may subscribe to
+- [x] Backstage chat topic (host, crew, guests only)
+- [x] Deep link that opens the app into the green room for that event
+- [x] In-room phones join via the existing crew camera flow, appear in the green room, mic off by default; one in-room device carries room audio (master-audio rule)
 
 ## Phase 3: Interview — guest green room screen
-- [ ] `GuestGreenRoomScreen`: camera/mic preview + meters, name + title (prefilled from profile), connection/device health, "Waiting for host", small stage preview, backstage chat, host's backstage voice
-- [ ] "You're on in 5" countdown on the shared server clock when brought on
-- [ ] On-stage view with Live badge; screen share on devices that support it today (iPad, Mac)
+- [x] `GuestGreenRoomScreen`: camera/mic preview + meters, name + title (prefilled from profile), connection/device health, "Waiting for host", small stage preview, backstage chat, host's backstage voice
+- [x] "You're on in 5" countdown on the shared server clock when brought on
+- [x] On-stage view with Live badge; screen share on devices that support it today (iPad, Mac)
 
 ## Phase 4: Interview — host Studio
-- [ ] Green room column replaces the camera column: tile with video, name/title, meter, health, status; actions Bring on / Send back / Remove / Mute / Talk privately (push to talk)
-- [ ] Stage monitor: layout picker (Solo, Side by side, Grid, Spotlight), active-speaker highlight, per-person on-stage timer
-- [ ] Automatic name lower third on bring-on from name/title (auto-hide 8 s default)
-- [ ] Host-only notes panel per event
-- [ ] Chat questions on screen: Questions filter + "Show on screen" targeted at the stage
-- [ ] "Add content angle": one extra angle holding a screen share, graphics or elements
-- [ ] Four interview templates in Layouts; saved layouts include the stage arrangement
+- [x] Green room column replaces the camera column: tile with video, name/title, meter, health, status; actions Bring on / Send back / Remove / Mute / Talk privately (push to talk)
+- [x] Stage monitor: layout picker (Solo, Side by side, Grid, Spotlight), active-speaker highlight, per-person on-stage timer
+- [x] Automatic name lower third on bring-on from name/title (auto-hide 8 s default)
+- [x] Host-only notes panel per event
+- [x] Chat questions on screen: Questions filter + "Show on screen" targeted at the stage
+- [x] "Add content angle": one extra angle holding a screen share, graphics or elements
+- [x] Four interview templates in Layouts; saved layouts include the stage arrangement
 
 ## Phase 5: Interview — viewers, replay, rehearsal
-- [ ] Viewer stage composed on device from individual feeds, following metadata layout, with speaker highlight and graphics overlay
-- [ ] Angle picker: Stage + content angle when present
-- [ ] On-stage avatar strip; tap opens profile sheet without leaving the show
-- [ ] Audio: all on-stage audio mixed; in-room phones follow the room-audio rule
-- [ ] Grid replay recorder renders the stage layout from logged stage marks
-- [ ] Studio Setup rehearsal: animated demo guests, bring on/send back, layouts, countdown
+- [x] Viewer screen routes by mode; Multicam unchanged (moved here from Phase 1)
+- [x] Viewer stage composed on device from individual feeds, following metadata layout, with speaker highlight and graphics overlay
+- [x] Angle picker: Stage + content angle when present
+- [x] On-stage avatar strip; tap opens profile sheet without leaving the show
+- [x] Audio: all on-stage audio mixed; in-room phones follow the room-audio rule
+- [x] Grid replay recorder renders the stage layout from logged stage marks
+- [x] Studio Setup rehearsal: animated demo guests, bring on/send back, layouts, countdown
+
+Implementation notes, Phases 2-5 (2026-11-01):
+- Migrations 0146 (`guest_invited` notification type, own transaction), 0147 (`event_guests`, `event_host_notes` owner-only, realtime on event_guests, notif_enabled maps guest_invited to the operator_assigned preference), 0148 (share code moved to service-role-only `event_guest_links`: events rows are public, so 0147's `events.guest_invite_code` leaked; the column is emptied and held null by a check, drop it later). All on prod.
+- Server rules in `_shared/interview.ts` (tests `tests/interview_test.ts`). livekit actions: invite-guest (push), guest-link, guest-join, guest-token, set-guest-title, move-guest (also crew cameras and the Studio; `stage_full` past 6; countdown 0-10 s, default 5), remove-guest, set-stage (layout/focus/content/order), mute-participant, backstage-token. set-mode to interview seeds the stage with the Studio.
+- Room metadata `stage` = `{ids:[{id,at}], layout, focus, content}`; `at` = server ms they appear (the countdown). App side: `lib/services/interview.dart` (`StageState`, `stageSlots`), `interview_service.dart`, `backstage.dart`; widgets `interview_stage.dart`, `interview_green_room.dart`. The same layout maths runs in `recorder/recorder.js` (both tests assert identical numbers).
+- Green-room privacy is SFU-enforced by the guest's own client (`applyGuestPrivacy`: only studio/camera/master-audio/guest roles may subscribe until on stage). The guest screen also mutes its tracks across a full reconnect until permissions are re-sent (livekit_client 2.7.0 doesn't resend them on a full restart).
+- Talkback is a second, publish-only connection `backstage-<slug>` whose permissions name only the guests being talked to (limiting the Studio's own connection would cut viewers off its audio). Backstage chat = data messages with explicit recipients, not stored.
+- Stage graphics = the "All cameras" graphics. "Show on screen" targets All cameras in Interview.
+- Viewer audio = master audio + guests on stage; crew phones on stage are video only (this is the "mic off by default" rule for in-room phones — no phone-side change).
+- Replay: in Interview the recorder page draws the stage with name tags and reports one full-frame tile, so the replay screen needed no change. Recorder republished to R2 (v1).
+- Guests enter by push (`guest_invited` → `/event/:id/green-room`), the event page's "Join green room", or `links.joinnile.com/g/<code>` (`/g/:code`; AASA path added; the web page never reveals the event).
+- Known limits: signed-out users lose a /g link at sign-in (the router has no return-to, true of all links); the guest's own stage preview skips people not in the room; content angle isn't shown to guests; Studio Setup's rehearsal notes are not saved; updating an existing layout from the current look doesn't refresh its stage arrangement; the guest's lower third replaces the host's on All cameras.
+- Not tested on hardware: everything here. On-device checklist: invite by username and link; guest pre-join and green room; host talkback both ways; bring on with countdown; viewer sees/hears only on-stage guests (try a viewer during green room); layouts and Spotlight focus; content angle; remove a guest; replay of an Interview show; echo with the Mac's speakers (external-mic mode).
 
 ## Phase 6: Premiere — film upload
 - [ ] Cloudflare Stream setup (Channing): account ID, API token, signing key, webhook secret as Supabase secrets

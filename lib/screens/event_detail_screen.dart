@@ -14,6 +14,8 @@ import '../services/crew_service.dart';
 import '../services/share_urls.dart';
 import '../services/event_service.dart';
 import '../services/follow_service.dart';
+import '../services/interview.dart';
+import '../services/interview_service.dart';
 import '../services/live_elements.dart';
 import '../services/livekit_service.dart';
 import '../services/money.dart';
@@ -90,6 +92,9 @@ class _EventDetailScreenState extends State<EventDetailScreen>
   // Crew: assigned camera operators get free access to the event.
   bool _isOperator = false;
   MyOperatorAssignment? _assignment;
+
+  // Interview mode: this user's own guest invitation, if they have one.
+  InterviewGuest? _invite;
 
   // Replay/VOD. _replayWatchable: a ready replay this user may watch now (→
   // "Watch Replay"). _replayLockedByTicket: a ready replay exists but the user
@@ -281,6 +286,7 @@ class _EventDetailScreenState extends State<EventDetailScreen>
       _initRealtime();
       _checkReplay();
       _loadResults();
+      _loadInvite();
 
       // Best-effort "Sponsored by" line (0079) — only set for an active,
       // approved sponsorship; never blocks or fails the screen.
@@ -301,6 +307,17 @@ class _EventDetailScreenState extends State<EventDetailScreen>
         _loading = false;
       });
     }
+  }
+
+  /// Interview mode: best-effort, never blocks the page. Guests may read their
+  /// own row (0147); everyone else gets nothing back.
+  Future<void> _loadInvite() async {
+    final event = _event;
+    if (event == null || _isOwnEvent || event.isOver) return;
+    try {
+      final invite = await InterviewService.myInvite(event.id);
+      if (mounted) setState(() => _invite = invite);
+    } catch (_) {}
   }
 
   /// Host-only: open offers on this event. There is no per-event RPC — the
@@ -868,6 +885,13 @@ class _EventDetailScreenState extends State<EventDetailScreen>
       ),
       const SizedBox(height: 16),
     ],
+    if (_invite case final invite?
+        when invite.status != GuestStatus.removed && !_event!.isOver) ...[
+      _GuestEntry(
+        onJoin: () => context.push(NileRoutes.eventGreenRoom(_event!.id)),
+      ),
+      const SizedBox(height: 16),
+    ],
     _PrimaryCta(
       event: _event!,
       countdownExpired: _countdownExpired,
@@ -1227,6 +1251,43 @@ class _HostRow extends StatelessWidget {
                   onPressed: busy ? null : onToggleFollow,
                   child: const Text('Follow'),
                 ),
+      ],
+    );
+  }
+}
+
+/// Interview mode: the signed-in user is on this show's guest list.
+class _GuestEntry extends StatelessWidget {
+  final VoidCallback onJoin;
+
+  const _GuestEntry({required this.onJoin});
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          children: [
+            Icon(Icons.mic_external_on, size: 16, color: NileColors.volt),
+            const SizedBox(width: NileSpacing.s6),
+            Text(
+              'You’re a guest on this show',
+              style: NileTextStyles.labelMd(),
+            ),
+          ],
+        ),
+        const SizedBox(height: NileSpacing.s8),
+        FilledButton.icon(
+          onPressed: onJoin,
+          style: FilledButton.styleFrom(
+            padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
+            backgroundColor: NileColors.volt,
+            foregroundColor: NileColors.onVolt,
+          ),
+          icon: const Icon(Icons.meeting_room_outlined),
+          label: const Text('Join green room'),
+        ),
       ],
     );
   }

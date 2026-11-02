@@ -70,6 +70,8 @@ function buildMessage(p: Payload): { title: string; body: string } {
       };
     case "operator_assigned":
       return { title: "You're on the crew", body: `${who} added you as a camera operator` };
+    case "guest_invited":
+      return { title: "You're invited", body: `${who} invited you to be a guest on their show` };
     case "new_message":
       return { title: who, body: "Sent you a message" };
     case "message_reaction":

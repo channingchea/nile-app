@@ -31,6 +31,10 @@ enum NotificationType {
 
   /// 24 hours before that offer expires untouched.
   sponsorshipOfferExpiring,
+
+  /// A host invited this user to be a guest on their Interview show (0146).
+  /// `entity_id` is the event; the tap opens its green room.
+  guestInvited,
 }
 
 class AppNotification {
@@ -92,6 +96,7 @@ class AppNotification {
     'feedback_resolved' => NotificationType.feedbackResolved,
     'sponsorship_offer' => NotificationType.sponsorshipOffer,
     'sponsorship_offer_expiring' => NotificationType.sponsorshipOfferExpiring,
+    'guest_invited' => NotificationType.guestInvited,
     _ => NotificationType.follow,
   };
 }

@@ -264,6 +264,8 @@ class NileStudio extends StatelessWidget {
     this.leading,
     this.trailing,
     this.center,
+    this.sourceColumn,
+    this.monitor,
     this.meter,
     this.onRemoveSource,
     this.onRenameSource,
@@ -316,6 +318,13 @@ class NileStudio extends StatelessWidget {
 
   /// Centered in the stats row — the Studio mode switch.
   final Widget? center;
+
+  /// Replaces the camera list (Interview mode's green room). [meter] isn't
+  /// drawn when this is set — put it in the replacement.
+  final Widget? sourceColumn;
+
+  /// Replaces the inspection monitor (Interview mode's stage monitor).
+  final Widget? monitor;
 
   /// Ejects a source from the room. Null hides the affordance entirely — only
   /// the host gets it, and only on sources marked [NileStudioSource.isRemovable].
@@ -386,19 +395,21 @@ class NileStudio extends StatelessWidget {
             children: [
               SizedBox(
                 width: sourceColumnWidth,
-                child: _StudioSourceList(
-                  sources: sources,
-                  selectedIdentity: selected?.identity,
-                  onSelect: onSelectSource,
-                  onRemove: onRemoveSource,
-                  onRename: onRenameSource,
-                  selfIdentity: selfIdentity,
-                  meter: meter,
-                  actions: sourceActions,
-                  graphicsFor: graphicsFor,
-                  overlayFor: overlayFor,
-                  isCued: isCued,
-                ),
+                child:
+                    sourceColumn ??
+                    _StudioSourceList(
+                      sources: sources,
+                      selectedIdentity: selected?.identity,
+                      onSelect: onSelectSource,
+                      onRemove: onRemoveSource,
+                      onRename: onRenameSource,
+                      selfIdentity: selfIdentity,
+                      meter: meter,
+                      actions: sourceActions,
+                      graphicsFor: graphicsFor,
+                      overlayFor: overlayFor,
+                      isCued: isCued,
+                    ),
               ),
               const _StudioDivider(),
               // The control bar belongs to the monitor column, so sources and
@@ -408,13 +419,15 @@ class NileStudio extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     Expanded(
-                      child: _StudioMonitor(
-                        selected: selected,
-                        self: showSelfPane ? self : null,
-                        graphicsFor: previewFor ?? graphicsFor,
-                        overlayFor: previewOverlayFor ?? overlayFor,
-                        isCued: isCued,
-                      ),
+                      child:
+                          monitor ??
+                          _StudioMonitor(
+                            selected: selected,
+                            self: showSelfPane ? self : null,
+                            graphicsFor: previewFor ?? graphicsFor,
+                            overlayFor: previewOverlayFor ?? overlayFor,
+                            isCued: isCued,
+                          ),
                     ),
                     ?hud,
                     _StudioControlBar(child: controls),

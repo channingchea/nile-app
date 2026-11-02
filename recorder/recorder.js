@@ -48,8 +48,55 @@
     return out;
   }
 
+  // ── Interview mode (docs/plans/studio-modes.md): the stage ───────────────
+  // Same rules as stageSlots in lib/services/interview.dart, so the replay
+  // shows the picture viewers saw. Rects are fractions of a 16:9 frame.
+  const STAGE_GAP = 0.01;
+  function stageLayout(layout, n, focusIndex) {
+    if (!n) return [];
+    const fi = Math.min(Math.max(focusIndex || 0, 0), n - 1);
+    const g = STAGE_GAP, gy = (STAGE_GAP * 16) / 9;
+    const r4 = (v) => Math.round(v * 10000) / 10000;
+    const rect = (index, x, y, w, h) => ({ index, r: [r4(x), r4(y), r4(w), r4(h)] });
+    if (n === 1 || layout === "solo") return [rect(fi, 0, 0, 1, 1)];
+    if (layout === "side") {
+      const w = (1 - (n - 1) * g) / n;
+      return Array.from({ length: n }, (_, i) => rect(i, i * (w + g), 0, w, 1));
+    }
+    if (layout === "spotlight") {
+      const bw = 0.75;
+      const others = [];
+      for (let i = 0; i < n; i++) if (i !== fi) others.push(i);
+      const m = others.length, sh = (1 - (m - 1) * gy) / m;
+      return [rect(fi, 0, 0, bw, 1), ...others.map((idx, j) => rect(idx, bw + g, j * (sh + gy), 1 - bw - g, sh))];
+    }
+    const cols = Math.ceil(Math.sqrt(n)), rows = Math.ceil(n / cols);
+    const cw = (1 - (cols - 1) * g) / cols, ch = (1 - (rows - 1) * gy) / rows;
+    const out = [];
+    for (let i = 0; i < n; i++) {
+      const row = Math.floor(i / cols), col = i % cols;
+      const inRow = row === rows - 1 ? n - (rows - 1) * cols : cols;
+      const xoff = (1 - (inRow * cw + (inRow - 1) * g)) / 2;
+      out.push(rect(i, xoff + col * (cw + g), row * (ch + gy), cw, ch));
+    }
+    return out;
+  }
+
+  /** Who is on the stage at [now] (server ms), in layout order, and who is featured. */
+  function stageOf(meta, now) {
+    const st = meta && typeof meta.stage === "object" && meta.stage ? meta.stage : {};
+    const ids = (Array.isArray(st.ids) ? st.ids : [])
+      .filter((e) => e && typeof e.id === "string" && typeof e.at === "number" && e.at <= now)
+      .map((e) => e.id)
+      .filter((id, i, a) => a.indexOf(id) === i)
+      .slice(0, 6);
+    const layout = ["solo", "side", "grid", "spotlight"].includes(st.layout) ? st.layout : "grid";
+    const fi = typeof st.focus === "string" ? Math.max(0, ids.indexOf(st.focus)) : 0;
+    return { ids, layout, fi };
+  }
+
   if (typeof module !== "undefined") {
-    module.exports = { pickTiles, layout };
+    module.exports = { pickTiles, layout, stageLayout, stageOf };
     return;
   }
 
@@ -106,9 +153,76 @@
 
   // ── Render ────────────────────────────────────────────────────────────────
   const tiles = new Map(); // key → { div, video, track }
+  const audio = new Map(); // track sid → { el, identity }
+
+  function participantMeta(identity) {
+    const p = room.remoteParticipants.get(identity);
+    try { return { p, m: JSON.parse((p && p.metadata) || "{}") || {} }; } catch (_) { return { p, m: {} }; }
+  }
+
+  // Interview: the stage, with name tags baked in. The app overlays the
+  // "All cameras" graphics on the whole frame, so one full-frame tile is
+  // reported. Audio follows the viewer rule: the show's audio plus the
+  // guests on stage (in-room phones don't double the room sound).
+  function renderStage(meta) {
+    const { ids, layout: lay, fi } = stageOf(meta, Date.now());
+    const all = feeds();
+    const slots = stageLayout(lay, ids.length, fi);
+    const seen = new Set();
+    for (const s of slots) {
+      const id = ids[s.index];
+      const key = "stage:" + id;
+      seen.add(key);
+      let t = tiles.get(key);
+      if (!t) {
+        const div = document.createElement("div");
+        div.className = "tile stage";
+        const tag = document.createElement("div");
+        tag.className = "tag";
+        div.appendChild(tag);
+        document.body.appendChild(div);
+        t = { div, video: null, track: null, tag };
+        tiles.set(key, t);
+      }
+      const r = s.r;
+      Object.assign(t.div.style, { left: r[0] * 100 + "%", top: r[1] * 100 + "%", width: r[2] * 100 + "%", height: r[3] * 100 + "%" });
+      const { p, m } = participantMeta(id);
+      const name = m.displayName || m.cameraName || (p && p.name) || "";
+      t.tag.textContent = m.title ? name + " · " + m.title : name;
+      const feed = all.find((f) => f.identity === id && !f.share);
+      const track = feed ? feed.track : null;
+      if (track !== t.track) {
+        if (t.video) { t.track && t.track.detach(t.video); t.video.remove(); t.video = null; }
+        if (track) { t.video = track.attach(); t.video.muted = true; t.div.insertBefore(t.video, t.tag); }
+        t.track = track;
+      }
+    }
+    for (const [key, t] of tiles) {
+      if (seen.has(key)) continue;
+      if (t.video && t.track) t.track.detach(t.video);
+      t.div.remove();
+      tiles.delete(key);
+    }
+    const onStage = new Set(ids);
+    for (const { el, identity } of audio.values()) {
+      const { m } = participantMeta(identity);
+      el.muted = !(m.isMasterAudio === true || (m.role === "guest" && onStage.has(identity)));
+    }
+    return [{ s: null, el: null, r: [0, 0, 1, 1] }];
+  }
 
   function render() {
     const meta = roomMeta();
+    if (meta.mode === "interview") {
+      const report = renderStage(meta);
+      if (t0 == null) return;
+      const metaRaw = room.metadata || "";
+      if (metaRaw !== lastMeta) { lastMeta = metaRaw; mark("meta", metaRaw); }
+      const json = JSON.stringify(report);
+      if (json !== lastTiles) { lastTiles = json; mark("tiles", report); }
+      return;
+    }
+    for (const a of audio.values()) a.el.muted = false;
     const items = pickTiles(meta, feeds());
     const rects = layout(items.length, 1920, 1080, 12);
     const seen = new Set();
@@ -146,18 +260,24 @@
   }
 
   // Audio: every published microphone, as the default recorder does.
-  room.on(LK.RoomEvent.TrackSubscribed, (track) => {
+  room.on(LK.RoomEvent.TrackSubscribed, (track, _pub, participant) => {
     if (track.kind === LK.Track.Kind.Audio) {
       const el = track.attach();
       el.style.display = "none";
       document.body.appendChild(el);
+      audio.set(track.sid, { el, identity: participant.identity });
     }
     render();
   });
   room.on(LK.RoomEvent.TrackUnsubscribed, (track) => {
-    if (track.kind === LK.Track.Kind.Audio) track.detach().forEach((el) => el.remove());
+    if (track.kind === LK.Track.Kind.Audio) {
+      track.detach().forEach((el) => el.remove());
+      audio.delete(track.sid);
+    }
     render();
   });
+  // Countdowns ("you're on in 5") end without any room event.
+  setInterval(() => { if (roomMeta().mode === "interview") render(); }, 500);
   for (const ev of [
     LK.RoomEvent.RoomMetadataChanged,
     LK.RoomEvent.ParticipantMetadataChanged,

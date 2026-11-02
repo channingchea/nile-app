@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../services/interview.dart' show StageLayout;
 import '../services/live_elements.dart';
 import '../services/overlay_layout.dart';
 import '../services/studio_layouts.dart';
@@ -58,6 +59,7 @@ class _LayoutEditorState extends State<LayoutEditor> {
   late AngleRef? _default = widget.layout.defaultAngle;
   late List<AngleRef> _order = [...widget.layout.order];
   late bool _setOrder = widget.layout.order.isNotEmpty;
+  late StageLayout? _stage = widget.layout.stage;
   int _tab = 0;
   String? _error;
 
@@ -82,6 +84,8 @@ class _LayoutEditorState extends State<LayoutEditor> {
     defaultAngle: _validDefault,
     clearDefault: _validDefault == null,
     order: _setOrder ? _normalizedOrder : const [],
+    stage: _stage,
+    clearStage: _stage == null,
   );
 
   AngleRef? get _validDefault {
@@ -631,6 +635,25 @@ class _LayoutEditorState extends State<LayoutEditor> {
               ),
           ],
         ),
+      const SizedBox(height: NileSpacing.s16),
+      Text('INTERVIEW STAGE', style: heading),
+      DropdownButton<StageLayout?>(
+        value: _stage,
+        isExpanded: true,
+        items: [
+          const DropdownMenuItem(
+            value: null,
+            child: Text('Leave the stage as it is'),
+          ),
+          for (final l in StageLayout.values)
+            DropdownMenuItem(value: l, child: Text(l.label)),
+        ],
+        onChanged: (l) => setState(() => _stage = l),
+      ),
+      Text(
+        'Used in Interview mode only.',
+        style: NileTextStyles.caption().copyWith(color: NileColors.txtTertiary),
+      ),
     ];
   }
 }

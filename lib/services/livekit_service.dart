@@ -2,6 +2,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'live_elements.dart';
 import 'overlay_layout.dart';
 import 'show_control.dart';
+import 'interview.dart';
 import 'studio_graphics.dart';
 import 'studio_mode.dart';
 import 'supabase_client.dart';
@@ -378,6 +379,119 @@ class LivekitService {
     'studio': true,
   });
 
+  // ── Interview mode (docs/plans/studio-modes.md) ──────────────────────────
+
+  /// Host: add a Nile user to the guest list (they get a push).
+  static Future<void> inviteGuest({
+    required String eventId,
+    required String userId,
+    String? title,
+  }) => _invoke<Map>({
+    'action': 'invite-guest',
+    'eventId': eventId,
+    'userId': userId,
+    'title': ?title,
+  });
+
+  /// Host: the share-link code (made on first call). [rotate] kills the old one.
+  static Future<String> guestLink({
+    required String eventId,
+    bool rotate = false,
+  }) async {
+    final d = await _invoke<Map>({
+      'action': 'guest-link',
+      'eventId': eventId,
+      if (rotate) 'rotate': true,
+    });
+    return d['code'] as String;
+  }
+
+  /// Anyone with a share link: joins the guest list. → the event's LiveKit
+  /// slug, and whether the caller turned out to be the host.
+  static Future<({String eventId, bool isHost})> guestJoin(String code) async {
+    final d = await _invoke<Map>({'action': 'guest-join', 'code': code});
+    return (eventId: d['eventId'] as String, isHost: d['host'] == true);
+  }
+
+  /// A guest joins the green room. Connect with `autoSubscribe: false`.
+  static Future<GuestConnection> guestToken({
+    required String eventId,
+    String? title,
+    String? device,
+  }) async => GuestConnection.fromJson(
+    await _invoke<Map>({
+      'action': 'guest-token',
+      'eventId': eventId,
+      'title': ?title,
+      'device': ?device,
+    }),
+  );
+
+  /// A guest edits their own name tag (null clears it).
+  static Future<void> setGuestTitle({
+    required String eventId,
+    required String? title,
+  }) => _invoke<Map>({
+    'action': 'set-guest-title',
+    'eventId': eventId,
+    'title': title,
+  });
+
+  /// Studio: bring someone on stage (after [countdownS]), send them back to
+  /// the green room, or remove them from the show. Throws `stage_full` past 6.
+  static Future<void> moveGuest({
+    required String eventId,
+    required String identity,
+    required GuestStatus to,
+    int countdownS = kStageCountdownSeconds,
+  }) => _invoke<Map>({
+    'action': 'move-guest',
+    'eventId': eventId,
+    'identity': identity,
+    'to': to.wire,
+    'countdownS': countdownS,
+    'studio': true,
+  });
+
+  /// Studio: layout, who Solo/Spotlight features, the content angle, order.
+  /// Partial — pass only what changes.
+  static Future<void> setStage({
+    required String eventId,
+    StageLayout? layout,
+    String? focus,
+    bool clearFocus = false,
+    String? content,
+    bool clearContent = false,
+    List<String>? order,
+  }) => _invoke<Map>({
+    'action': 'set-stage',
+    'eventId': eventId,
+    'layout': ?layout?.wire,
+    if (focus != null || clearFocus) 'focus': focus,
+    if (content != null || clearContent) 'content': content,
+    'order': ?order,
+    'studio': true,
+  });
+
+  /// Host: mute (or ask to unmute) someone's microphone.
+  static Future<void> muteParticipant({
+    required String eventId,
+    required String identity,
+    required bool muted,
+  }) => _invoke<Map>({
+    'action': 'mute-participant',
+    'eventId': eventId,
+    'identity': identity,
+    'muted': muted,
+  });
+
+  /// Host: token for the Studio's private talkback connection.
+  static Future<LivekitToken> backstageToken({required String eventId}) async =>
+      LivekitToken.fromJson(
+        await _invoke<Map>({'action': 'backstage-token', 'eventId': eventId}),
+        fallbackName: 'Backstage',
+      );
+
   /// New camera order (every slot id once). Default "Camera N" names follow
   /// their new position. Host only.
   static Future<void> reorderCameras({
@@ -733,4 +847,32 @@ class ElementStale implements Exception {
 
   @override
   String toString() => 'That element changed elsewhere — reloaded.';
+}
+
+/// What `guest-token` returns.
+class GuestConnection {
+  const GuestConnection({
+    required this.token,
+    required this.wsUrl,
+    required this.identity,
+    required this.status,
+    this.eventTitle,
+    this.mode,
+  });
+
+  factory GuestConnection.fromJson(Map d) => GuestConnection(
+    token: d['token'] as String,
+    wsUrl: d['wsUrl'] as String,
+    identity: d['identity'] as String,
+    status: GuestStatus.fromWire(d['status']),
+    eventTitle: d['eventTitle'] as String?,
+    mode: d['mode'] as String?,
+  );
+
+  final String token;
+  final String wsUrl;
+  final String identity;
+  final GuestStatus status;
+  final String? eventTitle;
+  final String? mode;
 }

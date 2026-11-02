@@ -80,6 +80,11 @@ class Destinations {
     return NileDestination(NileRoutes.dm(otherUserId), extra: conversation);
   }
 
+  /// Interview mode: the invited guest's green room. No fetch — the screen
+  /// resolves the event and the invitation itself.
+  static NileDestination greenRoom(String eventId) =>
+      NileDestination(NileRoutes.eventGreenRoom(eventId));
+
   static NileDestination report(String reportId) =>
       NileDestination(NileRoutes.report(reportId));
 
@@ -92,7 +97,7 @@ class Destinations {
   // ── Inbound taps ───────────────────────────────────────────────────────────
 
   /// A parsed deep link (`{kind, value}`) → destination. `profile` links carry
-  /// a username, the others an id.
+  /// a username, `guest` links an invite code, the others an id.
   static Future<NileDestination?> forLink({
     required String kind,
     required String value,
@@ -104,6 +109,10 @@ class Destinations {
         return event(value);
       case 'profile':
         return profileByUsername(value);
+      case 'guest':
+        // Joining the guest list needs the signed-in user, so the screen
+        // behind the route does it rather than this resolver.
+        return NileDestination(NileRoutes.guestLink(value));
     }
     return null;
   }
@@ -143,6 +152,9 @@ class Destinations {
       case NotificationType.replayPricePrompt:
         if (entityId == null) return null;
         return replayPricing(entityId);
+      case NotificationType.guestInvited:
+        if (entityId == null) return null;
+        return greenRoom(entityId);
       case NotificationType.feedbackResolved:
         if (entityId == null) return null;
         return report(entityId);
@@ -174,6 +186,7 @@ class Destinations {
     'feedback_resolved' => NotificationType.feedbackResolved,
     'sponsorship_offer' => NotificationType.sponsorshipOffer,
     'sponsorship_offer_expiring' => NotificationType.sponsorshipOfferExpiring,
+    'guest_invited' => NotificationType.guestInvited,
     _ => null,
   };
 }
