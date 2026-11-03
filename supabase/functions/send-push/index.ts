@@ -82,6 +82,9 @@ function buildMessage(p: Payload): { title: string; body: string } {
       return { title: "Sound check open", body: `${who} opened sound check — join to get ready` };
     case "tip_received":
       return { title: "New tip", body: `${who} sent you a tip` };
+    case "film_expiring":
+      // actor is the host themself (the sweep has no other actor) — no `who`.
+      return { title: "Your film is being deleted soon", body: "Your premiere's film will be removed from Nile in 2 days." };
     case "replay_price_prompt":
       return { title: "Price your replay", body: "Your replay is ready — set a price to publish it" };
     // No `who` on either sponsorship case. An advertiser has no user account,

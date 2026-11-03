@@ -155,6 +155,9 @@ class Destinations {
       case NotificationType.guestInvited:
         if (entityId == null) return null;
         return greenRoom(entityId);
+      case NotificationType.filmExpiring:
+        if (entityId == null) return null;
+        return NileDestination(NileRoutes.eventFilm(entityId));
       case NotificationType.feedbackResolved:
         if (entityId == null) return null;
         return report(entityId);
@@ -187,6 +190,7 @@ class Destinations {
     'sponsorship_offer' => NotificationType.sponsorshipOffer,
     'sponsorship_offer_expiring' => NotificationType.sponsorshipOfferExpiring,
     'guest_invited' => NotificationType.guestInvited,
+    'film_expiring' => NotificationType.filmExpiring,
     _ => null,
   };
 }

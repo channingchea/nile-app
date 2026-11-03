@@ -1,7 +1,9 @@
 import 'package:croppy/croppy.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:go_router/go_router.dart';
 
+import '../router.dart';
 import '../services/ad_service.dart';
 import '../services/crew_service.dart';
 import '../services/event_service.dart';
@@ -697,6 +699,24 @@ class _EditEventScreenState extends State<EditEventScreen> {
                     onChanged: (m) => setState(() => _studioMode = m),
                     locked: !StudioMode.canSwitch(isLive: widget.event.isLive),
                   ),
+                  if (_studioMode == StudioMode.premiere) ...[
+                    const SizedBox(height: NileSpacing.s8),
+                    widget.event.studioMode == StudioMode.premiere
+                        ? OutlinedButton.icon(
+                            onPressed: () => context.push(
+                              NileRoutes.eventFilm(widget.event.id),
+                            ),
+                            icon: const Icon(Icons.movie_outlined, size: 18),
+                            label: const Text('Film, trailer and captions'),
+                          )
+                        : Text(
+                            'Save your changes, then upload your film from '
+                            'the event page.',
+                            style: NileTextStyles.caption().copyWith(
+                              color: NileColors.txtTertiary,
+                            ),
+                          ),
+                  ],
                   const SizedBox(height: 20),
                   _SectionLabel('Cameras'),
                   const SizedBox(height: 6),

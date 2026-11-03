@@ -35,6 +35,10 @@ enum NotificationType {
   /// A host invited this user to be a guest on their Interview show (0146).
   /// `entity_id` is the event; the tap opens its green room.
   guestInvited,
+
+  /// Premiere: the host's film is deleted from Stream in 2 days (0150).
+  /// `entity_id` is the event; the tap opens its film settings.
+  filmExpiring,
 }
 
 class AppNotification {
@@ -97,6 +101,7 @@ class AppNotification {
     'sponsorship_offer' => NotificationType.sponsorshipOffer,
     'sponsorship_offer_expiring' => NotificationType.sponsorshipOfferExpiring,
     'guest_invited' => NotificationType.guestInvited,
+    'film_expiring' => NotificationType.filmExpiring,
     _ => NotificationType.follow,
   };
 }

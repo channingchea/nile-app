@@ -32,6 +32,10 @@ import '../widgets/photo_viewer.dart';
 import '../widgets/rolling_number.dart';
 import 'widgets/moderation_menu.dart';
 import '../services/formats.dart';
+import '../services/premiere.dart';
+import '../services/premiere_service.dart';
+import '../services/studio_mode.dart';
+import '../widgets/premiere_checklist.dart';
 
 /// Detail screen for a single event (scheduled, live, or ended).
 ///
@@ -95,6 +99,9 @@ class _EventDetailScreenState extends State<EventDetailScreen>
 
   // Interview mode: this user's own guest invitation, if they have one.
   InterviewGuest? _invite;
+
+  /// Premiere mode, host only: the film's readiness (0151).
+  EventFilm? _film;
 
   // Replay/VOD. _replayWatchable: a ready replay this user may watch now (→
   // "Watch Replay"). _replayLockedByTicket: a ready replay exists but the user
@@ -287,6 +294,7 @@ class _EventDetailScreenState extends State<EventDetailScreen>
       _checkReplay();
       _loadResults();
       _loadInvite();
+      _loadFilm();
 
       // Best-effort "Sponsored by" line (0079) — only set for an active,
       // approved sponsorship; never blocks or fails the screen.
@@ -318,6 +326,26 @@ class _EventDetailScreenState extends State<EventDetailScreen>
       final invite = await InterviewService.myInvite(event.id);
       if (mounted) setState(() => _invite = invite);
     } catch (_) {}
+  }
+
+  /// Premiere mode, host only: best-effort, never blocks the page.
+  Future<void> _loadFilm() async {
+    final event = _event;
+    if (event == null ||
+        !_isOwnEvent ||
+        event.isOver ||
+        event.studioMode != StudioMode.premiere) {
+      return;
+    }
+    try {
+      final film = await PremiereService.fetch(event.id);
+      if (mounted) setState(() => _film = film);
+    } catch (_) {}
+  }
+
+  Future<void> _openFilm() async {
+    await context.push(NileRoutes.eventFilm(_event!.id));
+    _loadFilm();
   }
 
   /// Host-only: open offers on this event. There is no per-event RPC — the
@@ -883,6 +911,10 @@ class _EventDetailScreenState extends State<EventDetailScreen>
         hasTicket: _hasTicket,
         isOperator: _isOperator,
       ),
+      const SizedBox(height: 16),
+    ],
+    if (_film case final film? when _isOwnEvent && !_event!.isOver) ...[
+      PremiereChecklist(film: film, onOpen: _openFilm),
       const SizedBox(height: 16),
     ],
     if (_invite case final invite?

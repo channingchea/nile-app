@@ -745,6 +745,15 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
             value: _draft.studioMode,
             onChanged: (m) => setState(() => _draft.studioMode = m),
           ),
+          if (_draft.studioMode == StudioMode.premiere) ...[
+            const SizedBox(height: 6),
+            Text(
+              'After you create the event, upload your film from its page.',
+              style: NileTextStyles.caption().copyWith(
+                color: NileColors.txtTertiary,
+              ),
+            ),
+          ],
           const SizedBox(height: 20),
           _SectionLabel('Cameras'),
           const SizedBox(height: 6),

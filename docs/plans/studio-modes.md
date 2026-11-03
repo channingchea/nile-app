@@ -89,12 +89,19 @@ Implementation notes, Phases 2-5 (2026-11-01):
 - Not tested on hardware: everything here. On-device checklist: invite by username and link; guest pre-join and green room; host talkback both ways; bring on with countdown; viewer sees/hears only on-stage guests (try a viewer during green room); layouts and Spotlight focus; content angle; remove a guest; replay of an Interview show; echo with the Mac's speakers (external-mic mode).
 
 ## Phase 6: Premiere — film upload
-- [ ] Cloudflare Stream setup (Channing): account ID, API token, signing key, webhook secret as Supabase secrets
-- [ ] Migration: `event_films` (event_id, host_id, stream_uid, status uploading/processing/ready/error, duration_s, captions, poster, trailer_uid, rating, content_warning, replay_policy, replay_hours, chat_policy, rights_confirmed_at, delete_after)
-- [ ] `premiere` edge fn: create-upload (resumable tus, 8 h cap, signed URLs required), add-captions (.srt/.vtt), set poster/trailer, delete, playback-token (short-lived, ticket holders + host), trailer-token (public, no ticket needed; separate from the film so the film stays locked), Cloudflare webhook (ready/error)
-- [ ] Premiere section in create/edit event and in Studio Setup: file picker with progress and resume (computer recommended for large files), processing status, poster, trailer, captions, rating card + content warning, replay choice (none / 24h / 48h / 7 days / until deleted), chat choice (open / reactions only / slow mode), "I own the rights" checkbox
-- [ ] Host "Ready" checklist on the event page
-- [ ] Cleanup job deletes films after the replay window (7 days if none), in-app reminder 2 days before; reminder email added to the Klaviyo backlog
+- [x] Cloudflare Stream setup (2026-11-02): Starter Bundle ($5/mo); Stream-only account token; Supabase secrets CF_ACCOUNT_ID, CF_STREAM_API_TOKEN, CF_STREAM_SIGNING_KEY_ID, CF_STREAM_SIGNING_JWK (base64 JWK), CF_STREAM_WEBHOOK_SECRET; webhook registered to `functions/v1/premiere-webhook` (build it with --no-verify-jwt, check the Webhook-Signature header)
+- [x] Migration: `event_films` (0151; film + trailer uid/status/duration, captions, poster, rating, content_warning, replay_policy, chat_policy, rights_confirmed_at, delete_after, reminder_sent_at)
+- [x] `premiere` edge fn: create-upload (resumable tus, 8 h cap, signed URLs required), add-captions (.srt/.vtt), set poster/trailer, delete, playback-token (short-lived, ticket holders + host), trailer-token (public, no ticket needed; separate from the film so the film stays locked), Cloudflare webhook (ready/error)
+- [x] Premiere section (own screen `/event/:id/film`, linked from edit event and the event page; create-event explains it comes after creating): file picker with progress and resume (computer recommended for large files), processing status, poster, trailer, captions, rating card + content warning, replay choice (none / 24h / 48h / 7 days / until deleted), chat choice (open / reactions only / slow mode), "I own the rights" checkbox. Studio Setup's film rehearsal moved to Phase 8 (demo film).
+- [x] Host "Ready" checklist on the event page
+- [x] Cleanup job deletes films after the replay window (never sooner than 7 days), in-app + push reminder 2 days before (`film_expiring`, 0150); reminder email still to add to the Klaviyo backlog
+
+Implementation notes, Phase 6 (2026-11-02):
+- Server: migrations 0150 (`film_expiring` notification type) and 0151 (`event_films`, host-only read, realtime, hourly `premiere-sweep` cron). Rules in `_shared/premiere.ts` (tests `tests/premiere_test.ts`), Stream client `_shared/cloudflare_stream.ts`. Functions `premiere` (JWT) and `premiere-webhook` (no JWT: Cloudflare HMAC signature, or x-cron-secret for the sweep). send-push has the reminder copy.
+- Uploads: the device sends bytes straight to Stream over tus (`lib/services/tus_upload.dart`, 16 MiB chunks, resumes from the server's offset). `PremiereUploads` (app-wide) keeps going when the screen closes and saves the URL + file so a relaunch can resume within the 6 h upload window. Stream reserves the film's reported length (or 4 h) while an upload is open: that counts against the plan's 1,000 stored minutes.
+- Playback tokens are RS256 JWTs signed in the function with the Stream signing key; the film token lasts the film's length + 2 h (1-12 h). The trailer token is for anyone signed in. Host preview plays the real signed HLS stream.
+- Films are deleted at max(replay window, 7 days) after the show; "until I delete it" keeps them.
+- App: `lib/services/premiere.dart` (model, checklist, .srt→.vtt), `premiere_service.dart`, `screens/premiere_film_screen.dart`, `widgets/premiere_checklist.dart`; new dependency `file_selector`.
 
 ## Phase 7: Premiere — synced playback and run of show
 - [ ] Room metadata `film`: state (pre/playing/paused/intermission/hold/ended), positionMs, at (server ms), segment (pre-show/film/post-show)

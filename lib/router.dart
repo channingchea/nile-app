@@ -37,6 +37,7 @@ import 'screens/edit_post_screen.dart';
 import 'screens/edit_profile_screen.dart';
 import 'screens/event_detail_screen.dart';
 import 'screens/follow_list_screen.dart';
+import 'screens/premiere_film_screen.dart';
 import 'screens/guest_green_room_screen.dart';
 import 'screens/home_screen.dart';
 import 'screens/like_list_screen.dart';
@@ -132,6 +133,9 @@ class NileRoutes {
 
   /// Interview mode: an invited guest's green room for event [id] (PK).
   static String eventGreenRoom(String id) => '/event/$id/green-room';
+
+  /// Premiere mode: the host's film, trailer, captions and settings.
+  static String eventFilm(String id) => '/event/$id/film';
 
   /// A host's guest share link (`links.joinnile.com/g/<code>`).
   static String guestLink(String code) => '/g/$code';
@@ -448,6 +452,11 @@ final GoRouter _router = NileGoRouter(
             path: 'green-room',
             builder: (_, s) =>
                 GuestGreenRoomScreen(eventId: s.pathParameters['id']!),
+          ),
+          GoRoute(
+            path: 'film',
+            builder: (_, s) =>
+                PremiereFilmScreen(eventId: s.pathParameters['id']!),
           ),
         ],
       ),

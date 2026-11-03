@@ -55,6 +55,8 @@ dependencies:
   sentry_flutter: ^9.16.0
   supabase_flutter: ^2.5.0
   image_picker: ^1.1.2
+  # Premiere: pick film, trailer and caption files (any platform).
+  file_selector: ^1.0.3
   croppy: ^1.5.3
   share_plus: ^10.1.2
   flutter_svg: ^2.0.10+1  # renders the TOTP enrollment QR (Supabase returns SVG)
