@@ -19,6 +19,7 @@ class GuestPreJoinForm extends StatelessWidget {
     this.controls,
     this.eventTitle,
     this.joining = false,
+    this.waiting = false,
     this.error,
   });
 
@@ -32,6 +33,9 @@ class GuestPreJoinForm extends StatelessWidget {
   final VoidCallback onJoin;
   final String? eventTitle;
   final bool joining;
+
+  /// Came by share link and the host hasn't let them in yet.
+  final bool waiting;
   final String? error;
 
   @override
@@ -93,9 +97,19 @@ class GuestPreJoinForm extends StatelessWidget {
           style: NileTextStyles.bodySm().copyWith(color: NileColors.error),
         ),
       ],
+      if (waiting) ...[
+        const SizedBox(height: NileSpacing.s16),
+        Text(
+          'You asked to join. The host will let you in from their green '
+          'room. Check your camera and mic while you wait.',
+          style: NileTextStyles.bodySm().copyWith(
+            color: NileColors.txtSecondary,
+          ),
+        ),
+      ],
       const SizedBox(height: NileSpacing.s24),
       FilledButton(
-        onPressed: joining ? null : onJoin,
+        onPressed: joining || waiting ? null : onJoin,
         style: FilledButton.styleFrom(
           padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
           backgroundColor: NileColors.volt,
@@ -106,7 +120,7 @@ class GuestPreJoinForm extends StatelessWidget {
                 dimension: 20,
                 child: CircularProgressIndicator(strokeWidth: 2),
               )
-            : const Text('Join green room'),
+            : Text(waiting ? 'Waiting for the host…' : 'Join green room'),
       ),
     ],
   );

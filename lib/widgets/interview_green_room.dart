@@ -78,6 +78,8 @@ class GreenRoomActions {
     this.onTalkAll,
     this.onInvite,
     this.onFocus,
+    this.onAdmit,
+    this.onDecline,
   });
 
   final ValueChanged<GreenRoomEntry>? onBringOn;
@@ -98,11 +100,15 @@ class GreenRoomActions {
 
   /// Feature them in Solo / Spotlight.
   final ValueChanged<GreenRoomEntry>? onFocus;
+
+  /// Let a share-link request in, or turn it down.
+  final ValueChanged<GreenRoomEntry>? onAdmit;
+  final ValueChanged<GreenRoomEntry>? onDecline;
 }
 
-/// Interview mode's left column: replaces the Studio's camera list. On stage
-/// first (with the 6-person count), then who's waiting, then invited guests
-/// who haven't joined.
+/// Interview mode's left column: replaces the Studio's camera list. People
+/// asking to join by link first (they need an answer), then on stage (with
+/// the 6-person count), who's waiting, and invited guests who haven't joined.
 class InterviewGreenRoomColumn extends StatelessWidget {
   const InterviewGreenRoomColumn({
     super.key,
@@ -132,6 +138,9 @@ class InterviewGreenRoomColumn extends StatelessWidget {
         .toList();
     final invited = entries
         .where((e) => e.status == GuestStatus.invited)
+        .toList();
+    final requests = entries
+        .where((e) => e.status == GuestStatus.requested)
         .toList();
     final full = onStage.length >= kStageMax;
 
@@ -213,6 +222,14 @@ class InterviewGreenRoomColumn extends StatelessWidget {
                       NileSpacing.s8,
                     ),
                     children: [
+                      if (requests.isNotEmpty)
+                        header('ASKING TO JOIN ${requests.length}'),
+                      for (final e in requests)
+                        GreenRoomRequestTile(
+                          key: ValueKey(e.identity),
+                          entry: e,
+                          actions: actions,
+                        ),
                       header('ON STAGE ${onStage.length}/$kStageMax'),
                       if (onStage.isEmpty)
                         Text(
@@ -346,6 +363,7 @@ class GreenRoomTile extends StatelessWidget {
     GuestStatus.onStage => 'On stage',
     GuestStatus.greenRoom => 'Waiting',
     GuestStatus.invited => 'Not joined yet',
+    GuestStatus.requested => 'Asked to join',
     GuestStatus.removed => 'Removed',
   };
 
@@ -591,6 +609,91 @@ class GreenRoomTile extends StatelessWidget {
                 ),
                 child: primary,
               ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Someone who opened the show's share link and is waiting to be let in.
+/// They have no picture yet: they only connect once the host says yes.
+class GreenRoomRequestTile extends StatelessWidget {
+  const GreenRoomRequestTile({
+    super.key,
+    required this.entry,
+    required this.actions,
+  });
+
+  final GreenRoomEntry entry;
+  final GreenRoomActions actions;
+
+  @override
+  Widget build(BuildContext context) {
+    final e = entry;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: NileSpacing.s8),
+      child: Container(
+        padding: const EdgeInsets.all(NileSpacing.s8),
+        decoration: BoxDecoration(
+          color: NileColors.bgRaised,
+          borderRadius: BorderRadius.circular(NileRadius.md),
+          border: Border.all(color: NileColors.volt),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                StageAvatar(name: e.name, avatarUrl: e.avatarUrl, small: true),
+                const SizedBox(width: NileSpacing.s8),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        e.name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: NileTextStyles.labelMd(),
+                      ),
+                      Text(
+                        [
+                          if (e.title != null && e.title!.isNotEmpty) e.title!,
+                          'Asked to join',
+                        ].join(' · '),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: NileTextStyles.caption().copyWith(
+                          color: NileColors.txtTertiary,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: NileSpacing.s8),
+            Row(
+              children: [
+                if (actions.onDecline != null)
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed: () => actions.onDecline!(e),
+                      child: const Text('Decline'),
+                    ),
+                  ),
+                if (actions.onDecline != null && actions.onAdmit != null)
+                  const SizedBox(width: NileSpacing.s8),
+                if (actions.onAdmit != null)
+                  Expanded(
+                    child: FilledButton(
+                      onPressed: () => actions.onAdmit!(e),
+                      child: const Text('Let in'),
+                    ),
+                  ),
+              ],
+            ),
           ],
         ),
       ),

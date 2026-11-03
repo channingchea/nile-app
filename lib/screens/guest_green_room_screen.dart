@@ -153,6 +153,12 @@ class _GuestGreenRoomScreenState extends State<GuestGreenRoomScreen> {
   String _status = 'scheduled';
   RealtimeChannel? _statusChannel;
 
+  // A share-link request the host hasn't answered yet.
+  String? _eventPk;
+  bool _awaiting = false;
+  RealtimeChannel? _inviteChannel;
+  Timer? _invitePoll;
+
   // Who.
   String _name = '';
   String? _avatarUrl;
@@ -237,6 +243,7 @@ class _GuestGreenRoomScreenState extends State<GuestGreenRoomScreen> {
   void dispose() {
     _leaving = true;
     _statusChannel?.unsubscribe();
+    _stopAwaiting();
     unawaited(_deviceSub?.cancel());
     unawaited(_teardownRoom());
     unawaited(_stopPreview());
@@ -279,10 +286,61 @@ class _GuestGreenRoomScreenState extends State<GuestGreenRoomScreen> {
     'The host removed you from the show.',
   );
 
+  /// Waits for the host to answer a share-link request: the guest's own
+  /// row changes (realtime), with a slow poll in case that drops.
+  void _startAwaiting() {
+    final pk = _eventPk;
+    if (pk == null) return;
+    _awaiting = true;
+    _inviteChannel ??= InterviewService.watch(pk, _recheckInvite);
+    _invitePoll ??= Timer.periodic(
+      const Duration(seconds: 15),
+      (_) => _recheckInvite(),
+    );
+  }
+
+  void _stopAwaiting() {
+    _inviteChannel?.unsubscribe();
+    _inviteChannel = null;
+    _invitePoll?.cancel();
+    _invitePoll = null;
+  }
+
+  Future<void> _recheckInvite() async {
+    final pk = _eventPk;
+    if (pk == null || !_awaiting) return;
+    InterviewGuest? invite;
+    try {
+      invite = await InterviewService.myInvite(pk);
+    } catch (_) {
+      return; // Next change or poll tries again.
+    }
+    if (!mounted || !_awaiting) return;
+    if (invite == null || invite.status == GuestStatus.removed) {
+      _awaiting = false;
+      _stopAwaiting();
+      return _showNotice(
+        Icons.person_off_outlined,
+        'The host didn’t let you in',
+        'Ask the host if you think this is a mistake.',
+      );
+    }
+    if (invite.status == GuestStatus.requested) return;
+    _stopAwaiting();
+    setState(() => _awaiting = false);
+    _toast('The host let you in. Join when you’re ready.');
+  }
+
   /// Server refusals that end the visit rather than asking for a retry.
   bool _handleRefusal(Object e) {
     final msg = _plain(e);
-    if (msg.contains('ended')) {
+    if (msg.contains('Waiting for the host')) {
+      setState(() {
+        _joining = false;
+        _startAwaiting();
+      });
+      unawaited(_openPreview());
+    } else if (msg.contains('ended')) {
       _showEnded();
     } else if (msg.contains('removed')) {
       _showRemoved();
@@ -333,6 +391,8 @@ class _GuestGreenRoomScreenState extends State<GuestGreenRoomScreen> {
       if (invite.status == GuestStatus.removed) return _showRemoved();
       if (!mounted) return;
       _slug = slug;
+      _eventPk = state['id'] as String;
+      if (invite.status == GuestStatus.requested) _startAwaiting();
       _eventTitle = state['title'] as String?;
       _status = status;
       _name = (profile?.displayName.isNotEmpty ?? false)
@@ -1217,6 +1277,7 @@ class _GuestGreenRoomScreenState extends State<GuestGreenRoomScreen> {
         name: _name,
         titleController: _title,
         joining: _joining,
+        waiting: _awaiting,
         error: _error,
         onJoin: _join,
       ),

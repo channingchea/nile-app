@@ -406,12 +406,25 @@ class LivekitService {
     return d['code'] as String;
   }
 
-  /// Anyone with a share link: joins the guest list. → the event's LiveKit
-  /// slug, and whether the caller turned out to be the host.
+  /// Anyone with a share link: asks to join the guest list (the host lets
+  /// them in). → the event's LiveKit slug, and whether the caller turned out
+  /// to be the host.
   static Future<({String eventId, bool isHost})> guestJoin(String code) async {
     final d = await _invoke<Map>({'action': 'guest-join', 'code': code});
     return (eventId: d['eventId'] as String, isHost: d['host'] == true);
   }
+
+  /// Host: let a share-link request in ([admit]) or turn it down.
+  static Future<void> admitGuest({
+    required String eventId,
+    required String userId,
+    required bool admit,
+  }) => _invoke<Map>({
+    'action': 'admit-guest',
+    'eventId': eventId,
+    'userId': userId,
+    'admit': admit,
+  });
 
   /// A guest joins the green room. Connect with `autoSubscribe: false`.
   static Future<GuestConnection> guestToken({

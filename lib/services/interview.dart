@@ -32,6 +32,8 @@ String backstageIdentity(String eventId) => 'backstage-$eventId';
 const String kBackstageTopic = 'backstage';
 
 enum GuestStatus {
+  /// Came in by share link; waits until the host lets them in (0149).
+  requested('requested', 'Asked to join'),
   invited('invited', 'Invited'),
   greenRoom('green_room', 'In green room'),
   onStage('on_stage', 'On stage'),

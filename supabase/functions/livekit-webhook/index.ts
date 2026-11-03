@@ -135,8 +135,10 @@ serve(async (req) => {
     return new Response("ok", { status: 200 });
   }
 
-  // Interview mode: a guest the host removed can still hold a join token that
-  // hasn't expired (15 min) and walk back in. The room is `nile-event-<slug>`.
+  // Interview mode: a guest the host removed (or never let in) can still hold
+  // a join token that hasn't expired (15 min) and walk back in. Anyone not
+  // invited, in the green room or on stage is kicked. The room is
+  // `nile-event-<slug>`.
   if (event.event === "participant_joined" && event.room && event.participant) {
     const m = /^guest-([0-9a-f-]{36})$/i.exec(event.participant.identity);
     const slug = event.room.name.replace(/^nile-event-/, "");
@@ -147,11 +149,11 @@ serve(async (req) => {
         .eq("user_id", m[1])
         .eq("events.livekit_room", slug)
         .maybeSingle();
-      if (row?.status === "removed") {
+      if (!["invited", "green_room", "on_stage"].includes(row?.status as string)) {
         await roomService.removeParticipant(event.room.name, event.participant.identity).catch((err) =>
           log("warn", { event: "participant_joined", identity: event.participant!.identity, error: String(err) })
         );
-        log("info", { event: "participant_joined", action: "kicked-removed-guest", slug });
+        log("info", { event: "participant_joined", action: "kicked-guest", status: row?.status ?? null, slug });
       }
     }
     return new Response("ok", { status: 200 });

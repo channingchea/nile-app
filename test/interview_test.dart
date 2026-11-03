@@ -176,6 +176,48 @@ void main() {
       expect(sent, ['host']);
     });
 
+    testWidgets('link requests sit on top with Let in / Decline', (t) async {
+      final admitted = <String>[], declined = <String>[];
+      await t.binding.setSurfaceSize(const Size(232, 1400));
+      addTearDown(() => t.binding.setSurfaceSize(null));
+      await t.pumpWidget(
+        _wrap(
+          InterviewGreenRoomColumn(
+            entries: [
+              e('host', GuestStatus.onStage, k: GreenRoomKind.host),
+              const GreenRoomEntry(
+                identity: 'cy',
+                name: 'Cy',
+                title: '@cy',
+                kind: GreenRoomKind.guest,
+                status: GuestStatus.requested,
+              ),
+            ],
+            actions: GreenRoomActions(
+              onAdmit: (x) => admitted.add(x.identity),
+              onDecline: (x) => declined.add(x.identity),
+            ),
+          ),
+        ),
+      );
+      expect(t.takeException(), isNull);
+      expect(find.text('ASKING TO JOIN 1'), findsOneWidget);
+      expect(find.text('@cy · Asked to join'), findsOneWidget);
+      expect(
+        t.getTopLeft(find.text('ASKING TO JOIN 1')).dy,
+        lessThan(t.getTopLeft(find.text('ON STAGE 1/$kStageMax')).dy),
+      );
+      expect(find.text('Bring on'), findsNothing);
+      await t.tap(find.text('Let in'));
+      await t.tap(find.text('Decline'));
+      expect(admitted, ['cy']);
+      expect(declined, ['cy']);
+    });
+
+    test('requested parses from the wire', () {
+      expect(GuestStatus.fromWire('requested'), GuestStatus.requested);
+    });
+
     testWidgets('a full stage disables Bring on', (t) async {
       final brought = <String>[];
       await t.binding.setSurfaceSize(const Size(232, 3000));

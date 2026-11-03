@@ -94,7 +94,9 @@ import {
   guestUserIdOf,
   isInviteCode,
   newInviteCode,
+  planLinkJoin,
   planMove,
+  REQUEST_WINDOW_MS,
   type Stage,
   stageOf,
   stageSecondsSince,
@@ -451,6 +453,8 @@ async function handle(req: Request, ctx: ReqCtx, json: Json): Promise<Response> 
       return await guestToken(body, user.id, admin, json);
     case "set-guest-title":
       return await setGuestTitle(body, user.id, admin, json);
+    case "admit-guest":
+      return await admitGuest(body, user.id, admin, json);
     case "move-guest":
       return await moveGuest(body, user.id, admin, json);
     case "remove-guest":
@@ -1632,7 +1636,7 @@ async function inviteGuest(body: any, userId: string, admin: any, json: Json): P
     event_id: gate.event.id,
     user_id: guestId,
     invited_by: userId,
-    ...(existing?.status === "removed" || !existing ? { status: "invited" } : {}),
+    ...(!existing || existing.status === "removed" || existing.status === "requested" ? { status: "invited" } : {}),
     ...(title !== undefined ? { title } : {}),
   };
   const { data: saved, error } = await admin
@@ -1705,16 +1709,51 @@ async function guestJoin(body: any, userId: string, admin: any, json: Json): Pro
   if (ev.host_id === userId) return json({ eventId: ev.livekit_room, host: true });
 
   const existing = await guestRowOf(ev.id, userId, admin);
-  if (existing?.status === "removed") return json({ error: "The host removed you from this show" }, 403);
+  let pending = 0;
   if (!existing) {
+    // Only recent requests count, so abandoned ones can't hold the link shut.
+    const { count } = await admin
+      .from("event_guests")
+      .select("id", { count: "exact", head: true })
+      .eq("event_id", ev.id)
+      .eq("status", "requested")
+      .gt("created_at", new Date(Date.now() - REQUEST_WINDOW_MS).toISOString());
+    pending = count ?? 0;
+  }
+  const plan = planLinkJoin(existing?.status ?? null, pending);
+  if ("error" in plan) return json({ error: plan.error }, plan.status);
+  if (plan.insert) {
+    // A link is a bearer credential: newcomers wait for the host (0149).
     const { error } = await admin.from("event_guests").insert({
       event_id: ev.id,
       user_id: userId,
-      invited_by: ev.host_id,
+      invited_by: null,
+      status: "requested",
     });
     if (error && error.code !== "23505") throw error;
   }
-  return json({ eventId: ev.livekit_room });
+  return json({ eventId: ev.livekit_room, requested: plan.requested });
+}
+
+// admit-guest — { eventId, userId, admit }. Host only. Answers a share-link
+// request: admit puts them on the guest list (they can then join the green
+// room), decline removes them.
+async function admitGuest(body: any, userId: string, admin: any, json: Json): Promise<Response> {
+  const { eventId, userId: guestId, admit } = body;
+  if (!eventId || typeof guestId !== "string" || typeof admit !== "boolean") {
+    return json({ error: "eventId, userId and admit are required" }, 400);
+  }
+  const gate = await requireHost(eventId, userId, admin, json);
+  if (gate instanceof Response) return gate;
+  const row = await guestRowOf(gate.event.id, guestId, admin);
+  if (!row || row.status !== "requested") return json({ error: "They aren't waiting to join" }, 404);
+  const { error } = await admin
+    .from("event_guests")
+    .update({ status: admit ? "invited" : "removed", invited_by: admit ? userId : null })
+    .eq("id", row.id)
+    .eq("status", "requested");
+  if (error) throw error;
+  return json({ success: true });
 }
 
 // guest-token — { eventId, title? }. The caller must be on the event's guest
@@ -1732,6 +1771,7 @@ async function guestToken(body: any, userId: string, admin: any, json: Json): Pr
   if (ev.status === "ended") return json({ error: "This show has ended" }, 409);
   const row = await guestRowOf(ev.id, userId, admin);
   if (!row || row.status === "removed") return json({ error: "You're not on this show's guest list" }, 403);
+  if (row.status === "requested") return json({ error: "Waiting for the host to let you in", requested: true }, 403);
   const { data: ban } = await admin
     .from("live_chat_bans")
     .select("user_id")
@@ -1745,12 +1785,15 @@ async function guestToken(body: any, userId: string, admin: any, json: Json): Pr
   const identity = guestIdentity(userId);
   const onStage = stageOf(await roomMetaOf(roomName)).ids.some((e) => e.id === identity);
   const status: GuestStatus = onStage ? "on_stage" : "green_room";
-  const { error } = await admin.from("event_guests").update({
+  // Keyed on the status too: a remove that lands between the read above and
+  // this write must win, not be undone by it.
+  const { data: marked, error } = await admin.from("event_guests").update({
     status,
     joined_at: new Date().toISOString(),
     ...(title !== undefined ? { title } : {}),
-  }).eq("id", row.id);
+  }).eq("id", row.id).in("status", ["invited", "green_room", "on_stage"]).select("id");
   if (error) throw error;
+  if (!marked?.length) return json({ error: "You're not on this show's guest list" }, 403);
 
   await ensureRoom(eventId, admin);
   const { data: p } = await admin.from("profiles").select("username, display_name, avatar_url").eq("id", userId).maybeSingle();
@@ -1784,7 +1827,9 @@ async function setGuestTitle(body: any, userId: string, admin: any, json: Json):
   const { data: ev } = await admin.from("events").select("id").eq("livekit_room", eventId).maybeSingle();
   if (!ev) return json({ error: "Event not found" }, 404);
   const row = await guestRowOf(ev.id, userId, admin);
-  if (!row || row.status === "removed") return json({ error: "You're not on this show's guest list" }, 403);
+  if (!row || row.status === "removed" || row.status === "requested") {
+    return json({ error: "You're not on this show's guest list" }, 403);
+  }
   const { error } = await admin.from("event_guests").update({ title }).eq("id", row.id);
   if (error) throw error;
   const roomName = roomNameFor(eventId);
@@ -1817,6 +1862,7 @@ async function moveGuest(body: any, userId: string, admin: any, json: Json): Pro
   }
   const row = guestId ? await guestRowOf(gate.event.id, guestId, admin) : null;
   if (guestId && (!row || row.status === "removed")) return json({ error: "They aren't on the guest list" }, 404);
+  if (row?.status === "requested" && to !== "removed") return json({ error: "Let them in first" }, 409);
   if (guestId && to === "on_stage" && !peer) return json({ error: "They haven't joined yet" }, 409);
 
   const meta = await roomMetaOf(roomName);

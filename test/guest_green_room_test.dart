@@ -165,6 +165,26 @@ void main() {
       expect(joined, 1);
     });
 
+    testWidgets('waiting for the host disables Join', (tester) async {
+      final title = TextEditingController();
+      addTearDown(title.dispose);
+      var joined = 0;
+      await tester.pumpWidget(
+        _wrap(
+          GuestPreJoinForm(
+            preview: const SizedBox(height: 100),
+            name: 'Ada',
+            titleController: title,
+            waiting: true,
+            onJoin: () => joined++,
+          ),
+        ),
+      );
+      expect(find.textContaining('You asked to join'), findsOneWidget);
+      await tester.tap(find.text('Waiting for the host…'));
+      expect(joined, 0);
+    });
+
     testWidgets('joining disables the button', (tester) async {
       final title = TextEditingController();
       addTearDown(title.dispose);

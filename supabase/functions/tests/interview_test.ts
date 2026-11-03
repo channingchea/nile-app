@@ -13,6 +13,8 @@ import {
   guestUserIdOf,
   isInviteCode,
   newInviteCode,
+  PENDING_REQUEST_MAX,
+  planLinkJoin,
   planMove,
   STAGE_MAX,
   stageOf,
@@ -104,4 +106,15 @@ Deno.test("invite codes are 10 unambiguous characters", () => {
 Deno.test("stage seconds accumulate from stage_since", () => {
   assertEquals(stageSecondsSince(null, 0), 0);
   assertEquals(stageSecondsSince("2026-11-01T20:00:00Z", Date.parse("2026-11-01T20:01:30Z")), 90);
+});
+
+Deno.test("share-link joins wait for the host; invited people keep their place", () => {
+  assertEquals(planLinkJoin(null, 0), { insert: true, requested: true });
+  assertEquals(planLinkJoin("requested", 0), { insert: false, requested: true });
+  assertEquals(planLinkJoin("invited", 0), { insert: false, requested: false });
+  assertEquals(planLinkJoin("on_stage", 99), { insert: false, requested: false });
+  const removed = planLinkJoin("removed", 0);
+  assert("error" in removed && removed.status === 403);
+  const full = planLinkJoin(null, PENDING_REQUEST_MAX);
+  assert("error" in full && full.status === 429);
 });

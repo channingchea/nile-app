@@ -18,7 +18,11 @@
 export const STAGE_MAX = 6;
 export const STAGE_LAYOUTS = ["solo", "side", "grid", "spotlight"] as const;
 export type StageLayout = typeof STAGE_LAYOUTS[number];
-export const GUEST_STATUSES = ["invited", "green_room", "on_stage", "removed"] as const;
+export const GUEST_STATUSES = ["requested", "invited", "green_room", "on_stage", "removed"] as const;
+/** Share-link requests waiting on the host at once; past this the link stops taking more. */
+export const PENDING_REQUEST_MAX = 20;
+/** How long a request counts toward [PENDING_REQUEST_MAX]. */
+export const REQUEST_WINDOW_MS = 30 * 60_000;
 export type GuestStatus = typeof GUEST_STATUSES[number];
 export type Move = "on_stage" | "green_room" | "removed";
 
@@ -50,6 +54,23 @@ export function stageOf(meta: Record<string, unknown>): Stage {
   const focus = typeof raw.focus === "string" && ids.some((e) => e.id === raw.focus) ? raw.focus : null;
   const content = typeof raw.content === "string" ? raw.content : null;
   return { ids: ids.slice(0, STAGE_MAX), layout, focus, content };
+}
+
+/**
+ * What guest-join does for someone opening a share link: a person the host
+ * already invited (or let in) keeps their place; anyone new waits as
+ * "requested" until the host answers, unless too many are already waiting.
+ */
+export function planLinkJoin(
+  existing: GuestStatus | null,
+  pending: number,
+): { insert: boolean; requested: boolean } | { error: string; status: number } {
+  if (existing === "removed") return { error: "The host removed you from this show", status: 403 };
+  if (existing) return { insert: false, requested: existing === "requested" };
+  if (pending >= PENDING_REQUEST_MAX) {
+    return { error: "This show has too many people waiting to join. Try again later.", status: 429 };
+  }
+  return { insert: true, requested: true };
 }
 
 /**

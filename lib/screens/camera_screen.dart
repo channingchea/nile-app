@@ -3307,7 +3307,22 @@ class _CameraScreenState extends State<CameraScreen> {
     try {
       final list = await InterviewService.guests(pk);
       if (!mounted || pk != _guestsFor) return;
+      final before = {
+        for (final g in _guests.value)
+          if (g.status == GuestStatus.requested) g.userId,
+      };
+      final asking = list
+          .where(
+            (g) =>
+                g.status == GuestStatus.requested && !before.contains(g.userId),
+          )
+          .toList();
       setState(() => _guests.value = list);
+      if (asking.length == 1) {
+        _toast('${asking.first.name} is asking to join the green room.');
+      } else if (asking.length > 1) {
+        _toast('${asking.length} people are asking to join the green room.');
+      }
     } catch (_) {
       // Best-effort: the next change re-reads.
     }
@@ -3410,6 +3425,21 @@ class _CameraScreenState extends State<CameraScreen> {
             ? 'The stage is full — send someone back first.'
             : msg,
       );
+    }
+  }
+
+  Future<void> _answerRequest(GreenRoomEntry e, {required bool admit}) async {
+    final eventId = _eventId;
+    final userId = guestUserIdOf(e.identity);
+    if (eventId == null || userId == null) return;
+    try {
+      await LivekitService.admitGuest(
+        eventId: eventId,
+        userId: userId,
+        admit: admit,
+      );
+    } catch (err) {
+      _toast(err.toString().replaceFirst('Exception: ', ''));
     }
   }
 
@@ -3642,14 +3672,16 @@ class _CameraScreenState extends State<CameraScreen> {
       if (g.status == GuestStatus.removed || joined.contains(g.userId)) {
         continue;
       }
+      final asking = g.status == GuestStatus.requested;
       out.add(
         GreenRoomEntry(
           identity: g.identity,
           name: g.name,
-          title: g.title,
+          // A link request is a stranger until let in: show who they are.
+          title: asking ? '@${g.username}' : g.title,
           avatarUrl: g.avatarUrl,
           kind: GreenRoomKind.guest,
-          status: GuestStatus.invited,
+          status: asking ? GuestStatus.requested : GuestStatus.invited,
         ),
       );
     }
@@ -3669,6 +3701,8 @@ class _CameraScreenState extends State<CameraScreen> {
           onTalkAll: _talkToAll,
           onFocus: (e) => _setStage(focus: e.identity),
           onInvite: _openInvite,
+          onAdmit: (e) => _answerRequest(e, admit: true),
+          onDecline: (e) => _answerRequest(e, admit: false),
         ),
         footer: _room?.localParticipant == null
             ? null
