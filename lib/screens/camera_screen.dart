@@ -141,6 +141,15 @@ class _CameraScreenState extends State<CameraScreen> {
 
   /// Studio choices saved on this device (Studio Preview writes the same keys).
   StudioPrefs? _prefs;
+
+  /// "Mirror my camera" (Settings). Applies on the phone layout too.
+  bool _mirrorPref = true;
+
+  /// Your own preview, every mode and layout: see [mirrorSelfView].
+  bool get _mirrorSelf => mirrorSelfView(
+    preference: _mirrorPref,
+    rearCamera: _builtInCamera && !_isFrontCamera,
+  );
   late final Future<void> _prefsReady = _loadPrefs();
 
   /// Saved choices apply in the Studio only — the phone layout keeps the
@@ -150,7 +159,9 @@ class _CameraScreenState extends State<CameraScreen> {
     try {
       final prefs = await StudioPrefs.load();
       _prefs = prefs;
-      if (!mounted || !_studioMode) return;
+      if (!mounted) return;
+      setState(() => _mirrorPref = prefs.mirrorCamera);
+      if (!_studioMode) return;
       setState(() {
         _disableAgc = prefs.externalMicProcessing;
         _chatVisible = prefs.chatVisible;
@@ -684,7 +695,7 @@ class _CameraScreenState extends State<CameraScreen> {
         track: _videoEnabled ? _localVideoTrack : null,
         isLocal: true,
         isMasterAudio: _isMainAudioSource,
-        mirror: _selectedCameraId == null && _isFrontCamera,
+        mirror: _mirrorSelf,
         slotId: _slotId,
         isRenamable: _slotId != null,
         isOffAir: _isOffAir,
@@ -1143,6 +1154,26 @@ class _CameraScreenState extends State<CameraScreen> {
       _masterIdentity != null &&
       _masterIdentity == _room?.localParticipant?.identity;
 
+  /// You muted yourself (the mic button or M). Wins over every automatic
+  /// rule: the film ending, Commentary turning on or this device becoming the
+  /// show audio never unmutes it. Only you do.
+  bool _selfMuted = false;
+
+  /// Why viewers can't hear this mic right now, or null when they can.
+  String? get _micOffReason {
+    if (_selfMuted) return 'Muted';
+    if (!_isMainAudioSource) return 'Not the show audio';
+    if (_viewerPreviewOpen) return 'Muted while you preview';
+    if (_talkbackMutesMic) return 'Muted while you talk backstage';
+    if (_filmMutesMic) return 'Muted while the film plays';
+    return null;
+  }
+
+  void _toggleSelfMute() {
+    setState(() => _selfMuted = !_selfMuted);
+    unawaited(_syncMicEnabled());
+  }
+
   /// Re-read who is in the room: the master-audio holder, whether Stream Audio
   /// is up, and whether a Studio is running the show. Called on connect and on
   /// every participant join/leave/metadata change; cheap enough for that, too
@@ -1249,7 +1280,7 @@ class _CameraScreenState extends State<CameraScreen> {
       // While the host monitors the viewer preview, their own mic stays muted
       // regardless of the broadcast rule — otherwise a host who IS the audio
       // source would feed their decoded monitor back into the stream.
-      if (_isMainAudioSource && !_viewerPreviewOpen && !_filmMutesMic) {
+      if (_micOffReason == null) {
         await track.unmute();
       } else {
         await track.mute();
@@ -1733,6 +1764,7 @@ class _CameraScreenState extends State<CameraScreen> {
   void dispose() {
     _stopInterview();
     _filmTimer?.cancel();
+    _restoreTimer?.cancel();
     _guests.dispose();
     _cue.dispose();
     _elementsCtl.dispose();
@@ -3320,6 +3352,7 @@ class _CameraScreenState extends State<CameraScreen> {
     String? message,
     bool? on,
     String? corner,
+    int? percent,
   }) async {
     final eventId = _eventId;
     if (eventId == null) return;
@@ -3331,6 +3364,7 @@ class _CameraScreenState extends State<CameraScreen> {
       message: message,
       on: on,
       corner: corner,
+      percent: percent,
     );
     final film = FilmState.fromJson(res['film']);
     if (film != null) _applyFilm(film);
@@ -3352,6 +3386,15 @@ class _CameraScreenState extends State<CameraScreen> {
                   now: ServerClock.now,
                   muted: !_hearFilm,
                   protect: false,
+                  // The corner picture viewers get, so the monitor matches.
+                  host: _film.pip == PipCorner.off
+                      ? null
+                      : InterviewStageView(
+                          tiles: _stageTiles(people),
+                          layout: _stage.layout,
+                          focusIndex: _stage.focusIndexIn(_stage.ids),
+                          compact: true,
+                        ),
                 )
               : _buildStageMonitor(people),
         ),
@@ -3424,6 +3467,7 @@ class _CameraScreenState extends State<CameraScreen> {
     _backstage = null;
     _talkingWith = null;
     _talkingAll = false;
+    unawaited(_syncMicEnabled());
     _notesOpen = false;
     _announced.clear();
     _syncStageTicker();
@@ -3531,8 +3575,37 @@ class _CameraScreenState extends State<CameraScreen> {
             .add(const Duration(seconds: 8))
             .millisecondsSinceEpoch,
       );
-      unawaited(_pushGraphics(_graphics.withOn(null, g)));
+      final r = _graphics.withCover(g);
+      // Back-to-back arrivals: keep the host's own lower third, not the last
+      // guest's name.
+      if (r.covered case final c? when !c.id.startsWith('guest-name:')) {
+        _covered = c;
+      }
+      unawaited(_pushGraphics(r.state));
+      _restoreTimer?.cancel();
+      _restoreTimer = Timer(
+        Duration(
+          milliseconds: g.hideAt! - DateTime.now().millisecondsSinceEpoch + 250,
+        ),
+        _restoreCovered,
+      );
     }
+  }
+
+  /// The All-cameras lower third a guest's name covered as they came on.
+  LiveGraphic? _covered;
+  Timer? _restoreTimer;
+
+  /// Their name has run out: the host's lower third comes back.
+  void _restoreCovered() {
+    final c = _covered;
+    _covered = null;
+    if (c == null || !mounted) return;
+    final next = _graphics.withRestored(
+      c,
+      DateTime.now().millisecondsSinceEpoch,
+    );
+    if (next != _graphics) unawaited(_pushGraphics(next));
   }
 
   Future<void> _moveGuest(GreenRoomEntry e, GuestStatus to) async {
@@ -3610,10 +3683,20 @@ class _CameraScreenState extends State<CameraScreen> {
   Future<void> _muteGuest(GreenRoomEntry e, bool muted) async {
     final eventId = _eventId;
     if (eventId == null) return;
-    // The Studio's mic follows the master-audio rule; muting it here would
-    // fight that.
     if (e.kind == GreenRoomKind.host) {
-      _toast('Your mic follows the show audio. Change it from the toolbar.');
+      if (muted != _selfMuted) {
+        _toggleSelfMute();
+      } else if (!muted) {
+        // Not muted by you: say what's holding it.
+        final why = _micOffReason;
+        if (why != null) {
+          _toast(
+            why == 'Not the show audio'
+                ? 'Your mic isn’t the show audio. Pick it under Audio.'
+                : '$why.',
+          );
+        }
+      }
       return;
     }
     try {
@@ -3626,6 +3709,37 @@ class _CameraScreenState extends State<CameraScreen> {
     } catch (err) {
       _toast(err.toString().replaceFirst('Exception: ', ''));
     }
+  }
+
+  /// Guests on stage whose mic is open.
+  List<String> get _openStageMics => [
+    for (final p in _peers)
+      if (_metaOf(p)['role'] == NileRole.guest &&
+          _stage.contains(p.identity) &&
+          p.isMicrophoneEnabled())
+        p.identity,
+  ];
+
+  /// Mute every guest on stage at once. Unmuting stays one by one (each guest
+  /// is asked), and your own mic is the mic button's.
+  Future<void> _muteStage() async {
+    final eventId = _eventId;
+    final ids = _openStageMics;
+    if (eventId == null || ids.isEmpty) return;
+    final ok = await Future.wait([
+      for (final id in ids)
+        LivekitService.muteParticipant(
+          eventId: eventId,
+          identity: id,
+          muted: true,
+        ).then((_) => true, onError: (_) => false),
+    ]);
+    final failed = ok.where((x) => !x).length;
+    _toast(
+      failed == 0
+          ? (ids.length == 1 ? 'Muted 1 guest.' : 'Muted ${ids.length} guests.')
+          : 'Couldn’t mute $failed of them. Try again.',
+    );
   }
 
   /// Guests in the green room (connected, not on stage).
@@ -3653,15 +3767,16 @@ class _CameraScreenState extends State<CameraScreen> {
       _backstage = line;
     }
     final want = _lineTargets;
+    // Off the air before the line opens, so nothing private leaks out.
+    await _syncMicEnabled();
     await line.talkTo(want);
     if (!setEquals(want, _lineTargets)) await line.talkTo(_lineTargets);
-    // The show mic isn't the talkback: viewers still hear it.
-    if (_lineTargets.isNotEmpty &&
-        _isMainAudioSource &&
-        _state == CameraState.live) {
-      _toast('Your show mic is still live. Viewers can hear you too.');
-    }
+    await _syncMicEnabled();
   }
+
+  /// Your show mic goes quiet while the private line is open: what you say
+  /// to the green room stays there.
+  bool get _talkbackMutesMic => _talkingWith != null || _talkingAll;
 
   Future<void> _togglePrivateTalk(GreenRoomEntry e) async {
     final ending = _talkingWith == e.identity;
@@ -3675,6 +3790,7 @@ class _CameraScreenState extends State<CameraScreen> {
     } catch (_) {
       if (mounted) setState(() => _talkingWith = null);
       _syncInterviewRoom();
+      unawaited(_syncMicEnabled());
       _toast('Couldn’t open a private line. Try again.');
     }
   }
@@ -3690,6 +3806,7 @@ class _CameraScreenState extends State<CameraScreen> {
       await _applyLine();
     } catch (_) {
       if (mounted) setState(() => _talkingAll = false);
+      unawaited(_syncMicEnabled());
       _toast('Couldn’t reach the green room. Try again.');
     }
   }
@@ -3766,9 +3883,9 @@ class _CameraScreenState extends State<CameraScreen> {
           kind: GreenRoomKind.host,
           status: statusOf(local.identity),
           track: _videoEnabled ? _localVideoTrack : null,
-          mirror: _selectedCameraId == null && _isFrontCamera,
+          mirror: _mirrorSelf,
           level: local.audioLevel,
-          micMuted: !_isMainAudioSource,
+          micMuted: _micOffReason != null,
           quality: _quality,
           countdown: _stage.countdownFor(local.identity, now),
           onStageFor: onFor(local.identity),
@@ -3935,6 +4052,12 @@ class _CameraScreenState extends State<CameraScreen> {
           ),
           const Spacer(),
           IconButton(
+            onPressed: _openStageMics.isEmpty ? null : _muteStage,
+            icon: const Icon(Icons.voice_over_off_outlined),
+            color: NileColors.txtSecondary,
+            tooltip: 'Mute everyone on stage',
+          ),
+          IconButton(
             onPressed: _eventPk == null
                 ? null
                 : () => setState(() => _notesOpen = !_notesOpen),
@@ -3951,10 +4074,10 @@ class _CameraScreenState extends State<CameraScreen> {
 
   /// Interview's monitor: the stage as viewers see it (pending guests show
   /// their countdown), with timers and the All-cameras graphics, cue included.
-  Widget _buildStageMonitor(List<GreenRoomEntry> people) {
+  List<StageTile> _stageTiles(List<GreenRoomEntry> people) {
     final now = ServerClock.now();
     final byId = {for (final e in people) e.identity: e};
-    final tiles = [
+    return [
       for (final s in _stage.entries)
         if (byId[s.id] case final e?)
           StageTile(
@@ -3976,6 +4099,10 @@ class _CameraScreenState extends State<CameraScreen> {
             countdown: _stage.countdownFor(s.id, now),
           ),
     ];
+  }
+
+  Widget _buildStageMonitor(List<GreenRoomEntry> people) {
+    final tiles = _stageTiles(people);
     final graphics = _cue.value
         .preview(_graphics.withBrand(_brandKit?.style), DateTime.now())
         .forSlot(null);
@@ -4751,6 +4878,11 @@ class _CameraScreenState extends State<CameraScreen> {
       connected: _state != CameraState.idle,
       onExternalMic: _setExternalMicMode,
       prefs: _studioMode ? _prefs : null,
+      mirror: () => _mirrorPref,
+      onMirror: (v) {
+        setState(() => _mirrorPref = v);
+        _prefs?.mirrorCamera = v;
+      },
     );
   }
 
@@ -5386,9 +5518,7 @@ class _CameraScreenState extends State<CameraScreen> {
         if (_videoEnabled && _localVideoTrack != null)
           VideoTrackRenderer(
             _localVideoTrack!,
-            // Mirror only the built-in selfie camera — an explicitly picked
-            // external device is never mirrored.
-            mirrorMode: _selectedCameraId == null && _isFrontCamera
+            mirrorMode: _mirrorSelf
                 ? VideoViewMirrorMode.mirror
                 : VideoViewMirrorMode.off,
           )
@@ -6073,6 +6203,7 @@ class _CameraScreenState extends State<CameraScreen> {
                 : _cue.value.isEmpty
                 ? null
                 : () => _cue.value = CueSet.empty,
+            onMute: _room == null ? null : _toggleSelfMute,
             child: studio,
           )
         : studio;
@@ -6121,6 +6252,10 @@ class _CameraScreenState extends State<CameraScreen> {
           : null,
       showClaimMasterAudio: !_isStudio && !_studioInCharge,
       toolbar: _isStudio ? _buildStudioToolbar() : const [],
+      micStatus: _micOffReason ?? 'Mic live',
+      micMuted: _selfMuted,
+      micOnAir: _micOffReason == null,
+      onToggleMic: _room == null ? null : _toggleSelfMute,
     );
   }
 
@@ -6142,14 +6277,17 @@ class _CameraScreenState extends State<CameraScreen> {
 
   List<Widget> _buildStudioToolbar() {
     final target = _toolbarTarget;
+    // Camera slots and their sync are Multicam's; the other modes run a stage.
+    final multicam = _showMode == StudioMode.multicam;
     return [
-      NileStudioIconButton(
-        onPressed: target != null && target.isRenamable
-            ? () => _renameSource(target)
-            : null,
-        tooltip: 'Rename camera',
-        icon: Icons.drive_file_rename_outline,
-      ),
+      if (multicam)
+        NileStudioIconButton(
+          onPressed: target != null && target.isRenamable
+              ? () => _renameSource(target)
+              : null,
+          tooltip: 'Rename camera',
+          icon: Icons.drive_file_rename_outline,
+        ),
       NileStudioIconButton(
         onPressed: _openGraphics,
         tooltip: 'Graphics',
@@ -6168,11 +6306,12 @@ class _CameraScreenState extends State<CameraScreen> {
         icon: Icons.dashboard_customize_outlined,
         active: _layouts.applied != null,
       ),
-      NileStudioIconButton(
-        onPressed: _confirmResync,
-        tooltip: 'Resync cameras and audio',
-        icon: Icons.sync,
-      ),
+      if (multicam)
+        NileStudioIconButton(
+          onPressed: _confirmResync,
+          tooltip: 'Resync cameras and audio',
+          icon: Icons.sync,
+        ),
       NileStudioMasterAudioMenu(
         options: _audioSourceOptions,
         current: _masterIdentity,

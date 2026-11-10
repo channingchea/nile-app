@@ -778,6 +778,25 @@ class GraphicsState {
     g,
   ]);
 
+  /// A brief all-cameras graphic (a guest's name as their countdown ends)
+  /// shown over whatever held its cap key there. [covered] is what it hid:
+  /// hand it to [withRestored] once [g] has run out to put it back.
+  ({GraphicsState state, LiveGraphic? covered}) withCover(LiveGraphic g) => (
+    state: withOn(null, g),
+    covered: all.where((x) => x.capKey == g.capKey && x.id != g.id).firstOrNull,
+  );
+
+  /// [covered] back on all cameras, unless something is still up in its place
+  /// (the cover hasn't run out, or the host put something else there) or it
+  /// would itself have run out by now.
+  GraphicsState withRestored(LiveGraphic covered, int nowMs) {
+    if (covered.expiredAt(nowMs)) return this;
+    final holder = all.any(
+      (x) => x.capKey == covered.capKey && !x.expiredAt(nowMs),
+    );
+    return holder ? this : withOn(null, covered);
+  }
+
   GraphicsState withOff(String? slotId, String graphicId) => _withTarget(
     slotId,
     targetList(slotId).where((x) => x.id != graphicId).toList(),

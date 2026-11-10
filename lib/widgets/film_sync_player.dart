@@ -86,7 +86,8 @@ class _FilmSyncPlayerState extends State<FilmSyncPlayer> {
     if (widget.demo != null) return;
     if (old.film != widget.film) _sync(force: true);
     if (old.muted != widget.muted ||
-        old.film.commentary != widget.film.commentary) {
+        old.film.commentary != widget.film.commentary ||
+        old.film.duck != widget.film.duck) {
       _applyVolume(_c);
     }
     if (old.captionsLang != widget.captionsLang) unawaited(_loadCaptions());
@@ -176,7 +177,11 @@ class _FilmSyncPlayerState extends State<FilmSyncPlayer> {
   }
 
   void _applyVolume(VideoPlayerController? c) => c?.setVolume(
-    filmVolume(commentary: widget.film.commentary, muted: widget.muted),
+    filmVolume(
+      commentary: widget.film.commentary,
+      muted: widget.muted,
+      duck: widget.film.duck,
+    ),
   );
 
   Future<void> _loadCaptions() async {

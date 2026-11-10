@@ -2658,6 +2658,10 @@ class NileStudioControlBar extends StatelessWidget {
     this.studioCameraLabel,
     this.showClaimMasterAudio = true,
     this.toolbar = const [],
+    this.micStatus,
+    this.micMuted = false,
+    this.micOnAir = false,
+    this.onToggleMic,
   });
 
   /// False means Sound Check — the bar is only ever shown in one of the two.
@@ -2703,6 +2707,17 @@ class NileStudioControlBar extends StatelessWidget {
   /// controls and the show controls. Empty for a camera device.
   final List<Widget> toolbar;
 
+  /// Your mic button, labelled with what viewers hear from it right now
+  /// ("Mic live", "Muted", "Muted while the film plays"). Null hides it.
+  final String? micStatus;
+
+  /// You muted yourself (the button, or M).
+  final bool micMuted;
+
+  /// Viewers hear this mic right now.
+  final bool micOnAir;
+  final VoidCallback? onToggleMic;
+
   @override
   Widget build(BuildContext context) {
     final soundCheck = !isLive;
@@ -2718,6 +2733,25 @@ class NileStudioControlBar extends StatelessWidget {
           crossAxisAlignment: WrapCrossAlignment.center,
           runSpacing: NileSpacing.s8,
           children: [
+            if (micStatus case final status?) ...[
+              Tooltip(
+                message: micMuted ? 'Unmute (M)' : 'Mute (M)',
+                child: OutlinedButton.icon(
+                  onPressed: onToggleMic,
+                  icon: Icon(micMuted ? Icons.mic_off : Icons.mic, size: 18),
+                  label: Text(status),
+                  style: micMuted
+                      ? _outlined(NileColors.error, NileColors.error)
+                      : micOnAir
+                      ? _outlined(NileColors.volt, NileColors.volt)
+                      : _outlined(
+                          NileColors.txtSecondary,
+                          NileColors.borderStrong,
+                        ),
+                ),
+              ),
+              const SizedBox(width: NileSpacing.s8),
+            ],
             if (showChatToggle) ...[
               NileStudioIconButton(
                 onPressed: onToggleChat,

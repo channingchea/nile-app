@@ -81,6 +81,7 @@ class StudioGraphicsHotkeys extends StatefulWidget {
     this.onAltDigit,
     this.onTake,
     this.onClear,
+    this.onMute,
     this.enabled = true,
   });
 
@@ -95,6 +96,9 @@ class StudioGraphicsHotkeys extends StatefulWidget {
 
   /// Escape. Null = the key passes through.
   final VoidCallback? onClear;
+
+  /// M: your mic on and off. Null = the key passes through.
+  final VoidCallback? onMute;
   final Widget child;
   final bool enabled;
 
@@ -174,6 +178,8 @@ class _StudioGraphicsHotkeysState extends State<StudioGraphicsHotkeys> {
         ? widget.onTake
         : key == LogicalKeyboardKey.escape
         ? widget.onClear
+        : key == LogicalKeyboardKey.keyM
+        ? widget.onMute
         : null;
     if (action == null) return false;
     final kb = HardwareKeyboard.instance;

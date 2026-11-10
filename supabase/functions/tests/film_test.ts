@@ -83,6 +83,13 @@ Deno.test("commentary and picture-in-picture work before the show and keep the c
   const c = ok(applyFilmControl(f, { film: "commentary", on: true }, 9_000, false));
   assertEquals([c.commentary, c.pos, c.at], [true, 1_000, 500]);
   assertEquals(ok(applyFilmControl(c, { film: "pip", corner: "br" }, 9_000, false)).pip, "br");
+  // The film's level under commentary: 0-100, kept through later presses.
+  const d = ok(applyFilmControl(c, { film: "duck", percent: 55 }, 9_000, false));
+  assertEquals([d.duck, d.pos, d.at], [55, 1_000, 500]);
+  assertEquals(ok(applyFilmControl(d, { film: "pause" }, 9_500, true)).duck, 55);
+  assertEquals(filmOf(JSON.parse(JSON.stringify(d)))?.duck, 55);
+  assert("error" in applyFilmControl(c, { film: "duck", percent: 101 }, 0, true));
+  assert("error" in applyFilmControl(c, { film: "duck", percent: 1.5 }, 0, true));
   // Pressing play again mid-film changes nothing.
   assertEquals(ok(applyFilmControl(f, { film: "play" }, 9_000, true)), f);
 });

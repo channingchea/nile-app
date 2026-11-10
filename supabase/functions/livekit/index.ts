@@ -28,7 +28,7 @@
 //   remove-participant host   → { success: true }   ← ejects one participant
 //   set-ready         crew    → { success: true }   ← flags caller's feed ready
 //   start-show        host    → { success: true }   ← stamps showStartedAt anchor + starts replay egress
-//   film-control      host    → { success, film }   ← Premiere transport: play/pause/seek/intermission/hold/end/reset, commentary, pip
+//   film-control      host    → { success, film }   ← Premiere transport: play/pause/seek/intermission/hold/end/reset, commentary, duck, pip
 //   stop-egress       host    → { success: true }   ← stops replay egress on show end
 //   replay-exists     viewer  → { available: bool } ← is a ready replay viewable by caller? (drives the CTA)
 //   replay-url        viewer  → { url, durationMs }  ← signed playback URL (ticket-gated)
@@ -1580,7 +1580,7 @@ async function setMode(body: any, userId: string, admin: any, json: Json): Promi
 
 // film-control — Premiere's transport (docs/plans/studio-modes.md, phase 7).
 // Body: { eventId, film: play|pause|resume|seek|intermission|hold|end|reset|
-// commentary|pip, positionMs?, seconds?, message?, on?, corner?, studio }.
+// commentary|duck|pip, positionMs?, seconds?, message?, on?, percent?, corner?, studio }.
 // Host only; while the Studio is in the room only the Studio. The film only
 // moves while the show is live. Writes room metadata `film` (every device
 // follows it) and event_films.film_state (live-chat and the replay read it).

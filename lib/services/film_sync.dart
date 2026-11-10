@@ -38,6 +38,7 @@ class FilmState {
     this.until,
     this.message,
     this.commentary = false,
+    this.duck = defaultDuck,
     this.pip = PipCorner.off,
     this.startedAt,
     this.endedAt,
@@ -58,6 +59,10 @@ class FilmState {
   final int? until;
   final String? message;
   final bool commentary;
+
+  /// Film volume under commentary, percent (room metadata `duck`).
+  final int duck;
+  static const defaultDuck = 30;
   final PipCorner pip;
   final int? startedAt;
   final int? endedAt;
@@ -76,6 +81,7 @@ class FilmState {
       until: n(raw['until']),
       message: raw['msg'] is String ? raw['msg'] as String : null,
       commentary: raw['commentary'] == true,
+      duck: n(raw['duck'])?.clamp(0, 100) ?? defaultDuck,
       pip: PipCorner.fromWire(raw['pip']),
       startedAt: n(raw['startedAt']),
       endedAt: n(raw['endedAt']),
@@ -128,6 +134,7 @@ class FilmState {
       other.until == until &&
       other.message == message &&
       other.commentary == commentary &&
+      other.duck == duck &&
       other.pip == pip &&
       other.startedAt == startedAt &&
       other.endedAt == endedAt;
@@ -141,6 +148,7 @@ class FilmState {
     until,
     message,
     commentary,
+    duck,
     pip,
     startedAt,
     endedAt,
@@ -203,9 +211,13 @@ SyncStep syncStep({required int playerMs, required int targetMs}) {
   return SyncStep(rate: drift > 0 ? 0.95 : 1.05);
 }
 
-/// Film volume on viewer devices: ducked to 30% under the host's commentary.
-double filmVolume({required bool commentary, required bool muted}) =>
-    muted ? 0 : (commentary ? 0.3 : 1.0);
+/// Film volume on viewer devices: ducked to [duck]% (30 unless the host
+/// changed it) under the host's commentary.
+double filmVolume({
+  required bool commentary,
+  required bool muted,
+  int duck = FilmState.defaultDuck,
+}) => muted ? 0 : (commentary ? duck.clamp(0, 100) / 100 : 1.0);
 
 /// Intermission countdown "4:05".
 String formatCountdown(int ms) {
@@ -227,6 +239,7 @@ FilmState rehearseFilmControl(
   String? message,
   bool? on,
   String? corner,
+  int? percent,
 }) {
   final n = f.nowAt(now);
   FilmState with_({
@@ -245,6 +258,7 @@ FilmState rehearseFilmControl(
     until: until,
     message: msg,
     commentary: f.commentary,
+    duck: f.duck,
     pip: f.pip,
     startedAt: startedAt ?? (keepStart ? f.startedAt : null),
     endedAt: endedAt,
@@ -295,21 +309,25 @@ FilmState rehearseFilmControl(
       return with_(phase: FilmPhase.pre, pos: 0, keepStart: false);
     case 'commentary':
       return on == null ? f : _copy(f, commentary: on);
+    case 'duck':
+      return percent == null ? f : _copy(f, duck: percent.clamp(0, 100));
     case 'pip':
       return corner == null ? f : _copy(f, pip: PipCorner.fromWire(corner));
   }
   return f;
 }
 
-FilmState _copy(FilmState f, {bool? commentary, PipCorner? pip}) => FilmState(
-  phase: f.phase,
-  pos: f.pos,
-  at: f.at,
-  dur: f.dur,
-  until: f.until,
-  message: f.message,
-  commentary: commentary ?? f.commentary,
-  pip: pip ?? f.pip,
-  startedAt: f.startedAt,
-  endedAt: f.endedAt,
-);
+FilmState _copy(FilmState f, {bool? commentary, int? duck, PipCorner? pip}) =>
+    FilmState(
+      phase: f.phase,
+      pos: f.pos,
+      at: f.at,
+      dur: f.dur,
+      until: f.until,
+      message: f.message,
+      commentary: commentary ?? f.commentary,
+      duck: duck ?? f.duck,
+      pip: pip ?? f.pip,
+      startedAt: f.startedAt,
+      endedAt: f.endedAt,
+    );

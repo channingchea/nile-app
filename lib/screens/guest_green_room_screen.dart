@@ -17,6 +17,7 @@ import '../services/livekit_service.dart';
 import '../services/profile_service.dart';
 import '../services/screen_capture_permission.dart';
 import '../services/server_clock.dart';
+import '../services/studio_prefs.dart';
 import '../services/studio_roles.dart';
 import '../theme.dart';
 import '../widgets/audio_meter.dart';
@@ -172,6 +173,8 @@ class _GuestGreenRoomScreenState extends State<GuestGreenRoomScreen> {
   String? _cameraId;
   String? _micId;
   bool _front = true;
+  StudioPrefs? _prefs;
+  bool _mirrorPref = true;
   bool _micOn = true;
   bool _cameraOn = true;
   StreamSubscription<List<MediaDevice>>? _deviceSub;
@@ -231,6 +234,15 @@ class _GuestGreenRoomScreenState extends State<GuestGreenRoomScreen> {
   void initState() {
     super.initState();
     unawaited(_resolve());
+    StudioPrefs.load().then<void>((p) {
+      _prefs = p;
+      if (mounted) setState(() => _mirrorPref = p.mirrorCamera);
+    }, onError: (_) {});
+  }
+
+  void _toggleMirror() {
+    setState(() => _mirrorPref = !_mirrorPref);
+    _prefs?.mirrorCamera = _mirrorPref;
   }
 
   @override
@@ -1298,7 +1310,11 @@ class _GuestGreenRoomScreenState extends State<GuestGreenRoomScreen> {
             VideoTrackRenderer(
               track,
               fit: VideoViewFit.cover,
-              mirrorMode: _front || _cameraId != null
+              mirrorMode:
+                  mirrorSelfView(
+                    preference: _mirrorPref,
+                    rearCamera: _cameraId == null && !_front,
+                  )
                   ? VideoViewMirrorMode.mirror
                   : VideoViewMirrorMode.off,
             )
@@ -1334,6 +1350,14 @@ class _GuestGreenRoomScreenState extends State<GuestGreenRoomScreen> {
       onCamera: _toggleCamera,
       onFlip: menus ? null : _flipCamera,
       devicePickers: [
+        NileStudioIconButton(
+          onPressed: _toggleMirror,
+          tooltip: _mirrorPref
+              ? 'Stop mirroring my camera'
+              : 'Mirror my camera',
+          icon: Icons.flip,
+          active: _mirrorPref,
+        ),
         if (menus) ...[
           NileCameraPickerButton(
             devices: _videoInputs,

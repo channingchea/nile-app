@@ -69,6 +69,8 @@ void main() {
       expect(filmVolume(commentary: false, muted: false), 1.0);
       expect(filmVolume(commentary: true, muted: false), 0.3);
       expect(filmVolume(commentary: true, muted: true), 0);
+      expect(filmVolume(commentary: true, muted: false, duck: 50), 0.5);
+      expect(filmVolume(commentary: false, muted: false, duck: 50), 1.0);
     });
   });
 
@@ -85,9 +87,13 @@ void main() {
     expect([f.phase, f.message], [FilmPhase.hold, 'Back soon']);
     f = rehearseFilmControl(f, 'commentary', 41000, on: true);
     f = rehearseFilmControl(f, 'pip', 41000, corner: 'tl');
-    expect([f.commentary, f.pip], [true, PipCorner.tl]);
+    f = rehearseFilmControl(f, 'duck', 41000, percent: 55);
+    expect([f.commentary, f.pip, f.duck], [true, PipCorner.tl, 55]);
     f = rehearseFilmControl(f, 'end', 50000);
-    expect([f.phase, f.endedAt, f.commentary], [FilmPhase.ended, 50000, true]);
+    expect(
+      [f.phase, f.endedAt, f.commentary, f.duck],
+      [FilmPhase.ended, 50000, true, 55],
+    );
     f = rehearseFilmControl(f, 'reset', 60000);
     expect([f.phase, f.startedAt], [FilmPhase.pre, null]);
     // Nonsense presses change nothing.
@@ -164,6 +170,7 @@ void main() {
         String? message,
         bool? on,
         String? corner,
+        int? percent,
       }) async => pressed.add(a);
       Widget panel(FilmState f) => MaterialApp(
         home: Scaffold(

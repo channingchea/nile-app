@@ -15,6 +15,7 @@ typedef FilmControl =
       String? message,
       bool? on,
       String? corner,
+      int? percent,
     });
 
 /// The Studio's Premiere panel (docs/plans/studio-modes.md, phase 7): Play,
@@ -56,6 +57,9 @@ class _PremierePanelState extends State<PremierePanel> {
   bool _busy = false;
   double? _scrub;
 
+  /// The film-under-commentary slider while it's being dragged.
+  double? _duck;
+
   @override
   void initState() {
     super.initState();
@@ -78,6 +82,7 @@ class _PremierePanelState extends State<PremierePanel> {
     String? message,
     bool? on,
     String? corner,
+    int? percent,
   }) async {
     if (_busy) return;
     setState(() => _busy = true);
@@ -89,6 +94,7 @@ class _PremierePanelState extends State<PremierePanel> {
         message: message,
         on: on,
         corner: corner,
+        percent: percent,
       );
     } catch (e) {
       if (mounted) {
@@ -299,7 +305,8 @@ class _PremierePanelState extends State<PremierePanel> {
               FilterChip(
                 label: const Text('Commentary'),
                 tooltip:
-                    'Your mic on over the film, which drops to 30% for viewers',
+                    'Your mic on over the film, which drops for viewers to '
+                    'the level you set',
                 selected: f.commentary,
                 onSelected: _busy ? null : (v) => _go('commentary', on: v),
               ),
@@ -338,6 +345,46 @@ class _PremierePanelState extends State<PremierePanel> {
                 ),
             ],
           ),
+          if (f.commentary)
+            Row(
+              children: [
+                Icon(
+                  Icons.volume_down,
+                  size: 18,
+                  color: NileColors.txtSecondary,
+                ),
+                const SizedBox(width: NileSpacing.s8),
+                Text(
+                  'Film under your voice',
+                  style: NileTextStyles.labelSm().copyWith(
+                    color: NileColors.txtSecondary,
+                  ),
+                ),
+                Expanded(
+                  child: Slider(
+                    value: _duck ?? f.duck.toDouble(),
+                    max: 100,
+                    divisions: 20,
+                    label: '${(_duck ?? f.duck).round()}%',
+                    onChanged: _busy ? null : (v) => setState(() => _duck = v),
+                    onChangeEnd: (v) async {
+                      await _go('duck', percent: v.round());
+                      if (mounted) setState(() => _duck = null);
+                    },
+                  ),
+                ),
+                SizedBox(
+                  width: 40,
+                  child: Text(
+                    '${(_duck ?? f.duck).round()}%',
+                    textAlign: TextAlign.end,
+                    style: NileTextStyles.labelSm().copyWith(
+                      color: NileColors.txtSecondary,
+                    ),
+                  ),
+                ),
+              ],
+            ),
         ],
       ),
     );

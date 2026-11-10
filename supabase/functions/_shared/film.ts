@@ -31,11 +31,16 @@ export type FilmState = {
   /** Hold slate text. */
   msg?: string;
   commentary: boolean;
+  /** Film volume (percent) under commentary; DEFAULT_DUCK when absent. */
+  duck?: number;
   pip: PipCorner;
   /** Server ms of the first Play, and of the end (played out or ended by hand). */
   startedAt?: number;
   endedAt?: number;
 };
+
+/** How loud the film stays under the host's commentary, percent. */
+export const DEFAULT_DUCK = 30;
 
 export const initialFilm = (dur: number, now: number): FilmState => ({
   state: "pre",
@@ -62,6 +67,7 @@ export function filmOf(raw: unknown): FilmState | null {
     ...(n(f.until) !== null ? { until: n(f.until)! } : {}),
     ...(typeof f.msg === "string" ? { msg: f.msg } : {}),
     commentary: f.commentary === true,
+    ...(n(f.duck) !== null ? { duck: Math.min(100, Math.max(0, Math.round(n(f.duck)!))) } : {}),
     pip: PIP_CORNERS.includes(f.pip as PipCorner) ? (f.pip as PipCorner) : "off",
     ...(n(f.startedAt) !== null ? { startedAt: n(f.startedAt)! } : {}),
     ...(n(f.endedAt) !== null ? { endedAt: n(f.endedAt)! } : {}),
@@ -98,9 +104,9 @@ export function filmNow(f: FilmState, now: number): FilmNow {
 }
 
 export type FilmAction =
-  | "play" | "pause" | "resume" | "seek" | "intermission" | "hold" | "end" | "reset" | "commentary" | "pip";
+  | "play" | "pause" | "resume" | "seek" | "intermission" | "hold" | "end" | "reset" | "commentary" | "duck" | "pip";
 export const FILM_ACTIONS: FilmAction[] = [
-  "play", "pause", "resume", "seek", "intermission", "hold", "end", "reset", "commentary", "pip",
+  "play", "pause", "resume", "seek", "intermission", "hold", "end", "reset", "commentary", "duck", "pip",
 ];
 
 /**
@@ -116,7 +122,7 @@ export function applyFilmControl(
   const action = body.film as FilmAction;
   if (!FILM_ACTIONS.includes(action)) return { error: "Unknown film control", status: 400 };
   const n = filmNow(cur, now);
-  const moving = !["commentary", "pip"].includes(action);
+  const moving = !["commentary", "duck", "pip"].includes(action);
   if (moving && !live) return { error: "Start the show first", status: 409 };
   if (moving && cur.dur <= 0) return { error: "The film isn't ready", status: 409 };
   const base = { ...cur };
@@ -163,6 +169,13 @@ export function applyFilmControl(
     case "commentary":
       if (typeof body.on !== "boolean") return { error: "on must be true or false", status: 400 };
       return { film: { ...cur, commentary: body.on } };
+    case "duck": {
+      const p = body.percent;
+      if (typeof p !== "number" || !Number.isInteger(p) || p < 0 || p > 100) {
+        return { error: "percent is 0 to 100", status: 400 };
+      }
+      return { film: { ...cur, duck: p } };
+    }
     case "pip":
       if (!PIP_CORNERS.includes(body.corner as PipCorner)) return { error: "Pick a corner", status: 400 };
       return { film: { ...cur, pip: body.corner as PipCorner } };

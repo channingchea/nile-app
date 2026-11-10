@@ -89,6 +89,33 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
   final _demo = StudioPreviewDemo();
   StudioPrefs? _prefs;
 
+  /// "Mirror my camera" (Settings): the same rule the real Studio uses.
+  bool _mirrorPref = true;
+
+  /// "Hear the film" rehearsed. The demo film is silent.
+  bool _hearFilm = false;
+
+  /// Your mic button, rehearsed. Kept in the interview demo so the green
+  /// room and stage show it too.
+  bool get _selfMuted => _interview.isMuted(_selfId);
+  void _toggleSelfMute() => _interview.setMuted(_selfId, !_selfMuted);
+
+  /// What viewers would hear from your mic, by the real Studio's rules.
+  String? get _micOffReason {
+    if (_selfMuted) return 'Muted';
+    if (_demo.master != _selfId) return 'Not the show audio';
+    if (_stageMode &&
+        (_interview.talkingTo != null || _interview.talkingToAll)) {
+      return 'Muted while you talk backstage';
+    }
+    if (_mode == StudioMode.premiere &&
+        segmentOf(_demoFilm, _wallNow()) == ShowSegment.film &&
+        !_demoFilm.commentary) {
+      return 'Muted while the film plays';
+    }
+    return null;
+  }
+
   bool _started = false;
 
   /// The mode switch, rehearsed: nothing is saved. Interview swaps in the
@@ -234,6 +261,7 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
     WidgetsBinding.instance.removeObserver(this);
     _hideTimer?.cancel();
     _demoFilmTimer?.cancel();
+    _restoreTimer?.cancel();
     _cue.dispose();
     _demo
       ..removeListener(_onDemo)
@@ -324,6 +352,7 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
       _disableAgc = prefs.externalMicProcessing;
       _chatVisible = prefs.chatVisible;
       _videoEnabled = !prefs.videoStartsOff;
+      _mirrorPref = prefs.mirrorCamera;
       if (widget.openDevices) {
         await _refreshDevices();
         if (_videoEnabled) {
@@ -549,6 +578,11 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
       connected: true,
       onExternalMic: _setExternalMic,
       prefs: _prefs,
+      mirror: () => _mirrorPref,
+      onMirror: (v) {
+        setState(() => _mirrorPref = v);
+        _prefs?.mirrorCamera = v;
+      },
     );
   }
 
@@ -1079,6 +1113,7 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
     String? message,
     bool? on,
     String? corner,
+    int? percent,
   }) async {
     setState(
       () => _demoFilm = rehearseFilmControl(
@@ -1090,6 +1125,7 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
         message: message,
         on: on,
         corner: corner,
+        percent: percent,
       ),
     );
     _onDemoFilmTick();
@@ -1122,6 +1158,7 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
                     positionMs: pos,
                     durationMs: _demoFilm.dur,
                   ),
+                  host: _demoFilm.pip == PipCorner.off ? null : _pipStage(),
                 )
               : _buildStageMonitor(),
         ),
@@ -1130,6 +1167,16 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
           now: _wallNow,
           onControl: _rehearseFilm,
           canPlay: true,
+          listening: _hearFilm,
+          onListen: (v) {
+            setState(() => _hearFilm = v);
+            if (v) {
+              _toast(
+                'The rehearsal film is silent. In a show, this plays the '
+                'film’s sound here. Use headphones, or your mic picks it up.',
+              );
+            }
+          },
         ),
       ],
     );
@@ -1137,23 +1184,46 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
 
   /// A guest's countdown ran out: their name lower third on every camera for
   /// 8 s, as the real Studio introduces them.
-  void _introduce(DemoGuest g) => _push(
-    _graphics.withOn(
-      null,
+  /// Your own lower third comes back once it runs out, as in the real Studio.
+  void _introduce(DemoGuest g) {
+    final hideAt = DateTime.now()
+        .add(const Duration(seconds: StudioSetupInterviewDemo.introSeconds))
+        .millisecondsSinceEpoch;
+    final r = _graphics.withCover(
       LiveGraphic(
         id: 'intro:${g.id}',
         kind: GraphicKind.lowerThird,
         title: g.name,
         subtitle: g.title,
-        hideAt: DateTime.now()
-            .add(const Duration(seconds: StudioSetupInterviewDemo.introSeconds))
-            .millisecondsSinceEpoch,
+        hideAt: hideAt,
       ),
-    ),
-  );
+    );
+    if (r.covered case final c? when !c.id.startsWith('intro:')) _covered = c;
+    _push(r.state);
+    _restoreTimer?.cancel();
+    _restoreTimer = Timer(
+      Duration(
+        milliseconds: hideAt - DateTime.now().millisecondsSinceEpoch + 250,
+      ),
+      () {
+        final c = _covered;
+        _covered = null;
+        if (c == null || !mounted) return;
+        final next = _graphics.withRestored(
+          c,
+          DateTime.now().millisecondsSinceEpoch,
+        );
+        if (next != _graphics) _push(next);
+      },
+    );
+  }
+
+  LiveGraphic? _covered;
+  Timer? _restoreTimer;
 
   static const _privateLine =
-      'In a real show, only they hear you — viewers can’t.';
+      'In a real show, only they hear you. Your show mic goes quiet until '
+      'you stop.';
 
   GreenRoomActions get _greenRoomActions => GreenRoomActions(
     onBringOn: (e) {
@@ -1218,7 +1288,13 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
     if (id == _selfId) {
       final cam = _videoEnabled ? _camera : null;
       return cam != null
-          ? VideoTrackRenderer(cam, fit: VideoViewFit.cover)
+          ? VideoTrackRenderer(
+              cam,
+              fit: VideoViewFit.cover,
+              mirrorMode: mirrorSelfView(preference: _mirrorPref)
+                  ? VideoViewMirrorMode.mirror
+                  : VideoViewMirrorMode.off,
+            )
           : const StageAvatar(name: 'You');
     }
     final g = StudioSetupInterviewDemo.guestById(id);
@@ -1247,6 +1323,28 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
     if (_share != null) _shareId: 'Your screen',
     for (final e in _elements.angles) elementAngleId(e.id): e.name,
   };
+
+  /// Demo guests on stage with their mic open.
+  List<String> get _openStageMics => [
+    for (final id in _interview.stage.ids)
+      if (id != _selfId && !_interview.isMuted(id)) id,
+  ];
+
+  /// The stage in the film's corner, as viewers get it.
+  Widget _pipStage() {
+    final stage = _interview.stage;
+    final tiles = _interview.stageTiles(
+      hostTrack: _videoEnabled ? _camera : null,
+      hostLevel: _level,
+    );
+    return InterviewStageView(
+      tiles: tiles,
+      layout: stage.layout,
+      focusIndex: stage.focusIndexIn([for (final t in tiles) t.identity]),
+      tileBuilder: (t) => _interviewPicture(t.identity),
+      compact: true,
+    );
+  }
 
   Widget _buildStageMonitor() {
     final stage = _interview.stage;
@@ -1323,6 +1421,18 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
                     ],
                   ),
                 ),
+              ),
+              IconButton(
+                tooltip: 'Mute everyone on stage',
+                onPressed: _openStageMics.isEmpty
+                    ? null
+                    : () {
+                        for (final id in _openStageMics) {
+                          _interview.setMuted(id, true);
+                        }
+                      },
+                icon: const Icon(Icons.voice_over_off_outlined),
+                color: NileColors.txtSecondary,
               ),
               IconButton(
                 tooltip: 'Notes',
@@ -1581,6 +1691,7 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
             label: 'Your camera',
             sublabel: d.master == _selfId ? 'Broadcast audio' : null,
             track: _videoEnabled ? _camera : null,
+            mirror: mirrorSelfView(preference: _mirrorPref),
             isLocal: true,
             isMasterAudio: d.master == _selfId,
             slotId: slot,
@@ -1651,6 +1762,7 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
           : _cue.value.isEmpty
           ? null
           : () => _cue.value = CueSet.empty,
+      onMute: _toggleSelfMute,
       child: Stack(
         children: [
           NileStudio(
@@ -1756,6 +1868,10 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
               onToggleVideo: _toggleVideo,
               onViewAsViewer: _previewOnly,
               onStartShow: _startShowTapped,
+              micStatus: _micOffReason ?? 'Mic live',
+              micMuted: _selfMuted,
+              micOnAir: _micOffReason == null,
+              onToggleMic: _toggleSelfMute,
               onEndStream: _previewOnly,
               onLeave: _exit,
               leaveLabel: 'Exit',

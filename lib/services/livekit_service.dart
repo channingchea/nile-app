@@ -380,8 +380,9 @@ class LivekitService {
   });
 
   /// Premiere's transport (docs/plans/studio-modes.md, phase 7). [film] is
-  /// play, pause, resume, seek, intermission, hold, end, reset, commentary or
-  /// pip. Returns the new room metadata `film` object.
+  /// play, pause, resume, seek, intermission, hold, end, reset, commentary,
+  /// duck ([percent]: film volume under commentary) or pip. Returns the new
+  /// room metadata `film` object.
   static Future<Map> filmControl({
     required String eventId,
     required String film,
@@ -390,6 +391,7 @@ class LivekitService {
     String? message,
     bool? on,
     String? corner,
+    int? percent,
   }) => _invoke<Map>({
     'action': 'film-control',
     'eventId': eventId,
@@ -399,6 +401,7 @@ class LivekitService {
     'message': ?message,
     'on': ?on,
     'corner': ?corner,
+    'percent': ?percent,
     'studio': true,
   });
 

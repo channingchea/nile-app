@@ -20,6 +20,8 @@ Future<void> showStudioSettingsSheet(
   required bool connected,
   required Future<void> Function(bool enabled) onExternalMic,
   StudioPrefs? prefs,
+  bool Function()? mirror,
+  ValueChanged<bool>? onMirror,
 }) {
   return showModalBottomSheet<void>(
     context: context,
@@ -103,6 +105,37 @@ Future<void> showStudioSettingsSheet(
                           : 'Changes apply immediately (brief audio gap while switching).',
                       style: NileTextStyles.bodySm().copyWith(
                         color: NileColors.amber,
+                      ),
+                    ),
+                  ],
+                  if (mirror != null && onMirror != null) ...[
+                    const SizedBox(height: 24),
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Expanded(
+                          child: Text(
+                            'Mirror my camera',
+                            style: NileTextStyles.bodyLg(),
+                          ),
+                        ),
+                        Switch(
+                          value: mirror(),
+                          activeThumbColor: NileColors.volt,
+                          onChanged: (v) {
+                            onMirror(v);
+                            setSheetState(() {});
+                          },
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      'Flips your own preview so it moves like a mirror. '
+                      'Viewers always see the true picture, so text on screen '
+                      'reads correctly for them. Saved on this device.',
+                      style: NileTextStyles.bodyMd().copyWith(
+                        color: NileColors.txtSecondary,
                       ),
                     ),
                   ],

@@ -388,7 +388,11 @@ class GreenRoomTile extends StatelessWidget {
         item(_GreenRoomMenu.focus, Icons.center_focus_strong, 'Feature'),
       if (e.isConnected && actions.onMute != null)
         e.micMuted
-            ? item(_GreenRoomMenu.unmute, Icons.mic, 'Ask to unmute')
+            ? item(
+                _GreenRoomMenu.unmute,
+                Icons.mic,
+                e.kind == GreenRoomKind.host ? 'Unmute' : 'Ask to unmute',
+              )
             : item(_GreenRoomMenu.mute, Icons.mic_off, 'Mute'),
       if (e.kind == GreenRoomKind.guest &&
           e.status == GuestStatus.greenRoom &&
