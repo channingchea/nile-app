@@ -657,11 +657,47 @@ final GoRouter _router = NileGoRouter(
   ],
 );
 
+/// Holds a guest invite (`/g/<code>`) opened before the app was ready for it
+/// (signed out, mid-signup, or the splash of a cold start) and hands it back
+/// once the gate opens, so the guest lands in the green room, not the feed.
+@visibleForTesting
+class GuestLinkHold {
+  String? _link;
+  String? get link => _link;
+
+  /// Run on every redirect. Returns where a ready user on a gate screen
+  /// should go instead of the feed, if anywhere.
+  String? check({
+    required bool ready,
+    required String loc,
+    required bool gateScreen,
+  }) {
+    if (!ready) {
+      if (loc.startsWith('/g/')) _link = loc;
+      return null;
+    }
+    if (!gateScreen) {
+      if (loc == _link) _link = null;
+      return null;
+    }
+    final to = _link;
+    _link = null;
+    return to;
+  }
+}
+
+final _guestLinkHold = GuestLinkHold();
+
 /// The auth/onboarding ladder, expressed as a redirect. Order matches the old
 /// `_AuthGate.build` exactly.
 String? _gateRedirect(BuildContext context, GoRouterState state) {
   final gate = AuthGate.instance;
   final loc = state.matchedLocation;
+  final resume = _guestLinkHold.check(
+    ready: gate.stage == GateStage.ready,
+    loc: loc,
+    gateScreen: NileRoutes.gateOnly.contains(loc),
+  );
 
   switch (gate.stage) {
     case GateStage.splash:
@@ -688,7 +724,7 @@ String? _gateRedirect(BuildContext context, GoRouterState state) {
       if (gate.passwordRecovery) {
         return loc == NileRoutes.resetPassword ? null : NileRoutes.resetPassword;
       }
-      return NileRoutes.gateOnly.contains(loc) ? NileRoutes.feed : null;
+      return NileRoutes.gateOnly.contains(loc) ? resume ?? NileRoutes.feed : null;
   }
 }
 

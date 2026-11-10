@@ -841,6 +841,7 @@ class _ViewerScreenState extends State<ViewerScreen>
       listener
         ..on<TrackSubscribedEvent>(_onTrackSubscribed)
         ..on<TrackUnsubscribedEvent>(_onTrackUnsubscribed)
+        ..on<TrackUnpublishedEvent>(_onTrackUnpublished)
         ..on<ParticipantConnectedEvent>(_onParticipantConnected)
         ..on<ParticipantDisconnectedEvent>(_onParticipantDisconnected)
         ..on<ParticipantMetadataUpdatedEvent>(_onParticipantMetadataUpdated)
@@ -1070,8 +1071,16 @@ class _ViewerScreenState extends State<ViewerScreen>
         if (isScreen) _afterAnglesChanged();
       }
       _updateAudioRouting();
-    } else if (event.track is AudioTrack) {
-      _audioPublications.remove(event.participant.identity);
+    }
+    // Audio is kept: routing unsubscribes on purpose (the mute button, another
+    // camera's sound), and a forgotten publication could never be turned back
+    // on. It's dropped only once it's really gone (_onTrackUnpublished).
+  }
+
+  void _onTrackUnpublished(TrackUnpublishedEvent event) {
+    final id = event.participant.identity;
+    if (_audioPublications[id]?.sid == event.publication.sid) {
+      _audioPublications.remove(id);
     }
   }
 
@@ -1753,6 +1762,7 @@ class _ViewerScreenState extends State<ViewerScreen>
     listener
       ..on<TrackSubscribedEvent>(_onTrackSubscribed)
       ..on<TrackUnsubscribedEvent>(_onTrackUnsubscribed)
+      ..on<TrackUnpublishedEvent>(_onTrackUnpublished)
       ..on<ParticipantConnectedEvent>(_onParticipantConnected)
       ..on<ParticipantDisconnectedEvent>(_onParticipantDisconnected)
       ..on<ParticipantMetadataUpdatedEvent>(_onParticipantMetadataUpdated)
