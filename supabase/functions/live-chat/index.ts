@@ -48,6 +48,7 @@ import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { RoomServiceClient } from "https://esm.sh/livekit-server-sdk@2.9.7?target=deno";
 import { corsHeaders as corsHeadersFor } from "../_shared/cors.ts";
+import { chatRuleDuringFilm, filmOf } from "../_shared/film.ts";
 import { failure } from "../_shared/errors.ts";
 
 // Long enough for a real thought, short enough that one person cannot own the
@@ -190,10 +191,11 @@ interface EventRow {
   chat_crew_moderation: boolean;
   chat_slow_mode_seconds: number;
   chat_access: string;
+  studio_mode?: string | null;
 }
 
 const EVENT_COLS =
-  "id, host_id, livekit_room, price, chat_crew_moderation, chat_slow_mode_seconds, chat_access";
+  "id, host_id, livekit_room, price, chat_crew_moderation, chat_slow_mode_seconds, chat_access, studio_mode";
 
 /**
  * Resolve the event from the client-side LiveKit slug (`events.livekit_room`),
@@ -365,7 +367,20 @@ async function send(
   // 1, refilling once every N seconds. `least(capacity, …)` inside the function
   // clamps a bucket that was filled under the old settings, so a host can turn
   // this on mid-show and it binds immediately.
-  const slow = Math.min(MAX_SLOW_MODE_SECONDS, Math.max(0, event.chat_slow_mode_seconds ?? 0));
+  let slow = Math.min(MAX_SLOW_MODE_SECONDS, Math.max(0, event.chat_slow_mode_seconds ?? 0));
+
+  // Premiere: while the film plays, chat follows the filmmaker's choice
+  // (reactions only, or slow). It opens up again for the Q&A.
+  if (!privileged && event.studio_mode === "premiere") {
+    const { data: f } = await admin
+      .from("event_films")
+      .select("chat_policy, film_state")
+      .eq("event_id", event.id)
+      .maybeSingle();
+    const rule = chatRuleDuringFilm(f?.chat_policy, filmOf(f?.film_state), Date.now());
+    if (rule && "block" in rule) return json({ error: rule.block }, 403);
+    if (rule) slow = Math.max(slow, rule.slowSeconds);
+  }
   const bucket = slow > 0
     ? { capacity: 1, refillPerSecond: 1 / slow }
     : DEFAULT_BUCKET;

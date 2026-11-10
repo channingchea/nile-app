@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:video_player/video_player.dart';
@@ -5,6 +7,9 @@ import 'package:video_player/video_player.dart';
 import '../services/event_service.dart';
 import '../services/livekit_service.dart';
 import '../services/mini_player.dart';
+import '../services/premiere.dart' show FilmRefused;
+import '../services/premiere_service.dart';
+import '../services/studio_mode.dart';
 import '../services/overlay_clock.dart';
 import '../services/replay_timeline.dart';
 import '../theme.dart';
@@ -39,6 +44,12 @@ class _ReplayScreenState extends State<ReplayScreen> {
   /// There is only a dock to shrink into at desktop widths, so on phones the
   /// screen keeps its original behaviour: leaving stops playback.
   bool _canDock = false;
+
+  // Premiere: Intro (recording) · Film (Stream) · Q&A (recording).
+  ({int start, int? end, bool filmReady})? _chapters;
+  _Chapter _chapter = _Chapter.intro;
+  VideoPlayerController? _film;
+  String? _filmError;
 
   @override
   void initState() {
@@ -95,10 +106,150 @@ class _ReplayScreenState extends State<ReplayScreen> {
     }
     setState(() => _controller = controller);
     controller.play();
+    if (widget.event.studioMode == StudioMode.premiere) {
+      unawaited(_loadChapters());
+    }
+  }
+
+  // ── Premiere chapters ──────────────────────────────────────────────────────
+
+  int? get _startWall => _timeline?.startWall;
+
+  /// Recording offsets (ms) where the film began and where the Q&A begins.
+  int? get _introEnd {
+    final c = _chapters, w = _startWall;
+    return c == null || w == null ? null : c.start - w;
+  }
+
+  int? get _qaStart {
+    final c = _chapters, w = _startWall;
+    return c?.end == null || w == null ? null : c!.end! - w;
+  }
+
+  Future<void> _loadChapters() async {
+    try {
+      final c = await PremiereService.replayChapters(widget.event.id);
+      if (!mounted || c == null) return;
+      setState(() => _chapters = c);
+      _controller?.addListener(_onRecordingTick);
+    } catch (_) {}
+  }
+
+  /// Intro runs into the film by itself.
+  void _onRecordingTick() {
+    final c = _controller, end = _introEnd;
+    if (c == null || end == null || _chapter != _Chapter.intro) return;
+    if (c.value.isPlaying && c.value.position.inMilliseconds >= end) {
+      unawaited(_openChapter(_Chapter.film));
+    }
+  }
+
+  void _onFilmTick() {
+    final f = _film;
+    if (f == null || _chapter != _Chapter.film) return;
+    final v = f.value;
+    if (v.isInitialized &&
+        !v.isPlaying &&
+        v.position >= v.duration &&
+        v.duration > Duration.zero) {
+      unawaited(_openChapter(_Chapter.qa));
+    }
+  }
+
+  Future<void> _openChapter(_Chapter ch) async {
+    setState(() => _chapter = ch);
+    if (ch == _Chapter.film) {
+      _controller?.pause();
+      if (_film == null && _filmError == null) {
+        try {
+          final p = await PremiereService.playback(widget.event.id);
+          final f = VideoPlayerController.networkUrl(p.url);
+          await f.initialize();
+          if (!mounted) {
+            await f.dispose();
+            return;
+          }
+          f.addListener(_onFilmTick);
+          setState(() => _film = f);
+        } on FilmRefused catch (e) {
+          if (mounted) setState(() => _filmError = e.message);
+        } catch (_) {
+          if (mounted) setState(() => _filmError = "Couldn't load the film.");
+        }
+      }
+      if (_chapter == _Chapter.film) await _film?.play();
+      return;
+    }
+    await _film?.pause();
+    final c = _controller;
+    if (c == null) return;
+    final at = ch == _Chapter.qa ? (_qaStart ?? 0) : 0;
+    await c.seekTo(Duration(milliseconds: at < 0 ? 0 : at));
+    await c.play();
+  }
+
+  Widget _chapterBar() {
+    final c = _chapters!;
+    Widget chip(String label, _Chapter ch, {bool enabled = true}) => Padding(
+      padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s4),
+      child: ChoiceChip(
+        label: Text(label),
+        selected: _chapter == ch,
+        onSelected: enabled ? (_) => _openChapter(ch) : null,
+      ),
+    );
+    return Padding(
+      padding: const EdgeInsets.all(NileSpacing.s8),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          chip('Intro', _Chapter.intro, enabled: _introEnd != null),
+          chip('Film', _Chapter.film, enabled: c.filmReady),
+          chip('Q&A', _Chapter.qa, enabled: _qaStart != null),
+        ],
+      ),
+    );
+  }
+
+  Widget _filmView() {
+    final f = _film;
+    if (_filmError != null) {
+      return Padding(
+        padding: const EdgeInsets.all(NileSpacing.s24),
+        child: Text(
+          _filmError!,
+          textAlign: TextAlign.center,
+          style: NileTextStyles.bodyMd(),
+        ),
+      );
+    }
+    if (f == null) return CircularProgressIndicator(color: NileColors.volt);
+    return GestureDetector(
+      onTap: () => setState(() => _controlsVisible = !_controlsVisible),
+      child: AspectRatio(
+        aspectRatio: f.value.aspectRatio == 0 ? 16 / 9 : f.value.aspectRatio,
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            VideoPlayer(f),
+            if (_controlsVisible)
+              _Controls(
+                controller: f,
+                onPlayPause: () {
+                  f.value.isPlaying ? f.pause() : f.play();
+                  setState(() {});
+                },
+              ),
+          ],
+        ),
+      ),
+    );
   }
 
   @override
   void dispose() {
+    _film?.dispose();
+    _controller?.removeListener(_onRecordingTick);
     final c = _controller;
     // Already handed over by _minimise — the dock owns it and disposing here
     // would kill the audio the mini player exists to preserve.
@@ -157,7 +308,23 @@ class _ReplayScreenState extends State<ReplayScreen> {
       ),
       // A player is one of the surfaces that breaks out of the text column —
       // capped only so the video doesn't stretch absurdly on a 32" display.
-      body: NileMaxWidth(maxWidth: 1100, child: Center(child: _buildContent())),
+      body: NileMaxWidth(
+        maxWidth: 1100,
+        child: _chapters == null
+            ? Center(child: _buildContent())
+            : Column(
+                children: [
+                  _chapterBar(),
+                  Expanded(
+                    child: Center(
+                      child: _chapter == _Chapter.film
+                          ? _filmView()
+                          : _buildContent(),
+                    ),
+                  ),
+                ],
+              ),
+      ),
     );
   }
 
@@ -259,3 +426,5 @@ class _Controls extends StatelessWidget {
     );
   }
 }
+
+enum _Chapter { intro, film, qa }

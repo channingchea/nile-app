@@ -213,7 +213,7 @@
 
   function render() {
     const meta = roomMeta();
-    if (meta.mode === "interview") {
+    if (meta.mode === "interview" || meta.mode === "premiere") {
       const report = renderStage(meta);
       if (t0 == null) return;
       const metaRaw = room.metadata || "";
@@ -277,7 +277,7 @@
     render();
   });
   // Countdowns ("you're on in 5") end without any room event.
-  setInterval(() => { if (roomMeta().mode === "interview") render(); }, 500);
+  setInterval(() => { const m = roomMeta().mode; if (m === "interview" || m === "premiere") render(); }, 500);
   for (const ev of [
     LK.RoomEvent.RoomMetadataChanged,
     LK.RoomEvent.ParticipantMetadataChanged,

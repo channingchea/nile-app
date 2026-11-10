@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart' show HapticFeedback;
 import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart' show RealtimeChannel;
+import '../services/analytics.dart';
 import '../services/supabase_client.dart';
 import '../services/block_service.dart';
 import '../services/camera_status.dart';
@@ -27,6 +28,7 @@ import '../services/livekit_service.dart';
 import '../services/live_elements.dart';
 import '../services/overlay_layout.dart';
 import '../services/server_clock.dart';
+import '../services/film_sync.dart';
 import '../services/studio_elements_controller.dart';
 import '../services/layout_templates.dart';
 import '../services/studio_layouts.dart';
@@ -48,6 +50,8 @@ import '../widgets/interview_invite_sheet.dart';
 import '../widgets/interview_stage.dart';
 import '../widgets/nile_studio.dart';
 import '../widgets/nile_studio_mode_switch.dart';
+import '../widgets/premiere_panel.dart';
+import '../widgets/premiere_widgets.dart';
 import '../widgets/screen_share_picker.dart';
 import '../widgets/camera_slot_sheet.dart';
 import '../widgets/nile_graphics_layer.dart';
@@ -1245,7 +1249,7 @@ class _CameraScreenState extends State<CameraScreen> {
       // While the host monitors the viewer preview, their own mic stays muted
       // regardless of the broadcast rule — otherwise a host who IS the audio
       // source would feed their decoded monitor back into the stream.
-      if (_isMainAudioSource && !_viewerPreviewOpen) {
+      if (_isMainAudioSource && !_viewerPreviewOpen && !_filmMutesMic) {
         await track.unmute();
       } else {
         await track.mute();
@@ -1347,8 +1351,33 @@ class _CameraScreenState extends State<CameraScreen> {
   final Set<String> _announced = {};
   bool _notesOpen = false;
 
+  /// The stage machinery (green room, guests, stage). Premiere runs on it
+  /// too: its pre-show and its Q&A are a stage.
   bool get _interview =>
-      _isStudio && widget.isHost && _showMode == StudioMode.interview;
+      _isStudio &&
+      widget.isHost &&
+      (_showMode == StudioMode.interview || _showMode == StudioMode.premiere);
+
+  // ── Premiere (docs/plans/studio-modes.md, phase 7) ──────────────────────
+
+  bool get _premiere =>
+      _isStudio && widget.isHost && _showMode == StudioMode.premiere;
+
+  /// The film clock (room metadata `film`).
+  FilmState _film = FilmState.none;
+
+  /// The host hears the film in their monitor (off: no echo into the mic).
+  bool _hearFilm = false;
+
+  /// Wakes when the film changes phase by itself (intermission over, credits).
+  Timer? _filmTimer;
+  bool _endingFilm = false;
+
+  bool get _filmOnScreen =>
+      _premiere && segmentOf(_film, ServerClock.now()) == ShowSegment.film;
+
+  /// The host's mic goes quiet while the film plays, unless Commentary is on.
+  bool get _filmMutesMic => _filmOnScreen && !_film.commentary;
 
   /// Another of the host's own devices is publishing (a phone running a
   /// camera). The Studio leaving Sound Check doesn't cancel the show then.
@@ -1703,6 +1732,7 @@ class _CameraScreenState extends State<CameraScreen> {
   @override
   void dispose() {
     _stopInterview();
+    _filmTimer?.cancel();
     _guests.dispose();
     _cue.dispose();
     _elementsCtl.dispose();
@@ -2631,6 +2661,7 @@ class _CameraScreenState extends State<CameraScreen> {
     }
     final stage = StageState.fromRoomMetadata(raw);
     if (stage != _stage && mounted) setState(() => _stage = stage);
+    _applyFilm(FilmState.fromRoomMetadata(raw));
     final show = ShowControl.fromRoomMetadata(raw);
     if (show != _show && mounted) {
       final reordered = !listEquals(show.slotOrder, _show.slotOrder);
@@ -3232,11 +3263,109 @@ class _CameraScreenState extends State<CameraScreen> {
     _syncInterview();
     try {
       await LivekitService.setMode(eventId: eventId, mode: mode);
+      unawaited(
+        NileAnalytics.capture(NileEvent.studioModeSet, {
+          'mode': mode.wire,
+          'preview': false,
+        }),
+      );
     } catch (e) {
       if (mounted) setState(() => _showMode = before);
       _syncInterview();
       _toast(e.toString().replaceFirst('Exception: ', ''));
     }
+  }
+
+  // ── Premiere ───────────────────────────────────────────────────────────
+
+  void _applyFilm(FilmState film) {
+    if (film == _film) return;
+    final muted = _filmMutesMic;
+    if (mounted) setState(() => _film = film);
+    _onFilmTick();
+    if (muted != _filmMutesMic) unawaited(_syncMicEnabled());
+  }
+
+  /// The film changes phase on its own (an intermission runs out, the credits
+  /// end). Redraw then, re-apply the mic rule, and record a natural end so
+  /// the replay and live-chat see it.
+  void _onFilmTick() {
+    _filmTimer?.cancel();
+    _filmTimer = null;
+    if (!_premiere) return;
+    final now = ServerClock.now();
+    final n = _film.nowAt(now);
+    if (_film.phase == FilmPhase.playing &&
+        n.phase == FilmPhase.ended &&
+        !_endingFilm) {
+      _endingFilm = true;
+      unawaited(
+        _filmControl(
+          'end',
+        ).whenComplete(() => _endingFilm = false).catchError((_) {}),
+      );
+    }
+    final wait = _film.nextChangeIn(now);
+    if (wait != null) {
+      _filmTimer = Timer(Duration(milliseconds: wait + 50), _onFilmTick);
+    }
+    if (mounted) setState(() {});
+    unawaited(_syncMicEnabled());
+  }
+
+  Future<void> _filmControl(
+    String action, {
+    int? positionMs,
+    int? seconds,
+    String? message,
+    bool? on,
+    String? corner,
+  }) async {
+    final eventId = _eventId;
+    if (eventId == null) return;
+    final res = await LivekitService.filmControl(
+      eventId: eventId,
+      film: action,
+      positionMs: positionMs,
+      seconds: seconds,
+      message: message,
+      on: on,
+      corner: corner,
+    );
+    final film = FilmState.fromJson(res['film']);
+    if (film != null) _applyFilm(film);
+    unawaited(NileAnalytics.capture(NileEvent.filmControl, {'action': action}));
+  }
+
+  /// Premiere's monitor: the film in step with viewers while it plays, the
+  /// stage before and after, with the transport under it.
+  Widget _buildPremiereMonitor(List<GreenRoomEntry> people) {
+    final live = _state == CameraState.live;
+    final pk = _eventPk;
+    return Column(
+      children: [
+        Expanded(
+          child: _filmOnScreen && pk != null
+              ? PremiereFilmStage(
+                  eventId: pk,
+                  film: _film,
+                  now: ServerClock.now,
+                  muted: !_hearFilm,
+                  protect: false,
+                )
+              : _buildStageMonitor(people),
+        ),
+        PremierePanel(
+          film: _film,
+          now: ServerClock.now,
+          onControl: _filmControl,
+          canPlay: live,
+          playHint: 'Start the show first',
+          listening: _hearFilm,
+          onListen: (v) => setState(() => _hearFilm = v),
+        ),
+      ],
+    );
   }
 
   // ── Interview (docs/plans/studio-modes.md, phase 4) ─────────────────────
@@ -3418,6 +3547,13 @@ class _CameraScreenState extends State<CameraScreen> {
         identity: e.identity,
         to: to,
       );
+      if (to == GuestStatus.onStage) {
+        unawaited(
+          NileAnalytics.capture(NileEvent.guestBroughtOn, {
+            'on_stage': _stage.entries.length + 1,
+          }),
+        );
+      }
     } catch (err) {
       final msg = err.toString().replaceFirst('Exception: ', '');
       _toast(
@@ -3437,6 +3573,9 @@ class _CameraScreenState extends State<CameraScreen> {
         eventId: eventId,
         userId: userId,
         admit: admit,
+      );
+      unawaited(
+        NileAnalytics.capture(NileEvent.guestAdmitted, {'admitted': admit}),
       );
     } catch (err) {
       _toast(err.toString().replaceFirst('Exception: ', ''));
@@ -5784,7 +5923,11 @@ class _CameraScreenState extends State<CameraScreen> {
       sourceActions: _sourceActions,
       // Interview: the green room and the stage replace cameras and monitor.
       sourceColumn: interview ? _buildGreenRoom(people) : null,
-      monitor: interview ? _buildStageMonitor(people) : null,
+      monitor: _premiere
+          ? _buildPremiereMonitor(people)
+          : interview
+          ? _buildStageMonitor(people)
+          : null,
       selectedIdentity: _selectedSourceId,
       onSelectSource: (id) => setState(() => _selectedSourceId = id),
       // Ejecting someone is the host's call, not an operator's — same bar as

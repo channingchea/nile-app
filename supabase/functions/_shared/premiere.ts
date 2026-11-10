@@ -55,6 +55,7 @@ export type DetailsPatch = {
   chat_policy?: string;
   poster_url?: string | null;
   rights_confirmed_at?: string | null;
+  ask_rating?: boolean;
 };
 
 /**
@@ -97,6 +98,10 @@ export function cleanDetails(
   if ("rightsConfirmed" in body) {
     if (typeof body.rightsConfirmed !== "boolean") return { error: "rightsConfirmed must be true or false" };
     patch.rights_confirmed_at = body.rightsConfirmed ? new Date(now).toISOString() : null;
+  }
+  if ("askRating" in body) {
+    if (typeof body.askRating !== "boolean") return { error: "askRating must be true or false" };
+    patch.ask_rating = body.askRating;
   }
   if (Object.keys(patch).length === 0) return { error: "Nothing to change" };
   return { patch };

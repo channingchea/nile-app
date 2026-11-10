@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 
+import '../services/analytics.dart';
 import '../services/interview.dart';
 import '../services/interview_service.dart';
 import '../services/livekit_service.dart';
@@ -139,6 +140,9 @@ class _InterviewInviteSheetState extends State<InterviewInviteSheet> {
         eventId: widget.eventId,
         userId: u.id,
         title: title.isEmpty ? null : title,
+      );
+      unawaited(
+        NileAnalytics.capture(NileEvent.guestInvited, {'via': 'username'}),
       );
       if (mounted) setState(() => _invited.add(u.id));
     } catch (e) {

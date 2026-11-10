@@ -37,6 +37,7 @@ class MainFlutterWindow: NSWindow {
 
     RegisterGeneratedPlugins(registry: flutterViewController)
     installHostChannel(flutterViewController)
+    installCaptureGuard(flutterViewController)
 
     super.awakeFromNib()
   }
@@ -145,5 +146,24 @@ class MainFlutterWindow: NSWindow {
     }
 
     hostChannel = channel
+  }
+
+  // MARK: - nile/capture_guard
+
+  private var captureChannel: FlutterMethodChannel?
+
+  /// Premiere's recording blackout (lib/services/capture_guard.dart): while a
+  /// film plays the window is left out of screen sharing and screen capture.
+  private func installCaptureGuard(_ controller: FlutterViewController) {
+    let channel = FlutterMethodChannel(
+      name: "nile/capture_guard",
+      binaryMessenger: controller.engine.binaryMessenger
+    )
+    channel.setMethodCallHandler { [weak self] call, result in
+      guard call.method == "protect" else { return result(FlutterMethodNotImplemented) }
+      self?.sharingType = (call.arguments as? Bool ?? false) ? .none : .readOnly
+      result(false)
+    }
+    captureChannel = channel
   }
 }

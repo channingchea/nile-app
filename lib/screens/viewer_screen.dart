@@ -17,6 +17,9 @@ import '../services/deep_link_service.dart';
 import '../services/event_service.dart';
 import '../services/follow_service.dart';
 import '../services/interview.dart' show StageState;
+import '../services/film_sync.dart';
+import '../services/premiere.dart' show ChatPolicy;
+import '../widgets/premiere_widgets.dart';
 import '../services/interview_viewer.dart';
 import '../services/livekit_service.dart';
 import '../services/live_elements.dart';
@@ -157,6 +160,17 @@ class _ViewerScreenState extends State<ViewerScreen>
   // screen when the next "you're on in 5" countdown ends.
   StudioMode _mode = StudioMode.multicam;
   StageState _stage = StageState.empty;
+
+  // ── Premiere (docs/plans/studio-modes.md, phases 7-8) ────────────────────
+  FilmState _film = FilmState.none;
+  Timer? _filmTimer;
+
+  /// The viewer picked the host's camera over the film.
+  bool _watchingHost = false;
+  ShowSegment? _lastSegment;
+  bool _closingSlate = false;
+  bool _askRating = false;
+  ChatPolicy _filmChat = ChatPolicy.open;
   Timer? _stageTimer;
 
   /// Watching the host's content angle instead of the stage.
@@ -342,6 +356,7 @@ class _ViewerScreenState extends State<ViewerScreen>
     _angleHeartbeat?.cancel();
     _angleHeartbeat = null;
     _stageTimer?.cancel();
+    _filmTimer?.cancel();
     _stageTimer = null;
   }
 
@@ -1937,7 +1952,25 @@ class _ViewerScreenState extends State<ViewerScreen>
 
   // ── Interview (studio modes phase 5) ──────────────────────────────────────
 
-  bool get _interview => _mode == StudioMode.interview;
+  /// The stage show: Interview, and Premiere's pre-show and Q&A.
+  bool get _interview =>
+      _mode == StudioMode.interview || _mode == StudioMode.premiere;
+
+  bool get _premiere => _mode == StudioMode.premiere;
+
+  ShowSegment get _segment =>
+      _premiere ? segmentOf(_film, ServerClock.now()) : ShowSegment.preShow;
+
+  /// The film stage is up.
+  bool get _filmOn => _segment == ShowSegment.film;
+
+  /// While the film plays the stage's sound is the host's commentary only.
+  bool get _stageAudioOn => !_filmOn || _film.commentary;
+
+  /// While the film plays the stage's pictures are needed only for the
+  /// corner picture or when the viewer picked the host's camera.
+  bool get _stageVideoOn =>
+      !_filmOn || _watchingHost || _film.pip != PipCorner.off;
 
   /// Room metadata `mode` and `stage`. The mode only changes before the show
   /// is live (the server locks it, and going live rejoins), so there are no
@@ -1945,10 +1978,12 @@ class _ViewerScreenState extends State<ViewerScreen>
   void _applyStage(String? raw) {
     final mode = StudioMode.fromRoomMetadata(raw) ?? _mode;
     final stage = StageState.fromRoomMetadata(raw);
-    if (mode == _mode && stage == _stage) return;
+    final film = FilmState.fromRoomMetadata(raw);
+    if (mode == _mode && stage == _stage && film == _film) return;
     void apply() {
       _mode = mode;
       _stage = stage;
+      _film = film;
       // The content angle went away under the viewer: back to the stage.
       if (ContentAngle.parse(stage.content) == null) _watchingContent = false;
     }
@@ -1973,8 +2008,34 @@ class _ViewerScreenState extends State<ViewerScreen>
     if (wait != null) {
       _stageTimer = Timer(Duration(milliseconds: wait + 20), _onStageTick);
     }
+    _onFilmTick();
     setState(() {});
     _syncStage();
+  }
+
+  /// The film changes phase by itself (an intermission ends, the credits
+  /// roll into the Q&A): wake then. The closing slate goes up as the film
+  /// gives way to the Q&A.
+  void _onFilmTick() {
+    _filmTimer?.cancel();
+    _filmTimer = null;
+    if (!_premiere) return;
+    final now = ServerClock.now();
+    final seg = segmentOf(_film, now);
+    if (_lastSegment == ShowSegment.film && seg == ShowSegment.postShow) {
+      _closingSlate = true;
+    }
+    if (seg != ShowSegment.film) _watchingHost = false;
+    _lastSegment = seg;
+    final wait = _film.nextChangeIn(now);
+    if (wait != null) {
+      _filmTimer = Timer(Duration(milliseconds: wait + 50), () {
+        if (!mounted) return;
+        _onFilmTick();
+        setState(() {});
+        _syncStage();
+      });
+    }
   }
 
   /// Room events only Interview needs. Each is a no-op in multicam.
@@ -2018,10 +2079,10 @@ class _ViewerScreenState extends State<ViewerScreen>
     final roles = _roles();
     final feeds = stageFeeds(
       stage: _stage,
-      visible: _stageNow(roles),
+      visible: _stageVideoOn ? _stageNow(roles) : const [],
       roles: roles,
       masterAudio: _masterAudioIdentity,
-      audioOn: _audioEnabled,
+      audioOn: _audioEnabled && _stageAudioOn,
     );
     for (final p in room.remoteParticipants.values) {
       final id = p.identity;
@@ -2284,6 +2345,22 @@ class _ViewerScreenState extends State<ViewerScreen>
   /// the countdown rather than shrinking it into a card.
   Widget _buildLobbyBackground() {
     final spons = _sponsorship;
+    // Premiere, unsponsored: the trailer (muted, tap for sound) or the
+    // poster. A sponsor keeps the whole background they paid for.
+    if (_premiere && spons == null && _eventDbId != null) {
+      return PremiereTrailer(
+        key: ValueKey('lobby-trailer-$_eventDbId'),
+        eventId: _eventDbId!,
+        fallback: _coverImageUrl != null
+            ? Image.network(
+                _coverImageUrl!,
+                fit: BoxFit.cover,
+                errorBuilder: (_, _, _) =>
+                    ColoredBox(color: NileColors.bgSurface),
+              )
+            : null,
+      );
+    }
     final controller = _sponsorController;
     final videoReady = controller != null && controller.value.isInitialized;
     final bgImageUrl = spons == null
@@ -2557,6 +2634,8 @@ class _ViewerScreenState extends State<ViewerScreen>
 
         // Collapsible live chat — sits above the video, slides off when closed
         if (!_streamEnded) _buildChatOverlay(),
+
+        if (_closingSlate && !_streamEnded) _buildClosingSlate(),
 
         // Reconnecting overlay — room dropped but the show is still live.
         if (_reconnecting && !_streamEnded) _buildReconnectingOverlay(),
@@ -3188,6 +3267,25 @@ class _ViewerScreenState extends State<ViewerScreen>
   }
 
   Widget _buildChatInput(double bottomInset) {
+    if (_filmOn &&
+        _filmChat == ChatPolicy.reactions &&
+        _hostId != supabase.auth.currentUser?.id) {
+      return Padding(
+        padding: EdgeInsets.fromLTRB(
+          NileSpacing.s12,
+          NileSpacing.s12,
+          NileSpacing.s12,
+          NileSpacing.s12 + bottomInset,
+        ),
+        child: Text(
+          'Reactions only while the film plays. Chat opens for the Q&A.',
+          textAlign: TextAlign.center,
+          style: NileTextStyles.bodySm().copyWith(
+            color: NileColors.txtTertiary,
+          ),
+        ),
+      );
+    }
     return Padding(
       padding: EdgeInsets.fromLTRB(
         NileSpacing.s12,
@@ -3568,6 +3666,7 @@ class _ViewerScreenState extends State<ViewerScreen>
     if (_eventStatus != 'live' && !_streamEnded) {
       return _buildWaitingForCameras();
     }
+    if (_filmOn && !_streamEnded) return _buildFilmShow(desktop: desktop);
     final lineup = _stageNow();
     final angles = interviewAngles(
       _stage.content,
@@ -3632,6 +3731,86 @@ class _ViewerScreenState extends State<ViewerScreen>
       },
     );
   }
+
+  /// Premiere's film: full size, the host in a corner when the Studio puts
+  /// them there, and a Film | Host choice under it.
+  Widget _buildFilmShow({required bool desktop}) {
+    final pk = _eventDbId;
+    // Built only when it's on screen: drawing the stage counts a sponsor's
+    // graphics impression.
+    final host = _watchingHost || pk == null || _film.pip != PipCorner.off
+        ? _buildInterviewPicture(_stageNow(), null)
+        : null;
+    final picture = _watchingHost || pk == null
+        ? host!
+        : PremiereFilmStage(
+            eventId: pk,
+            film: _film,
+            now: ServerClock.now,
+            muted: !_audioEnabled,
+            host: host,
+            onPlayback: (p) {
+              if (!mounted) return;
+              setState(() {
+                _askRating = p.askRating;
+                _filmChat = p.chatPolicy;
+              });
+            },
+          );
+    Widget choice(String label, bool host) => Padding(
+      padding: const EdgeInsets.all(NileSpacing.s4),
+      child: ChoiceChip(
+        label: Text(label),
+        selected: _watchingHost == host,
+        onSelected: (_) {
+          setState(() => _watchingHost = host);
+          _syncStage();
+        },
+      ),
+    );
+    return Column(
+      children: [
+        _buildAudioBar(),
+        Expanded(
+          child: desktop
+              ? Stack(
+                  children: [
+                    Positioned.fill(child: picture),
+                    _buildReactionOverlay(),
+                    if (_canReact) _buildReactionRail(),
+                  ],
+                )
+              : picture,
+        ),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [choice('Film', false), choice('Host', true)],
+        ),
+      ],
+    );
+  }
+
+  /// "Thanks for watching" over the Q&A as the film ends.
+  Widget _buildClosingSlate() => Positioned.fill(
+    child: ColoredBox(
+      color: NileColors.bgPage.withValues(alpha: 0.6),
+      child: PremiereClosingSlate(
+        eventId: _eventDbId ?? '',
+        hostName: _hostHandle ?? _hostUsername ?? 'the filmmaker',
+        askRating: _askRating && _eventDbId != null,
+        onClose: () => setState(() => _closingSlate = false),
+        onTip: _canTip
+            ? () {
+                setState(() => _closingSlate = false);
+                _openTipSheet();
+              }
+            : null,
+        onProfile: _hostId == null
+            ? null
+            : () => context.push(NileRoutes.profile(_hostId!)),
+      ),
+    ),
+  );
 
   /// The stage composed from everyone's own feed, with the "All cameras"
   /// graphics over it — or, when picked, the content angle full size.
@@ -3992,6 +4171,7 @@ class _ViewerScreenState extends State<ViewerScreen>
             ],
           ),
         ),
+        if (_closingSlate) _buildClosingSlate(),
         if (_reconnecting) _buildReconnectingOverlay(),
       ],
     );

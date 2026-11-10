@@ -28,6 +28,7 @@
 //   remove-participant host   → { success: true }   ← ejects one participant
 //   set-ready         crew    → { success: true }   ← flags caller's feed ready
 //   start-show        host    → { success: true }   ← stamps showStartedAt anchor + starts replay egress
+//   film-control      host    → { success, film }   ← Premiere transport: play/pause/seek/intermission/hold/end/reset, commentary, pip
 //   stop-egress       host    → { success: true }   ← stops replay egress on show end
 //   replay-exists     viewer  → { available: bool } ← is a ready replay viewable by caller? (drives the CTA)
 //   replay-url        viewer  → { url, durationMs }  ← signed playback URL (ticket-gated)
@@ -103,6 +104,7 @@ import {
 } from "../_shared/interview.ts";
 import { angleIdsOf, cleanAppliedShow, planElements, validateApply } from "../_shared/layouts.ts";
 import { timelineOf } from "../_shared/replay_marks.ts";
+import { applyFilmControl, compactFilm, filmOf, initialFilm } from "../_shared/film.ts";
 
 // CORS headers are per-request, so the JSON responder is built per-request too
 // and handed to the helpers below (they run outside the handler's scope).
@@ -443,6 +445,8 @@ async function handle(req: Request, ctx: ReqCtx, json: Json): Promise<Response> 
       return await setShow(body, user.id, admin, json);
     case "set-mode":
       return await setMode(body, user.id, admin, json);
+    case "film-control":
+      return await filmControl(body, user.id, admin, json);
     case "invite-guest":
       return await inviteGuest(body, user.id, admin, json);
     case "guest-link":
@@ -1553,10 +1557,17 @@ async function setMode(body: any, userId: string, admin: any, json: Json): Promi
   if ("error" in check) return json({ error: check.error }, check.status);
 
   const { error: upd } = await admin.from("events").update({ studio_mode: check.mode }).eq("id", gate.event.id);
-  if (upd) throw upd;
-  // Entering Interview with no stage yet: the host's Studio starts on it.
+  if (upd) {
+    // The mode moves the ticket floor (0153): say so rather than 500.
+    if (String(upd.message).includes("price_below_minimum")) {
+      return json({ error: `This ticket price is too low for ${check.mode === "premiere" ? "Premiere" : "Interview"}. ${upd.hint ?? ""}`.trim() }, 409);
+    }
+    throw upd;
+  }
+  // Entering Interview or Premiere with no stage yet: the host's Studio starts
+  // on it (Premiere's pre-show and Q&A are a stage too).
   const patch: Record<string, unknown> = { mode: check.mode };
-  if (check.mode === "interview" && !meta.stage) {
+  if ((check.mode === "interview" || check.mode === "premiere") && !meta.stage) {
     patch.stage = emptyStage([{ id: studioIdentity(eventId), at: Date.now() }]);
   }
   try {
@@ -1565,6 +1576,47 @@ async function setMode(body: any, userId: string, admin: any, json: Json): Promi
     // No room yet — the event row is enough; viewers read it when they join.
   }
   return json({ success: true, mode: check.mode });
+}
+
+// film-control — Premiere's transport (docs/plans/studio-modes.md, phase 7).
+// Body: { eventId, film: play|pause|resume|seek|intermission|hold|end|reset|
+// commentary|pip, positionMs?, seconds?, message?, on?, corner?, studio }.
+// Host only; while the Studio is in the room only the Studio. The film only
+// moves while the show is live. Writes room metadata `film` (every device
+// follows it) and event_films.film_state (live-chat and the replay read it).
+async function filmControl(body: any, userId: string, admin: any, json: Json): Promise<Response> {
+  const { eventId } = body;
+  if (!eventId) return json({ error: "eventId is required" }, 400);
+  const gate = await requireHost(eventId, userId, admin, json);
+  if (gate instanceof Response) return gate;
+  const roomName = roomNameFor(eventId);
+  const refused = await studioOnly(body, roomName, json);
+  if (refused) return refused;
+
+  const [{ data: ev, error: evErr }, { data: row, error: filmErr }] = await Promise.all([
+    admin.from("events").select("status, studio_mode").eq("id", gate.event.id).single(),
+    admin.from("event_films").select("film_status, film_duration_s, film_state").eq("event_id", gate.event.id).maybeSingle(),
+  ]);
+  if (evErr) throw evErr;
+  if (filmErr) throw filmErr;
+  if (ev.studio_mode !== "premiere") return json({ error: "This show isn't a Premiere" }, 409);
+  const dur = row?.film_status === "ready" ? Math.round(Number(row.film_duration_s) * 1000) || 0 : 0;
+  const meta = await roomMetaOf(roomName);
+  const now = Date.now();
+  const cur = filmOf(meta.film) ?? filmOf(row?.film_state) ?? initialFilm(dur, now);
+  // A replaced film (before the show) brings its own length.
+  const next = applyFilmControl({ ...cur, dur: dur || cur.dur }, body, now, ev.status === "live");
+  if ("error" in next) return json({ error: next.error }, next.status);
+  const film = compactFilm(next.film);
+  try {
+    await roomService.updateRoomMetadata(roomName, JSON.stringify(mergeRoomMeta(meta, { film })));
+  } catch (err) {
+    log("warn", { action: "film-control", roomName, error: String(err) });
+    return json({ error: "The show's room isn't open yet" }, 409);
+  }
+  const { error: saveErr } = await admin.from("event_films").update({ film_state: film }).eq("event_id", gate.event.id);
+  if (saveErr) log("warn", { action: "film-control", stage: "save", error: String(saveErr.message ?? saveErr) });
+  return json({ success: true, film, serverNow: now });
 }
 
 // ── Interview mode: guests and the stage (docs/plans/studio-modes.md) ─────────

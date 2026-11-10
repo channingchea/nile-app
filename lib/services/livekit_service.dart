@@ -379,6 +379,29 @@ class LivekitService {
     'studio': true,
   });
 
+  /// Premiere's transport (docs/plans/studio-modes.md, phase 7). [film] is
+  /// play, pause, resume, seek, intermission, hold, end, reset, commentary or
+  /// pip. Returns the new room metadata `film` object.
+  static Future<Map> filmControl({
+    required String eventId,
+    required String film,
+    int? positionMs,
+    int? seconds,
+    String? message,
+    bool? on,
+    String? corner,
+  }) => _invoke<Map>({
+    'action': 'film-control',
+    'eventId': eventId,
+    'film': film,
+    'positionMs': ?positionMs,
+    'seconds': ?seconds,
+    'message': ?message,
+    'on': ?on,
+    'corner': ?corner,
+    'studio': true,
+  });
+
   // ── Interview mode (docs/plans/studio-modes.md) ──────────────────────────
 
   /// Host: add a Nile user to the guest list (they get a push).

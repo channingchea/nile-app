@@ -114,11 +114,16 @@ void main() {
         // Interview's guest list and talkback reach the server too.
         'InterviewService',
         'Backstage',
+        // Premiere's rehearsal runs a demo film locally, never the real one.
+        'PremiereService',
+        'filmControl',
+        'CaptureGuard',
       ];
       for (final path in [
         'lib/screens/studio_preview_screen.dart',
         'lib/widgets/studio_preview_demo.dart',
         'lib/widgets/studio_setup_interview_demo.dart',
+        'lib/widgets/premiere_panel.dart',
       ]) {
         // Comments may describe what the file avoids; code may not use it.
         final code = File(path)

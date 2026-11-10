@@ -106,32 +106,49 @@ Implementation notes, Phase 6 (2026-11-02):
 - App: `lib/services/premiere.dart` (model, checklist, .srt→.vtt), `premiere_service.dart`, `screens/premiere_film_screen.dart`, `widgets/premiere_checklist.dart`; new dependency `file_selector`.
 
 ## Phase 7: Premiere — synced playback and run of show
-- [ ] Room metadata `film`: state (pre/playing/paused/intermission/hold/ended), positionMs, at (server ms), segment (pre-show/film/post-show)
-- [ ] livekit fn `film-control`: play / pause / intermission (duration) / hold (message) / resume; host/Studio only
-- [ ] `FilmSyncPlayer` (video_player, HLS): target = position + elapsed; drift 0.3–1.5 s corrected by 0.95–1.05× speed, >1.5 s seeks; late joiners seek
-- [ ] Run of show: pre-show = host camera stage; Play = film stage; credits end → post-show (host camera + green room Q&A) automatically; manual override
-- [ ] Host camera as second angle, or picture-in-picture toggle with corner choice
-- [ ] Audio: host mic auto-mutes at film start; Commentary switch = host mic on + film ducked to 30% on viewer devices
-- [ ] Studio Premiere panel: transport buttons, progress + time remaining, Commentary and PiP toggles, in-sync film monitor
-- [ ] Countdown lobby: poster, muted trailer (tap for sound), countdown; built into the Pre-Show lobby, sponsor slot kept
-- [ ] Trailer on the event page (event_detail_screen): muted autoplay at the top, tap for sound, poster shown while it loads or if there's no trailer; plays for anyone, before or after buying a ticket
-- [ ] Rating card before the film; 18+ rating runs the existing age check before a playback token is issued
+- [x] Room metadata `film`: state (pre/playing/paused/intermission/hold/ended), positionMs, at (server ms), segment (pre-show/film/post-show)
+- [x] livekit fn `film-control`: play / pause / intermission (duration) / hold (message) / resume; host/Studio only
+- [x] `FilmSyncPlayer` (video_player, HLS): target = position + elapsed; drift 0.3–1.5 s corrected by 0.95–1.05× speed, >1.5 s seeks; late joiners seek
+- [x] Run of show: pre-show = host camera stage; Play = film stage; credits end → post-show (host camera + green room Q&A) automatically; manual override
+- [x] Host camera as second angle, or picture-in-picture toggle with corner choice
+- [x] Audio: host mic auto-mutes at film start; Commentary switch = host mic on + film ducked to 30% on viewer devices
+- [x] Studio Premiere panel: transport buttons, progress + time remaining, Commentary and PiP toggles, in-sync film monitor
+- [x] Countdown lobby: poster, muted trailer (tap for sound), countdown; built into the Pre-Show lobby, sponsor slot kept
+- [x] Trailer on the event page (event_detail_screen): muted autoplay at the top, tap for sound, poster shown while it loads or if there's no trailer; plays for anyone, before or after buying a ticket
+- [x] Rating card before the film; 18+ rating runs the existing age check before a playback token is issued
 
 ## Phase 8: Premiere — protection, chat, captions, closing, replay
-- [ ] Screen-recording blackout: iOS covers the film while captured; Android FLAG_SECURE on the premiere screen; macOS window sharingType none during the film; explanatory slate
-- [ ] Captions toggle (WebVTT from Stream via video_player closed captions)
-- [ ] Chat policy enforced in live-chat while the film plays (reactions only = emoji bar); reopens for post-show
-- [ ] Post-show Q&A reuses the interview green room and stage
-- [ ] "Thanks for watching" closing slate: tip button, filmmaker profile link, optional "Rate the film" poll
-- [ ] Replay per filmmaker choice, as chapters: Intro (room recording) · Film (Stream) · Q&A (room recording), split at logged film start/end
-- [ ] Studio Setup rehearsal with a short demo film and all transport controls
+- [x] Screen-recording blackout: iOS covers the film while captured; Android FLAG_SECURE on the premiere screen; macOS window sharingType none during the film; explanatory slate
+- [x] Captions toggle (WebVTT from Stream via video_player closed captions)
+- [x] Chat policy enforced in live-chat while the film plays (reactions only = emoji bar); reopens for post-show
+- [x] Post-show Q&A reuses the interview green room and stage
+- [x] "Thanks for watching" closing slate: tip button, filmmaker profile link, optional "Rate the film" poll
+- [x] Replay per filmmaker choice, as chapters: Intro (room recording) · Film (Stream) · Q&A (room recording), split at logged film start/end
+- [x] Studio Setup rehearsal with a short demo film and all transport controls
 
 ## Phase 9: Pricing, analytics, website, verification
-- [ ] Mode-aware `compute_min_ticket_cents`: premiere adds film hours × $0.06/viewer + storage share; interview adds guests × hours; also include recording cost (fee-analysis guardrail 1)
-- [ ] PostHog events for modes, guests, film actions (counts only, never names)
-- [ ] Update /filmmakers page + FAQ: upload instead of screen share (no em dashes)
-- [ ] Tests: Deno (stage limit, mode lock, film-control auth, playback tokens), Flutter (film drift math, stage layout math), extend the Studio Setup safety test
-- [ ] On-device checklist; min_build bump at ship
+- [x] Mode-aware `compute_min_ticket_cents`: premiere adds film hours × $0.06/viewer + storage share; interview adds guests × hours; also include recording cost (fee-analysis guardrail 1)
+- [x] PostHog events for modes, guests, film actions (counts only, never names)
+- [x] Update /filmmakers page + FAQ: upload instead of screen share (no em dashes)
+- [x] Tests: Deno (stage limit, mode lock, film-control auth, playback tokens), Flutter (film drift math, stage layout math), extend the Studio Setup safety test
+- [ ] On-device checklist; min_build bump at ship (both still open: device pass is Channing's; bump once build 7 is on TestFlight, Firebase and R2)
+
+Implementation notes, Phases 7-9 (2026-11-09):
+- Film clock: `_shared/film.ts` (tests `tests/film_test.ts`) mirrored by `lib/services/film_sync.dart`. Room metadata `film` = {state, pos, at, dur, until?, msg?, commentary, pip, startedAt?, endedAt?}. Devices compute position from it and ServerClock; an intermission resumes by itself at `until`, and a playing film past its length is "ended" (post-show starts with no server call; the Studio records the end with film-control `end`).
+- livekit `film-control` (host, Studio-only while in the room; Premiere only; transport only while live, commentary/pip any time). Writes room metadata and `event_films.film_state` (0153). set-mode seeds the stage for Premiere too and turns the new price floor's refusal into a 409 with the minimum.
+- Premiere reuses the Interview machinery: `_interview` in camera_screen and viewer_screen now covers Premiere, so pre-show and Q&A are the stage (green room, guests, layouts). The film segment swaps in `PremiereFilmStage` (viewer) / the Premiere monitor + `PremierePanel` (Studio).
+- `FilmSyncPlayer` (lib/widgets/film_sync_player.dart): 1 s sync loop, syncStep (<0.3 s nothing, 0.95-1.05x up to 1.5 s, seek beyond), 2 s settle after a seek, swaps in a fresh signed stream 5 min before the 1 h token ends. Volume 30% under Commentary. Viewers don't subscribe to stage audio during the film unless Commentary is on, nor stage video unless PiP or the Host angle is picked. The Studio mutes its own mic while the film plays without Commentary.
+- playback-token now returns rating, content warning, chat policy, askRating and signed caption URLs; 18+ films need user_age_verification to show 18+ (store age band or birthday), else 403 code "age". Captions: our own copy in the private `film-captions` bucket (video_player can't pick HLS subtitle tracks).
+- Chat: live-chat blocks non-crew text during the film when the policy is reactions-only, and holds slow mode at 10 s minimum when "slow". Viewer input shows a note instead.
+- Screen-recording blackout: `CaptureGuard` + native `nile/capture_guard` (iOS capturedDidChange → cover slate; Android FLAG_SECURE; macOS sharingType .none). Held by every viewer FilmSyncPlayer.
+- Closing slate (tip, profile, optional 1-5 stars → `film_ratings`, host sees the average on the Film screen; "Ask viewers to rate the film" switch). Replay: Intro · Film · Q&A chips via premiere `replay-chapters` (film segment wall times) against the grid replay's startWall; Film plays the Stream video through playback-token (replay window and ticket rules apply).
+- Lobby + event page: `PremiereTrailer` (muted loop, tap for sound, poster while loading or when there's no trailer). A sponsored lobby keeps the sponsor's full-bleed creative.
+- Studio Setup: Premiere rehearses the green room plus a 3-minute stand-in film driven by `rehearseFilmControl` (local); safety test bans PremiereService/filmControl/CaptureGuard there.
+- Pricing (0153): every mode adds recording (120c/h ÷ 10 tickets); Interview adds 2 assumed guests as cameras; Premiere adds Stream delivery (6c/viewer-h) and storage share (0.5c/min ÷ 10) for a film the length of the show. 2 h / 1 cam: Multicam $2.50, Interview $3.00, Premiere $3.00. A mode change re-checks the price.
+- PostHog: studio_mode_set, guest_invited, guest_brought_on, guest_admitted, film_upload_started, film_control, film_watched, film_rated (kinds and counts only).
+- Website: /filmmakers and the FAQ now describe upload + synced playback (committed in nile-website, not pushed until build 7 ships).
+- Recorder draws the stage for Premiere too (republished to R2 v1). Verified 2026-11-09: unsigned manifest requests for the uploaded film and trailer return 401.
+- Not tested on hardware: all of Phases 7-9.
 
 ## Open questions / risks
 - Commentary audio vs the HLS picture can be up to ~0.5 s apart; verify on hardware.

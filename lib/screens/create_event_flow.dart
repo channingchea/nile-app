@@ -230,6 +230,7 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
   int get _minPriceCents => _pricing.minTicketCentsFor(
     durationMinutes: _parsedDurationMinutes() ?? 60,
     cameraCount: _cameraCount,
+    mode: _draft.studioMode,
   );
 
   /// Price typed right now, in cents (0 when blank).

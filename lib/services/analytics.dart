@@ -178,7 +178,19 @@ enum NileEvent {
   layoutSaved('layout_saved'),
   layoutCued('layout_cued'),
   layoutApplied('layout_applied'),
-  layoutMissingItems('layout_missing_items');
+  layoutMissingItems('layout_missing_items'),
+
+  // Studio modes. The mode, the guest route and counts, the film action and
+  // the media kind only — never a name, a username or a title. `preview` as
+  // for elements.
+  studioModeSet('studio_mode_set'),
+  guestInvited('guest_invited'),
+  guestBroughtOn('guest_brought_on'),
+  guestAdmitted('guest_admitted'),
+  filmUploadStarted('film_upload_started'),
+  filmControl('film_control'),
+  filmWatched('film_watched'),
+  filmRated('film_rated');
 
   const NileEvent(this.name);
 

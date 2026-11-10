@@ -149,6 +149,7 @@ class _EditEventScreenState extends State<EditEventScreen> {
   int get _minPriceCents => _pricing.minTicketCentsFor(
     durationMinutes: _parsedDurationMinutes() ?? 60,
     cameraCount: _cameraCount,
+    mode: _studioMode,
   );
 
   int get _typedPriceCents {

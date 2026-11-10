@@ -25,6 +25,9 @@ import '../services/studio_graphics.dart';
 import '../services/studio_layouts.dart';
 import '../services/studio_layouts_controller.dart';
 import '../services/studio_mode.dart';
+import '../services/film_sync.dart';
+import '../widgets/premiere_panel.dart';
+import '../widgets/premiere_widgets.dart';
 import '../services/studio_prefs.dart';
 import '../theme.dart';
 import '../widgets/audio_meter.dart';
@@ -89,9 +92,18 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
   bool _started = false;
 
   /// The mode switch, rehearsed: nothing is saved. Interview swaps in the
-  /// green room and stage; Premiere keeps the multicam layout until it ships
+  /// green room and stage; Premiere adds a demo film and its transport
   /// (docs/plans/studio-modes.md).
   StudioMode _mode = StudioMode.multicam;
+
+  /// Premiere rehearsed: a three-minute stand-in film on the device's clock.
+  FilmState _demoFilm = const FilmState(dur: 3 * 60 * 1000);
+  Timer? _demoFilmTimer;
+
+  static int _wallNow() => DateTime.now().millisecondsSinceEpoch;
+
+  bool get _stageMode =>
+      _mode == StudioMode.interview || _mode == StudioMode.premiere;
 
   /// Interview rehearsed: demo guests, the green room and the stage, all
   /// local. Its timer runs only while Interview is on screen.
@@ -221,6 +233,7 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
     _messenger?.clearSnackBars();
     WidgetsBinding.instance.removeObserver(this);
     _hideTimer?.cancel();
+    _demoFilmTimer?.cancel();
     _cue.dispose();
     _demo
       ..removeListener(_onDemo)
@@ -698,7 +711,7 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
       for (final e in r.elements) e.copyWith(version: e.version + 1),
     ]);
     _demo.applyShow(r.show);
-    if (_mode == StudioMode.interview && l.stage != null) {
+    if (_stageMode && l.stage != null) {
       _interview.setLayout(l.stage!);
     }
     if (mounted) setState(() => _layout = r.overlay);
@@ -710,7 +723,7 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
     slots: _slots,
     // Interview lists its stage templates first.
     templates: [
-      if (_mode == StudioMode.interview)
+      if (_stageMode)
         ...interviewTemplates(
           logoPath: _brandKit?.logoPath,
           hostName: 'Your name',
@@ -1046,13 +1059,81 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
 
   void _setMode(StudioMode m) {
     setState(() => _mode = m);
+    NileAnalytics.capture(NileEvent.studioModeSet, {
+      'mode': m.wire,
+      'preview': true,
+    });
     _syncInterview();
   }
 
-  /// Interview's demo only runs while it is on screen.
-  void _syncInterview() => _mode == StudioMode.interview && _started
-      ? _interview.start()
-      : _interview.stop();
+  /// Interview's demo only runs while it is on screen (Premiere's pre-show
+  /// and Q&A use it too).
+  void _syncInterview() =>
+      _stageMode && _started ? _interview.start() : _interview.stop();
+
+  /// Premiere rehearsal: transport presses run locally on the demo film.
+  Future<void> _rehearseFilm(
+    String action, {
+    int? positionMs,
+    int? seconds,
+    String? message,
+    bool? on,
+    String? corner,
+  }) async {
+    setState(
+      () => _demoFilm = rehearseFilmControl(
+        _demoFilm,
+        action,
+        _wallNow(),
+        positionMs: positionMs,
+        seconds: seconds,
+        message: message,
+        on: on,
+        corner: corner,
+      ),
+    );
+    _onDemoFilmTick();
+  }
+
+  /// Redraw as the demo film changes phase by itself (and at the end).
+  void _onDemoFilmTick() {
+    _demoFilmTimer?.cancel();
+    final wait = _demoFilm.nextChangeIn(_wallNow());
+    _demoFilmTimer = wait == null
+        ? null
+        : Timer(Duration(milliseconds: wait + 50), () {
+            if (mounted) setState(() {});
+            _onDemoFilmTick();
+          });
+  }
+
+  Widget _buildPremiereMonitor() {
+    final onFilm = segmentOf(_demoFilm, _wallNow()) == ShowSegment.film;
+    return Column(
+      children: [
+        Expanded(
+          child: onFilm
+              ? PremiereFilmStage(
+                  eventId: 'rehearsal',
+                  film: _demoFilm,
+                  now: _wallNow,
+                  protect: false,
+                  demo: (pos) => DemoFilmPicture(
+                    positionMs: pos,
+                    durationMs: _demoFilm.dur,
+                  ),
+                )
+              : _buildStageMonitor(),
+        ),
+        PremierePanel(
+          film: _demoFilm,
+          now: _wallNow,
+          onControl: _rehearseFilm,
+          canPlay: true,
+        ),
+      ],
+    );
+  }
 
   /// A guest's countdown ran out: their name lower third on every camera for
   /// 8 s, as the real Studio introduces them.
@@ -1553,7 +1634,7 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
 
   Widget _buildStudio(bool hasChatColumn) {
     final live = _demo.isLive;
-    final interview = _mode == StudioMode.interview;
+    final interview = _stageMode;
     final selfIsMaster = _demo.master == _selfId;
     return StudioGraphicsHotkeys(
       // Not while a dialog (the graphics panel among them) is over the Studio.
@@ -1586,7 +1667,11 @@ class _StudioPreviewScreenState extends State<StudioPreviewScreen>
             previewOverlayFor: (s) => _overlayFor(s, preview: true),
             sourceActions: _sourceActions,
             sourceColumn: interview ? _greenRoomColumn() : null,
-            monitor: interview ? _buildStageMonitor() : null,
+            monitor: _mode == StudioMode.premiere
+                ? _buildPremiereMonitor()
+                : interview
+                ? _buildStageMonitor()
+                : null,
             stats: NileStudioStats(
               isLive: live,
               elapsed: _demo.elapsed,

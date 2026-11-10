@@ -57,6 +57,7 @@ class _PremiereFilmScreenState extends State<PremiereFilmScreen> {
   final _resumable = <FilmKind, ({String path, Uri url, String name})?>{};
   final _wasRunning = <FilmKind, bool>{};
   bool _busy = false;
+  Future<({int count, double? average})>? _ratings;
 
   PremiereUploads get _uploads => PremiereUploads.instance;
 
@@ -590,6 +591,54 @@ class _PremiereFilmScreenState extends State<PremiereFilmScreen> {
                 : (p) => _run(
                     () => PremiereService.setDetails(widget.eventId, chat: p),
                   ),
+          ),
+        ),
+        _Section(
+          title: 'After the film',
+          subtitle:
+              'A “Thanks for watching” card opens the Q&A with a tip button '
+              'and a link to your profile.',
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                value: film.askRating,
+                onChanged: _busy || locked
+                    ? null
+                    : (v) => _run(
+                        () => PremiereService.setDetails(
+                          widget.eventId,
+                          askRating: v,
+                        ),
+                      ),
+                title: Text(
+                  'Ask viewers to rate the film',
+                  style: NileTextStyles.bodyMd(),
+                ),
+                subtitle: Text(
+                  'One to five stars. Only you see the results.',
+                  style: NileTextStyles.bodySm().copyWith(
+                    color: NileColors.txtTertiary,
+                  ),
+                ),
+              ),
+              if (film.askRating)
+                FutureBuilder(
+                  future: _ratings ??= PremiereService.ratings(widget.eventId),
+                  builder: (context, snap) {
+                    final r = snap.data;
+                    if (r == null || r.count == 0) {
+                      return const SizedBox.shrink();
+                    }
+                    return Text(
+                      'Rated ${r.average!.toStringAsFixed(1)} of 5 by '
+                      '${r.count} viewer${r.count == 1 ? '' : 's'}',
+                      style: NileTextStyles.labelMd(),
+                    );
+                  },
+                ),
+            ],
           ),
         ),
         const SizedBox(height: NileSpacing.s24),

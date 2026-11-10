@@ -3,6 +3,9 @@ import UIKit
 
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
+  private var captureChannel: FlutterMethodChannel?
+  private var captureObserver: NSObjectProtocol?
+
   override func application(
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
@@ -20,6 +23,31 @@ import UIKit
     if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "NileAgeSignals") {
       AgeSignalsChannel.register(with: registrar) { [weak self] in
         self?.window?.rootViewController
+      }
+    }
+
+    // Premiere's recording blackout (lib/services/capture_guard.dart): while
+    // a film plays, tell Dart whenever the screen starts or stops being
+    // recorded, mirrored or AirPlayed, so it can cover the film.
+    if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "NileCaptureGuard") {
+      let channel = FlutterMethodChannel(
+        name: "nile/capture_guard", binaryMessenger: registrar.messenger())
+      captureChannel = channel
+      channel.setMethodCallHandler { [weak self] call, result in
+        guard call.method == "protect", let self else { return result(FlutterMethodNotImplemented) }
+        let on = call.arguments as? Bool ?? false
+        if let o = self.captureObserver {
+          NotificationCenter.default.removeObserver(o)
+          self.captureObserver = nil
+        }
+        if on {
+          self.captureObserver = NotificationCenter.default.addObserver(
+            forName: UIScreen.capturedDidChangeNotification, object: nil, queue: .main
+          ) { [weak self] _ in
+            self?.captureChannel?.invokeMethod("captured", arguments: UIScreen.main.isCaptured)
+          }
+        }
+        result(on && UIScreen.main.isCaptured)
       }
     }
 

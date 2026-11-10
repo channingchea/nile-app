@@ -7,6 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:video_player/video_player.dart';
 
+import 'analytics.dart';
 import 'premiere.dart';
 import 'supabase_client.dart';
 import 'tus_upload.dart';
@@ -95,6 +96,7 @@ abstract final class PremiereService {
     String? posterUrl,
     bool clearPoster = false,
     bool? rightsConfirmed,
+    bool? askRating,
   }) async => _filmOf(
     await _invoke({
       'action': 'set-details',
@@ -105,6 +107,7 @@ abstract final class PremiereService {
       'chatPolicy': ?chat?.wire,
       if (posterUrl != null || clearPoster) 'posterUrl': posterUrl,
       'rightsConfirmed': ?rightsConfirmed,
+      'askRating': ?askRating,
     }),
   );
 
@@ -143,11 +146,54 @@ abstract final class PremiereService {
     );
   }
 
-  /// A signed HLS URL for the film (host preview now; viewers in phase 7).
-  static Future<Uri> filmUrl(String eventId) async => Uri.parse(
-    (await _invoke({'action': 'playback-token', 'eventId': eventId}))['url']
-        as String,
-  );
+  /// A signed HLS URL for the film (the host's preview).
+  static Future<Uri> filmUrl(String eventId) async =>
+      (await playback(eventId)).url;
+
+  /// Everything a viewer's player needs: the signed stream (renew it before
+  /// [FilmPlayback.expiresAt]), captions, and the rating card. Throws
+  /// [FilmRefused] when this person can't watch (no ticket, 18+, …).
+  static Future<FilmPlayback> playback(String eventId) async {
+    try {
+      final res = await supabase.functions.invoke(
+        'premiere',
+        body: {'action': 'playback-token', 'eventId': eventId},
+      );
+      final d = res.data;
+      if (d is Map && d['url'] is String) return FilmPlayback.fromJson(d);
+      throw FilmRefused.fromJson(d is Map ? d : const {});
+    } on FunctionException catch (e) {
+      final d = e.details;
+      throw FilmRefused.fromJson(d is Map ? d : const {});
+    }
+  }
+
+  /// Viewer: rate the film on the closing slate (1-5).
+  static Future<void> rateFilm(String eventId, int stars) =>
+      _invoke({'action': 'rate-film', 'eventId': eventId, 'stars': stars});
+
+  /// Where the film sat in the show (server ms), for the replay's chapters.
+  static Future<({int start, int? end, bool filmReady})?> replayChapters(
+    String eventId,
+  ) async {
+    final d = await _invoke({'action': 'replay-chapters', 'eventId': eventId});
+    final span = d['span'];
+    if (span is! Map || span['start'] is! num) return null;
+    return (
+      start: (span['start'] as num).toInt(),
+      end: (span['end'] as num?)?.toInt(),
+      filmReady: d['filmReady'] == true,
+    );
+  }
+
+  /// Host: how viewers rated the film.
+  static Future<({int count, double? average})> ratings(String eventId) async {
+    final d = await _invoke({'action': 'ratings', 'eventId': eventId});
+    return (
+      count: (d['count'] as num?)?.toInt() ?? 0,
+      average: (d['average'] as num?)?.toDouble(),
+    );
+  }
 
   /// A signed HLS URL for the trailer, or null when there isn't one.
   static Future<({Uri? url, String? posterUrl})> trailer(String eventId) async {
@@ -251,6 +297,9 @@ class PremiereUploads extends ChangeNotifier {
     try {
       final size = await file.length();
       j.total = size;
+      unawaited(
+        NileAnalytics.capture(NileEvent.filmUploadStarted, {'kind': kind.name}),
+      );
       final created = await PremiereService.createUpload(
         eventId: eventId,
         kind: kind,

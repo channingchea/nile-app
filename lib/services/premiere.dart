@@ -108,6 +108,7 @@ class EventFilm {
     this.chat = ChatPolicy.open,
     this.rightsConfirmedAt,
     this.deleteAfter,
+    this.askRating = false,
   });
 
   factory EventFilm.empty(String eventId) => EventFilm(eventId: eventId);
@@ -138,6 +139,7 @@ class EventFilm {
       chat: ChatPolicy.fromWire(r['chat_policy']),
       rightsConfirmedAt: at(r['rights_confirmed_at']),
       deleteAfter: at(r['delete_after']),
+      askRating: r['ask_rating'] == true,
     );
   }
 
@@ -158,6 +160,9 @@ class EventFilm {
   final ChatPolicy chat;
   final DateTime? rightsConfirmedAt;
   final DateTime? deleteAfter;
+
+  /// The closing slate asks viewers to rate the film.
+  final bool askRating;
 
   MediaStatus statusOf(FilmKind k) =>
       k == FilmKind.film ? filmStatus : trailerStatus;
@@ -223,4 +228,73 @@ String formatBytes(int bytes) {
   return bytes >= gb
       ? '${(bytes / gb).toStringAsFixed(1)} GB'
       : '${(bytes / mb).toStringAsFixed(bytes >= 10 * mb ? 0 : 1)} MB';
+}
+
+/// A viewer's signed film stream (playback-token).
+@immutable
+class FilmPlayback {
+  const FilmPlayback({
+    required this.url,
+    required this.expiresAt,
+    this.captions = const [],
+    this.rating,
+    this.contentWarning,
+    this.askRating = false,
+    this.chatPolicy = ChatPolicy.open,
+  });
+
+  factory FilmPlayback.fromJson(Map d) => FilmPlayback(
+    url: Uri.parse(d['url'] as String),
+    expiresAt: DateTime.fromMillisecondsSinceEpoch(
+      (d['expiresAt'] as num?)?.toInt() ?? 0,
+    ),
+    captions: [
+      for (final c in (d['captions'] as List?) ?? const [])
+        if (c is Map && c['url'] is String && c['lang'] is String)
+          FilmCaptionTrack(
+            c['lang'] as String,
+            '${c['label'] ?? c['lang']}',
+            Uri.parse(c['url'] as String),
+          ),
+    ],
+    rating: FilmRating.fromWire(d['rating']),
+    contentWarning: d['contentWarning'] as String?,
+    askRating: d['askRating'] == true,
+    chatPolicy: ChatPolicy.fromWire(d['chatPolicy']),
+  );
+
+  final Uri url;
+  final DateTime expiresAt;
+  final List<FilmCaptionTrack> captions;
+  final FilmRating? rating;
+  final String? contentWarning;
+  final bool askRating;
+  final ChatPolicy chatPolicy;
+}
+
+@immutable
+class FilmCaptionTrack {
+  const FilmCaptionTrack(this.lang, this.label, this.url);
+  final String lang;
+  final String label;
+  final Uri url;
+}
+
+/// Why playback-token said no. [age] means the film is 18+ and the account
+/// doesn't show the viewer is an adult.
+class FilmRefused implements Exception {
+  const FilmRefused(this.message, {this.age = false, this.rating});
+
+  factory FilmRefused.fromJson(Map d) => FilmRefused(
+    d['error']?.toString() ?? 'The film can’t play right now.',
+    age: d['code'] == 'age',
+    rating: FilmRating.fromWire(d['rating']),
+  );
+
+  final String message;
+  final bool age;
+  final FilmRating? rating;
+
+  @override
+  String toString() => message;
 }

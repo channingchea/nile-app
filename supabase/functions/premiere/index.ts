@@ -12,8 +12,12 @@
 //   set-details     host: rating, contentWarning, replayPolicy, chatPolicy, posterUrl, rightsConfirmed
 //   add-captions    host: { lang, label?, vtt }   remove-captions host: { lang }
 //   delete-media    host: { kind }
-//   playback-token  ticket holders / host / crew → { url, expiresAt }
+//   playback-token  ticket holders / host / crew → { url, expiresAt, rating, contentWarning, captions, askRating }
+//                   (18+ films need an account shown to be 18 or older)
 //   trailer-token   anyone signed in → { url, expiresAt }
+//   rate-film       viewer: { stars 1-5 } once the film has started, when the filmmaker asks
+//   ratings         host → { count, average }
+//   replay-chapters anyone signed in → { span: { start, end } | null, filmReady } (server ms of the film segment)
 //
 // Secrets: CF_ACCOUNT_ID, CF_STREAM_API_TOKEN, CF_STREAM_SIGNING_KEY_ID,
 // CF_STREAM_SIGNING_JWK (set 2026-11-02). Deploy with the default JWT check.
@@ -23,6 +27,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders as corsHeadersFor } from "../_shared/cors.ts";
 import { failure } from "../_shared/errors.ts";
 import { deleteVideo, drainDeletions, ensureSigned, getVideo, streamFetch, STREAM_API } from "../_shared/cloudflare_stream.ts";
+import { filmOf, filmSpan, isAdult } from "../_shared/film.ts";
 import {
   canWatchFilm,
   checkQuota,
@@ -52,6 +57,8 @@ const MAX_TRAILER_BYTES = 4 * 1024 ** 3;
 const UPLOAD_WINDOW_MS = 6 * 3600_000; // how long a provisioned upload URL accepts bytes
 const POSTER_PREFIX = `${Deno.env.get("SUPABASE_URL")}/storage/v1/object/public/events/`;
 const ON_AIR = ["live", "soundcheck"];
+const CAPTIONS_BUCKET = "film-captions";
+const captionPath = (eventId: string, lang: string) => `${eventId}/${lang}.vtt`;
 
 function log(level: "info" | "warn" | "error", fields: Record<string, unknown>) {
   console.log(JSON.stringify({ level, fn: "premiere", ...fields }));
@@ -79,7 +86,7 @@ async function eventOf(eventId: unknown, admin: any): Promise<EventRow | null> {
   return data as EventRow | null;
 }
 
-async function filmOf(eventId: string, admin: any): Promise<FilmRow | null> {
+async function filmOf_(eventId: string, admin: any): Promise<FilmRow | null> {
   const { data } = await admin.from("event_films").select("*").eq("event_id", eventId).maybeSingle();
   return data as FilmRow | null;
 }
@@ -185,7 +192,7 @@ async function refresh(body: any, userId: string, admin: any, json: Json): Promi
   const ev = await eventOf(body.eventId, admin);
   const refused = hostGate(ev, userId, json);
   if (refused) return refused;
-  const film = await filmOf(ev!.id, admin);
+  const film = await filmOf_(ev!.id, admin);
   if (!film) return json({ film: null });
   const patch: Record<string, unknown> = {};
   for (const kind of ["film", "trailer"] as MediaKind[]) {
@@ -226,7 +233,7 @@ async function addCaptions(body: any, userId: string, admin: any, json: Json): P
   if (!isCaptionLang(body.lang)) return json({ error: "Pick a caption language" }, 400);
   const bad = checkVtt(body.vtt);
   if (bad) return json({ error: bad }, 400);
-  const film = await filmOf(ev!.id, admin);
+  const film = await filmOf_(ev!.id, admin);
   if (!film?.film_uid || film.film_status !== "ready") return json({ error: "Add captions once the film has finished processing" }, 409);
   const form = new FormData();
   form.append("file", new Blob([body.vtt], { type: "text/vtt" }), `${body.lang}.vtt`);
@@ -235,6 +242,10 @@ async function addCaptions(body: any, userId: string, admin: any, json: Json): P
     log("warn", { action: "add-captions", status: res.status, body: (await res.text()).slice(0, 500) });
     return json({ error: "Stream didn't accept that caption file" }, 502);
   }
+  // Our own copy too: the app's player shows WebVTT it fetched itself.
+  const { error: upErr } = await admin.storage.from(CAPTIONS_BUCKET)
+    .upload(captionPath(ev!.id, body.lang), new Blob([body.vtt], { type: "text/vtt" }), { upsert: true, contentType: "text/vtt" });
+  if (upErr) throw upErr;
   const label = typeof body.label === "string" && body.label.trim() ? body.label.trim().slice(0, 40) : body.lang;
   const captions = [...(film.captions ?? []).filter((c: any) => c.lang !== body.lang), { lang: body.lang, label }];
   return json({ film: await saveFilm(ev!, { captions }, admin) });
@@ -245,10 +256,11 @@ async function removeCaptions(body: any, userId: string, admin: any, json: Json)
   const refused = hostGate(ev, userId, json);
   if (refused) return refused;
   if (!isCaptionLang(body.lang)) return json({ error: "Pick a caption language" }, 400);
-  const film = await filmOf(ev!.id, admin);
+  const film = await filmOf_(ev!.id, admin);
   if (!film?.film_uid) return json({ error: "There's no film" }, 404);
   const res = await streamFetch(`/${film.film_uid}/captions/${body.lang}`, { method: "DELETE" });
   if (!res.ok && res.status !== 404) return json({ error: "Couldn't remove those captions" }, 502);
+  await admin.storage.from(CAPTIONS_BUCKET).remove([captionPath(ev!.id, body.lang)]).catch(() => {});
   const captions = (film.captions ?? []).filter((c: any) => c.lang !== body.lang);
   return json({ film: await saveFilm(ev!, { captions }, admin) });
 }
@@ -264,6 +276,11 @@ async function deleteMedia(body: any, userId: string, admin: any, json: Json): P
   const patch = body.kind === "film"
     ? { film_uid: null, film_status: "none", film_error: null, film_name: null, film_bytes: null, film_duration_s: null, captions: [] }
     : { trailer_uid: null, trailer_status: "none", trailer_error: null, trailer_duration_s: null };
+  if (body.kind === "film") {
+    const old = await filmOf_(ev!.id, admin);
+    const paths = (old?.captions ?? []).map((c: any) => captionPath(ev!.id, c.lang));
+    if (paths.length) await admin.storage.from(CAPTIONS_BUCKET).remove(paths).catch(() => {});
+  }
   const film = await saveFilm(ev!, patch, admin); // the trigger queues the old video
   await drainDeletions(admin, 5).catch(() => 0);
   return json({ film });
@@ -272,7 +289,7 @@ async function deleteMedia(body: any, userId: string, admin: any, json: Json): P
 async function playbackToken(body: any, userId: string, admin: any, json: Json): Promise<Response> {
   const ev = await eventOf(body.eventId, admin);
   if (!ev || ev.removed_at) return json({ error: "Event not found" }, 404);
-  const film = await filmOf(ev.id, admin);
+  const film = await filmOf_(ev.id, admin);
   if (!film?.film_uid || film.film_status !== "ready") return json({ error: "The film isn't ready" }, 409);
   const isHost = ev.host_id === userId;
   const [{ data: op }, { data: ticket }, { data: ban }] = await Promise.all([
@@ -297,6 +314,21 @@ async function playbackToken(body: any, userId: string, admin: any, json: Json):
     now,
   });
   if ("error" in ok) return json({ error: ok.error }, ok.status);
+  const info = {
+    rating: film.rating ?? null,
+    contentWarning: film.content_warning ?? null,
+    askRating: film.ask_rating === true,
+    chatPolicy: film.chat_policy ?? "open",
+  };
+  // 18+: the account has to show the viewer is an adult (a store-held age
+  // band or the birthday they gave). The host previews their own film.
+  if (film.rating === "18+" && !isHost) {
+    const { data: age } = await admin.from("user_age_verification")
+      .select("birthdate, age_lower_bound").eq("user_id", userId).maybeSingle();
+    if (!isAdult(age, now)) {
+      return json({ error: "This film is for adults. Your account doesn't show you're 18 or older.", code: "age", ...info }, 403);
+    }
+  }
   const w = replayWindowMs(policy);
   const exp = tokenExpiry({
     isHost,
@@ -305,13 +337,73 @@ async function playbackToken(body: any, userId: string, admin: any, json: Json):
     replayEndsAt: ev.status === "ended" && endedAt !== null && w !== null ? endedAt + w : null,
   });
   const token = await signPlaybackToken(film.film_uid, KEY_ID, JWK, exp);
-  return json({ url: manifestUrl(film.playback_host, token), expiresAt: exp * 1000, durationS: film.film_duration_s });
+  const captions = [];
+  for (const c of film.captions ?? []) {
+    const { data } = await admin.storage.from(CAPTIONS_BUCKET).createSignedUrl(captionPath(ev.id, c.lang), 3600);
+    if (data?.signedUrl) captions.push({ lang: c.lang, label: c.label ?? c.lang, url: data.signedUrl });
+  }
+  return json({
+    url: manifestUrl(film.playback_host, token),
+    expiresAt: exp * 1000,
+    durationS: film.film_duration_s,
+    captions,
+    ...info,
+  });
+}
+
+// rate-film — { eventId, stars }. Someone who could watch, once the film has
+// started, when the filmmaker asked for ratings. One rating each; a second
+// replaces the first.
+async function rateFilm(body: any, userId: string, admin: any, json: Json): Promise<Response> {
+  const ev = await eventOf(body.eventId, admin);
+  if (!ev || ev.removed_at) return json({ error: "Event not found" }, 404);
+  const stars = body.stars;
+  if (typeof stars !== "number" || !Number.isInteger(stars) || stars < 1 || stars > 5) {
+    return json({ error: "Pick 1 to 5 stars" }, 400);
+  }
+  const film = await filmOf_(ev.id, admin);
+  if (!film?.ask_rating) return json({ error: "This film isn't taking ratings" }, 409);
+  if (filmOf(film.film_state)?.startedAt === undefined) return json({ error: "The film hasn't started" }, 409);
+  if (ev.host_id === userId) return json({ error: "You can't rate your own film" }, 403);
+  const { data: ban } = await admin.from("live_chat_bans").select("user_id")
+    .eq("event_id", ev.id).eq("user_id", userId).maybeSingle();
+  if (ban) return json({ error: "You've been removed from this event" }, 403);
+  if ((ev.price ?? 0) > 0) {
+    const { data: ticket } = await admin.from("tickets").select("id")
+      .eq("event_id", ev.id).eq("buyer_id", userId).eq("status", "paid").limit(1).maybeSingle();
+    if (!ticket) return json({ error: "You need a ticket to rate this film" }, 403);
+  }
+  const { error } = await admin.from("film_ratings")
+    .upsert({ event_id: ev.id, user_id: userId, stars }, { onConflict: "event_id,user_id" });
+  if (error) throw error;
+  return json({ success: true });
+}
+
+// replay-chapters — where the film sat in the show, so the replay can offer
+// Intro (recording) · Film (Stream) · Q&A (recording). Times aren't secret;
+// whether the film itself may play is still playback-token's call.
+async function replayChapters(body: any, _userId: string, admin: any, json: Json): Promise<Response> {
+  const ev = await eventOf(body.eventId, admin);
+  if (!ev || ev.removed_at || ev.studio_mode !== "premiere") return json({ span: null, filmReady: false });
+  const film = await filmOf_(ev.id, admin);
+  return json({ span: filmSpan(filmOf(film?.film_state)), filmReady: film?.film_status === "ready" });
+}
+
+async function ratings(body: any, userId: string, admin: any, json: Json): Promise<Response> {
+  const ev = await eventOf(body.eventId, admin);
+  const refused = hostGate(ev, userId, json);
+  if (refused) return refused;
+  const { data, error } = await admin.from("film_ratings").select("stars").eq("event_id", ev!.id);
+  if (error) throw error;
+  const n = (data ?? []).length;
+  const avg = n ? (data as { stars: number }[]).reduce((a, r) => a + r.stars, 0) / n : null;
+  return json({ count: n, average: avg });
 }
 
 async function trailerToken(body: any, _userId: string, admin: any, json: Json): Promise<Response> {
   const ev = await eventOf(body.eventId, admin);
   if (!ev || ev.removed_at || ev.studio_mode !== "premiere") return json({ error: "Event not found" }, 404);
-  const film = await filmOf(ev.id, admin);
+  const film = await filmOf_(ev.id, admin);
   if (!film?.trailer_uid || film.trailer_status !== "ready") return json({ url: null, posterUrl: film?.poster_url ?? null });
   const exp = Math.floor(Date.now() / 1000) + 2 * 3600;
   const token = await signPlaybackToken(film.trailer_uid, KEY_ID, JWK, exp);
@@ -342,6 +434,9 @@ async function handle(req: Request, json: Json, ctx: Record<string, unknown>): P
     case "delete-media": return await deleteMedia(body, user.id, admin, json);
     case "playback-token": return await playbackToken(body, user.id, admin, json);
     case "trailer-token": return await trailerToken(body, user.id, admin, json);
+    case "rate-film": return await rateFilm(body, user.id, admin, json);
+    case "ratings": return await ratings(body, user.id, admin, json);
+    case "replay-chapters": return await replayChapters(body, user.id, admin, json);
     default: return json({ error: "Unknown action" }, 400);
   }
 }

@@ -1,4 +1,5 @@
 import 'net.dart';
+import 'studio_mode.dart';
 import 'supabase_client.dart';
 
 /// Server pricing constants (the `app_config` singleton), mirrored on-device so
@@ -16,6 +17,12 @@ class PricingConfig {
   final int maxStreamMinutes;
   final double creatorRevenueShare;
 
+  // 0153: recording, Cloudflare Stream (Premiere) and Interview's guests.
+  final double recordingCentsPerHour;
+  final double streamDeliveryCentsPerViewerHour;
+  final double streamStorageCentsPerMinute;
+  final int interviewAssumedGuests;
+
   const PricingConfig({
     required this.minTicketCents,
     required this.egressCentsPerViewerHour,
@@ -25,6 +32,10 @@ class PricingConfig {
     required this.floorAssumedTickets,
     required this.maxStreamMinutes,
     required this.creatorRevenueShare,
+    this.recordingCentsPerHour = 120,
+    this.streamDeliveryCentsPerViewerHour = 6,
+    this.streamStorageCentsPerMinute = 0.5,
+    this.interviewAssumedGuests = 2,
   });
 
   /// Used until the real config lands (and if the fetch ever fails). Matches
@@ -66,24 +77,52 @@ class PricingConfig {
         j['creator_revenue_share'],
         f.creatorRevenueShare,
       ),
+      recordingCentsPerHour: num_(
+        j['recording_cents_per_hour'],
+        f.recordingCentsPerHour,
+      ),
+      streamDeliveryCentsPerViewerHour: num_(
+        j['stream_delivery_cents_per_viewer_hour'],
+        f.streamDeliveryCentsPerViewerHour,
+      ),
+      streamStorageCentsPerMinute: num_(
+        j['stream_storage_cents_per_minute'],
+        f.streamStorageCentsPerMinute,
+      ),
+      interviewAssumedGuests: int_(
+        j['interview_assumed_guests'],
+        f.interviewAssumedGuests,
+      ),
     );
   }
 
   /// Break-even ticket floor in cents. Worst case per ticket: one viewer who
-  /// watches the whole show, plus this ticket's share of ingest across the
-  /// assumed buyer count, plus Stripe's fixed fee — all of which has to come
-  /// out of the platform's slice. Rounded up to 50c, never below
+  /// watches the whole show, plus this ticket's share of ingest and the
+  /// recording across the assumed buyer count, plus Stripe's fixed fee — all
+  /// of which has to come out of the platform's slice. Interview counts its
+  /// guests as cameras; Premiere adds Stream delivery and a share of storage
+  /// for a film the length of the show (0153). Rounded up to 50c, never below
   /// [minTicketCents].
   int minTicketCentsFor({
     required int durationMinutes,
     required int cameraCount,
+    StudioMode mode = StudioMode.multicam,
   }) {
-    final hours = (durationMinutes < 1 ? 1 : durationMinutes) / 60.0;
-    final cams = cameraCount < 1 ? 1 : cameraCount;
-    final cost =
+    final mins = durationMinutes < 1 ? 1 : durationMinutes;
+    final hours = mins / 60.0;
+    final cams =
+        (cameraCount < 1 ? 1 : cameraCount) +
+        (mode == StudioMode.interview ? interviewAssumedGuests : 0);
+    var cost =
         stripeFixedCents +
         egressCentsPerViewerHour * hours +
-        (ingestCentsPerCamHour * cams * hours) / floorAssumedTickets;
+        (ingestCentsPerCamHour * cams * hours + recordingCentsPerHour * hours) /
+            floorAssumedTickets;
+    if (mode == StudioMode.premiere) {
+      cost +=
+          streamDeliveryCentsPerViewerHour * hours +
+          (streamStorageCentsPerMinute * mins) / floorAssumedTickets;
+    }
     final margin = (1 - creatorRevenueShare) - stripePct;
     if (margin <= 0) return minTicketCents;
     final floor = ((cost / margin) / 50.0).ceil() * 50;
@@ -116,7 +155,9 @@ class PricingService {
           .select(
             'min_ticket_cents, egress_cents_per_viewer_hour, '
             'ingest_cents_per_cam_hour, stripe_pct, stripe_fixed_cents, '
-            'floor_assumed_tickets, max_stream_minutes, creator_revenue_share',
+            'floor_assumed_tickets, max_stream_minutes, creator_revenue_share, '
+            'recording_cents_per_hour, stream_delivery_cents_per_viewer_hour, '
+            'stream_storage_cents_per_minute, interview_assumed_guests',
           )
           .eq('id', 1)
           .limit(1)

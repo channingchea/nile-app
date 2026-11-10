@@ -36,6 +36,7 @@ import '../services/premiere.dart';
 import '../services/premiere_service.dart';
 import '../services/studio_mode.dart';
 import '../widgets/premiere_checklist.dart';
+import '../widgets/premiere_widgets.dart';
 
 /// Detail screen for a single event (scheduled, live, or ended).
 ///
@@ -56,11 +57,10 @@ class EventDetailScreen extends StatefulWidget {
     this.event,
     this.eventId,
     this.fromProfileId,
-  })
-    : assert(
-        event != null || eventId != null,
-        'EventDetailScreen needs either event or eventId',
-      );
+  }) : assert(
+         event != null || eventId != null,
+         'EventDetailScreen needs either event or eventId',
+       );
 
   @override
   State<EventDetailScreen> createState() => _EventDetailScreenState();
@@ -530,10 +530,7 @@ class _EventDetailScreenState extends State<EventDetailScreen>
       kind == 'replay'
           ? NileEvent.replayCheckoutStarted
           : NileEvent.ticketCheckoutStarted,
-      {
-        'event_id': _event!.id,
-        'price_cents': _event!.price ?? 0,
-      },
+      {'event_id': _event!.id, 'price_cents': _event!.price ?? 0},
     );
     try {
       final url = await TicketService.createCheckoutUrl(
@@ -576,9 +573,9 @@ class _EventDetailScreenState extends State<EventDetailScreen>
     final uri = Uri.parse(ShareUrls.boost(_event!.id));
     if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('Could not open the boost page')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Could not open the boost page')),
+      );
     }
   }
 
@@ -783,9 +780,7 @@ class _EventDetailScreenState extends State<EventDetailScreen>
         _HostOffersBanner(
           offers: _offers,
           onTap: () async {
-            await context.push(
-              NileRoutes.sponsorshipOffers(eventId: e.id),
-            );
+            await context.push(NileRoutes.sponsorshipOffers(eventId: e.id));
             if (mounted) await _loadOffers();
           },
         ),
@@ -985,7 +980,7 @@ class _EventDetailScreenState extends State<EventDetailScreen>
         child: Stack(
           fit: StackFit.expand,
           children: [
-            _CoverImage(event: _event!),
+            _heroMedia(),
             // No back button here — the chrome's top bar carries it now, and
             // two would be two.
             SafeArea(
@@ -1051,6 +1046,20 @@ class _EventDetailScreenState extends State<EventDetailScreen>
     ],
   );
 
+  /// Premiere: the trailer plays at the top (muted, tap for sound) for anyone,
+  /// ticket or not, with the poster while it loads. Otherwise the cover.
+  Widget _heroMedia() {
+    final event = _event!;
+    if (event.studioMode != StudioMode.premiere || event.isOver) {
+      return _CoverImage(event: event);
+    }
+    return PremiereTrailer(
+      key: ValueKey('trailer-${event.id}'),
+      eventId: event.id,
+      fallback: _CoverImage(event: event),
+    );
+  }
+
   /// Tall enough to be a hero, short enough to leave the fold above the ticket
   /// button on a 900 pt-high window.
   static const double _heroHeight = 300;
@@ -1079,12 +1088,15 @@ class _EventDetailScreenState extends State<EventDetailScreen>
           backgroundColor: NileColors.bgPage,
           expandedHeight: 240,
           actions: _appBarActions(),
-          flexibleSpace: FlexibleSpaceBar(
-            background: _CoverImage(event: _event!),
-          ),
+          flexibleSpace: FlexibleSpaceBar(background: _heroMedia()),
         ),
         SliverPadding(
-          padding: const EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s16, NileSpacing.s16, NileSpacing.s32),
+          padding: const EdgeInsets.fromLTRB(
+            NileSpacing.s16,
+            NileSpacing.s16,
+            NileSpacing.s16,
+            NileSpacing.s32,
+          ),
           sliver: SliverList.list(
             children: [..._detailBlocks(), ..._actionBlocks()],
           ),
@@ -1123,9 +1135,9 @@ class _CoverImage extends StatelessWidget {
           onTap: event.thumbnailUrl == null
               ? null
               : () => PhotoViewerScreen.open(
-                    context,
-                    image: NetworkImage(event.thumbnailUrl!),
-                  ),
+                  context,
+                  image: NetworkImage(event.thumbnailUrl!),
+                ),
           child: Hero(
             tag: 'event-cover-${event.id}',
             child: event.thumbnailUrl != null
@@ -1188,7 +1200,10 @@ class _StatusChip extends StatelessWidget {
       label = 'SCHEDULED';
     }
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s8, vertical: NileSpacing.s4),
+      padding: const EdgeInsets.symmetric(
+        horizontal: NileSpacing.s8,
+        vertical: NileSpacing.s4,
+      ),
       decoration: BoxDecoration(
         color: bg,
         borderRadius: BorderRadius.circular(NileRadius.xs),
@@ -1486,7 +1501,10 @@ class _PriceChip extends StatelessWidget {
         : NileColors.txtPrimary;
 
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s8, vertical: NileSpacing.s4),
+      padding: const EdgeInsets.symmetric(
+        horizontal: NileSpacing.s8,
+        vertical: NileSpacing.s4,
+      ),
       decoration: BoxDecoration(
         color: bg,
         borderRadius: BorderRadius.circular(NileRadius.xs),
@@ -1590,7 +1608,9 @@ class _PrimaryCta extends StatelessWidget {
                 icon: const Icon(Icons.play_arrow),
                 label: Text(event.isLive ? 'Watch instead' : 'View Lobby'),
                 style: OutlinedButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
+                  padding: const EdgeInsets.symmetric(
+                    vertical: NileSpacing.s16,
+                  ),
                 ),
               ),
             ),
@@ -1643,7 +1663,10 @@ class _PrimaryCta extends StatelessWidget {
               const Text('Watch Now'),
               const SizedBox(width: 8),
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s6, vertical: NileSpacing.s2),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: NileSpacing.s6,
+                  vertical: NileSpacing.s2,
+                ),
                 decoration: BoxDecoration(
                   color: Colors.white24,
                   borderRadius: BorderRadius.circular(NileRadius.xs),
