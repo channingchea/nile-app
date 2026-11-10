@@ -269,6 +269,35 @@ class _PremiereFilmScreenState extends State<PremiereFilmScreen> {
     );
   }
 
+  /// Everything on this screen saves as it changes; Done flushes the one
+  /// field that saves on blur, says what's still needed, and goes back.
+  Future<void> _done() async {
+    await _saveWarning();
+    if (!mounted) return;
+    final film = _film;
+    final missing = [
+      for (final i in film?.checklist ?? const <ReadyItem>[])
+        if (i.required && !i.done) i.label,
+    ];
+    final uploading = FilmKind.values.any(
+      (k) => _uploads.job(widget.eventId, k)?.running == true,
+    );
+    _toast(
+      [
+        missing.isEmpty
+            ? 'Premiere saved and ready.'
+            : 'Saved. Still needed before the show: ${missing.join(', ')}.',
+        if (uploading)
+          'Your upload keeps going: keep Nile open until it finishes.',
+      ].join(' '),
+    );
+    if (context.canPop()) {
+      context.pop();
+    } else {
+      context.go(NileRoutes.event(widget.eventId));
+    }
+  }
+
   Future<void> _addCaptions() async {
     final lang = await showDialog<String>(
       context: context,
@@ -356,6 +385,10 @@ class _PremiereFilmScreenState extends State<PremiereFilmScreen> {
               )
             : _body(event, film),
       ),
+      bottomNavigationBar:
+          event?.studioMode == StudioMode.premiere && film != null
+          ? _DoneBar(busy: _busy, onDone: _done)
+          : null,
     );
   }
 
@@ -913,6 +946,48 @@ class _Notice extends StatelessWidget {
   );
 }
 
+class _DoneBar extends StatelessWidget {
+  const _DoneBar({required this.busy, required this.onDone});
+
+  final bool busy;
+  final VoidCallback onDone;
+
+  @override
+  Widget build(BuildContext context) => DecoratedBox(
+    decoration: BoxDecoration(
+      color: NileColors.bgPage,
+      border: Border(top: BorderSide(color: NileColors.border)),
+    ),
+    child: SafeArea(
+      top: false,
+      child: NileMaxWidth(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: NileSpacing.s16,
+            vertical: NileSpacing.s12,
+          ),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  busy ? 'Saving…' : 'Changes save as you make them.',
+                  style: NileTextStyles.bodySm().copyWith(
+                    color: NileColors.txtTertiary,
+                  ),
+                ),
+              ),
+              FilledButton(
+                onPressed: busy ? null : onDone,
+                child: const Text('Done'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
 /// Plays the signed HLS stream so the host can check the upload.
 class _PreviewDialog extends StatefulWidget {
   const _PreviewDialog({required this.url});
@@ -961,20 +1036,26 @@ class _PreviewDialogState extends State<_PreviewDialog> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          AspectRatio(
-            aspectRatio: _c.value.isInitialized ? _c.value.aspectRatio : 16 / 9,
-            child: _error != null
-                ? Center(
-                    child: Text(
-                      _error!,
-                      style: NileTextStyles.bodyMd().copyWith(
-                        color: Colors.white,
+          // Flexible bounds the height, so a tall (portrait) video shrinks to
+          // fit the screen instead of overflowing it.
+          Flexible(
+            child: AspectRatio(
+              aspectRatio: _c.value.isInitialized
+                  ? _c.value.aspectRatio
+                  : 16 / 9,
+              child: _error != null
+                  ? Center(
+                      child: Text(
+                        _error!,
+                        style: NileTextStyles.bodyMd().copyWith(
+                          color: Colors.white,
+                        ),
                       ),
-                    ),
-                  )
-                : _c.value.isInitialized
-                ? VideoPlayer(_c)
-                : const Center(child: CircularProgressIndicator()),
+                    )
+                  : _c.value.isInitialized
+                  ? VideoPlayer(_c)
+                  : const Center(child: CircularProgressIndicator()),
+            ),
           ),
           if (_c.value.isInitialized)
             VideoProgressIndicator(
