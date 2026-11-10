@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
@@ -327,12 +328,20 @@ class PremiereTrailer extends StatefulWidget {
     this.fallback,
     this.fit = BoxFit.cover,
     this.showSoundHint = true,
+    this.cinema = false,
+    this.backdropUrl,
   });
 
   final String eventId;
   final Widget? fallback;
   final BoxFit fit;
   final bool showSoundHint;
+
+  /// Banner layout: the trailer (or banner still) at its own shape, centred
+  /// over a blurred copy of the artwork, so nothing is cut off whatever shape
+  /// the space is. [backdropUrl] is the art to use when there's no poster.
+  final bool cinema;
+  final String? backdropUrl;
 
   @override
   State<PremiereTrailer> createState() => _PremiereTrailerState();
@@ -341,6 +350,7 @@ class PremiereTrailer extends StatefulWidget {
 class _PremiereTrailerState extends State<PremiereTrailer> {
   VideoPlayerController? _c;
   String? _poster;
+  String? _banner;
   bool _loaded = false;
   bool _sound = false;
 
@@ -362,6 +372,7 @@ class _PremiereTrailerState extends State<PremiereTrailer> {
       if (!mounted) return;
       setState(() {
         _poster = t.posterUrl;
+        _banner = t.bannerUrl;
         _loaded = true;
       });
       final url = t.url;
@@ -388,9 +399,81 @@ class _PremiereTrailerState extends State<PremiereTrailer> {
     c.setVolume(_sound ? 1 : 0);
   }
 
+  Widget _cinema(VideoPlayerController? c) {
+    final art = _banner ?? _poster ?? widget.backdropUrl;
+    if (!_loaded || (c == null && art == null)) {
+      return widget.fallback ?? ColoredBox(color: NileColors.bgSurface);
+    }
+    return GestureDetector(
+      onTap: c == null ? null : _toggleSound,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          const ColoredBox(color: Colors.black),
+          if (art != null) ...[
+            ImageFiltered(
+              imageFilter: ui.ImageFilter.blur(sigmaX: 40, sigmaY: 40),
+              child: Image.network(
+                art,
+                fit: BoxFit.cover,
+                errorBuilder: (_, _, _) => const SizedBox.shrink(),
+              ),
+            ),
+            const ColoredBox(color: Colors.black54),
+          ],
+          Center(
+            child: c != null
+                ? AspectRatio(
+                    aspectRatio: c.value.aspectRatio,
+                    child: VideoPlayer(c),
+                  )
+                : Image.network(
+                    art!,
+                    fit: BoxFit.contain,
+                    errorBuilder: (_, _, _) =>
+                        widget.fallback ?? const SizedBox.shrink(),
+                  ),
+          ),
+          if (c != null && widget.showSoundHint) _soundHint(),
+        ],
+      ),
+    );
+  }
+
+  Widget _soundHint() => Positioned(
+    left: 12,
+    bottom: 12,
+    child: Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: NileSpacing.s12,
+        vertical: NileSpacing.s4,
+      ),
+      decoration: BoxDecoration(
+        color: Colors.black54,
+        borderRadius: BorderRadius.circular(NileRadius.pill),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            _sound ? Icons.volume_up : Icons.volume_off,
+            size: 16,
+            color: Colors.white,
+          ),
+          const SizedBox(width: NileSpacing.s4),
+          Text(
+            _sound ? 'Trailer' : 'Tap for sound',
+            style: NileTextStyles.labelSm().copyWith(color: Colors.white),
+          ),
+        ],
+      ),
+    ),
+  );
+
   @override
   Widget build(BuildContext context) {
     final c = _c;
+    if (widget.cinema) return _cinema(c);
     final poster = _poster;
     final Widget still = poster != null
         ? ColoredBox(
@@ -421,38 +504,7 @@ class _PremiereTrailerState extends State<PremiereTrailer> {
               ),
             ),
           ),
-          if (widget.showSoundHint)
-            Positioned(
-              left: 12,
-              bottom: 12,
-              child: Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: NileSpacing.s12,
-                  vertical: NileSpacing.s4,
-                ),
-                decoration: BoxDecoration(
-                  color: Colors.black54,
-                  borderRadius: BorderRadius.circular(NileRadius.pill),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(
-                      _sound ? Icons.volume_up : Icons.volume_off,
-                      size: 16,
-                      color: Colors.white,
-                    ),
-                    const SizedBox(width: NileSpacing.s4),
-                    Text(
-                      _sound ? 'Trailer' : 'Tap for sound',
-                      style: NileTextStyles.labelSm().copyWith(
-                        color: Colors.white,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
+          if (widget.showSoundHint) _soundHint(),
         ],
       ),
     );

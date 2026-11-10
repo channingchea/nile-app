@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart' show NetworkAssetBundle;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:video_player/video_player.dart';
@@ -94,6 +95,7 @@ abstract final class PremiereService {
     ReplayPolicy? replay,
     ChatPolicy? chat,
     String? posterUrl,
+    String? bannerUrl,
     bool clearPoster = false,
     bool? rightsConfirmed,
     bool? askRating,
@@ -106,6 +108,7 @@ abstract final class PremiereService {
       'replayPolicy': ?replay?.wire,
       'chatPolicy': ?chat?.wire,
       if (posterUrl != null || clearPoster) 'posterUrl': posterUrl,
+      if (bannerUrl != null || clearPoster) 'bannerUrl': bannerUrl,
       'rightsConfirmed': ?rightsConfirmed,
       'askRating': ?askRating,
     }),
@@ -196,36 +199,72 @@ abstract final class PremiereService {
   }
 
   /// A signed HLS URL for the trailer, or null when there isn't one.
-  static Future<({Uri? url, String? posterUrl})> trailer(String eventId) async {
+  static Future<({Uri? url, String? posterUrl, String? bannerUrl})> trailer(
+    String eventId,
+  ) async {
     final d = await _invoke({'action': 'trailer-token', 'eventId': eventId});
     return (
       url: d['url'] is String ? Uri.parse(d['url'] as String) : null,
       posterUrl: d['posterUrl'] as String?,
+      bannerUrl: d['bannerUrl'] as String?,
     );
   }
 
-  /// Stores a poster image beside the event's cover and saves its URL.
+  /// Stores an image beside the event's cover; returns its cache-busted URL.
+  static Future<String> _putImage(String path, Uint8List bytes) async {
+    final bucket = supabase.storage.from('events');
+    await bucket.uploadBinary(
+      path,
+      bytes,
+      fileOptions: const FileOptions(contentType: 'image/jpeg', upsert: true),
+    );
+    return '${bucket.getPublicUrl(path)}?t=${DateTime.now().millisecondsSinceEpoch}';
+  }
+
+  /// Saves the poster (2:3), its banner crop (16:9) and the photo both came
+  /// from, so the banner can be re-cropped later without picking again.
   static Future<EventFilm?> uploadPoster({
     required String eventId,
     required String slug,
-    required Uint8List bytes,
+    required Uint8List poster,
+    required Uint8List banner,
+    required Uint8List source,
   }) async {
-    final path = '$slug/poster.jpg';
-    await supabase.storage
-        .from('events')
-        .uploadBinary(
-          path,
-          bytes,
-          fileOptions: const FileOptions(
-            contentType: 'image/jpeg',
-            upsert: true,
-          ),
-        );
-    final url = supabase.storage.from('events').getPublicUrl(path);
-    return setDetails(
-      eventId,
-      posterUrl: '$url?t=${DateTime.now().millisecondsSinceEpoch}',
-    );
+    final urls = await Future.wait([
+      _putImage('$slug/poster.jpg', poster),
+      _putImage('$slug/poster-banner.jpg', banner),
+      _putImage('$slug/poster-source.jpg', source),
+    ]);
+    return setDetails(eventId, posterUrl: urls[0], bannerUrl: urls[1]);
+  }
+
+  static Future<EventFilm?> uploadBanner({
+    required String eventId,
+    required String slug,
+    required Uint8List banner,
+  }) async => setDetails(
+    eventId,
+    bannerUrl: await _putImage('$slug/poster-banner.jpg', banner),
+  );
+
+  /// The photo the poster was cropped from, or the poster itself for posters
+  /// saved before the original was kept. Null when neither loads.
+  static Future<Uint8List?> posterSource(
+    String slug, {
+    String? posterUrl,
+  }) async {
+    final bucket = supabase.storage.from('events');
+    final t = DateTime.now().millisecondsSinceEpoch;
+    for (final url in [
+      '${bucket.getPublicUrl('$slug/poster-source.jpg')}?t=$t',
+      ?posterUrl,
+    ]) {
+      try {
+        final data = await NetworkAssetBundle(Uri.parse(url)).load(url);
+        return data.buffer.asUint8List();
+      } catch (_) {}
+    }
+    return null;
   }
 }
 

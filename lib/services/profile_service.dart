@@ -218,7 +218,10 @@ class ProfileService {
         .replaceAll(r'\', r'\\')
         .replaceAll('%', r'\%')
         .replaceAll('_', r'\_');
-    var query = supabase.from('profiles').select('id').ilike('username', pattern);
+    var query = supabase
+        .from('profiles')
+        .select('id')
+        .ilike('username', pattern);
     if (excludeUserId != null) {
       query = query.neq('id', excludeUserId);
     }
@@ -251,11 +254,17 @@ class ProfileService {
   /// has not accepted the current [termsVersion].
   ///
   /// Fail-closed: a missing profile row reads as not-onboarded.
-  static Future<({bool onboarded, bool needsUsernameClaim, bool needsCompliance})>
-      gateState() async {
+  static Future<
+    ({bool onboarded, bool needsUsernameClaim, bool needsCompliance})
+  >
+  gateState() async {
     final uid = supabase.auth.currentUser?.id;
     if (uid == null) {
-      return (onboarded: true, needsUsernameClaim: false, needsCompliance: false);
+      return (
+        onboarded: true,
+        needsUsernameClaim: false,
+        needsCompliance: false,
+      );
     }
     // One round trip, not two: the gate blocks the first frame after sign-in.
     final rows = await Future.wait<dynamic>([
@@ -273,7 +282,11 @@ class ProfileService {
     final row = rows[0] as Map<String, dynamic>?;
     final ageRow = rows[1] as Map<String, dynamic>?;
     if (row == null) {
-      return (onboarded: false, needsUsernameClaim: false, needsCompliance: true);
+      return (
+        onboarded: false,
+        needsUsernameClaim: false,
+        needsCompliance: true,
+      );
     }
     return (
       onboarded: row['onboarded_at'] != null,
@@ -368,18 +381,12 @@ class ProfileService {
     CropShapeFn? cropPathFn,
     List<CropAspectRatio?>? allowedAspectRatios,
   }) async {
-    final picker = ImagePicker();
-    final picked = await picker.pickImage(
-      source: ImageSource.gallery,
+    final pickedBytes = await pickRawImageBytes(
       maxWidth: maxWidth,
       maxHeight: maxHeight,
-      imageQuality: 85,
     );
-    if (picked == null) return null;
-
-    final pickedBytes = await picked.readAsBytes();
-    if (!context.mounted) return null;
-    return _cropBytes(
+    if (pickedBytes == null || !context.mounted) return null;
+    return cropBytes(
       context,
       pickedBytes,
       cropPathFn: cropPathFn,
@@ -412,7 +419,7 @@ class ProfileService {
     for (final file in selected) {
       final raw = await file.readAsBytes();
       if (!context.mounted) break;
-      final cropped = await _cropBytes(
+      final cropped = await cropBytes(
         context,
         raw,
         cropPathFn: cropPathFn,
@@ -425,7 +432,21 @@ class ProfileService {
 
   /// Shows the crop UI for [pickedBytes] and returns the result (or the
   /// original resized bytes if the user dismisses the crop screen).
-  static Future<Uint8List?> _cropBytes(
+  /// Picks one gallery image, resized, without cropping. Null on cancel.
+  static Future<Uint8List?> pickRawImageBytes({
+    double maxWidth = 512,
+    double maxHeight = 512,
+  }) async {
+    final picked = await ImagePicker().pickImage(
+      source: ImageSource.gallery,
+      maxWidth: maxWidth,
+      maxHeight: maxHeight,
+      imageQuality: 85,
+    );
+    return picked?.readAsBytes();
+  }
+
+  static Future<Uint8List?> cropBytes(
     BuildContext context,
     Uint8List pickedBytes, {
     CropShapeFn? cropPathFn,

@@ -9,7 +9,7 @@
 // Actions (POST { action, eventId, ... }; eventId = events.id):
 //   create-upload   host: { kind: film|trailer, size, durationS?, name? } → { uploadUrl, uid }
 //   refresh         host: re-reads processing videos from Stream (webhook fallback)
-//   set-details     host: rating, contentWarning, replayPolicy, chatPolicy, posterUrl, rightsConfirmed
+//   set-details     host: rating, contentWarning, replayPolicy, chatPolicy, posterUrl, bannerUrl, rightsConfirmed
 //   add-captions    host: { lang, label?, vtt }   remove-captions host: { lang }
 //   delete-media    host: { kind }
 //   playback-token  ticket holders / host / crew → { url, expiresAt, rating, contentWarning, captions, askRating }
@@ -404,10 +404,11 @@ async function trailerToken(body: any, _userId: string, admin: any, json: Json):
   const ev = await eventOf(body.eventId, admin);
   if (!ev || ev.removed_at || ev.studio_mode !== "premiere") return json({ error: "Event not found" }, 404);
   const film = await filmOf_(ev.id, admin);
-  if (!film?.trailer_uid || film.trailer_status !== "ready") return json({ url: null, posterUrl: film?.poster_url ?? null });
+  const art = { posterUrl: film?.poster_url ?? null, bannerUrl: film?.banner_url ?? null };
+  if (!film?.trailer_uid || film.trailer_status !== "ready") return json({ url: null, ...art });
   const exp = Math.floor(Date.now() / 1000) + 2 * 3600;
   const token = await signPlaybackToken(film.trailer_uid, KEY_ID, JWK, exp);
-  return json({ url: manifestUrl(film.playback_host, token), expiresAt: exp * 1000, posterUrl: film.poster_url ?? null });
+  return json({ url: manifestUrl(film.playback_host, token), expiresAt: exp * 1000, ...art });
 }
 
 async function handle(req: Request, json: Json, ctx: Record<string, unknown>): Promise<Response> {

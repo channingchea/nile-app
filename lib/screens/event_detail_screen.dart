@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -1050,15 +1051,18 @@ class _EventDetailScreenState extends State<EventDetailScreen>
   /// ticket or not, with the poster while it loads. Otherwise the cover.
   Widget _heroMedia() {
     final event = _event!;
-    if (event.studioMode != StudioMode.premiere || event.isOver) {
-      return _CoverImage(event: event);
-    }
+    if (!_premiereHero) return _CoverImage(event: event);
     return PremiereTrailer(
       key: ValueKey('trailer-${event.id}'),
       eventId: event.id,
+      cinema: true,
+      backdropUrl: event.thumbnailUrl,
       fallback: _CoverImage(event: event),
     );
   }
+
+  bool get _premiereHero =>
+      _event!.studioMode == StudioMode.premiere && !_event!.isOver;
 
   /// Tall enough to be a hero, short enough to leave the fold above the ticket
   /// button on a 900 pt-high window.
@@ -1086,7 +1090,15 @@ class _EventDetailScreenState extends State<EventDetailScreen>
         SliverAppBar(
           pinned: true,
           backgroundColor: NileColors.bgPage,
-          expandedHeight: 240,
+          // Premiere: as tall as a 16:9 trailer at full width, so it fills.
+          expandedHeight: _premiereHero
+              ? math.min(
+                      MediaQuery.sizeOf(context).width,
+                      NileMaxWidth.columnFor(context),
+                    ) *
+                    9 /
+                    16
+              : 240,
           actions: _appBarActions(),
           flexibleSpace: FlexibleSpaceBar(background: _heroMedia()),
         ),

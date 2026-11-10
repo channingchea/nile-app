@@ -54,6 +54,7 @@ export type DetailsPatch = {
   replay_policy?: ReplayPolicy;
   chat_policy?: string;
   poster_url?: string | null;
+  banner_url?: string | null;
   rights_confirmed_at?: string | null;
   ask_rating?: boolean;
 };
@@ -88,12 +89,13 @@ export function cleanDetails(
     if (!CHAT_POLICIES.includes(body.chatPolicy as typeof CHAT_POLICIES[number])) return { error: "Pick a chat option" };
     patch.chat_policy = body.chatPolicy as string;
   }
-  if ("posterUrl" in body) {
-    const u = body.posterUrl;
+  for (const [key, col, label] of [["posterUrl", "poster_url", "poster"], ["bannerUrl", "banner_url", "banner"]] as const) {
+    if (!(key in body)) continue;
+    const u = body[key];
     if (u !== null && (typeof u !== "string" || !u.startsWith(posterPrefix) || /\s|\.\./.test(u) || u.length > 1000)) {
-      return { error: "That poster link isn't valid" };
+      return { error: `That ${label} link isn't valid` };
     }
-    patch.poster_url = u as string | null;
+    patch[col] = u as string | null;
   }
   if ("rightsConfirmed" in body) {
     if (typeof body.rightsConfirmed !== "boolean") return { error: "rightsConfirmed must be true or false" };

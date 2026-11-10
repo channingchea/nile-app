@@ -102,6 +102,7 @@ class EventFilm {
     this.trailerDuration,
     this.captions = const [],
     this.posterUrl,
+    this.bannerUrl,
     this.rating,
     this.contentWarning,
     this.replay = ReplayPolicy.none,
@@ -133,6 +134,7 @@ class EventFilm {
             FilmCaption(c['lang'] as String, '${c['label'] ?? c['lang']}'),
       ],
       posterUrl: r['poster_url'] as String?,
+      bannerUrl: r['banner_url'] as String?,
       rating: FilmRating.fromWire(r['rating']),
       contentWarning: r['content_warning'] as String?,
       replay: ReplayPolicy.fromWire(r['replay_policy']),
@@ -154,6 +156,9 @@ class EventFilm {
   final Duration? trailerDuration;
   final List<FilmCaption> captions;
   final String? posterUrl;
+
+  /// The poster cropped 16:9 for the event page banner.
+  final String? bannerUrl;
   final FilmRating? rating;
   final String? contentWarning;
   final ReplayPolicy replay;

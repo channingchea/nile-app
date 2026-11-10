@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:croppy/croppy.dart' show CropAspectRatio;
 import 'package:file_selector/file_selector.dart';
@@ -341,24 +342,81 @@ class _PremiereFilmScreenState extends State<PremiereFilmScreen> {
     );
   }
 
+  /// One photo, cropped twice: 2:3 for the poster, then 16:9 for the event
+  /// page banner.
   Future<void> _pickPoster() async {
     final slug = _event?.liveKitEventId;
     if (slug == null) return _toast('Save the event first.');
-    final bytes = await ProfileService.pickImageBytes(
-      context,
-      maxWidth: 1000,
-      maxHeight: 1500,
-      allowedAspectRatios: [const CropAspectRatio(width: 2, height: 3)],
+    final source = await ProfileService.pickRawImageBytes(
+      maxWidth: 1600,
+      maxHeight: 1600,
     );
-    if (bytes == null) return;
+    if (source == null) return;
+    final poster = await _crop(source, 2, 3);
+    if (poster == null) return;
+    _toast('Now crop it for the event page banner.');
+    final banner = await _crop(source, 16, 9);
+    if (banner == null) return;
     await _run(
       () => PremiereService.uploadPoster(
         eventId: widget.eventId,
         slug: slug,
-        bytes: bytes,
+        poster: poster,
+        banner: banner,
+        source: source,
       ),
     );
   }
+
+  /// Re-crops the banner from the photo the poster came from.
+  Future<void> _adjustBanner() async {
+    final slug = _event?.liveKitEventId;
+    if (slug == null) return;
+    setState(() => _busy = true);
+    final source = await PremiereService.posterSource(
+      slug,
+      posterUrl: _film?.posterUrl,
+    );
+    if (!mounted) return;
+    setState(() => _busy = false);
+    if (source == null) {
+      return _toast("Couldn't load the poster. Choose it again.");
+    }
+    final banner = await _crop(source, 16, 9);
+    if (banner == null) return;
+    await _run(
+      () => PremiereService.uploadBanner(
+        eventId: widget.eventId,
+        slug: slug,
+        banner: banner,
+      ),
+    );
+  }
+
+  Future<Uint8List?> _crop(Uint8List bytes, int w, int h) async {
+    if (!mounted) return null;
+    try {
+      return await ProfileService.cropBytes(
+        context,
+        bytes,
+        allowedAspectRatios: [CropAspectRatio(width: w, height: h)],
+      );
+    } catch (e) {
+      _toast(_plain(e));
+      return null;
+    }
+  }
+
+  Widget _thumb(String url, double w, double h) => ClipRRect(
+    borderRadius: BorderRadius.circular(NileRadius.sm),
+    child: Image.network(
+      url,
+      width: w,
+      height: h,
+      fit: BoxFit.cover,
+      errorBuilder: (_, _, _) => SizedBox(width: w, height: h),
+    ),
+  );
 
   // ── Layout ─────────────────────────────────────────────────────────────────
 
@@ -484,43 +542,52 @@ class _PremiereFilmScreenState extends State<PremiereFilmScreen> {
         _Section(
           title: 'Poster',
           subtitle:
-              'Optional. Shown before the film and while the trailer loads.',
-          child: Row(
+              'Optional. You crop it twice: as a poster shown before the '
+              'film, and as the banner on the event page.',
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               if (film.posterUrl != null) ...[
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(NileRadius.sm),
-                  child: Image.network(
-                    film.posterUrl!,
-                    width: 64,
-                    height: 96,
-                    fit: BoxFit.cover,
-                    errorBuilder: (_, _, _) =>
-                        const SizedBox(width: 64, height: 96),
+                Row(
+                  children: [
+                    _thumb(film.posterUrl!, 64, 96),
+                    if (film.bannerUrl != null) ...[
+                      const SizedBox(width: NileSpacing.s12),
+                      _thumb(film.bannerUrl!, 128, 72),
+                    ],
+                  ],
+                ),
+                const SizedBox(height: NileSpacing.s12),
+              ],
+              Wrap(
+                spacing: NileSpacing.s8,
+                runSpacing: NileSpacing.s8,
+                children: [
+                  OutlinedButton(
+                    onPressed: _busy || locked ? null : _pickPoster,
+                    child: Text(
+                      film.posterUrl == null ? 'Choose poster' : 'Change',
+                    ),
                   ),
-                ),
-                const SizedBox(width: NileSpacing.s12),
-              ],
-              OutlinedButton(
-                onPressed: _busy || locked ? null : _pickPoster,
-                child: Text(
-                  film.posterUrl == null ? 'Choose poster' : 'Change',
-                ),
+                  if (film.posterUrl != null) ...[
+                    OutlinedButton(
+                      onPressed: _busy || locked ? null : _adjustBanner,
+                      child: const Text('Adjust banner'),
+                    ),
+                    TextButton(
+                      onPressed: _busy || locked
+                          ? null
+                          : () => _run(
+                              () => PremiereService.setDetails(
+                                widget.eventId,
+                                clearPoster: true,
+                              ),
+                            ),
+                      child: const Text('Remove'),
+                    ),
+                  ],
+                ],
               ),
-              if (film.posterUrl != null) ...[
-                const SizedBox(width: NileSpacing.s8),
-                TextButton(
-                  onPressed: _busy || locked
-                      ? null
-                      : () => _run(
-                          () => PremiereService.setDetails(
-                            widget.eventId,
-                            clearPoster: true,
-                          ),
-                        ),
-                  child: const Text('Remove'),
-                ),
-              ],
             ],
           ),
         ),

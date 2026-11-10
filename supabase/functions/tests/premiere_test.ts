@@ -53,6 +53,10 @@ Deno.test("details: validated, only what's sent changes", () => {
   assertEquals(cleanDetails({ posterUrl: `${POSTERS}slug/poster.jpg?t=1` }, now), {
     patch: { poster_url: `${POSTERS}slug/poster.jpg?t=1` },
   });
+  assert("error" in cleanDetails({ bannerUrl: "https://tracker.example/b.gif" }, now));
+  assertEquals(cleanDetails({ posterUrl: null, bannerUrl: `${POSTERS}slug/poster-banner.jpg?t=1` }, now), {
+    patch: { poster_url: null, banner_url: `${POSTERS}slug/poster-banner.jpg?t=1` },
+  });
   assert("error" in cleanDetails({ contentWarning: "x".repeat(201) }, now));
   assert("error" in cleanDetails({}, now));
 });
