@@ -960,27 +960,35 @@ class _DoneBar extends StatelessWidget {
     ),
     child: SafeArea(
       top: false,
-      child: NileMaxWidth(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(
-            horizontal: NileSpacing.s16,
-            vertical: NileSpacing.s12,
+      // NileMaxWidth's Align would fill the bar's whole height allowance
+      // (the full screen); heightFactor 1 keeps the bar as tall as its row.
+      child: Center(
+        heightFactor: 1,
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            maxWidth: NileMaxWidth.columnFor(context),
           ),
-          child: Row(
-            children: [
-              Expanded(
-                child: Text(
-                  busy ? 'Saving…' : 'Changes save as you make them.',
-                  style: NileTextStyles.bodySm().copyWith(
-                    color: NileColors.txtTertiary,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(
+              horizontal: NileSpacing.s16,
+              vertical: NileSpacing.s12,
+            ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    busy ? 'Saving…' : 'Changes save as you make them.',
+                    style: NileTextStyles.bodySm().copyWith(
+                      color: NileColors.txtTertiary,
+                    ),
                   ),
                 ),
-              ),
-              FilledButton(
-                onPressed: busy ? null : onDone,
-                child: const Text('Done'),
-              ),
-            ],
+                FilledButton(
+                  onPressed: busy ? null : onDone,
+                  child: const Text('Done'),
+                ),
+              ],
+            ),
           ),
         ),
       ),
