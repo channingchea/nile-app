@@ -78,10 +78,12 @@ class _WhatsOnState extends State<_WhatsOn> {
 
   Future<void> _load() async {
     try {
-      final liveFuture = EventService.getLiveNow(limit: 4);
-      final upcomingFuture = EventService.getUpcoming(limit: 6);
-      final live = await liveFuture;
-      final upcoming = await upcomingFuture;
+      // Both at once, and both errors caught: awaiting them one after the
+      // other left the second failure unhandled whenever the first one threw.
+      final (live, upcoming) = await (
+        EventService.getLiveNow(limit: 4),
+        EventService.getUpcoming(limit: 6),
+      ).wait;
       if (!mounted) return;
       setState(() {
         _live = live;
@@ -152,7 +154,8 @@ class _WhatsOnState extends State<_WhatsOn> {
               minItemWidth: _minCardWidth,
               maxColumns: 2,
               children: [
-                for (final e in live) _LiveCard(event: e, onTap: () => _open(e)),
+                for (final e in live)
+                  _LiveCard(event: e, onTap: () => _open(e)),
               ],
             ),
             const SizedBox(height: NileSpacing.s24),
@@ -308,8 +311,9 @@ class _UpNextRow extends StatelessWidget {
                   const SizedBox(height: NileSpacing.s2),
                   Text(
                     nileWhen(event.scheduledAt),
-                    style: NileTextStyles.caption()
-                        .copyWith(color: NileColors.volt),
+                    style: NileTextStyles.caption().copyWith(
+                      color: NileColors.volt,
+                    ),
                   ),
                 ],
               ),
@@ -333,8 +337,9 @@ class _Empty extends StatelessWidget {
         const SizedBox(height: NileSpacing.s12),
         Text(
           'Nothing on air',
-          style: NileTextStyles.labelMd()
-              .copyWith(color: NileColors.txtSecondary),
+          style: NileTextStyles.labelMd().copyWith(
+            color: NileColors.txtSecondary,
+          ),
         ),
         const SizedBox(height: NileSpacing.s4),
         Text(
