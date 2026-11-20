@@ -380,65 +380,79 @@ class NileStudio extends StatelessWidget {
     // second pane is dead space.
     final showSelfPane = self != null && self.identity != selected?.identity;
 
+    // The Studio runs edge to edge on iPad: the stats row's surface carries on
+    // under the status bar and the columns stop above the home indicator.
     return Column(
       children: [
-        _StudioStatsRow(
-          stats: stats,
-          leading: leading,
-          trailing: trailing,
-          center: center,
+        ColoredBox(
+          color: NileColors.bgSurface,
+          child: SafeArea(
+            bottom: false,
+            child: _StudioStatsRow(
+              stats: stats,
+              leading: leading,
+              trailing: trailing,
+              center: center,
+            ),
+          ),
         ),
         ?banner,
         Expanded(
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              SizedBox(
-                width: sourceColumnWidth,
-                child:
-                    sourceColumn ??
-                    _StudioSourceList(
-                      sources: sources,
-                      selectedIdentity: selected?.identity,
-                      onSelect: onSelectSource,
-                      onRemove: onRemoveSource,
-                      onRename: onRenameSource,
-                      selfIdentity: selfIdentity,
-                      meter: meter,
-                      actions: sourceActions,
-                      graphicsFor: graphicsFor,
-                      overlayFor: overlayFor,
-                      isCued: isCued,
+          child: ColoredBox(
+            color: NileColors.bgSurface,
+            child: SafeArea(
+              top: false,
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  SizedBox(
+                    width: sourceColumnWidth,
+                    child:
+                        sourceColumn ??
+                        _StudioSourceList(
+                          sources: sources,
+                          selectedIdentity: selected?.identity,
+                          onSelect: onSelectSource,
+                          onRemove: onRemoveSource,
+                          onRename: onRenameSource,
+                          selfIdentity: selfIdentity,
+                          meter: meter,
+                          actions: sourceActions,
+                          graphicsFor: graphicsFor,
+                          overlayFor: overlayFor,
+                          isCued: isCued,
+                        ),
+                  ),
+                  const _StudioDivider(),
+                  // The control bar belongs to the monitor column, so sources and
+                  // chat run the full height beside it.
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Expanded(
+                          child:
+                              monitor ??
+                              _StudioMonitor(
+                                selected: selected,
+                                self: showSelfPane ? self : null,
+                                graphicsFor: previewFor ?? graphicsFor,
+                                overlayFor: previewOverlayFor ?? overlayFor,
+                                isCued: isCued,
+                              ),
+                        ),
+                        ?hud,
+                        _StudioControlBar(child: controls),
+                      ],
                     ),
-              ),
-              const _StudioDivider(),
-              // The control bar belongs to the monitor column, so sources and
-              // chat run the full height beside it.
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Expanded(
-                      child:
-                          monitor ??
-                          _StudioMonitor(
-                            selected: selected,
-                            self: showSelfPane ? self : null,
-                            graphicsFor: previewFor ?? graphicsFor,
-                            overlayFor: previewOverlayFor ?? overlayFor,
-                            isCued: isCued,
-                          ),
-                    ),
-                    ?hud,
-                    _StudioControlBar(child: controls),
+                  ),
+                  if (showChatColumn && chat != null) ...[
+                    const _StudioDivider(),
+                    SizedBox(width: chatColumnWidth, child: chat),
                   ],
-                ),
+                ],
               ),
-              if (showChatColumn && chat != null) ...[
-                const _StudioDivider(),
-                SizedBox(width: chatColumnWidth, child: chat),
-              ],
-            ],
+            ),
           ),
         ),
       ],

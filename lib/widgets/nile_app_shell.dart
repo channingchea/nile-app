@@ -188,7 +188,15 @@ class NileAppShell extends StatelessWidget {
             child: Column(
               children: [
                 NileTopBar(leading: atBranchRoot ? null : const _ShellBack()),
-                Expanded(child: child),
+                // The top bar has taken the status-bar inset, so screens below
+                // it must not pad for it a second time.
+                Expanded(
+                  child: MediaQuery.removePadding(
+                    context: context,
+                    removeTop: true,
+                    child: child,
+                  ),
+                ),
               ],
             ),
           ),

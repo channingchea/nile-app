@@ -33,9 +33,12 @@ class NileTopBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // On iPad the window runs under the status bar; the bar's background fills
+    // that strip and its contents start below it. Zero on macOS.
+    final top = MediaQuery.paddingOf(context).top;
     return Container(
-      height: height,
-      padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s16),
+      height: height + top,
+      padding: EdgeInsets.fromLTRB(NileSpacing.s16, top, NileSpacing.s16, 0),
       decoration: BoxDecoration(
         color: NileColors.bgPage,
         border: Border(bottom: BorderSide(color: NileColors.border)),
@@ -93,8 +96,9 @@ class _SearchPill extends StatelessWidget {
                   'Search events, people, topics',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: NileTextStyles.bodySm()
-                      .copyWith(color: NileColors.txtTertiary),
+                  style: NileTextStyles.bodySm().copyWith(
+                    color: NileColors.txtTertiary,
+                  ),
                 ),
               ),
               const SizedBox(width: NileSpacing.s12),
