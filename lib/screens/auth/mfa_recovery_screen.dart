@@ -1,10 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:go_router/go_router.dart';
 
+import '../../router.dart';
 import '../../services/mfa_service.dart';
 import '../../services/supabase_client.dart';
 import '../../theme.dart';
-import 'mfa_enroll_screen.dart';
 
 /// Lost-authenticator recovery. Reached from the login challenge via "Use a
 /// recovery code instead." The user enters one backup code; the server verifies
@@ -54,12 +55,9 @@ class _MfaRecoveryScreenState extends State<MfaRecoveryScreen> {
   }
 
   Future<void> _reEnroll() async {
-    final done = await Navigator.push<bool>(
-      context,
-      MaterialPageRoute(builder: (_) => const MfaEnrollScreen()),
-    );
+    final done = await context.push<bool>(NileRoutes.mfaEnroll);
     // Re-enrolled: close recovery too so we land in the app (gate root).
-    if (done == true && mounted) Navigator.pop(context);
+    if (done == true && mounted) context.pop();
   }
 
   @override

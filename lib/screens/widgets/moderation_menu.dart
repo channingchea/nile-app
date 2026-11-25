@@ -165,6 +165,7 @@ class _ReportSheetState extends State<_ReportSheet> {
     ReportTargetType.ad => 'ad',
     ReportTargetType.current => 'Current',
     ReportTargetType.currentComment => 'comment',
+    ReportTargetType.liveChatMessage => 'message',
   };
 
   Future<void> _submit() async {

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../theme.dart';
+import '../services/nile_navigation.dart';
 
 /// Full-screen photo viewer: black backdrop, pinch-to-zoom, tap anywhere (or
 /// the close button / back gesture) to dismiss. Supports a single image or a
@@ -46,7 +47,8 @@ class PhotoViewerScreen extends StatefulWidget {
     Object? heroTag,
     double? aspectRatio,
   }) {
-    return Navigator.of(context).push(
+    return NileNav.push(
+      context,
       PageRouteBuilder(
         opaque: false,
         barrierColor: Colors.black,

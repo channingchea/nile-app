@@ -1,0 +1,16 @@
+# P4 #41. Generates lib/l10n/app_localizations.dart from the .arb files below.
+# Runs automatically as part of `flutter pub get` / build because
+# `generate: true` is set under `flutter:` in pubspec.yaml.
+arb-dir: lib/l10n
+template-arb-file: app_en.arb
+output-localization-file: app_localizations.dart
+output-class: AppLocalizations
+# The generated file is checked in (output-dir under lib/): it keeps
+# `flutter test` working without a codegen step and makes string changes
+# visible in review, which is the point of extracting them in the first place.
+output-dir: lib/l10n
+# ICU treats a straight apostrophe as an escape character, so `use-escaping`
+# means every one in the catalogue must be doubled. We use the typographic
+# apostrophe (’) in copy instead — better typography, and it sidesteps the
+# whole class of "Unmatched single quotes" build failures.
+use-escaping: true

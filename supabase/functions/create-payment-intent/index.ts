@@ -7,7 +7,9 @@
 //   supabase functions deploy create-payment-intent
 //
 // Request (POST, Bearer = user JWT):
-//   { "event_id": "uuid", "kind": "live" | "replay" }   (kind defaults to "live")
+//   { "event_id": "uuid", "kind": "live" | "replay", "origin": "macos" }
+//   kind defaults to "live"; origin is optional and recorded in Stripe
+//   metadata (see _shared/checkout_origin.ts) — omitted ⇒ "unknown".
 //   Price and title are read server-side from events — the client cannot set
 //   them. kind "replay" prices from events.replay_price and requires the replay
 //   to be published (Phase 2 VOD pricing); kind "live" prices from events.price.
@@ -20,6 +22,11 @@ import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import Stripe from "https://esm.sh/stripe@14?target=deno";
 import { corsHeaders as corsHeadersFor } from "../_shared/cors.ts";
+import { failure } from "../_shared/errors.ts";
+import { checkoutOrigin } from "../_shared/checkout_origin.ts";
+import {
+  CURRENCY, priceTaxParams, taxParams, TICKET_REFUND_POLICY,
+} from "../_shared/money.ts";
 
 const stripe = new Stripe(Deno.env.get("STRIPE_SECRET_KEY")!, {
   apiVersion: "2023-10-16",
@@ -56,8 +63,10 @@ serve(async (req) => {
       return json({ error: "Unauthorized" }, 401);
     }
 
-    const { event_id, kind: rawKind } = await req.json();
+    const { event_id, kind: rawKind, origin: rawOrigin } = await req.json();
     const kind = rawKind === "replay" ? "replay" : "live";
+    // Which app the sale came from. Older clients send nothing → "unknown".
+    const origin = checkoutOrigin(rawOrigin);
     if (!event_id) {
       return json({ error: "Invalid request body" }, 400);
     }
@@ -182,14 +191,20 @@ serve(async (req) => {
       line_items: [
         {
           price_data: {
-            currency: "usd",
+            currency: CURRENCY,
             unit_amount: amount_cents,
             product_data: { name: event_title ?? "Event Ticket" },
+            ...priceTaxParams(),
           },
           quantity: 1,
         },
       ],
       mode: "payment",
+      ...taxParams(),
+      // The refund policy and the currency, immediately above the pay button.
+      // This is the one placement every buyer passes through regardless of
+      // which surface sent them to checkout (#37).
+      custom_text: { submit: { message: TICKET_REFUND_POLICY } },
       // Atomic split when the host is payable; plain charge otherwise.
       ...(destination
         ? {
@@ -205,20 +220,51 @@ serve(async (req) => {
         event_id,
         buyer_id: user.id,
         kind,
+        origin,
       },
     });
 
-    // Pre-create a pending ticket row (upsert in case of retry)
+    // Record the attempt in the ledger (migration 0092). One immutable row per
+    // checkout, keyed on the session id, which is what the webhook resolves
+    // through. This is what makes a second checkout stop hiding the first: both
+    // attempts exist, and whichever one the buyer actually completes settles.
+    //
+    // application_fee_cents is recorded even on the fallback path. It used to be
+    // null there, and host_ticket_earnings netted amount - coalesce(fee, amount)
+    // — exactly zero. The host earned their share either way; only the transfer
+    // mechanism differs.
+    const { error: ledgerErr } = await adminClient.from("ticket_checkouts").insert({
+      event_id,
+      buyer_id: user.id,
+      session_id: session.id,
+      payment_intent_id: (session.payment_intent as string) ?? null,
+      kind,
+      amount_cents,
+      application_fee_cents: feeCents,
+      split_status: destination ? "split" : "platform_fallback",
+      status: "pending",
+    });
+    if (ledgerErr) {
+      // Without a ledger row the webhook cannot settle this session, so the
+      // buyer would be charged for nothing. Better to not open checkout at all.
+      console.error("ticket_checkouts insert failed:", ledgerErr.message);
+      await stripe.checkout.sessions.expire(session.id).catch(() => {});
+      return json({ error: "Could not start checkout. Please try again." }, 500);
+    }
+
+    // Pre-create a pending ticket row so My Tickets can show the attempt. A
+    // 'refunded' row is deliberately left alone: overwriting it with 'pending'
+    // was how a later replay purchase erased a refund from history.
     await adminClient.from("tickets").upsert(
       {
         event_id,
         buyer_id: user.id,
-        stripe_payment_intent_id: session.payment_intent as string ?? session.id,
+        stripe_payment_intent_id: (session.payment_intent as string) ?? session.id,
         amount_cents,
         status: "pending",
         kind,
         split_status: destination ? "split" : "platform_fallback",
-        application_fee_cents: destination ? feeCents : null,
+        application_fee_cents: feeCents,
       },
       { onConflict: "event_id,buyer_id", ignoreDuplicates: false }
     );
@@ -226,7 +272,7 @@ serve(async (req) => {
     return json({ checkout_url: session.url });
   } catch (err) {
     console.error(err);
-    return json({ error: String(err) }, 500);
+    return json(failure(err, "create-payment-intent"), 500);
   }
 });
 

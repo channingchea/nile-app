@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 
+import '../../router.dart';
 import '../../theme.dart';
-import 'mfa_enroll_screen.dart';
 
 /// Gate shown when a host tries to start Stripe Connect onboarding without 2FA.
 /// Explains why it's required and routes into enrollment. Pops `true` once the
@@ -10,11 +11,8 @@ class MfaConnectGateScreen extends StatelessWidget {
   const MfaConnectGateScreen({super.key});
 
   Future<void> _setUp(BuildContext context) async {
-    final done = await Navigator.push<bool>(
-      context,
-      MaterialPageRoute(builder: (_) => const MfaEnrollScreen()),
-    );
-    if (done == true && context.mounted) Navigator.pop(context, true);
+    final done = await context.push<bool>(NileRoutes.mfaEnroll);
+    if (done == true && context.mounted) context.pop(true);
   }
 
   @override

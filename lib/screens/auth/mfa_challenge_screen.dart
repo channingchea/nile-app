@@ -1,10 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:go_router/go_router.dart';
 
+import '../../router.dart';
 import '../../services/mfa_service.dart';
 import '../../services/supabase_client.dart';
 import '../../theme.dart';
-import 'mfa_recovery_screen.dart';
 
 /// Second-step login challenge, shown by the auth gate when a session sits at
 /// aal1 but a verified factor requires aal2. On success the session elevates and
@@ -129,12 +130,7 @@ class _MfaChallengeScreenState extends State<MfaChallengeScreen> {
                 ),
                 const SizedBox(height: NileSpacing.s8),
                 TextButton(
-                  onPressed: () => Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (_) => const MfaRecoveryScreen(),
-                    ),
-                  ),
+                  onPressed: () => context.push(NileRoutes.mfaRecovery),
                   child: Text(
                     'Use a recovery code instead',
                     style: NileTextStyles.labelMd().copyWith(

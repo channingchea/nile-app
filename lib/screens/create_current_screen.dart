@@ -572,6 +572,7 @@ class _CreateCurrentScreenState extends State<CreateCurrentScreen> {
             ),
           ),
           IconButton(
+            tooltip: 'Remove this photo',
             visualDensity: VisualDensity.compact,
             onPressed: () => setState(() => _images.removeAt(i)),
             icon: Icon(Icons.close, size: 18, color: NileColors.txtTertiary),

@@ -1,32 +1,27 @@
 import 'dart:async';
 
 import 'package:app_links/app_links.dart';
-import 'package:flutter/material.dart';
-import '../screens/event_detail_screen.dart';
-import '../screens/post_detail_screen.dart';
-import '../screens/profile_screen.dart';
-import '../screens/viewer_screen.dart';
-import 'event_service.dart';
-import 'post_service.dart';
-import 'profile_service.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
+
+import '../router.dart';
+import 'destinations.dart';
 import 'share_urls.dart';
 
-/// Handles inbound deep links and routes them via the app's navigator key.
+/// Handles inbound deep links and routes them through the app router.
 ///
 /// Two link shapes resolve to the same destinations:
 ///   • Universal Links / App Links (real https, work whether or not the app is
-///     installed): `https://<shareDomain>/e/<id>`, `/p/<id>`, `/u/<username>`.
+///     installed): `https://<shareDomain>/e/<id>`, `/p/<id>`, `/u/<username>`,
+///     `/g/<code>` (a host's guest invite).
 ///   • Legacy custom scheme (only fires when the app is installed):
 ///     `nile://event/<id>`, `nile://post/<id>`.
 class DeepLinkService {
   static final _appLinks = AppLinks();
-  static GlobalKey<NavigatorState>? _navKey;
   static StreamSubscription<Uri>? _sub;
 
-  /// Call once after the navigator is mounted. Handles the cold-start link
+  /// Call once after the router is mounted. Handles the cold-start link
   /// (app opened by a link) and subscribes to links while running.
-  static Future<void> init(GlobalKey<NavigatorState> navKey) async {
-    _navKey = navKey;
+  static Future<void> init() async {
     try {
       final initial = await _appLinks.getInitialLink();
       if (initial != null) await _route(initial);
@@ -42,10 +37,13 @@ class DeepLinkService {
     _sub = null;
   }
 
+  @visibleForTesting
+  static ({String kind, String value})? parse(Uri uri) => _parse(uri);
+
   /// Normalizes an inbound URI to `(kind, value)` where kind ∈ {event, post,
-  /// profile}, or null if it's not a recognized Nile link.
+  /// profile, guest}, or null if it's not a recognized Nile link.
   static ({String kind, String value})? _parse(Uri uri) {
-    // Universal / App Links: https://<shareDomain>/{e|p|u}/<value>
+    // Universal / App Links: https://<shareDomain>/{e|p|u|g}/<value>
     if ((uri.scheme == 'https' || uri.scheme == 'http') &&
         uri.host == ShareUrls.shareDomain) {
       final segs = uri.pathSegments;
@@ -57,6 +55,8 @@ class DeepLinkService {
           return (kind: 'post', value: segs[1]);
         case 'u':
           return (kind: 'profile', value: segs[1]);
+        case 'g':
+          return (kind: 'guest', value: segs[1]);
       }
       return null;
     }
@@ -70,44 +70,35 @@ class DeepLinkService {
     return null;
   }
 
+  /// A Nile share link tapped inside the app (a QR code on screen): opened on
+  /// top of where the user is, not in place of it. False when it isn't one of
+  /// ours.
+  static Future<bool> openInApp(Uri uri) async {
+    final parsed = _parse(uri);
+    if (parsed == null) return false;
+    final destination = await Destinations.forLink(
+      kind: parsed.kind,
+      value: parsed.value,
+    );
+    if (destination == null) return false;
+    nileRouter.push(destination.location, extra: destination.extra);
+    return true;
+  }
+
   static Future<void> _route(Uri uri) async {
     final parsed = _parse(uri);
     if (parsed == null) return;
-    final nav = _navKey?.currentState;
-    if (nav == null) return;
+    final destination = await Destinations.forLink(
+      kind: parsed.kind,
+      value: parsed.value,
+    );
+    if (destination == null) return;
 
-    // The user arrived from outside the app, so land them on a fresh stack.
-    // Repeated links would otherwise pile duplicate screens on top of
-    // whatever was already pushed (worst case: a second live ViewerScreen,
-    // i.e. two simultaneous LiveKit connections).
-    void pushFresh(Route<void> route) {
-      nav.popUntil((r) => r.isFirst);
-      nav.push(route);
-    }
-
-    switch (parsed.kind) {
-      case 'post':
-        final post = await PostService.fetchById(parsed.value);
-        if (post == null) return;
-        pushFresh(
-          MaterialPageRoute(builder: (_) => PostDetailScreen(post: post)),
-        );
-      case 'event':
-        final event = await EventService.fetchById(parsed.value);
-        if (event == null) return;
-        pushFresh(
-          MaterialPageRoute(
-            builder: (_) => event.isLive
-                ? ViewerScreen(initialEventId: event.liveKitEventId)
-                : EventDetailScreen(event: event),
-          ),
-        );
-      case 'profile':
-        final userId = await ProfileService.idForUsername(parsed.value);
-        if (userId == null) return;
-        pushFresh(
-          MaterialPageRoute(builder: (_) => ProfileScreen(userId: userId)),
-        );
-    }
+    // The user arrived from outside the app, so land them on a fresh stack:
+    // `go` replaces what's there, where in-app navigation pushes onto it.
+    // Repeated links would otherwise pile duplicate screens on top of whatever
+    // was already pushed (worst case: a second live ViewerScreen, i.e. two
+    // simultaneous LiveKit connections).
+    nileRouter.go(destination.location, extra: destination.extra);
   }
 }

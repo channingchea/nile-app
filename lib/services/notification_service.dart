@@ -10,6 +10,12 @@ enum NotificationType {
   eventStarting,
   eventLive,
   eventEnded,
+
+  /// The show was auto-closed without ever going live (migration 0088). Split
+  /// out of [eventEnded] because telling a ticket holder their event "ended"
+  /// when it never happened is both wrong and hides the thing they care about:
+  /// the host still has their money.
+  eventNoShow,
   operatorAssigned,
   newMessage,
   messageReaction,
@@ -17,6 +23,22 @@ enum NotificationType {
   soundcheckOpen,
   replayPricePrompt,
   feedbackResolved,
+
+  /// A brand has cleared Nile's policy screen and is offering to sponsor one of
+  /// the host's events (0095). `entity_id` is the CAMPAIGN id, not the event —
+  /// the tap has to land on the one offer, not the list.
+  sponsorshipOffer,
+
+  /// 24 hours before that offer expires untouched.
+  sponsorshipOfferExpiring,
+
+  /// A host invited this user to be a guest on their Interview show (0146).
+  /// `entity_id` is the event; the tap opens its green room.
+  guestInvited,
+
+  /// Premiere: the host's film is deleted from Stream in 2 days (0150).
+  /// `entity_id` is the event; the tap opens its film settings.
+  filmExpiring,
 }
 
 class AppNotification {
@@ -68,6 +90,7 @@ class AppNotification {
     'event_starting' => NotificationType.eventStarting,
     'event_live' => NotificationType.eventLive,
     'event_ended' => NotificationType.eventEnded,
+    'event_no_show' => NotificationType.eventNoShow,
     'operator_assigned' => NotificationType.operatorAssigned,
     'new_message' => NotificationType.newMessage,
     'message_reaction' => NotificationType.messageReaction,
@@ -75,6 +98,10 @@ class AppNotification {
     'soundcheck_open' => NotificationType.soundcheckOpen,
     'replay_price_prompt' => NotificationType.replayPricePrompt,
     'feedback_resolved' => NotificationType.feedbackResolved,
+    'sponsorship_offer' => NotificationType.sponsorshipOffer,
+    'sponsorship_offer_expiring' => NotificationType.sponsorshipOfferExpiring,
+    'guest_invited' => NotificationType.guestInvited,
+    'film_expiring' => NotificationType.filmExpiring,
     _ => NotificationType.follow,
   };
 }

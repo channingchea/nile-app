@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
-import '../screens/payouts_screen.dart';
+import 'package:go_router/go_router.dart';
+import '../router.dart';
 import '../services/payout_service.dart';
 import '../theme.dart';
 
@@ -63,10 +64,7 @@ class _PayoutGateSheet extends StatelessWidget {
               child: FilledButton.icon(
                 onPressed: () {
                   Navigator.pop(context);
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(builder: (_) => const PayoutsScreen()),
-                  );
+                  context.push(NileRoutes.settingsPayouts);
                 },
                 icon: const Icon(Icons.arrow_forward, size: 18),
                 label: const Text('Set up payouts'),

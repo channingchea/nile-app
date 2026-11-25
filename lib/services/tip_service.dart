@@ -1,3 +1,4 @@
+import 'checkout_origin.dart';
 import 'supabase_client.dart';
 
 /// Live-show tips. Collected via a Stripe destination charge in the
@@ -20,7 +21,11 @@ class TipService {
   }) async {
     final response = await supabase.functions.invoke(
       'create-tip-payment',
-      body: {'event_id': eventId, 'amount_cents': amountCents},
+      body: {
+        'event_id': eventId,
+        'amount_cents': amountCents,
+        'origin': NileCheckoutOrigin.current,
+      },
     );
     if (response.status != 200) {
       throw Exception((response.data as Map?)?['error'] ?? 'Payment error');

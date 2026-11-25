@@ -1,11 +1,25 @@
 import 'supabase_client.dart';
 
-enum ReportTargetType { user, post, event, comment, ad, current, currentComment }
+enum ReportTargetType {
+  user,
+  post,
+  event,
+  comment,
+  ad,
+  current,
+  currentComment,
+  liveChatMessage,
+}
 
 extension ReportTargetTypeX on ReportTargetType {
-  /// Matches the report_target_type Postgres enum (0066 adds the current values).
+  /// Matches the report_target_type Postgres enum (0066 adds the current
+  /// values, 0108 the live-chat one).
+  ///
+  /// Every multi-word value needs its own arm — the `_ => name` fallback yields
+  /// Dart camelCase, which the enum cast rejects.
   String get dbValue => switch (this) {
     ReportTargetType.currentComment => 'current_comment',
+    ReportTargetType.liveChatMessage => 'live_chat_message',
     _ => name,
   };
 }

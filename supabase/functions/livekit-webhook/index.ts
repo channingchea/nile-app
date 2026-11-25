@@ -1,6 +1,7 @@
 // Supabase Edge Function: livekit-webhook
 //
-// Receives LiveKit Cloud webhooks. Today it handles one event: egress_ended,
+// Receives LiveKit Cloud webhooks: room_finished, participant_joined (kicks a
+// removed Interview guest), and egress_ended,
 // which is how a replay recording (started in the `livekit` fn's start-show)
 // becomes playable. LiveKit egress is async — the MP4 isn't finalized when the
 // show ends — so this webhook is the moment we flip the replay row to
@@ -20,7 +21,7 @@
 
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { WebhookReceiver, EgressClient } from "https://esm.sh/livekit-server-sdk@2.9.7?target=deno";
+import { EgressClient, RoomServiceClient, WebhookReceiver } from "https://esm.sh/livekit-server-sdk@2.9.7?target=deno";
 
 const receiver = new WebhookReceiver(
   Deno.env.get("LIVEKIT_API_KEY")!,
@@ -33,6 +34,12 @@ const LIVEKIT_HTTP_URL = Deno.env.get("LIVEKIT_URL")!
   .replace(/^wss:/, "https:")
   .replace(/^ws:/, "http:");
 const egressClient = new EgressClient(
+  LIVEKIT_HTTP_URL,
+  Deno.env.get("LIVEKIT_API_KEY")!,
+  Deno.env.get("LIVEKIT_API_SECRET")!,
+);
+
+const roomService = new RoomServiceClient(
   LIVEKIT_HTTP_URL,
   Deno.env.get("LIVEKIT_API_KEY")!,
   Deno.env.get("LIVEKIT_API_SECRET")!,
@@ -70,7 +77,7 @@ serve(async (req) => {
     const slug = roomName.replace(/^nile-event-/, "");
     const { data: ev } = await admin
       .from("events")
-      .select("id")
+      .select("id, status")
       .eq("livekit_room", slug)
       .maybeSingle();
 
@@ -89,6 +96,65 @@ serve(async (req) => {
         );
         log("info", { event: "room_finished", roomName, action: "stopped-egress" });
       }
+      // The grid replay (phase 6) records alongside; stop it the same way.
+      const { data: grids } = await admin
+        .from("replay_grids")
+        .select("egress_id")
+        .eq("event_id", ev.id)
+        .eq("status", "recording");
+      for (const g of grids ?? []) {
+        if (g.egress_id) {
+          await egressClient.stopEgress(g.egress_id).catch((err) =>
+            log("warn", { event: "room_finished", roomName, stop_error: String(err) }),
+          );
+        }
+      }
+
+      // C6: close the event too. Nothing used to write events.status here, so a
+      // host whose battery died stayed pinned to Live Now for the rest of the
+      // scheduled duration, with every viewer who tapped in getting a valid
+      // token into an empty room. The room is gone — the show is over.
+      //
+      // Only from 'live' or 'soundcheck': a room can finish for a show that
+      // never started (empty timeout on an abandoned setup), and the auto-end
+      // sweep owns that case with the right ended_at. 0089 makes anything else
+      // a hard error anyway.
+      if (ev.status === "live" || ev.status === "soundcheck") {
+        const { error: endErr } = await admin
+          .from("events")
+          .update({ status: "ended", ended_at: new Date().toISOString() })
+          .eq("id", ev.id)
+          .in("status", ["live", "soundcheck"]);
+        if (endErr) {
+          log("warn", { event: "room_finished", roomName, end_error: endErr.message });
+        } else {
+          log("info", { event: "room_finished", roomName, action: "ended-event" });
+        }
+      }
+    }
+    return new Response("ok", { status: 200 });
+  }
+
+  // Interview mode: a guest the host removed (or never let in) can still hold
+  // a join token that hasn't expired (15 min) and walk back in. Anyone not
+  // invited, in the green room or on stage is kicked. The room is
+  // `nile-event-<slug>`.
+  if (event.event === "participant_joined" && event.room && event.participant) {
+    const m = /^guest-([0-9a-f-]{36})$/i.exec(event.participant.identity);
+    const slug = event.room.name.replace(/^nile-event-/, "");
+    if (m) {
+      const { data: row } = await admin
+        .from("event_guests")
+        .select("status, events!inner(livekit_room)")
+        .eq("user_id", m[1])
+        .eq("events.livekit_room", slug)
+        .maybeSingle();
+      if (!["invited", "green_room", "on_stage"].includes(row?.status as string)) {
+        await roomService.removeParticipant(event.room.name, event.participant.identity).catch((err) =>
+          log("warn", { event: "participant_joined", identity: event.participant!.identity, error: String(err) })
+        );
+        log("info", { event: "participant_joined", action: "kicked-guest", status: row?.status ?? null, slug });
+      }
     }
     return new Response("ok", { status: 200 });
   }
@@ -99,7 +165,8 @@ serve(async (req) => {
     const ok = e.status === 3; // EGRESS_COMPLETE; 4/5 = failed/aborted
     // file result carries the finalized location + duration (nanoseconds → ms).
     const file = e.fileResults?.[0];
-    const durationMs = file?.duration ? Number(file.duration) / 1_000_000 : null;
+    // Rounded: duration_ms is a bigint, and ns → ms leaves a fraction.
+    const durationMs = file?.duration ? Math.round(Number(file.duration) / 1_000_000) : null;
 
     const { data: updated, error } = await admin
       .from("replays")
@@ -114,6 +181,25 @@ serve(async (req) => {
     if (error) {
       log("error", { egressId, error: error.message });
       return new Response("db error", { status: 500 });
+    }
+
+    // Not the main recording: maybe the grid replay (phase 6). Its own row,
+    // no notifications — the main recording's end already sends those.
+    if (!updated) {
+      const { data: grid, error: gridErr } = await admin
+        .from("replay_grids")
+        .update({ status: ok ? "ready" : "failed", duration_ms: ok ? durationMs : null })
+        .eq("egress_id", egressId)
+        .select("id")
+        .maybeSingle();
+      if (gridErr) {
+        log("error", { egressId, error: gridErr.message });
+        return new Response("db error", { status: 500 });
+      }
+      if (grid) {
+        log("info", { event: "egress_ended", egressId, grid: true, status: ok ? "ready" : "failed" });
+        return new Response("ok", { status: 200 });
+      }
     }
 
     // Fan out replay_ready notifications (followers + paid-ticket holders), gated

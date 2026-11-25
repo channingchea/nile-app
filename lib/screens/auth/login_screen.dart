@@ -1,14 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import '../../router.dart';
 import '../../services/human_check.dart';
 import '../../services/supabase_client.dart';
 import '../../theme.dart';
 import '../../widgets/nile_logo.dart';
 import '../../widgets/social_auth_buttons.dart';
-import 'forgot_password_screen.dart';
-import 'signup_screen.dart';
+import '../../widgets/suspended_dialog.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -49,7 +50,15 @@ class _LoginScreenState extends State<LoginScreen> {
       // _AuthGate in main.dart handles the navigation automatically
       // once the auth state stream emits a session.
     } on AuthException catch (e) {
-      if (mounted) _showError(e.message);
+      if (!mounted) {
+        // nothing to show
+      } else if (isSuspendedAuthError(e)) {
+        // GoTrue's "User is banned" is not an error message to put in a
+        // snackbar — it needs an explanation and a way to appeal (P3 #35).
+        await showSuspendedDialog(context);
+      } else {
+        _showError(e.message);
+      }
     } catch (_) {
       if (mounted) _showError('Something went wrong. Please try again.');
     } finally {
@@ -107,7 +116,16 @@ class _LoginScreenState extends State<LoginScreen> {
                           color: NileColors.txtTertiary,
                         ),
                       ),
-                      const SizedBox(height: 48),
+                      const SizedBox(height: 32),
+
+                      // ── Social sign-in ───────────────────────────────────────
+                      // Above the form, mirroring signup — keeps the providers
+                      // in the first screenful on short phones too.
+                      const SocialAuthButtons(
+                        dividerBelow: true,
+                        dividerLabel: 'or sign in with email',
+                      ),
+                      const SizedBox(height: 24),
 
                       // ── Email ────────────────────────────────────────────────
                       TextFormField(
@@ -152,6 +170,9 @@ class _LoginScreenState extends State<LoginScreen> {
                             color: NileColors.txtTertiary,
                           ),
                           suffixIcon: IconButton(
+                            tooltip: _obscurePass
+                                ? 'Show password'
+                                : 'Hide password',
                             icon: Icon(
                               _obscurePass
                                   ? Icons.visibility_outlined
@@ -175,16 +196,15 @@ class _LoginScreenState extends State<LoginScreen> {
                       Align(
                         alignment: Alignment.centerRight,
                         child: TextButton(
-                          onPressed: () => Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                              builder: (_) => ForgotPasswordScreen(
-                                initialEmail: _emailCtrl.text.trim().isEmpty
-                                    ? null
-                                    : _emailCtrl.text.trim(),
-                              ),
-                            ),
-                          ),
+                          onPressed: () {
+                            final email = _emailCtrl.text.trim();
+                            context.push(
+                              email.isEmpty
+                                  ? NileRoutes.forgotPassword
+                                  : '${NileRoutes.forgotPassword}?email='
+                                      '${Uri.encodeComponent(email)}',
+                            );
+                          },
                           child: Text(
                             'Forgot password?',
                             style: NileTextStyles.bodyMd().copyWith(
@@ -218,27 +238,24 @@ class _LoginScreenState extends State<LoginScreen> {
                       ),
                       const SizedBox(height: 24),
 
-                      // ── Social sign-in ───────────────────────────────────────
-                      const SocialAuthButtons(),
-                      const SizedBox(height: 24),
-
                       // ── Sign up link ─────────────────────────────────────────
                       Row(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
-                          Text(
-                            "Don't have an account?",
-                            style: NileTextStyles.bodyMd().copyWith(
-                              color: NileColors.txtTertiary,
+                          // Flexible: this row overflows at 375pt width
+                          // (iPhone SE) once the button's padding is counted.
+                          Flexible(
+                            child: Text(
+                              "Don't have an account?",
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: NileTextStyles.bodyMd().copyWith(
+                                color: NileColors.txtTertiary,
+                              ),
                             ),
                           ),
                           TextButton(
-                            onPressed: () => Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                builder: (_) => const SignupScreen(),
-                              ),
-                            ),
+                            onPressed: () => context.push(NileRoutes.signup),
                             child: Text(
                               'Sign Up',
                               style: NileTextStyles.bodyMd().copyWith(

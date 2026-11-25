@@ -1,18 +1,12 @@
 import 'package:flutter/material.dart';
-import '../services/event_service.dart';
-import '../services/message_service.dart';
+import 'package:go_router/go_router.dart';
+import '../services/destinations.dart';
 import '../services/notification_service.dart';
-import '../services/post_service.dart';
 import '../theme.dart';
 import '../widgets/empty_state.dart';
-import 'conversation_screen.dart';
-import 'event_detail_screen.dart';
-import 'my_report_screen.dart';
-import 'post_detail_screen.dart';
 import 'profile_screen.dart';
-import 'replay_pricing_screen.dart';
-import 'viewer_screen.dart';
 import 'widgets/load_more_footer.dart';
+import '../services/nile_navigation.dart';
 
 class NotificationsScreen extends StatefulWidget {
   const NotificationsScreen({super.key});
@@ -89,67 +83,14 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
   }
 
   Future<void> _tap(AppNotification n) async {
-    switch (n.type) {
-      case NotificationType.postLike:
-      case NotificationType.postComment:
-        if (n.entityId == null) return;
-        final post = await PostService.fetchById(n.entityId!);
-        if (!mounted || post == null) return;
-        Navigator.push(
-          context,
-          MaterialPageRoute(builder: (_) => PostDetailScreen(post: post)),
-        );
-      case NotificationType.follow:
-        Navigator.push(
-          context,
-          MaterialPageRoute(builder: (_) => ProfileScreen(userId: n.actorId)),
-        );
-      case NotificationType.newMessage:
-      case NotificationType.messageReaction:
-        // actor_id is the sender/reactor (the other participant); resolve (or
-        // reuse) the conversation by it.
-        final conv = await MessageService.getOrCreate(n.actorId);
-        if (!mounted) return;
-        Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (_) => ConversationScreen(conversation: conv),
-          ),
-        );
-      case NotificationType.eventStarting:
-      case NotificationType.eventLive:
-      case NotificationType.eventEnded:
-      case NotificationType.operatorAssigned:
-      case NotificationType.replayReady:
-      case NotificationType.soundcheckOpen:
-        if (n.entityId == null) return;
-        final event = await EventService.fetchById(n.entityId!);
-        if (!mounted || event == null) return;
-        Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (_) => event.isLive
-                ? ViewerScreen(initialEventId: event.liveKitEventId)
-                : EventDetailScreen(event: event),
-          ),
-        );
-      case NotificationType.replayPricePrompt:
-        if (n.entityId == null) return;
-        final ev = await EventService.fetchById(n.entityId!);
-        if (!mounted || ev == null) return;
-        Navigator.push(
-          context,
-          MaterialPageRoute(builder: (_) => ReplayPricingScreen(event: ev)),
-        );
-      case NotificationType.feedbackResolved:
-        if (n.entityId == null) return;
-        Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (_) => MyReportScreen(reportId: n.entityId!),
-          ),
-        );
-    }
+    final destination = await Destinations.forNotification(
+      n.type,
+      entityId: n.entityId,
+      actorId: n.actorId,
+    );
+    if (!mounted || destination == null) return;
+    // Already inside the app, so this pushes: back returns to this list.
+    context.push(destination.location, extra: destination.extra);
   }
 
   @override
@@ -253,9 +194,13 @@ class _NotificationTile extends StatelessWidget {
       '@${notification.actorUsername} started following you',
     NotificationType.eventStarting =>
       '@${notification.actorUsername}’s event starts in 15 minutes',
-    NotificationType.eventLive => '@${notification.actorUsername} is live now',
+    // Past tense on purpose: this row is a record of a moment, and it sat in the
+    // list saying "is live now" for days after the show finished.
+    NotificationType.eventLive => '@${notification.actorUsername} went live',
     NotificationType.eventEnded =>
       '@${notification.actorUsername}’s event ended',
+    NotificationType.eventNoShow =>
+      '@${notification.actorUsername}’s event didn’t take place',
     NotificationType.operatorAssigned =>
       '@${notification.actorUsername} added you as a camera operator',
     NotificationType.newMessage =>
@@ -270,6 +215,17 @@ class _NotificationTile extends StatelessWidget {
       'Your replay is ready — set a price to publish it',
     NotificationType.feedbackResolved =>
       'Your report has an update — tap to read it',
+    // No `@username` on either: there is no user account behind an advertiser,
+    // so actor_id on these rows is the host themselves. The brand name isn't in
+    // the notification row either — it's on the card these open.
+    NotificationType.sponsorshipOffer =>
+      'A brand offered to sponsor your event — tap to review it',
+    NotificationType.sponsorshipOfferExpiring =>
+      'A sponsorship offer on your event expires in 24 hours',
+    NotificationType.guestInvited =>
+      '@${notification.actorUsername} invited you to be a guest on their show',
+    NotificationType.filmExpiring =>
+      'Your premiere’s film will be removed from Nile in 2 days',
   };
 
   IconData _icon() => switch (notification.type) {
@@ -279,6 +235,7 @@ class _NotificationTile extends StatelessWidget {
     NotificationType.eventStarting => Icons.live_tv,
     NotificationType.eventLive => Icons.sensors,
     NotificationType.eventEnded => Icons.replay,
+    NotificationType.eventNoShow => Icons.event_busy,
     NotificationType.operatorAssigned => Icons.videocam,
     NotificationType.newMessage => Icons.send_rounded,
     NotificationType.messageReaction => Icons.favorite,
@@ -286,6 +243,10 @@ class _NotificationTile extends StatelessWidget {
     NotificationType.soundcheckOpen => Icons.tune,
     NotificationType.replayPricePrompt => Icons.sell,
     NotificationType.feedbackResolved => Icons.bug_report,
+    NotificationType.sponsorshipOffer => Icons.workspace_premium,
+    NotificationType.sponsorshipOfferExpiring => Icons.hourglass_bottom,
+    NotificationType.guestInvited => Icons.mic_external_on,
+    NotificationType.filmExpiring => Icons.movie_outlined,
   };
 
   Color _iconColor() => switch (notification.type) {
@@ -295,6 +256,7 @@ class _NotificationTile extends StatelessWidget {
     NotificationType.eventStarting => NileColors.coral,
     NotificationType.eventLive => NileColors.coral,
     NotificationType.eventEnded => NileColors.txtSecondary,
+    NotificationType.eventNoShow => NileColors.txtSecondary,
     NotificationType.operatorAssigned => NileColors.azure,
     NotificationType.newMessage => NileColors.volt,
     NotificationType.messageReaction => NileColors.coral,
@@ -302,6 +264,10 @@ class _NotificationTile extends StatelessWidget {
     NotificationType.soundcheckOpen => NileColors.azure,
     NotificationType.replayPricePrompt => NileColors.volt,
     NotificationType.feedbackResolved => NileColors.azure,
+    NotificationType.sponsorshipOffer => NileColors.volt,
+    NotificationType.sponsorshipOfferExpiring => NileColors.coral,
+    NotificationType.guestInvited => NileColors.azure,
+    NotificationType.filmExpiring => NileColors.warning,
   };
 
   String _timeAgo(DateTime dt) {
@@ -330,7 +296,7 @@ class _NotificationTile extends StatelessWidget {
               clipBehavior: Clip.none,
               children: [
                 GestureDetector(
-                  onTap: () => Navigator.push(
+                  onTap: () => NileNav.push(
                     context,
                     MaterialPageRoute(
                       builder: (_) =>

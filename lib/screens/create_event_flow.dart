@@ -1,22 +1,29 @@
+import 'dart:math';
+
 import 'package:croppy/croppy.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:go_router/go_router.dart';
 import 'package:share_plus/share_plus.dart';
 
+import '../services/ad_service.dart';
 import '../services/crew_service.dart';
 import '../services/share_urls.dart';
 import '../services/event_service.dart';
+import '../services/studio_mode.dart';
 import '../services/livekit_service.dart';
 import '../services/pricing_service.dart';
 import '../services/profile_service.dart';
+import '../router.dart';
 import '../theme.dart';
 import '../widgets/crew_editor.dart';
+import '../widgets/nile_studio_mode_switch.dart';
 import '../widgets/duration_field.dart';
+import '../widgets/nile_desktop.dart';
 import '../widgets/payout_gate.dart';
 import '../widgets/payout_preview_card.dart';
 import '../widgets/topic_chips.dart';
-import 'create_post_screen.dart';
-import 'event_detail_screen.dart';
+import '../services/formats.dart';
 
 /// Mutable draft carried across the create-event flow pages. Page 1 fills the
 /// event fields and creates the row; later pages attach crew + show the summary.
@@ -27,11 +34,24 @@ class EventDraft {
   String description = '';
   DateTime? scheduledAt;
   int durationMinutes = 60; // default 1h
-  int? priceCents;
+
+  /// Starts on the minimum for a one-hour show; cleared = a free show.
+  int? priceCents = PricingService.current.minTicketCentsFor(
+    durationMinutes: 60,
+  );
   int? ticketLimit;
+
+  /// How the Studio runs the show; changeable in the Studio until live.
+  StudioMode studioMode = StudioMode.multicam;
 
   /// Host opt-in: let a brand sponsor this event's Pre-Show lobby (0079).
   bool sponsorshipOpen = false;
+
+  /// Smallest offer worth showing the host, in cents. Null = platform floor.
+  int? sponsorshipMinOfferCents;
+
+  /// Accept anything at or above the minimum without asking (0096).
+  bool sponsorshipAutoAccept = false;
 
   /// Topic tags — what `recommend_events_by_topic` matches interests against.
   final Set<String> topicIds = {};
@@ -93,6 +113,24 @@ class _CreateEventFlowState extends State<CreateEventFlow> {
 
 // ── Page 1: Event Details ─────────────────────────────────────────────────────
 
+/// Desktop split geometry. The panel is wide enough for a legible 16:9 card,
+/// and the pair is capped so a maximised window doesn't stretch the form into
+/// 1600 pt input fields — a form reads as a document, centred, not as a band.
+const double _kPreviewWidth = 360;
+const double _kSplitMaxWidth = 1100;
+
+/// "$25" / "$2,500" — the sponsorship bounds are always whole dollars, and
+/// "$2500.00" in an error string reads like a bug.
+String _wholeDollars(int cents) {
+  final s = (cents ~/ 100).toString();
+  final buf = StringBuffer();
+  for (var i = 0; i < s.length; i++) {
+    if (i > 0 && (s.length - i) % 3 == 0) buf.write(',');
+    buf.write(s[i]);
+  }
+  return '\$$buf';
+}
+
 class EventDetailsPage extends StatefulWidget {
   final EventDraft draft;
   final VoidCallback onCancel;
@@ -114,6 +152,11 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
   late final TextEditingController _priceController;
   late final TextEditingController _ticketLimitController;
   late final TextEditingController _durationController;
+  late final TextEditingController _minOfferController;
+
+  /// Platform floor/ceiling for a sponsorship offer, from app_config. Fetched
+  /// the first time the toggle goes on — most events never open to sponsors.
+  SponsorshipBounds? _sponsorshipBounds;
 
   bool _uploadingCover = false;
   bool _submitting = false;
@@ -128,13 +171,23 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
   // real config as soon as it loads.
   PricingConfig _pricing = PricingService.current;
 
+  /// The floor the price field last saw — see [_followFloor].
+  int _floorSeen = 0;
+
+  /// Signed-in host, for the preview card's byline. Null until it loads — and
+  /// always, on a phone, where there is no preview to put it in.
+  UserProfile? _host;
+  bool _previewWired = false;
+
   EventDraft get _draft => widget.draft;
 
   @override
   void initState() {
     super.initState();
     PricingService.load().then((c) {
-      if (mounted) setState(() => _pricing = c);
+      if (!mounted) return;
+      setState(() => _pricing = c);
+      _followFloor();
     });
     _nameController = TextEditingController(text: _draft.name);
     _descriptionController = TextEditingController(text: _draft.description);
@@ -146,25 +199,63 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
     _ticketLimitController = TextEditingController(
       text: _draft.ticketLimit?.toString() ?? '',
     );
+    _minOfferController = TextEditingController(
+      text: _draft.sponsorshipMinOfferCents == null
+          ? ''
+          : (_draft.sponsorshipMinOfferCents! / 100).toStringAsFixed(2),
+    );
     // Seed duration field from the draft in the currently-selected unit (hours).
     _durationController = TextEditingController(
       text: _trimNum(_draft.durationMinutes / 60),
     );
     // Live preview: rebuild on every keystroke so the "ends at" caption and the
     // payout card track what's typed.
-    _durationController.addListener(() => setState(() {}));
+    _floorSeen = _minPriceCents;
+    _durationController.addListener(() {
+      _followFloor();
+      setState(() {});
+    });
     _priceController.addListener(() => setState(() {}));
+  }
+
+  /// Wiring the desktop preview needs and the phone doesn't: the title has to
+  /// echo per keystroke, and the byline needs a host. Done here rather than in
+  /// [initState] because the window class isn't known until the first
+  /// dependency pass, and re-checked after that so a window dragged wide picks
+  /// the preview up. A phone never gets here, so it neither rebuilds on every
+  /// character nor pays for the profile fetch.
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_previewWired || !NileBreakpoints.of(context).hasNavRail) return;
+    _previewWired = true;
+    _nameController.addListener(() => setState(() {}));
+    ProfileService.fetchCurrentProfile().then((p) {
+      if (mounted) setState(() => _host = p);
+    });
   }
 
   // ── Pricing ─────────────────────────────────────────────────────────────────
 
   int get _cameraCount => _draft.crew.cameraCount;
 
-  /// Break-even ticket floor for the currently-entered duration + cameras.
+  /// Ticket floor for the currently-entered duration.
   int get _minPriceCents => _pricing.minTicketCentsFor(
     durationMinutes: _parsedDurationMinutes() ?? 60,
-    cameraCount: _cameraCount,
   );
+
+  /// The price follows the floor. When the minimum moves (a longer or shorter
+  /// show), a price that sat on the old minimum — or would now fall under the
+  /// new one — moves with it. A blank (free) price is left alone.
+  void _followFloor() {
+    final min = _minPriceCents;
+    if (min == _floorSeen) return;
+    final typed = _typedPriceCents;
+    if (typed > 0 && (typed == _floorSeen || typed < min)) {
+      _priceController.text = (min / 100).toStringAsFixed(2);
+    }
+    _floorSeen = min;
+  }
 
   /// Price typed right now, in cents (0 when blank).
   int get _typedPriceCents {
@@ -175,6 +266,21 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
   }
 
   static String _money(int cents) => '\$${(cents / 100).toStringAsFixed(2)}';
+
+  /// The payout card is a pricing coach, not a receipt — it only has something
+  /// to say once the event is priced or multi-camera. Same rule on both
+  /// layouts; only where the card sits changes.
+  bool get _showPayout => _cameraCount > 1 || _typedPriceCents > 0;
+
+  /// Every number in here comes from [PricingConfig] — the floor from
+  /// `minTicketCentsFor`, the host's cut from `creatorEarningsCents`. Nothing
+  /// on this screen does pricing arithmetic of its own.
+  Widget _payoutCard() => PayoutPreviewCard(
+    priceCents: _typedPriceCents,
+    minCents: _minPriceCents,
+    cameraCount: _cameraCount,
+    config: _pricing,
+  );
 
   /// Free is single-camera only; anything priced must clear the floor.
   String? _validatePrice(String? v) {
@@ -208,42 +314,36 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
     _priceController.dispose();
     _ticketLimitController.dispose();
     _durationController.dispose();
+    _minOfferController.dispose();
     super.dispose();
   }
 
   // ── Helpers ─────────────────────────────────────────────────────────────────
 
+  /// A LiveKit room slug for [name].
+  ///
+  /// The suffix used to be `millisecondsSinceEpoch % 10000` — four digits, so
+  /// one collision in ten thousand per identical title. That is not a rounding
+  /// error here: the slug also keys the cover-image path and the LiveKit room,
+  /// so a collision overwrote another host's cover and cross-wired their room
+  /// before finally failing on the unique constraint. Ten random hex characters
+  /// from a secure source costs six extra bytes in a URL and makes it a
+  /// non-event.
   String _generateEventId(String name) {
     final slug = name
         .toLowerCase()
         .replaceAll(RegExp(r'[^a-z0-9\s]'), '')
         .trim()
         .replaceAll(RegExp(r'\s+'), '-');
-    final suffix = (DateTime.now().millisecondsSinceEpoch % 10000)
-        .toString()
-        .padLeft(4, '0');
+    final rng = Random.secure();
+    final suffix = List.generate(
+      10,
+      (_) => rng.nextInt(16).toRadixString(16),
+    ).join();
     return slug.isNotEmpty ? '$slug-$suffix' : 'event-$suffix';
   }
 
-  String _formatScheduled(DateTime dt) {
-    const months = [
-      'Jan',
-      'Feb',
-      'Mar',
-      'Apr',
-      'May',
-      'Jun',
-      'Jul',
-      'Aug',
-      'Sep',
-      'Oct',
-      'Nov',
-      'Dec',
-    ];
-    final t =
-        '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
-    return '${months[dt.month - 1]} ${dt.day}, ${dt.year} · $t';
-  }
+  String _formatScheduled(DateTime dt) => NileFormats.dayMonthYearTime(dt);
 
   /// Parse the duration field into minutes given the current unit. Returns null
   /// if blank/invalid (validation guards the submit path separately).
@@ -322,9 +422,7 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
       firstDate: now,
       lastDate: now.add(const Duration(days: 365 * 2)),
       builder: (ctx, child) => Theme(
-        data: Theme.of(ctx).copyWith(
-          colorScheme: Theme.of(ctx).colorScheme,
-        ),
+        data: Theme.of(ctx).copyWith(colorScheme: Theme.of(ctx).colorScheme),
         child: child!,
       ),
     );
@@ -335,21 +433,27 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
         _draft.scheduledAt ?? now.add(const Duration(hours: 1)),
       ),
       builder: (ctx, child) => Theme(
-        data: Theme.of(ctx).copyWith(
-          colorScheme: Theme.of(ctx).colorScheme,
-        ),
+        data: Theme.of(ctx).copyWith(colorScheme: Theme.of(ctx).colorScheme),
         child: child!,
       ),
     );
     if (time == null) return;
+    final picked = DateTime(
+      date.year,
+      date.month,
+      date.day,
+      time.hour,
+      time.minute,
+    );
+    // firstDate constrains the DATE only — picking today and then a time that
+    // has already been meant an event the auto-end sweep closed within five
+    // minutes. Migration 0100 enforces the same rule server-side.
+    if (picked.isBefore(DateTime.now())) {
+      setState(() => _dateError = 'Pick a start time in the future.');
+      return;
+    }
     setState(() {
-      _draft.scheduledAt = DateTime(
-        date.year,
-        date.month,
-        date.day,
-        time.hour,
-        time.minute,
-      );
+      _draft.scheduledAt = picked;
       _dateError = null;
     });
   }
@@ -359,7 +463,12 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
   /// one. Reuses the payout gate sheet with sponsorship copy.
   Future<void> _toggleSponsorship(bool v) async {
     if (!v) {
-      setState(() => _draft.sponsorshipOpen = false);
+      // Auto-accept goes with it, so it can't sit armed on a closed event and
+      // fire the day the host reopens sponsorship.
+      setState(() {
+        _draft.sponsorshipOpen = false;
+        _draft.sponsorshipAutoAccept = false;
+      });
       return;
     }
     final ok = await ensurePaidPublishAllowed(
@@ -371,6 +480,37 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
     );
     if (!mounted) return;
     setState(() => _draft.sponsorshipOpen = ok);
+    if (ok && _sponsorshipBounds == null) {
+      final b = await AdService.sponsorshipBounds();
+      if (mounted) setState(() => _sponsorshipBounds = b);
+    }
+  }
+
+  /// Offer bounds, on the shipped defaults until app_config answers. Cents.
+  SponsorshipBounds get _bounds =>
+      _sponsorshipBounds ?? (minCents: 2500, maxCents: 250000);
+
+  /// The typed minimum in cents, or null for "use the platform floor".
+  int? get _typedMinOfferCents {
+    final raw = _minOfferController.text.trim();
+    if (raw.isEmpty) return null;
+    final n = double.tryParse(raw);
+    return n == null ? null : (n * 100).round();
+  }
+
+  String? _validateMinOffer(String? v) {
+    if (!_draft.sponsorshipOpen) return null;
+    if (v == null || v.trim().isEmpty) return null; // platform floor
+    final n = double.tryParse(v.trim());
+    if (n == null) return 'Invalid';
+    final cents = (n * 100).round();
+    if (cents < _bounds.minCents) {
+      return 'At least ${_wholeDollars(_bounds.minCents)}';
+    }
+    if (cents > _bounds.maxCents) {
+      return 'At most ${_wholeDollars(_bounds.maxCents)}';
+    }
+    return null;
   }
 
   /// Validate, persist the draft fields, create the LiveKit room + event row,
@@ -394,6 +534,7 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
         ? null
         : int.parse(_ticketLimitController.text.trim());
     _draft.durationMinutes = _parsedDurationMinutes() ?? 60;
+    _draft.sponsorshipMinOfferCents = _typedMinOfferCents;
 
     setState(() {
       _submitting = true;
@@ -438,9 +579,12 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
         price: _draft.priceCents,
         ticketLimit: _draft.ticketLimit,
         cameraCount: _draft.crew.cameraCount,
+        studioMode: _draft.studioMode,
         asDraft: true,
         topicIds: _draft.topicIds.toList(),
         sponsorshipOpen: _draft.sponsorshipOpen,
+        sponsorshipMinOfferCents: _draft.sponsorshipMinOfferCents,
+        sponsorshipAutoAccept: _draft.sponsorshipAutoAccept,
       );
       _draft.event = event;
 
@@ -466,6 +610,10 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
 
   @override
   Widget build(BuildContext context) {
+    // Desktop sets the form beside a live preview of the card it produces;
+    // the phone keeps the single scrolling column it shipped with.
+    final split = NileBreakpoints.of(context).hasNavRail;
+
     return Scaffold(
       backgroundColor: NileColors.bgPage,
       appBar: AppBar(
@@ -478,226 +626,372 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
         title: Text('Create Event', style: NileTextStyles.headingMd()),
       ),
       body: NileMaxWidth(
+        // The split caps and centres its own pair, so the 900 pt column
+        // ceiling would squeeze it back to one column before it ever got to
+        // measure itself.
+        maxWidth: split ? double.infinity : null,
         child: AbsorbPointer(
           absorbing: _submitting,
           child: Form(
             key: _formKey,
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.fromLTRB(NileSpacing.s24, NileSpacing.s8, NileSpacing.s24, NileSpacing.s40),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  _CoverPicker(
-                    bytes: _draft.coverBytes,
-                    busy: _uploadingCover,
-                    onPick: _pickCover,
-                    onClear: () => setState(() => _draft.coverBytes = null),
-                  ),
-                  const SizedBox(height: 24),
-                  _SectionLabel('Event Name'),
-                  const SizedBox(height: 6),
-                  TextFormField(
-                    controller: _nameController,
-                    textCapitalization: TextCapitalization.words,
-                    maxLength: 80,
-                    decoration: const InputDecoration(
-                      hintText: 'e.g. Friday Night Live',
+            child: split
+                ? NileDesktopSplit(
+                    sideWidth: _kPreviewWidth,
+                    maxTotalWidth: _kSplitMaxWidth,
+                    // The split centres its pair on both axes. On a display
+                    // tall enough to hold the whole form, a column that only
+                    // claimed its content height would float off the app bar,
+                    // so it claims the window instead and scrolls inside it.
+                    content: SizedBox(
+                      height: double.infinity,
+                      child: _formColumn(inlinePayout: false),
                     ),
-                    validator: (v) =>
-                        (v == null || v.trim().isEmpty) ? 'Required' : null,
-                  ),
-                  const SizedBox(height: 20),
-                  _SectionLabel('Description'),
-                  const SizedBox(height: 6),
-                  TextFormField(
-                    controller: _descriptionController,
-                    maxLines: 4,
-                    maxLength: 500,
-                    decoration: const InputDecoration(
-                      hintText: 'Tell viewers what to expect…',
+                    side: _previewPanel(),
+                    // Between the rail breakpoint and the split's own minimum
+                    // there is room for one column only.
+                    narrow: NileMaxWidth(
+                      child: _formColumn(inlinePayout: true),
                     ),
-                  ),
-                  const SizedBox(height: 20),
-                  _SectionLabel('Topics'),
-                  const SizedBox(height: 6),
-                  Text(
-                    'Tag your event so it reaches people into these topics.',
-                    style: NileTextStyles.bodySm().copyWith(
-                      color: NileColors.txtTertiary,
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  TopicChips(selected: _draft.topicIds),
-                  const SizedBox(height: 20),
-                  _SectionLabel('Scheduled For'),
-                  const SizedBox(height: 6),
-                  _DateField(
-                    value: _draft.scheduledAt,
-                    onTap: _pickDateTime,
-                    onClear: () => setState(() => _draft.scheduledAt = null),
-                    formatter: _formatScheduled,
-                    errorText: _dateError,
-                  ),
-                  const SizedBox(height: 20),
-                  _SectionLabel('Duration'),
-                  const SizedBox(height: 6),
-                  DurationField(
-                    controller: _durationController,
-                    inHours: _durationInHours,
-                    onUnitChanged: _changeUnit,
-                    preview: _durationPreview(),
-                    maxMinutes: _pricing.maxStreamMinutes,
-                  ),
-                  const SizedBox(height: 20),
-                  _SectionLabel('Cameras'),
-                  const SizedBox(height: 6),
-                  CameraStepper(
-                    count: _cameraCount,
-                    max: CrewState.maxCameras,
-                    onAdd: () => _changeCameraCount(1),
-                    onRemove: () => _changeCameraCount(-1),
-                  ),
-                  const SizedBox(height: 6),
-                  Text(
-                    _cameraCount > 1
-                        ? 'Multi-camera streams need a ticket — minimum '
-                              '${_money(_minPriceCents)} for this event.'
-                        : 'Single-camera streams can be free.',
-                    style: NileTextStyles.caption().copyWith(
-                      color: NileColors.txtTertiary,
-                    ),
-                  ),
-                  const SizedBox(height: 20),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            _SectionLabel('Price (USD)'),
-                            const SizedBox(height: 6),
-                            TextFormField(
-                              controller: _priceController,
-                              keyboardType:
-                                  const TextInputType.numberWithOptions(
-                                    decimal: true,
-                                  ),
-                              inputFormatters: [
-                                FilteringTextInputFormatter.allow(
-                                  RegExp(r'^\d*\.?\d{0,2}'),
-                                ),
-                              ],
-                              decoration: InputDecoration(
-                                prefixText: '\$ ',
-                                hintText: _cameraCount > 1
-                                    ? (_minPriceCents / 100).toStringAsFixed(2)
-                                    : 'Free',
-                              ),
-                              validator: _validatePrice,
-                            ),
-                          ],
-                        ),
-                      ),
-                      const SizedBox(width: 16),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            _SectionLabel('Ticket Limit'),
-                            const SizedBox(height: 6),
-                            TextFormField(
-                              controller: _ticketLimitController,
-                              keyboardType: TextInputType.number,
-                              inputFormatters: [
-                                FilteringTextInputFormatter.digitsOnly,
-                              ],
-                              decoration: const InputDecoration(
-                                hintText: 'Unlimited',
-                              ),
-                              validator: (v) {
-                                if (v == null || v.isEmpty) return null;
-                                final n = int.tryParse(v);
-                                if (n == null || n <= 0) return 'Invalid';
-                                return null;
-                              },
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                  if (_cameraCount > 1 || _typedPriceCents > 0) ...[
-                    const SizedBox(height: 16),
-                    PayoutPreviewCard(
-                      priceCents: _typedPriceCents,
-                      minCents: _minPriceCents,
-                      cameraCount: _cameraCount,
-                      config: _pricing,
-                    ),
-                  ],
-                  const SizedBox(height: 20),
-                  _SectionLabel('Sponsorship'),
-                  SwitchListTile.adaptive(
-                    contentPadding: EdgeInsets.zero,
-                    value: _draft.sponsorshipOpen,
-                    onChanged: _toggleSponsorship,
-                    title: Text(
-                      'Open to sponsorship',
-                      style: NileTextStyles.bodyMd(),
-                    ),
-                    subtitle: Text(
-                      'Let a brand sponsor your pre-show lobby. You keep 70% '
-                      'of the sponsorship price; every ad is reviewed by Nile '
-                      'before it can appear.',
-                      style: NileTextStyles.caption().copyWith(
-                        color: NileColors.txtTertiary,
-                      ),
-                    ),
-                    activeTrackColor: NileColors.volt,
-                  ),
-                  if (_errorMessage != null) ...[
-                    const SizedBox(height: 20),
-                    Container(
-                      padding: const EdgeInsets.all(NileSpacing.s12),
-                      decoration: BoxDecoration(
-                        color: NileColors.error.withValues(alpha: 0.1),
-                        borderRadius: BorderRadius.circular(NileRadius.sm),
-                        border: Border.all(
-                          color: NileColors.error.withValues(alpha: 0.4),
-                        ),
-                      ),
-                      child: Text(
-                        _errorMessage!,
-                        style: NileTextStyles.bodySm().copyWith(
-                          color: NileColors.error,
-                        ),
-                      ),
-                    ),
-                  ],
-                  const SizedBox(height: 32),
-                  FilledButton.icon(
-                    onPressed: _submitting ? null : _next,
-                    icon: _submitting
-                        ? SizedBox(
-                            width: 18,
-                            height: 18,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              color: NileColors.onVolt,
-                            ),
-                          )
-                        : const Icon(Icons.arrow_forward),
-                    label: Text(_submitting ? 'Creating…' : 'Next'),
-                    style: FilledButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
-                      textStyle: NileTextStyles.labelLg().copyWith(color: null),
-                    ),
-                  ),
-                ],
-              ),
-            ),
+                  )
+                : _formColumn(inlinePayout: true),
           ),
         ),
+      ),
+    );
+  }
+
+  /// The sticky desktop panel: the card this draft will become, and — once
+  /// there's a price to talk about — the same payout estimate the phone shows
+  /// inline. Scrolls itself, so a short window can still reach the bottom.
+  Widget _previewPanel() {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(
+        0,
+        NileSpacing.s8,
+        NileSpacing.s24,
+        NileSpacing.s40,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const NileSectionHeader('Preview', dense: true),
+          _EventPreviewCard(
+            coverBytes: _draft.coverBytes,
+            title: _nameController.text.trim(),
+            host: _host,
+            scheduledAt: _draft.scheduledAt,
+            durationMinutes: _parsedDurationMinutes(),
+            priceCents: _typedPriceCents,
+            cameraCount: _cameraCount,
+          ),
+          if (_showPayout) ...[
+            const SizedBox(height: NileSpacing.s24),
+            const NileSectionHeader('Payout', dense: true),
+            _payoutCard(),
+          ],
+        ],
+      ),
+    );
+  }
+
+  /// The form itself. [inlinePayout] keeps the payout card in the flow of the
+  /// column — where it belongs on a phone; the desktop split hands it to the
+  /// sticky panel instead, so the estimate stays put while the host scrolls.
+  Widget _formColumn({required bool inlinePayout}) {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(
+        NileSpacing.s24,
+        NileSpacing.s8,
+        NileSpacing.s24,
+        NileSpacing.s40,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _CoverPicker(
+            bytes: _draft.coverBytes,
+            busy: _uploadingCover,
+            onPick: _pickCover,
+            onClear: () => setState(() => _draft.coverBytes = null),
+          ),
+          const SizedBox(height: 24),
+          _SectionLabel('Event Name'),
+          const SizedBox(height: 6),
+          TextFormField(
+            controller: _nameController,
+            textCapitalization: TextCapitalization.words,
+            maxLength: 80,
+            decoration: const InputDecoration(
+              hintText: 'e.g. Friday Night Live',
+            ),
+            validator: (v) =>
+                (v == null || v.trim().isEmpty) ? 'Required' : null,
+          ),
+          const SizedBox(height: 20),
+          _SectionLabel('Description'),
+          const SizedBox(height: 6),
+          TextFormField(
+            controller: _descriptionController,
+            maxLines: 4,
+            maxLength: 500,
+            decoration: const InputDecoration(
+              hintText: 'Tell viewers what to expect…',
+            ),
+          ),
+          const SizedBox(height: 20),
+          _SectionLabel('Topics'),
+          const SizedBox(height: 6),
+          Text(
+            'Tag your event so it reaches people into these topics.',
+            style: NileTextStyles.bodySm().copyWith(
+              color: NileColors.txtTertiary,
+            ),
+          ),
+          const SizedBox(height: 10),
+          TopicChips(selected: _draft.topicIds),
+          const SizedBox(height: 20),
+          _SectionLabel('Scheduled For'),
+          const SizedBox(height: 6),
+          _DateField(
+            value: _draft.scheduledAt,
+            onTap: _pickDateTime,
+            onClear: () => setState(() => _draft.scheduledAt = null),
+            formatter: _formatScheduled,
+            errorText: _dateError,
+          ),
+          const SizedBox(height: 20),
+          _SectionLabel('Duration'),
+          const SizedBox(height: 6),
+          DurationField(
+            controller: _durationController,
+            inHours: _durationInHours,
+            onUnitChanged: _changeUnit,
+            preview: _durationPreview(),
+            maxMinutes: _typedPriceCents > 0
+                ? _pricing.maxStreamMinutes
+                : _pricing.freeMaxStreamMinutes,
+            freeCap: _typedPriceCents == 0,
+          ),
+          const SizedBox(height: 20),
+          _SectionLabel('Studio Mode'),
+          const SizedBox(height: 6),
+          StudioModeField(
+            value: _draft.studioMode,
+            onChanged: (m) => setState(() => _draft.studioMode = m),
+          ),
+          if (_draft.studioMode == StudioMode.premiere) ...[
+            const SizedBox(height: 6),
+            Text(
+              'After you create the event, upload your film from its page.',
+              style: NileTextStyles.caption().copyWith(
+                color: NileColors.txtTertiary,
+              ),
+            ),
+          ],
+          const SizedBox(height: 20),
+          _SectionLabel('Cameras'),
+          const SizedBox(height: 6),
+          CameraStepper(
+            count: _cameraCount,
+            max: CrewState.maxCameras,
+            onAdd: () => _changeCameraCount(1),
+            onRemove: () => _changeCameraCount(-1),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            _cameraCount > 1
+                ? 'Multi-camera streams need a ticket — minimum '
+                      '${_money(_minPriceCents)} for this event.'
+                : 'Single-camera streams can be free.',
+            style: NileTextStyles.caption().copyWith(
+              color: NileColors.txtTertiary,
+            ),
+          ),
+          const SizedBox(height: 20),
+          Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _SectionLabel('Price (USD)'),
+                    const SizedBox(height: 6),
+                    TextFormField(
+                      controller: _priceController,
+                      keyboardType: const TextInputType.numberWithOptions(
+                        decimal: true,
+                      ),
+                      inputFormatters: [
+                        FilteringTextInputFormatter.allow(
+                          RegExp(r'^\d*\.?\d{0,2}'),
+                        ),
+                      ],
+                      decoration: InputDecoration(
+                        prefixText: '\$ ',
+                        hintText: _cameraCount > 1
+                            ? (_minPriceCents / 100).toStringAsFixed(2)
+                            : 'Free',
+                      ),
+                      validator: _validatePrice,
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 16),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _SectionLabel('Ticket Limit'),
+                    const SizedBox(height: 6),
+                    TextFormField(
+                      controller: _ticketLimitController,
+                      keyboardType: TextInputType.number,
+                      inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                      decoration: const InputDecoration(
+                        hintText: 'Unlimited',
+                        helperText:
+                            'Up to ${LivekitService.maxViewersPerEvent}',
+                      ),
+                      validator: (v) {
+                        if (v == null || v.isEmpty) return null;
+                        final n = int.tryParse(v);
+                        if (n == null || n <= 0) return 'Invalid';
+                        // Selling past room capacity used to be accepted here
+                        // and only refused at the door, mid-show, with no
+                        // refund path. Caught at the point of sale instead —
+                        // and again by a CHECK constraint (migration 0105).
+                        if (n > LivekitService.maxViewersPerEvent) {
+                          return 'Max ${LivekitService.maxViewersPerEvent}';
+                        }
+                        return null;
+                      },
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          if (_typedPriceCents == 0) ...[
+            const SizedBox(height: 6),
+            Text(
+              _pricing.freeShowRule,
+              style: NileTextStyles.caption().copyWith(
+                color: NileColors.txtTertiary,
+              ),
+            ),
+          ],
+          if (inlinePayout && _showPayout) ...[
+            const SizedBox(height: 16),
+            _payoutCard(),
+          ],
+          const SizedBox(height: 20),
+          _SectionLabel('Sponsorship'),
+          SwitchListTile.adaptive(
+            contentPadding: EdgeInsets.zero,
+            value: _draft.sponsorshipOpen,
+            onChanged: _toggleSponsorship,
+            title: Text('Open to sponsorship', style: NileTextStyles.bodyMd()),
+            subtitle: Text(
+              'Let a brand sponsor your pre-show lobby. You keep 70% '
+              'of the sponsorship price; every ad is reviewed by Nile '
+              'before it can appear.',
+              style: NileTextStyles.caption().copyWith(
+                color: NileColors.txtTertiary,
+              ),
+            ),
+            activeTrackColor: NileColors.volt,
+          ),
+          // Only once the toggle is on: two fields about terms are noise to the
+          // majority of hosts who leave sponsorship off.
+          if (_draft.sponsorshipOpen) ...[
+            const SizedBox(height: 12),
+            _SectionLabel('Minimum offer'),
+            const SizedBox(height: 6),
+            TextFormField(
+              controller: _minOfferController,
+              keyboardType: const TextInputType.numberWithOptions(
+                decimal: true,
+              ),
+              inputFormatters: [
+                FilteringTextInputFormatter.allow(RegExp(r'^\d*\.?\d{0,2}')),
+              ],
+              decoration: InputDecoration(
+                prefixText: '\$ ',
+                hintText: (_bounds.minCents / 100).toStringAsFixed(2),
+                // No suggestion on this screen: suggest_sponsorship_price is
+                // keyed on an event id, and the event doesn't exist yet. Edit
+                // Event shows one.
+                helperText:
+                    'Offers below this are turned down for you. Leave blank '
+                    'for the ${_wholeDollars(_bounds.minCents)} platform '
+                    'minimum.',
+                helperMaxLines: 3,
+              ),
+              validator: _validateMinOffer,
+            ),
+            const SizedBox(height: 8),
+            CheckboxListTile.adaptive(
+              contentPadding: EdgeInsets.zero,
+              controlAffinity: ListTileControlAffinity.leading,
+              value: _draft.sponsorshipAutoAccept,
+              onChanged: (v) =>
+                  setState(() => _draft.sponsorshipAutoAccept = v ?? false),
+              title: Text(
+                'Automatically accept offers at or above my minimum',
+                style: NileTextStyles.bodyMd(),
+              ),
+              subtitle: Text(
+                'Nile still screens every ad for policy. What you\'re giving '
+                'up is the look — you won\'t see which brand it is before it '
+                'runs in your lobby.',
+                style: NileTextStyles.caption().copyWith(
+                  color: NileColors.txtTertiary,
+                ),
+              ),
+              activeColor: NileColors.volt,
+              checkColor: NileColors.onVolt,
+            ),
+          ],
+          if (_errorMessage != null) ...[
+            const SizedBox(height: 20),
+            Container(
+              padding: const EdgeInsets.all(NileSpacing.s12),
+              decoration: BoxDecoration(
+                color: NileColors.error.withValues(alpha: 0.1),
+                borderRadius: BorderRadius.circular(NileRadius.sm),
+                border: Border.all(
+                  color: NileColors.error.withValues(alpha: 0.4),
+                ),
+              ),
+              child: Text(
+                _errorMessage!,
+                style: NileTextStyles.bodySm().copyWith(
+                  color: NileColors.error,
+                ),
+              ),
+            ),
+          ],
+          const SizedBox(height: 32),
+          FilledButton.icon(
+            onPressed: _submitting ? null : _next,
+            icon: _submitting
+                ? SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: NileColors.onVolt,
+                    ),
+                  )
+                : const Icon(Icons.arrow_forward),
+            label: Text(_submitting ? 'Creating…' : 'Next'),
+            style: FilledButton.styleFrom(
+              padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
+              textStyle: NileTextStyles.labelLg().copyWith(color: null),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -820,7 +1114,12 @@ class _ChooseCrewPageState extends State<ChooseCrewPage> {
         child: AbsorbPointer(
           absorbing: _committing,
           child: SingleChildScrollView(
-            padding: const EdgeInsets.fromLTRB(NileSpacing.s24, NileSpacing.s8, NileSpacing.s24, NileSpacing.s40),
+            padding: const EdgeInsets.fromLTRB(
+              NileSpacing.s24,
+              NileSpacing.s8,
+              NileSpacing.s24,
+              NileSpacing.s40,
+            ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
@@ -860,7 +1159,9 @@ class _ChooseCrewPageState extends State<ChooseCrewPage> {
                 FilledButton(
                   onPressed: _committing ? null : () => _commit(asDraft: false),
                   style: FilledButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
+                    padding: const EdgeInsets.symmetric(
+                      vertical: NileSpacing.s16,
+                    ),
                     textStyle: NileTextStyles.labelLg().copyWith(color: null),
                   ),
                   child: _committing
@@ -931,12 +1232,11 @@ class EventCreatedPage extends StatelessWidget {
 
   void _postAbout(BuildContext context) {
     final ev = _event;
-    Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => CreatePostScreen(
-          initialText: ev == null ? null : 'Going live: ${ev.title} 🎥',
-          eventId: ev?.id,
-        ),
+    context.push(
+      NileRoutes.createPost,
+      extra: CreatePostArgs(
+        initialText: ev == null ? null : 'Going live: ${ev.title} 🎥',
+        eventId: ev?.id,
       ),
     );
   }
@@ -959,7 +1259,12 @@ class EventCreatedPage extends StatelessWidget {
       ),
       body: NileMaxWidth(
         child: SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(NileSpacing.s24, NileSpacing.s8, NileSpacing.s24, NileSpacing.s40),
+          padding: const EdgeInsets.fromLTRB(
+            NileSpacing.s24,
+            NileSpacing.s8,
+            NileSpacing.s24,
+            NileSpacing.s40,
+          ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
@@ -1011,7 +1316,9 @@ class EventCreatedPage extends StatelessWidget {
                 icon: const Icon(Icons.edit_outlined),
                 label: const Text('Post About It'),
                 style: FilledButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
+                  padding: const EdgeInsets.symmetric(
+                    vertical: NileSpacing.s16,
+                  ),
                   textStyle: NileTextStyles.labelLg().copyWith(color: null),
                 ),
               ),
@@ -1022,7 +1329,9 @@ class EventCreatedPage extends StatelessWidget {
                 icon: const Icon(Icons.ios_share),
                 label: const Text('Share With Friends'),
                 style: OutlinedButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
+                  padding: const EdgeInsets.symmetric(
+                    vertical: NileSpacing.s16,
+                  ),
                 ),
               ),
 
@@ -1031,11 +1340,7 @@ class EventCreatedPage extends StatelessWidget {
               InkWell(
                 onTap: ev == null
                     ? null
-                    : () => Navigator.of(context).push(
-                        MaterialPageRoute(
-                          builder: (_) => EventDetailScreen(event: ev),
-                        ),
-                      ),
+                    : () => context.push(NileRoutes.event(ev.id), extra: ev),
                 borderRadius: BorderRadius.circular(NileRadius.sm),
                 child: Container(
                   padding: const EdgeInsets.symmetric(
@@ -1087,26 +1392,9 @@ String _fmtDuration(int mins) {
   return '${m}m';
 }
 
-String _fmtClock(DateTime dt) =>
-    '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+String _fmtClock(DateTime dt) => NileFormats.time(dt);
 
-String _fmtDateTime(DateTime dt) {
-  const months = [
-    'Jan',
-    'Feb',
-    'Mar',
-    'Apr',
-    'May',
-    'Jun',
-    'Jul',
-    'Aug',
-    'Sep',
-    'Oct',
-    'Nov',
-    'Dec',
-  ];
-  return '${months[dt.month - 1]} ${dt.day} · ${_fmtClock(dt)}';
-}
+String _fmtDateTime(DateTime dt) => NileFormats.dayMonthTime(dt);
 
 // ── Sub-widgets ───────────────────────────────────────────────────────────────
 
@@ -1257,7 +1545,10 @@ class _DateField extends StatelessWidget {
           onTap: onTap,
           borderRadius: BorderRadius.circular(NileRadius.sm),
           child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s12, vertical: NileSpacing.s12),
+            padding: const EdgeInsets.symmetric(
+              horizontal: NileSpacing.s12,
+              vertical: NileSpacing.s12,
+            ),
             decoration: BoxDecoration(
               color: NileColors.bgSurface,
               border: Border.all(
@@ -1299,13 +1590,189 @@ class _DateField extends StatelessWidget {
         ),
         if (errorText != null)
           Padding(
-            padding: const EdgeInsets.only(left: NileSpacing.s12, top: NileSpacing.s8),
+            padding: const EdgeInsets.only(
+              left: NileSpacing.s12,
+              top: NileSpacing.s8,
+            ),
             child: Text(
               errorText!,
               style: NileTextStyles.caption().copyWith(color: NileColors.error),
             ),
           ),
       ],
+    );
+  }
+}
+
+/// Desktop-only mirror of the card this draft will become — cover, byline,
+/// title, when it runs and what it costs. Display-only: it reads the form's
+/// current values and never writes back, so nothing here can change what gets
+/// published. Built rather than borrowed because the feed's own event card
+/// takes a persisted [Event], and this draft doesn't have one yet.
+class _EventPreviewCard extends StatelessWidget {
+  final Uint8List? coverBytes;
+  final String title;
+  final UserProfile? host;
+  final DateTime? scheduledAt;
+  final int? durationMinutes;
+  final int priceCents;
+  final int cameraCount;
+
+  const _EventPreviewCard({
+    required this.coverBytes,
+    required this.title,
+    required this.host,
+    required this.scheduledAt,
+    required this.durationMinutes,
+    required this.priceCents,
+    required this.cameraCount,
+  });
+
+  String get _when {
+    final start = scheduledAt;
+    final mins = durationMinutes;
+    final runs = mins == null ? null : _fmtDuration(mins);
+    if (start == null) {
+      return runs == null ? 'Not scheduled' : 'Not scheduled · $runs';
+    }
+    return runs == null
+        ? _fmtDateTime(start)
+        : '${_fmtDateTime(start)} · $runs';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final handle = host?.username ?? 'you';
+    final initial = handle.isEmpty ? '?' : handle[0].toUpperCase();
+    final avatarUrl = host?.avatarUrl;
+
+    return Material(
+      color: NileColors.bgSurface,
+      borderRadius: BorderRadius.circular(NileRadius.lg),
+      clipBehavior: Clip.antiAlias,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          AspectRatio(
+            aspectRatio: 16 / 9,
+            child: coverBytes == null
+                ? ColoredBox(
+                    color: NileColors.bgRaised,
+                    child: Center(
+                      child: Icon(
+                        Icons.image_outlined,
+                        size: 28,
+                        color: NileColors.txtTertiary,
+                      ),
+                    ),
+                  )
+                : Image.memory(coverBytes!, fit: BoxFit.cover),
+          ),
+          Padding(
+            padding: const EdgeInsets.all(NileSpacing.s12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    CircleAvatar(
+                      radius: 14,
+                      backgroundColor: NileColors.bgRaised,
+                      backgroundImage: avatarUrl == null
+                          ? null
+                          : nileAvatarImage(avatarUrl, 14),
+                      child: avatarUrl != null
+                          ? null
+                          : Text(
+                              initial,
+                              style: NileTextStyles.labelSm().copyWith(
+                                color: NileColors.txtPrimary,
+                                letterSpacing: 0,
+                              ),
+                            ),
+                    ),
+                    const SizedBox(width: NileSpacing.s8),
+                    Expanded(
+                      child: Text(
+                        '@$handle',
+                        style: NileTextStyles.bodySm(),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    _PricePill(priceCents: priceCents),
+                  ],
+                ),
+                const SizedBox(height: NileSpacing.s6),
+                Text(
+                  title.isEmpty ? 'Untitled event' : title,
+                  style: NileTextStyles.headingSm(),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                const SizedBox(height: NileSpacing.s8),
+                Row(
+                  children: [
+                    Icon(
+                      Icons.schedule,
+                      size: 14,
+                      color: NileColors.txtTertiary,
+                    ),
+                    const SizedBox(width: NileSpacing.s6),
+                    Expanded(
+                      child: Text(
+                        _when,
+                        style: NileTextStyles.caption().copyWith(
+                          color: NileColors.txtSecondary,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    Icon(
+                      Icons.videocam,
+                      size: 14,
+                      color: NileColors.txtTertiary,
+                    ),
+                    const SizedBox(width: NileSpacing.s4),
+                    Text(
+                      '$cameraCount',
+                      style: NileTextStyles.caption().tabular,
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// The ticket price as it reads on a card. Free is a neutral chip; a price is
+/// volt — the same emphasis the payout card gives the host's cut.
+class _PricePill extends StatelessWidget {
+  final int priceCents;
+
+  const _PricePill({required this.priceCents});
+
+  @override
+  Widget build(BuildContext context) {
+    final paid = priceCents > 0;
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: NileSpacing.s8,
+        vertical: NileSpacing.s2,
+      ),
+      decoration: BoxDecoration(
+        color: paid ? NileColors.volt : NileColors.bgRaised,
+        borderRadius: BorderRadius.circular(NileRadius.pill),
+      ),
+      child: Text(
+        paid ? '\$${(priceCents / 100).toStringAsFixed(2)}' : 'Free',
+        style: NileTextStyles.caption()
+            .copyWith(color: paid ? NileColors.onVolt : NileColors.txtSecondary)
+            .tabular,
+      ),
     );
   }
 }

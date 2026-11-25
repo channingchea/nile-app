@@ -6,22 +6,9 @@ import 'event_repost_service.dart';
 import 'like_service.dart';
 import 'net.dart';
 import 'pagination.dart';
+import 'studio_mode.dart';
 import 'supabase_client.dart';
 import 'topic_service.dart';
-
-// ── Required SQL (run once in Supabase SQL editor) ────────────────────────────
-// create or replace function increment_viewer_count(p_livekit_room text)
-// returns void language sql as $$
-//   update events set viewer_count = viewer_count + 1
-//   where livekit_room = p_livekit_room;
-// $$;
-//
-// create or replace function decrement_viewer_count(p_livekit_room text)
-// returns void language sql as $$
-//   update events set viewer_count = greatest(0, viewer_count - 1)
-//   where livekit_room = p_livekit_room;
-// $$;
-// ─────────────────────────────────────────────────────────────────────────────
 
 // ── Model ─────────────────────────────────────────────────────────────────────
 
@@ -45,8 +32,19 @@ class Event {
   final int? ticketLimit;
   final int cameraCount;
 
+  /// How the Studio runs this show (0145).
+  final StudioMode studioMode;
+
   /// Host opt-in to Pre-Show sponsorship (0079).
   final bool sponsorshipOpen;
+
+  /// Smallest offer this host will look at, in cents. Null means the platform
+  /// floor (`app_config.sponsorship_min_offer_cents`) applies (0096).
+  final int? sponsorshipMinOfferCents;
+
+  /// Accept any offer at or above the minimum without asking (0096). Default
+  /// off — turning it on waives brand-fit review, not Nile's policy screen.
+  final bool sponsorshipAutoAccept;
   final DateTime createdAt;
   final DateTime? startedAt;
   final DateTime? scheduledAt;
@@ -78,7 +76,10 @@ class Event {
     this.replayPublishedAt,
     this.ticketLimit,
     this.cameraCount = 1,
+    this.studioMode = StudioMode.multicam,
     this.sponsorshipOpen = false,
+    this.sponsorshipMinOfferCents,
+    this.sponsorshipAutoAccept = false,
     required this.createdAt,
     this.startedAt,
     this.scheduledAt,
@@ -114,7 +115,10 @@ class Event {
       replayPublishedAt: replayPublishedAt,
       ticketLimit: ticketLimit,
       cameraCount: cameraCount,
+      studioMode: studioMode,
       sponsorshipOpen: sponsorshipOpen,
+      sponsorshipMinOfferCents: sponsorshipMinOfferCents,
+      sponsorshipAutoAccept: sponsorshipAutoAccept,
       createdAt: createdAt,
       startedAt: startedAt,
       scheduledAt: scheduledAt,
@@ -133,6 +137,50 @@ class Event {
   bool get isScheduled => status == 'scheduled';
   bool get isEnded => status == 'ended';
   bool get isDraft => status == 'draft';
+
+  /// Longest a show is allowed to run — mirrors `app_config.max_stream_minutes`
+  /// (480), the same bound the `auto_end_expired_events` sweep uses. Only
+  /// relevant for events whose host never set a duration.
+  static const maxStreamDuration = Duration(hours: 8);
+
+  /// The instant after which this show is definitively over, whatever [status]
+  /// says. Falls back to the max stream length for events with no `end_at`.
+  DateTime? get effectiveEndAt =>
+      endAt ?? scheduledAt?.add(maxStreamDuration);
+
+  /// True once the show is over. Covers three cases raw [status] gets wrong:
+  ///
+  ///  * the host never showed up, so the row is still `scheduled`;
+  ///  * the host opened Sound Check and quit, so it is still `soundcheck`;
+  ///  * the 5-minute auto-end sweep hasn't run yet.
+  ///
+  /// Never true for a draft or an actually-live stream. **Use this, not
+  /// [isEnded], for anything that promises the viewer a stream is coming** —
+  /// beta testers hit day-old events still saying "waiting for host".
+  bool get isOver =>
+      isOverAt(status: status, scheduledAt: scheduledAt, endAt: endAt);
+
+  /// [isOver] for callers that hold a raw `events` row rather than an [Event] —
+  /// the viewer screen reads its state straight off `fetchEventState`. Keeping
+  /// one implementation is the point: the bug this whole rule exists to fix was
+  /// six screens each re-deciding what "over" meant.
+  static bool isOverAt({
+    required String status,
+    DateTime? scheduledAt,
+    DateTime? endAt,
+  }) {
+    if (status == 'ended') return true;
+    if (status == 'draft' || status == 'live') return false;
+    final end = endAt ?? scheduledAt?.add(maxStreamDuration);
+    // isAfter compares absolute instants, so no UTC/local conversion here.
+    return end != null && DateTime.now().isAfter(end);
+  }
+
+  /// True when this event promises the viewer a stream: it's on air now, or the
+  /// lobby is open. The affirmative form of [isOver] — surfaces that offer a way
+  /// IN (Watch buttons, the Lobby, the viewer's live branch) should gate on this
+  /// rather than on `!isEnded`, which is true for a show that never happened.
+  bool get isWatchable => (isLive || isSoundCheck) && !isOver;
 
   factory Event.fromJson(
     Map<String, dynamic> json, {
@@ -162,7 +210,12 @@ class Event {
           : null,
       ticketLimit: (json['ticket_limit'] as num?)?.toInt(),
       cameraCount: (json['camera_count'] as num?)?.toInt() ?? 1,
+      studioMode: StudioMode.fromWire(json['studio_mode']),
       sponsorshipOpen: json['sponsorship_open'] as bool? ?? false,
+      sponsorshipMinOfferCents:
+          (json['sponsorship_min_offer_cents'] as num?)?.toInt(),
+      sponsorshipAutoAccept:
+          json['sponsorship_auto_accept'] as bool? ?? false,
       createdAt: DateTime.parse(json['created_at'] as String),
       startedAt: json['started_at'] != null
           ? DateTime.parse(json['started_at'] as String)
@@ -183,6 +236,17 @@ class EventService {
   /// PostgREST value list for a `not(col,'in',...)` filter, or null if empty.
   static String? _notInList(List<String> ids) =>
       ids.isEmpty ? null : '(${ids.join(',')})';
+
+  /// Drops shows that are over — see [Event.isOver].
+  ///
+  /// Every feed, rail, and search query has to run this client-side: the only
+  /// thing a PostgREST filter can see is `status`, and `status` lies for a host
+  /// no-show (still `scheduled`) and an abandoned Sound Check (still
+  /// `soundcheck`) until the 5-minute sweep catches up. Callers that page should
+  /// compute hasMore/cursor from the RAW page before calling this, so dropping
+  /// rows never shortens a page into a false "end of list".
+  static List<Event> dropOver(Iterable<Event> events) =>
+      events.where((e) => !e.isOver).toList();
 
   /// Live events across the whole platform (not follow-scoped), most-watched
   /// first. Powers the zero-follow starter feed and the Live Now rail.
@@ -224,6 +288,38 @@ class EventService {
         .toList();
   });
 
+  /// Everything scheduled between [from] and [to], for the Schedule grid.
+  ///
+  /// Differs from [getUpcoming] in three ways, all of them because this powers a
+  /// calendar rather than a recommendation: it is bounded at both ends, it
+  /// **includes the caller's own events** (your own shows are the ones you most
+  /// need to see on a schedule), and it reaches into the past far enough to show
+  /// the current week from its start.
+  ///
+  /// [from] and [to] are converted to UTC here; callers pass local wall-clock
+  /// bounds. Doing the conversion in one place is deliberate — the July bug came
+  /// from a naive timestamp crossing this boundary unconverted.
+  static Future<List<Event>> getScheduledBetween({
+    required DateTime from,
+    required DateTime to,
+    int limit = 300,
+  }) => guard(() async {
+    var b = supabase
+        .from('events')
+        .select(
+          '*, profiles!events_host_id_fkey(username, avatar_url, is_official)',
+        )
+        .neq('status', 'draft')
+        .gte('scheduled_at', from.toUtc().toIso8601String())
+        .lt('scheduled_at', to.toUtc().toIso8601String());
+    final blocked = _notInList(await BlockService.blockedIds());
+    if (blocked != null) b = b.not('host_id', 'in', blocked);
+    final rows = await b.order('scheduled_at', ascending: true).limit(limit);
+    return (rows as List)
+        .map((r) => Event.fromJson(r as Map<String, dynamic>))
+        .toList();
+  });
+
   /// Feed: every event from [followingIds] that hasn't passed yet, live-first.
   ///
   /// "Passed" = status is `ended`, OR it was scheduled and the scheduled time
@@ -255,16 +351,10 @@ class EventService {
         ? fetched.last.createdAt.toIso8601String()
         : null;
 
-    final now = DateTime.now();
-    final events = fetched.where((e) {
-      if (e.isEnded) return false;
-      if (e.isScheduled &&
-          e.scheduledAt != null &&
-          e.scheduledAt!.isBefore(now)) {
-        return false;
-      }
-      return true;
-    }).toList();
+    // Was a hand-rolled no-show filter that missed 'soundcheck' entirely and
+    // disagreed with Event.isOver's grace window, so the feed and the detail
+    // page contradicted each other for up to 8 hours on the same event.
+    final events = dropOver(fetched);
 
     // Live first, then upcoming-soonest scheduled, then evergreen by recency.
     events.sort((a, b) {
@@ -360,9 +450,12 @@ class EventService {
     int? price, // cents
     int? ticketLimit,
     int? cameraCount,
+    StudioMode studioMode = StudioMode.multicam,
     bool asDraft = false,
     List<String>? topicIds,
     bool sponsorshipOpen = false, // host opt-in to Pre-Show sponsorship (0079)
+    int? sponsorshipMinOfferCents, // null = platform floor (0096)
+    bool sponsorshipAutoAccept = false,
   }) async {
     final uid = supabase.auth.currentUser?.id;
     if (uid == null) throw StateError('EventService: no authenticated user');
@@ -385,7 +478,14 @@ class EventService {
           'price': ?price,
           'ticket_limit': ?ticketLimit,
           'camera_count': ?cameraCount,
+          'studio_mode': studioMode.wire,
           if (sponsorshipOpen) 'sponsorship_open': true,
+          // Both only mean anything with the toggle on, and writing them for a
+          // closed event would resurrect stale terms if it were reopened later.
+          if (sponsorshipOpen)
+            'sponsorship_min_offer_cents': ?sponsorshipMinOfferCents,
+          if (sponsorshipOpen && sponsorshipAutoAccept)
+            'sponsorship_auto_accept': true,
         })
         .select('*, profiles!events_host_id_fkey(username, avatar_url, is_official)')
         .single();
@@ -414,8 +514,12 @@ class EventService {
     int? ticketLimit,
     bool clearTicketLimit = false,
     int? cameraCount,
+    StudioMode? studioMode, // locked by the server once live (0145)
     List<String>? topicIds, // null = leave tags untouched; [] = clear all
     bool? sponsorshipOpen, // Pre-Show sponsorship opt-in (0079)
+    int? sponsorshipMinOfferCents, // 0096
+    bool clearSponsorshipMinOffer = false, // back to the platform floor
+    bool? sponsorshipAutoAccept,
   }) async {
     if (topicIds != null) {
       await TopicService.setEventTopics(eventId, topicIds);
@@ -435,7 +539,11 @@ class EventService {
       'ticket_limit': ?ticketLimit,
       if (clearTicketLimit) 'ticket_limit': null,
       'camera_count': ?cameraCount,
+      'studio_mode': ?studioMode?.wire,
       'sponsorship_open': ?sponsorshipOpen,
+      'sponsorship_min_offer_cents': ?sponsorshipMinOfferCents,
+      if (clearSponsorshipMinOffer) 'sponsorship_min_offer_cents': null,
+      'sponsorship_auto_accept': ?sponsorshipAutoAccept,
     };
 
     // Nothing changed — skip the update and just fetch the current row.
@@ -544,11 +652,16 @@ class EventService {
       final ev = m['event'] as Map<String, dynamic>?;
       if (ev == null) continue;
       final reposter = (m['reposter'] as Map<String, dynamic>?) ?? {};
+      final event = Event.fromJson(
+        ev,
+        repostedByUsername: reposter['username'] as String?,
+      );
+      // This query has no status filter of its own, so without this a repost
+      // re-injects an ended or no-showed event into the very feed getFeed
+      // excludes it from.
+      if (event.isOver) continue;
       out.add((
-        event: Event.fromJson(
-          ev,
-          repostedByUsername: reposter['username'] as String?,
-        ),
+        event: event,
         repostedAt: DateTime.parse(m['created_at'] as String),
       ));
     }
@@ -624,14 +737,24 @@ class EventService {
   }
 
   /// Transition an event to 'live'.
+  ///
+  /// Guarded like its siblings: without the `.neq` an `ended` show could be
+  /// flipped back to `live` with a fresh `started_at`, which re-fires the "is
+  /// live" push to every follower. Migration 0089 enforces the same rule
+  /// server-side — this is the client half, so the failure is a no-op update
+  /// rather than a thrown Postgres error.
+  ///
+  /// `started_at` is deliberately NOT sent: 0089 stamps it from the server
+  /// clock. The auto-end sweep computes the whole run length from that value,
+  /// and a device 20 minutes fast used to buy 20 extra minutes of billed egress.
   static Future<void> goLive(String liveKitEventId) async {
     await supabase
         .from('events')
-        .update({
-          'status': 'live',
-          'started_at': DateTime.now().toUtc().toIso8601String(),
-        })
-        .eq('livekit_room', liveKitEventId);
+        .update({'status': 'live'})
+        .eq('livekit_room', liveKitEventId)
+        .neq('status', 'ended')
+        .neq('status', 'cancelled')
+        .neq('status', 'draft');
   }
 
   /// Transition an event to 'ended'.
@@ -642,7 +765,9 @@ class EventService {
           'status': 'ended',
           'ended_at': DateTime.now().toUtc().toIso8601String(),
         })
-        .eq('livekit_room', liveKitEventId);
+        .eq('livekit_room', liveKitEventId)
+        .neq('status', 'ended')
+        .neq('status', 'cancelled');
   }
 
   /// Host: publish the replay at [priceCents] (0 = free). Server-side RPC
@@ -655,21 +780,9 @@ class EventService {
     ),
   );
 
-  /// Atomically increment viewer_count (requires the SQL function above).
-  static Future<void> incrementViewerCount(String liveKitEventId) async {
-    await supabase.rpc(
-      'increment_viewer_count',
-      params: {'p_livekit_room': liveKitEventId},
-    );
-  }
-
-  /// Atomically decrement viewer_count (floor 0, requires the SQL function above).
-  static Future<void> decrementViewerCount(String liveKitEventId) async {
-    await supabase.rpc(
-      'decrement_viewer_count',
-      params: {'p_livekit_room': liveKitEventId},
-    );
-  }
+  // increment/decrement_viewer_count wrappers removed (migration 0085): the
+  // count is reconciled server-side from LiveKit's participant list, and the
+  // RPCs are no longer callable by anon or authenticated.
 
   /// Fetch current viewer_count, status, and the timing anchors for an event by
   /// liveKitEventId. scheduled_at gates how early a host may enter sound check;
@@ -682,7 +795,7 @@ class EventService {
         .from('events')
         .select(
           'id, host_id, title, viewer_count, status, '
-          'scheduled_at, end_at, started_at, '
+          'scheduled_at, end_at, started_at, studio_mode, '
           // Pre-Show lobby (0079): cover + host identity for the upgraded lobby.
           'description, cover_image_url, '
           'profiles!events_host_id_fkey(username, display_name, avatar_url)',

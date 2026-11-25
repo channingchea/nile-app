@@ -1,0 +1,29 @@
+# Template for android/key.properties — copy to key.properties and fill in.
+# key.properties is gitignored and must NEVER be committed.
+#
+# This is the UPLOAD key for Play App Signing. Google holds the real app
+# signing key; if this upload key is ever lost you can request a reset from
+# Play Console rather than losing the app, which is the whole reason we use
+# Play App Signing.
+#
+# Create the keystore (run once, from anywhere):
+#
+#   keytool -genkey -v \
+#     -keystore ~/keys/nile-upload.jks \
+#     -storetype JKS \
+#     -keyalg RSA -keysize 2048 -validity 10000 \
+#     -alias nile-upload
+#
+# Keep the .jks OUTSIDE the repo (~/keys is fine) and put the password in your
+# password manager. Back the file up somewhere durable — a lost upload key is
+# recoverable via Play support, but it is a slow detour you don't want.
+#
+# Then read the fingerprint you'll need for App Links / assetlinks.json:
+#
+#   keytool -list -v -keystore ~/keys/nile-upload.jks -alias nile-upload \
+#     | grep 'SHA256:'
+
+storeFile=/Users/you/keys/nile-upload.jks
+storePassword=CHANGEME
+keyAlias=nile-upload
+keyPassword=CHANGEME

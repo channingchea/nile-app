@@ -1,0 +1,84 @@
+{
+  "@@locale": "en",
+
+  "appTitle": "Nile",
+  "@appTitle": {
+    "description": "The product name. Not translated — it's a proper noun."
+  },
+
+  "cancelTicketTitle": "Cancel this ticket?",
+  "@cancelTicketTitle": {
+    "description": "Title of the confirmation dialog when a buyer cancels a ticket inside the free-cancellation window."
+  },
+  "cancelTicketBody": "{amount} goes back to the card you paid with, usually within 5–10 business days. You will lose access to “{eventTitle}”.",
+  "@cancelTicketBody": {
+    "description": "Body of the ticket cancellation confirmation. The amount is pre-formatted with the currency, because which side of the number the symbol sits on is itself a locale decision.",
+    "placeholders": {
+      "amount": { "type": "String", "example": "$12.00 USD" },
+      "eventTitle": { "type": "String", "example": "Sunday Service" }
+    }
+  },
+  "cancelTicketKeep": "Keep it",
+  "cancelTicketConfirm": "Cancel ticket",
+  "cancelTicketDone": "Ticket cancelled — refund on its way.",
+
+  "ticketRefundPolicyShort": "Charged in US dollars. Free cancellation up to {hours} hours before the event starts.",
+  "@ticketRefundPolicyShort": {
+    "description": "Shown under the buy button, before payment. MUST quote the same window that refund-ticket enforces — see supabase/functions/_shared/money.ts.",
+    "placeholders": {
+      "hours": { "type": "int", "example": "24" }
+    }
+  },
+
+  "likeAction": "Like",
+  "unlikeAction": "Unlike",
+  "likeCount": "{count, plural, =1{1 like} other{{count} likes}}",
+  "@likeCount": {
+    "description": "Screen-reader label for the like count. Plural, because a language with more than two forms cannot be served by an 's'.",
+    "placeholders": {
+      "count": { "type": "int", "example": "3" }
+    }
+  },
+  "seeWhoLiked": "See who liked this, {likes}",
+  "@seeWhoLiked": {
+    "placeholders": {
+      "likes": { "type": "String", "example": "3 likes" }
+    }
+  },
+
+  "notificationsWithUnread": "Notifications, {count} unread",
+  "@notificationsWithUnread": {
+    "description": "Screen-reader label for the notifications button when the badge is showing. The count matters — the badge is a purely visual signal.",
+    "placeholders": {
+      "count": { "type": "int", "example": "3" }
+    }
+  },
+  "notificationsLabel": "Notifications",
+
+  "showPassword": "Show password",
+  "hidePassword": "Hide password",
+  "back": "Back",
+  "close": "Close",
+  "clearSearch": "Clear search",
+  "mute": "Mute",
+  "unmute": "Unmute",
+  "play": "Play",
+  "pause": "Pause",
+  "showChat": "Show chat",
+  "hideChat": "Hide chat",
+  "sendMessage": "Send message",
+  "switchCamera": "Switch camera",
+
+  "quietHoursTitle": "Hold notifications overnight",
+  "quietHoursOff": "Off",
+  "quietHoursRange": "Silent from {start} to {end}",
+  "@quietHoursRange": {
+    "placeholders": {
+      "start": { "type": "String", "example": "22:00" },
+      "end": { "type": "String", "example": "07:00" }
+    }
+  },
+  "quietHoursExplainer": "Notifications still arrive in the app — your phone just stays quiet. Alerts about a show starting, going live, or a soundcheck you’re crewing always come through.",
+
+  "shareUsageData": "Share usage data"
+}

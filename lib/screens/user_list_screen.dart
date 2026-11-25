@@ -1,10 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import '../router.dart';
 import '../services/follow_service.dart';
 import '../services/pagination.dart' show Paged;
 import '../services/profile_service.dart';
 import '../theme.dart';
-import 'profile_screen.dart';
 import 'widgets/load_more_footer.dart';
 
 /// Fetches one page of profiles; [cursor] is null for the first page.
@@ -230,12 +231,7 @@ class _UserListScreenState extends State<UserListScreen> {
             isLoading: _followLoading.contains(user.id),
             onFollowTap: isMe ? null : () => _toggleFollow(user),
             onTap: () =>
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (_) => ProfileScreen(userId: user.id),
-                  ),
-                ).then((_) {
+                context.push(NileRoutes.profile(user.id)).then((_) {
                   if (mounted && !isMe) {
                     _followState.remove(user.id);
                     FollowService.isFollowing(user.id).then((v) {

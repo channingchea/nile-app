@@ -20,6 +20,18 @@
 
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { failure } from "../_shared/errors.ts";
+
+// Notification types that ignore quiet hours (migration 0127). The test is
+// "would this still be useful in the morning?" — a show starting in fifteen
+// minutes would not be. Keep this list short; every addition is a decision to
+// wake somebody up.
+const TIME_CRITICAL = new Set([
+  "event_starting",
+  "event_live",
+  "soundcheck_open",
+  "operator_assigned",
+]);
 
 interface Payload {
   notification_id: string;
@@ -48,8 +60,18 @@ function buildMessage(p: Payload): { title: string; body: string } {
       return { title: "Live now", body: `${who} is live` };
     case "event_ended":
       return { title: "Event ended", body: `${who}'s event has ended` };
+    case "event_no_show":
+      // Migration 0088: the show was auto-closed without ever going live.
+      // Deliberately does NOT say "ended" — nothing happened, and the ticket
+      // holder still has money with the host.
+      return {
+        title: "Event didn't take place",
+        body: `${who}'s event never started`,
+      };
     case "operator_assigned":
       return { title: "You're on the crew", body: `${who} added you as a camera operator` };
+    case "guest_invited":
+      return { title: "You're invited", body: `${who} invited you to be a guest on their show` };
     case "new_message":
       return { title: who, body: "Sent you a message" };
     case "message_reaction":
@@ -60,8 +82,23 @@ function buildMessage(p: Payload): { title: string; body: string } {
       return { title: "Sound check open", body: `${who} opened sound check — join to get ready` };
     case "tip_received":
       return { title: "New tip", body: `${who} sent you a tip` };
+    case "film_expiring":
+      // actor is the host themself (the sweep has no other actor) — no `who`.
+      return { title: "Your film is being deleted soon", body: "Your premiere's film will be removed from Nile in 2 days." };
     case "replay_price_prompt":
       return { title: "Price your replay", body: "Your replay is ready — set a price to publish it" };
+    // No `who` on either sponsorship case. An advertiser has no user account,
+    // so actor_id on these rows is the HOST — interpolating it would read "you
+    // want to sponsor your event". The brand name isn't in this payload either
+    // (the row carries a campaign id, nothing else), so the copy works without
+    // it and the card behind the tap names the brand.
+    case "sponsorship_offer":
+      return { title: "Sponsorship offer", body: "A brand wants to sponsor your event — tap to review" };
+    case "sponsorship_offer_expiring":
+      return {
+        title: "Offer expires tomorrow",
+        body: "A sponsorship offer on your event expires in 24 hours",
+      };
     default:
       return { title: "Nile", body: "You have a new notification" };
   }
@@ -193,6 +230,26 @@ serve(async (req) => {
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
     );
 
+    // Quiet hours (migration 0127). This holds the PUSH, never the
+    // notification — the row is already written, so it's all waiting in the
+    // app when they look. What changes is whether the phone lights up at 3am.
+    //
+    // TIME_CRITICAL is exempt on purpose and the settings screen says so. A
+    // show you bought a ticket to, or a soundcheck you're crewing, is starting
+    // *now*; holding that until morning silences the one notification that
+    // could not be acted on later. Everything social waits.
+    if (!TIME_CRITICAL.has(p.type)) {
+      const { data: quiet } = await admin.rpc("in_quiet_hours", {
+        p_user_id: p.recipient_id,
+      });
+      if (quiet === true) {
+        return new Response(
+          JSON.stringify({ sent: 0, held: "quiet_hours" }),
+          { status: 200 },
+        );
+      }
+    }
+
     const { data: tokens, error } = await admin
       .from("device_tokens")
       .select("token")
@@ -236,7 +293,6 @@ serve(async (req) => {
       status: 200,
     });
   } catch (e) {
-    console.error("send-push error:", e);
-    return new Response(JSON.stringify({ error: String(e) }), { status: 500 });
+    return new Response(JSON.stringify(failure(e, "send-push")), { status: 500 });
   }
 });

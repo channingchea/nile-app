@@ -7,7 +7,7 @@
 // leaves a row in `moderation_audit` (fire-and-forget; never fails the call).
 //
 //   { target_type: "user" | "post" | "event" | "comment" | "ad"
-//                | "current" | "current_comment",
+//                | "current" | "current_comment" | "live_chat_message",
 //     target_id: uuid,
 //     action: "resolve" | "dismiss" | "remove_content" | "restore_content"
 //           | "suspend_user" | "unsuspend_user",
@@ -41,6 +41,7 @@
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders as corsHeadersFor } from "../_shared/cors.ts";
+import { failure } from "../_shared/errors.ts";
 
 // CORS headers are per-request, so the JSON responder is built per-request too
 // and handed to the helpers below (they run outside the handler's scope).
@@ -58,6 +59,21 @@ const CONTENT_TABLES: Record<string, string> = {
   event: "events",
   current: "currents",
   current_comment: "current_comments",
+  // #16 phase 3. live_chat_messages carries the same id/removed_at/removed_by
+  // shape the generic remove path expects, so this entry is the whole change —
+  // remove_content and restore_content need no new code.
+  live_chat_message: "live_chat_messages",
+};
+
+// Who each content type belongs to — the person a takedown actually happens
+// to, and therefore who is owed a statement of reasons (P3 #35, DSA Art. 17).
+const OWNER_COLUMNS: Record<string, string> = {
+  posts: "user_id",
+  post_comments: "user_id",
+  events: "host_id",
+  currents: "user_id",
+  current_comments: "user_id",
+  live_chat_messages: "sender_id",
 };
 
 // Comment-shaped tables keep a denormalized count on their parent; soft
@@ -69,6 +85,7 @@ const COMMENT_PARENTS: Record<string, { parentTable: string; parentCol: string }
 
 const TARGET_TYPES = new Set([
   "user", "post", "event", "comment", "ad", "current", "current_comment",
+  "live_chat_message",
 ]);
 const ACTIONS = new Set([
   "resolve", "dismiss", "remove_content", "restore_content",
@@ -133,7 +150,7 @@ serve(async (req) => {
     return await unsuspendUser(admin, user.id, target_id, trimmedNote, json);
   } catch (err) {
     console.error(err);
-    return json({ error: String(err) }, 500);
+    return json(failure(err, "moderate-report"), 500);
   }
 });
 
@@ -156,8 +173,36 @@ async function resolveOrDismiss(
     return json({ error: "No open/reviewing reports for this target (already handled?)" }, 409);
   }
 
+  // An upheld ad report is the exact signal the sponsorship trusted tier is
+  // meant to react to: this advertiser's creative got in front of people
+  // without a human looking at it, and it shouldn't have. Back to the blocking
+  // queue until an admin clears them again. (dismiss means the report was
+  // wrong, so it leaves the tier alone.)
+  if (action === "resolve" && targetType === "ad") {
+    await demoteAdvertiserTrust(admin, targetId);
+  }
+
   await logAudit(admin, { actor: actorId, action, target_type: targetType, target_id: targetId, note });
   return json({ target_type: targetType, target_id: targetId, action, reports_updated: updated.length });
+}
+
+// reports.target_id for an 'ad' is the ad_campaigns row. Fire-and-forget: a
+// failed demotion is logged, never a reason to fail the moderation action.
+// deno-lint-ignore no-explicit-any
+async function demoteAdvertiserTrust(admin: any, campaignId: string) {
+  try {
+    const { data: c } = await admin
+      .from("ad_campaigns").select("advertiser_account_id").eq("id", campaignId).maybeSingle();
+    const accountId = c?.advertiser_account_id as string | null;
+    if (!accountId) return; // host boost — no advertiser account to demote
+    const { error } = await admin
+      .from("advertiser_accounts")
+      .update({ trust_tier: "new", trusted_at: null })
+      .eq("id", accountId);
+    if (error) console.error("trust demotion failed:", error);
+  } catch (err) {
+    console.error("trust demotion error:", err);
+  }
 }
 
 // ── remove_content ───────────────────────────────────────────────────────
@@ -200,6 +245,7 @@ async function removeContent(
   if (rErr) console.error("report resolve failed:", rErr);
 
   await logAudit(admin, { actor: actorId, action: "remove_content", target_type: targetType, target_id: targetId, note });
+  await notifySubject(admin, { targetType, targetId, action: "remove_content", note });
   return json({
     target_type: targetType, target_id: targetId, removed: true,
     reports_resolved: resolved?.length ?? 0,
@@ -235,6 +281,7 @@ async function restoreContent(
 
   // Reports intentionally stay resolved — restoring doesn't reopen them.
   await logAudit(admin, { actor: actorId, action: "restore_content", target_type: targetType, target_id: targetId, note });
+  await notifySubject(admin, { targetType, targetId, action: "restore_content", note });
   return json({ target_type: targetType, target_id: targetId, restored: true });
 }
 
@@ -277,6 +324,9 @@ async function suspendUser(admin: any, actorId: string, targetId: string, note: 
   if (rErr) console.error("report resolve failed:", rErr);
 
   await logAudit(admin, { actor: actorId, action: "suspend_user", target_type: "user", target_id: targetId, note });
+  // Written even though a suspended account can't sign in to read it: the
+  // appeal page quotes it back, and it is the record if the ban is lifted.
+  await notifySubject(admin, { targetType: "user", targetId, action: "suspend_user", note });
   return json({ target_id: targetId, suspended: true, reports_resolved: resolved?.length ?? 0 });
 }
 
@@ -299,7 +349,47 @@ async function unsuspendUser(admin: any, actorId: string, targetId: string, note
   }
 
   await logAudit(admin, { actor: actorId, action: "unsuspend_user", target_type: "user", target_id: targetId, note });
+  await notifySubject(admin, { targetType: "user", targetId, action: "unsuspend_user", note });
   return json({ target_id: targetId, suspended: false });
+}
+
+// The statement of reasons owed to the person an action was taken against
+// (P3 #35). Distinct from moderation_audit, which is the internal record: this
+// one is readable by its subject, and is what an appeal argues with.
+// Fire-and-forget, same posture as logAudit — failing to tell someone must not
+// leave the content up.
+// deno-lint-ignore no-explicit-any
+async function notifySubject(admin: any, args: {
+  targetType: string;
+  targetId: string;
+  action: string;
+  note: string | null;
+}) {
+  try {
+    let userId: string | null = null;
+    if (args.targetType === "user") {
+      userId = args.targetId;
+    } else {
+      const table = CONTENT_TABLES[args.targetType];
+      const col = table ? OWNER_COLUMNS[table] : null;
+      if (!table || !col) return;
+      const { data } = await admin
+        .from(table).select(col).eq("id", args.targetId).maybeSingle();
+      userId = (data?.[col] as string | null) ?? null;
+    }
+    if (!userId) return;
+
+    const { error } = await admin.from("moderation_notices").insert({
+      user_id: userId,
+      action: args.action,
+      target_type: args.targetType,
+      target_id: args.targetId,
+      reason: args.note,
+    });
+    if (error) console.error("notice insert failed:", error);
+  } catch (err) {
+    console.error("notice insert error:", err);
+  }
 }
 
 // Permanent record of a moderation action. Written with the service role

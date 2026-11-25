@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 1.0.0+4
+version: 1.0.0+8
 
 environment:
   sdk: ^3.12.0
@@ -30,6 +30,10 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  # P4 #41. Ships the Material/Cupertino translations and the locale
+  # resolution machinery; `intl` on its own only formats.
+  flutter_localizations:
+    sdk: flutter
 
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
@@ -37,7 +41,13 @@ dependencies:
   livekit_client: ^2.7.0
   # Direct dep for desktop screen-share source picking (desktopCapturer);
   # already pulled in transitively by livekit_client.
-  flutter_webrtc: ^1.4.0
+  # PINNED: RealSync (packages/nile_realsync) calls into this exact libwebrtc
+  # (WebRTC-SDK 144.7559.01). It self-tests on iOS/macOS, but Android can't
+  # prove the layout — re-run the RealSync rig before changing this.
+  flutter_webrtc: 1.4.0
+  # RealSync's native jitter-buffer hook (Studio master host, phase 7).
+  nile_realsync:
+    path: packages/nile_realsync
   http: ^1.6.0
   permission_handler: ^12.0.1
   google_fonts: ^6.2.1
@@ -45,6 +55,8 @@ dependencies:
   sentry_flutter: ^9.16.0
   supabase_flutter: ^2.5.0
   image_picker: ^1.1.2
+  # Premiere: pick film, trailer and caption files (any platform).
+  file_selector: ^1.0.3
   croppy: ^1.5.3
   share_plus: ^10.1.2
   flutter_svg: ^2.0.10+1  # renders the TOTP enrollment QR (Supabase returns SVG)
@@ -65,7 +77,11 @@ dependencies:
   package_info_plus: ^8.1.0
   device_info_plus: ^12.3.0  # bug reports: device model ("only on a Pixel 6a")
   sensors_plus: ^6.1.0  # beta-only shake-to-report
-
+  go_router: ^17.4.0
+  tray_manager: ^0.5.3
+  posthog_flutter: ^5.36.4
+  intl: ^0.20.2
+  qr_flutter: ^4.1.0
 dependency_overrides:
   app_links: 6.4.0
 
@@ -91,6 +107,9 @@ flutter:
   # included with your application, so that you can use the icons in
   # the material Icons class.
   uses-material-design: true
+
+  # P4 #41: runs gen-l10n over lib/l10n/*.arb on pub get and build.
+  generate: true
 
   assets:
     - assets/images/

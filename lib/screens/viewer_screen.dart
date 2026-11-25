@@ -2,24 +2,53 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 import 'package:flutter/foundation.dart'
-    show kIsWeb, defaultTargetPlatform, TargetPlatform;
+    show kIsWeb, defaultTargetPlatform, TargetPlatform, listEquals;
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 import 'package:livekit_client/livekit_client.dart' hide ChatMessage;
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:video_player/video_player.dart';
 import '../services/ad_service.dart';
+import '../services/analytics.dart';
+import '../services/away_pause.dart';
+import '../services/block_service.dart';
 import '../services/chat_service.dart';
+import '../services/deep_link_service.dart';
 import '../services/event_service.dart';
+import '../services/follow_service.dart';
+import '../services/interview.dart' show StageState;
+import '../services/film_sync.dart';
+import '../services/premiere.dart' show ChatPolicy;
+import '../widgets/premiere_widgets.dart';
+import '../services/interview_viewer.dart';
 import '../services/livekit_service.dart';
-import '../services/profile_service.dart';
+import '../services/live_elements.dart';
+import '../services/overlay_layout.dart';
+import '../services/realsync.dart';
 import '../services/realtime.dart';
+import '../services/report_service.dart';
+import '../services/server_clock.dart';
 import '../services/share_urls.dart';
+import '../services/show_control.dart';
+import '../services/studio_graphics.dart';
+import '../services/studio_mode.dart';
+import '../services/studio_roles.dart';
 import '../services/supabase_client.dart';
 import '../services/tip_service.dart';
+import '../router.dart';
 import '../theme.dart';
+import 'widgets/moderation_menu.dart';
+import '../widgets/nile_desktop.dart';
+import '../widgets/elements/element_kinds.dart'
+    show ElementInteraction, Ticking;
+import '../widgets/elements/poll.dart' show PollLivePill, showPollVoteSheet;
+import '../widgets/interview_stage.dart' show InterviewStageView, StageTile;
+import '../widgets/nile_graphics_layer.dart';
+import '../widgets/nile_link_text.dart';
 import '../widgets/rolling_number.dart';
 import '../widgets/share_to_sheet.dart';
+import '../widgets/stage_profile_sheet.dart';
 
 class ViewerScreen extends StatefulWidget {
   final String? initialEventId;
@@ -42,15 +71,23 @@ class CameraFeed {
   /// are always matched on identity AND kind — never identity alone.
   final bool isScreenShare;
 
+  /// The event_cameras slot this participant is on (token metadata). Null for
+  /// a publisher with no slot — never off air, never reordered.
+  final String? slotId;
+
   CameraFeed({
     required this.identity,
     required this.cameraName,
     this.track,
     this.isScreenShare = false,
+    this.slotId,
   });
 
-  String get displayName =>
-      isScreenShare ? '$cameraName — Screen' : cameraName;
+  String get displayName => isScreenShare ? '$cameraName — Screen' : cameraName;
+
+  /// A live element shown as its own angle (studio live elements, phase 4):
+  /// no participant, no track — it draws the element.
+  bool get isElementAngle => isElementAngleId(identity);
 }
 
 class _ViewerScreenState extends State<ViewerScreen>
@@ -77,6 +114,96 @@ class _ViewerScreenState extends State<ViewerScreen>
   static const int _maxSyncDelayMs = 2000;
   int? _audioJoinedAt;
 
+  // Studio graphics on air (room metadata `graphics`), drawn over whichever
+  // angle this viewer is watching. Viewers can't hide them.
+  GraphicsState _graphics = GraphicsState.empty;
+
+  /// Live elements on air and where everything sits on each camera (studio
+  /// live elements). Overlay changes are held back to match this viewer's
+  /// video when its delay is known ([overlayHoldback]); [_overlaySeq] keeps a
+  /// late timer from putting an older state back.
+  ElementsState _elements = ElementsState.empty;
+  OverlayLayout _layout = OverlayLayout.empty;
+  int _overlaySeq = 0;
+  int _overlayShown = 0;
+
+  /// Viewer taps (phase 5): each element's totals, this viewer's own choices,
+  /// and whether those have been fetched for this show yet.
+  final Map<String, ElementTally> _tallies = {};
+  final Map<String, List<String>> _myChoices = {};
+  bool _myChoicesLoaded = false;
+
+  /// Each poll's round as last seen: a reset (new round) clears your vote.
+  final Map<String, int> _rounds = {};
+
+  /// Polls whose "Poll is live" pill this viewer closed.
+  final Set<String> _pillDismissed = {};
+
+  /// The camera whose sound played before an element angle was picked — an
+  /// element angle never changes the audio (phase 4).
+  String? _lastCameraAudio;
+
+  /// In-show sponsor logos already counted for this viewer (the server
+  /// dedupes too; this just saves the calls).
+  final Set<String> _sponsorSeen = {};
+
+  // Show control (room metadata `show`): off-air angles, where new viewers
+  // start, the camera order and "Send everyone here".
+  ShowControl _show = ShowControl.empty;
+
+  /// The "Send everyone here" already acted on — or already in place when we
+  /// joined, so a late joiner never replays it.
+  int? _seenSendAllNonce;
+
+  // Interview mode (studio modes phase 5): the mode (event row, then room
+  // metadata `mode`) and the stage (room metadata `stage`). Who is visibly on
+  // stage is worked out on the fly (stageLineup); [_stageTimer] wakes the
+  // screen when the next "you're on in 5" countdown ends.
+  StudioMode _mode = StudioMode.multicam;
+  StageState _stage = StageState.empty;
+
+  // ── Premiere (docs/plans/studio-modes.md, phases 7-8) ────────────────────
+  FilmState _film = FilmState.none;
+  Timer? _filmTimer;
+
+  /// The viewer picked the host's camera over the film.
+  bool _watchingHost = false;
+  ShowSegment? _lastSegment;
+  bool _closingSlate = false;
+  bool _askRating = false;
+  ChatPolicy _filmChat = ChatPolicy.open;
+  Timer? _stageTimer;
+
+  /// Watching the host's content angle instead of the stage.
+  bool _watchingContent = false;
+
+  /// Cameras' video lands over the first seconds after a join, in no fixed
+  /// order. Until this time the viewer is settled onto the start angle as each
+  /// one arrives; cleared the moment they (or the host) pick one.
+  DateTime? _settleUntil;
+  static const _settleWindow = Duration(seconds: 5);
+
+  /// The angle being watched when the room dropped, restored on rejoin.
+  ({String identity, bool screen})? _resume;
+
+  // Viewers per angle: the slot last reported, and the 60 s heartbeat.
+  ({String? slot})? _reportedAngle;
+  Timer? _angleHeartbeat;
+
+  // Resync: the Studio stamps `resyncAt` into room metadata. We act on a
+  // stamp that changes after we joined — compared by value, not by clock, so
+  // a phone with a wrong clock still behaves — and ignore the one we joined
+  // with.
+  int? _seenResyncAt;
+  bool _syncing = false;
+
+  // RealSync (phase 7): holds the watched camera in step with the show audio
+  // for the whole show. Off unless the remote switch is on AND the native hook
+  // passed its self-test; while off, the joinedAt subscribe delay below is
+  // the only alignment, exactly as before.
+  RealSyncDriver? _realSync;
+  bool _realSyncOn = false;
+
   // Phase 7: viewer count + realtime
   int _viewerCount = 0;
   String? _streamEventId; // liveKitEventId for cleanup
@@ -88,44 +215,88 @@ class _ViewerScreenState extends State<ViewerScreen>
   String? _eventTitle;
   String? _hostId;
   bool _tipPending = false;
+
+  // Away (cost controls, phase 4): the viewer left the app or hid the window.
+  // Nothing is pulled while away; after [_awayLimit] the room is dropped too,
+  // which is also what takes this viewer out of the count.
+  static const _awayLimit = Duration(minutes: 2);
+  late final AwayWatcher _awayWatcher;
+  Timer? _awayTimer;
+  bool _awayDropped = false;
+  bool _resuming = false;
+  bool get _away => _awayWatcher.away;
   // True while the room dropped (e.g. all cameras left) but the show is still
   // live in the DB — we hold a "reconnecting" overlay and retry rather than
   // ending. Only an `ended` DB status actually ends the show.
   bool _reconnecting = false;
   int _reconnectAttempt = 0;
+  Timer? _reconnectTimer;
+  // The same rejoin machinery also runs at Start Show — the Lobby token has no
+  // subscribe rights — and "the stream dropped" is the wrong thing to say at the
+  // moment a show begins. Only the overlay's wording depends on this.
+  bool _goingLive = false;
   // Event status drives the Lobby: 'soundcheck' → Lobby, 'live' → stream.
   String? _eventStatus;
   ResilientChannel? _eventConn;
-  bool _hasIncrementedViewerCount = false;
 
   // Pre-Show lobby (0079): event context for the upgraded lobby — cover image,
   // countdown to showtime, host row — plus the sponsor creative when the event
   // is sponsored. The video creative loops muted (tap the speaker to unmute).
   DateTime? _scheduledAt;
+
+  /// Carried purely so [_isOver] can apply the same rule the rest of the app
+  /// uses — see [Event.isOverAt].
+  DateTime? _endAt;
   String? _coverImageUrl;
   String? _hostUsername;
   String? _hostAvatarUrl;
+
+  /// The host's @username (the profile sheet), next to the name above.
+  String? _hostHandle;
   LobbySponsorship? _sponsorship;
   VideoPlayerController? _sponsorController;
   bool _sponsorMuted = true;
   bool _lobbyImpressionLogged = false;
   Timer? _lobbyTicker; // 1s countdown refresh while the lobby is showing
 
-  // Periodic server-authoritative viewer-count reconcile. Any watching client
-  // re-derives the true count from LiveKit participants, so the number self-heals
-  // from killed-app drift instead of relying on matched increment/decrement.
-  Timer? _viewerReconcileTimer;
-
   // Live chat (ephemeral broadcast). Capped in-memory buffer so a session feels
   // populated without persisting anything server-side.
   static const int _maxChatMessages = 200;
   RealtimeChannel? _chatChannel;
+
+  /// Read-only topic carrying server-authored announcements (tips). Clients
+  /// have no INSERT grant on it, which is what makes those messages
+  /// unforgeable — see migration 0099.
+  RealtimeChannel? _systemChannel;
+
+  /// True once the chat channel has failed to join. Surfaced in the chat pane
+  /// rather than swallowed — see [_onChatStatus].
+  bool _chatUnavailable = false;
   final List<ChatMessage> _chatMessages = [];
+
+  /// The pinned message over the chat, and whether it is expanded. _pinLive
+  /// flips on the first live pin update, which makes the join fetch stale.
+  PinnedMessage? _pinned;
+  bool _pinnedExpanded = false;
+  bool _pinLive = false;
+
+  /// Accounts this viewer has blocked. Chat arrives over a broadcast, not a
+  /// table, so RLS never sees it — without this a viewer who blocked someone
+  /// everywhere else in the app would still read them in chat.
+  ///
+  /// Unlike the host's ban this changes only this viewer's own view, which is
+  /// the correct scope for a block: one person deciding what they read, not
+  /// deciding it for the room.
+  final Set<String> _blockedChatSenders = {};
   final _chatController = TextEditingController();
   final _chatScrollController = ScrollController();
-  String? _myUsername;
-  String? _myAvatarUrl;
   bool _chatOpen = false;
+  // Desktop gives chat a column of its own, so there is nothing to open or
+  // close there. This stands in for "the panel is up" everywhere the open flag
+  // drives behaviour (auto-follow, the unread dot) rather than position, and is
+  // set from build() — the only place that knows which layout was chosen.
+  // Always false on compact, so the phone reads exactly _chatOpen as before.
+  bool _chatPinned = false;
   bool _hasUnreadChat = false;
   // Pin-to-bottom: while the user has scrolled up, don't yank them down on a new
   // message — count them and surface a "new messages" pill instead.
@@ -143,6 +314,7 @@ class _ViewerScreenState extends State<ViewerScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _awayWatcher = AwayWatcher(onAway: _goAway, onBack: _comeBack);
     _chatScrollController.addListener(_onChatScroll);
     if (widget.initialEventId != null) {
       _eventIdController.text = widget.initialEventId!;
@@ -153,17 +325,106 @@ class _ViewerScreenState extends State<ViewerScreen>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    // Returning from the external tip checkout: confirm the tip landed, then
-    // announce it in chat. _tipPending prevents any other resume from firing it.
+    // Returning from the external tip checkout. The announcement itself is the
+    // server's job now (stripe-webhook broadcasts when the tip settles), which
+    // is what fixed the two failure modes here: a CANCELLED tip used to
+    // re-announce this viewer's previous tip, and a tip that settled after they
+    // closed the screen was never announced at all. All this does now is clear
+    // the pending flag.
     if (state == AppLifecycleState.resumed && _tipPending) {
       _tipPending = false;
-      _confirmAndAnnounceTip();
     }
+  }
+
+  // ── Away ──────────────────────────────────────────────────────────────────
+
+  /// Subscribe — unless the viewer is away, when nothing is pulled and
+  /// [_comeBack] picks it up instead.
+  void _pull(RemoteTrackPublication pub) {
+    if (!_away) pub.subscribe();
+  }
+
+  /// Left the app: stop pulling every feed, and start the clock on the room.
+  void _goAway() {
+    final room = _room;
+    if (room == null || _state != ViewerState.watching || _streamEnded) return;
+    // Come back to the angle being watched (a screen share's tile is rebuilt).
+    final f = _focused;
+    if (f != null) _resume = (identity: f.identity, screen: f.isScreenShare);
+    _realSync?.reset();
+    for (final p in room.remoteParticipants.values) {
+      for (final pub in [
+        ...p.videoTrackPublications,
+        ...p.audioTrackPublications,
+      ]) {
+        if (pub.subscribed) pub.unsubscribe();
+      }
+    }
+    _awayTimer?.cancel();
+    _awayTimer = Timer(_awayLimit, () {
+      // Still away: leave the room too. The server's sweep counts this viewer
+      // out, once; coming back rejoins.
+      if (!mounted || !_away) return;
+      _awayDropped = true;
+      _room?.disconnect();
+    });
+  }
+
+  /// Back in view: pull the show again, or rejoin if the room was dropped.
+  void _comeBack() {
+    _awayTimer?.cancel();
+    _awayTimer = null;
+    final dropped = _awayDropped;
+    _awayDropped = false;
+    if (!mounted ||
+        _room == null ||
+        _state != ViewerState.watching ||
+        _streamEnded) {
+      return;
+    }
+    setState(() => _resuming = true);
+    if (dropped) {
+      if (_reconnecting) return;
+      _reconnecting = true;
+      _reconnectAttempt = 0;
+      _attemptReconnect();
+      return;
+    }
+    _settleUntil = DateTime.now().add(_settleWindow);
+    _pullAgain();
+    _reportAngle(force: true);
+    Future.delayed(const Duration(milliseconds: 1500), () {
+      if (mounted && !_reconnecting) setState(() => _resuming = false);
+    });
+  }
+
+  /// Every feed the show needs right now, through the usual subscribe paths.
+  void _pullAgain() {
+    final room = _room;
+    if (room == null) return;
+    if (_interview) return _syncStage();
+    _audioJoinedAt = _findAudioJoinedAt(room) ?? _audioJoinedAt;
+    for (final p in room.remoteParticipants.values) {
+      for (final pub in p.videoTrackPublications) {
+        if (!pub.subscribed) _delayedSubscribeVideo(p, pub);
+      }
+      // Audio published while away was never stored: pull it once, and the
+      // usual routing keeps or drops it.
+      if (!_audioPublications.containsKey(p.identity)) {
+        p.audioTrackPublications.forEach(_pull);
+      }
+    }
+    _updateAudioRouting();
+    _syncOffAir();
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _awayWatcher.dispose();
+    _awayTimer?.cancel();
+    _overlaySeq = -1;
+    _realSync?.dispose();
     _decrementAndCleanup();
     _eventIdController.dispose();
     _chatController.dispose();
@@ -175,21 +436,27 @@ class _ViewerScreenState extends State<ViewerScreen>
 
   void _decrementAndCleanup() {
     _teardownLobby();
-    _viewerReconcileTimer?.cancel();
-    _viewerReconcileTimer = null;
-    if (_hasIncrementedViewerCount && _streamEventId != null) {
-      // Reconcile excluding ourselves so the count drops even before LiveKit
-      // registers our disconnect (covers the last-viewer-leaves case).
-      LivekitService.reconcileViewers(
-        eventId: _streamEventId!,
-        excludeSelf: true,
-      ).catchError((_) {});
-      _hasIncrementedViewerCount = false;
-    }
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    _clearReconnect();
+    _awayTimer?.cancel();
+    _awayTimer = null;
+    _awayDropped = false;
+    // No recount on the way out either. It existed to make the count settle
+    // immediately when the last viewer left, but at the end of a real show
+    // everyone leaves at once — which is precisely when a per-client write to
+    // one row is worst. The sweep settles it within the minute.
     _eventConn?.dispose();
     _eventConn = null;
     _chatChannel?.unsubscribe();
     _chatChannel = null;
+    _systemChannel?.unsubscribe();
+    _systemChannel = null;
+    _angleHeartbeat?.cancel();
+    _angleHeartbeat = null;
+    _stageTimer?.cancel();
+    _filmTimer?.cancel();
+    _stageTimer = null;
   }
 
   /// Re-pull authoritative event state after a realtime drop/rejoin, so a status
@@ -211,7 +478,7 @@ class _ViewerScreenState extends State<ViewerScreen>
   Future<void> _initLobby() async {
     _lobbyTicker?.cancel();
     _lobbyTicker = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (mounted && _eventStatus == 'soundcheck' && !_streamEnded) {
+      if (mounted && _inLobby) {
         setState(() {}); // refresh the countdown
       }
     });
@@ -219,7 +486,9 @@ class _ViewerScreenState extends State<ViewerScreen>
     final dbId = _eventDbId;
     if (dbId == null) return;
     final spons = await AdService.lobbySponsorship(dbId);
-    if (!mounted || spons == null || _eventStatus != 'soundcheck') return;
+    // Re-checked after the await: a lobby that has since aged out must not log
+    // the impression the advertiser is billed for.
+    if (!mounted || spons == null || !_inLobby) return;
 
     VideoPlayerController? controller;
     if (spons.kind == 'video' && spons.videoUrl != null) {
@@ -236,7 +505,7 @@ class _ViewerScreenState extends State<ViewerScreen>
         controller = null; // fall back to the thumb/cover
       }
     }
-    if (!mounted || _eventStatus != 'soundcheck') {
+    if (!mounted || !_inLobby) {
       controller?.dispose();
       return;
     }
@@ -279,12 +548,39 @@ class _ViewerScreenState extends State<ViewerScreen>
     }
   }
 
+  /// Parses a timestamp off a raw `events` row into local time. Null-safe and
+  /// tolerant of a bad value, because the viewer must still open if one field
+  /// is malformed.
+  static DateTime? _parseTs(Object? raw) =>
+      raw is String ? DateTime.tryParse(raw)?.toLocal() : null;
+
+  /// True once this show is over, whatever `status` claims — a host no-show
+  /// stays `scheduled` and an abandoned Sound Check stays `soundcheck` until the
+  /// 5-minute sweep catches up. Same rule the feeds and the event page use.
+  bool get _isOver => Event.isOverAt(
+    status: _eventStatus ?? '',
+    scheduledAt: _scheduledAt,
+    endAt: _endAt,
+  );
+
+  /// The Pre-Show lobby holds viewers between Sound Check and Start Show.
+  ///
+  /// Gated on [_isOver] as well as the raw status: an abandoned Sound Check used
+  /// to render a countdown, a looping sponsor creative, an open chat, and a
+  /// billed advertiser impression — for a show that was never going to happen.
+  bool get _inLobby =>
+      _eventStatus == 'soundcheck' && !_streamEnded && !_isOver;
+
   /// "Starts in 2h 14m" → "Starting soon" once showtime passes.
   String get _countdownLabel {
     final at = _scheduledAt;
     if (at == null) return 'Starting soon';
     final diff = at.difference(DateTime.now());
-    if (diff.isNegative) return 'Starting soon';
+    // Every past time used to collapse to "Starting soon" — the exact string
+    // the testers reported, still showing on a show three days gone.
+    if (diff.isNegative) {
+      return _isOver ? 'This event didn’t take place' : 'Starting soon';
+    }
     final d = diff.inDays, h = diff.inHours % 24, m = diff.inMinutes % 60;
     final s = diff.inSeconds % 60;
     if (d > 0) return 'Starts in ${d}d ${h}h';
@@ -295,21 +591,58 @@ class _ViewerScreenState extends State<ViewerScreen>
 
   // ── Chat ──────────────────────────────────────────────────────────────────
 
+  /// Whether the chat list is on screen — collapsed panel on a phone, pinned
+  /// column on a desktop. Everything that reacts to chat being *visible* asks
+  /// this; only the phone's slide animation still asks [_chatOpen].
+  bool get _chatShowing => _chatOpen || _chatPinned;
+
   void _onChatMessage(ChatMessage msg) {
     if (!mounted) return;
     // Auto-follow only when the user is already pinned to the bottom (or it's
     // their own message). Otherwise keep their scroll position and count the
     // new message for the "new messages" pill.
+    // Same id again = the host released a held-back line, re-delivering it.
+    // Replace it where it stands; it isn't new.
+    final at = msg.id == null
+        ? -1
+        : _chatMessages.indexWhere((m) => m.id == msg.id);
+    if (at != -1) {
+      setState(() => _chatMessages[at] = msg);
+      return;
+    }
     final follow = _chatAtBottom || msg.isMine;
     setState(() {
       _chatMessages.add(msg);
       if (_chatMessages.length > _maxChatMessages) {
         _chatMessages.removeRange(0, _chatMessages.length - _maxChatMessages);
       }
-      if (!_chatOpen && !msg.isMine) _hasUnreadChat = true;
-      if (_chatOpen && !follow && !msg.isSystem) _pendingChatCount++;
+      if (!_chatShowing && !msg.isMine) _hasUnreadChat = true;
+      if (_chatShowing && !follow && !msg.isSystem) _pendingChatCount++;
     });
-    if (_chatOpen && follow) _scrollChatToBottom();
+    if (_chatShowing && follow) _scrollChatToBottom();
+  }
+
+  void _onPin(PinnedMessage? pinned) {
+    if (!mounted) return;
+    setState(() {
+      _pinLive = true;
+      if (pinned?.messageId != _pinned?.messageId) _pinnedExpanded = false;
+      _pinned = pinned;
+    });
+  }
+
+  /// The host removed a single message. Silent by design: no "message removed"
+  /// placeholder, the line simply stops being there. A tombstone is a trophy.
+  void _onChatRemove(String messageId) {
+    if (!mounted) return;
+    setState(() => _chatMessages.removeWhere((m) => m.id == messageId));
+  }
+
+  /// The host banned someone — drop everything they said, not only the line the
+  /// host happened to be looking at.
+  void _onChatRemoveSender(String senderId) {
+    if (senderId.isEmpty || !mounted) return;
+    setState(() => _chatMessages.removeWhere((m) => m.senderId == senderId));
   }
 
   void _onChatScroll() {
@@ -366,17 +699,27 @@ class _ViewerScreenState extends State<ViewerScreen>
     );
   }
 
+  /// Send through the `live-chat` function rather than straight onto the
+  /// channel (#16 phase 1) — that is where the rate limit, the ban check and
+  /// the server-side record are. Our own copy comes back over the broadcast
+  /// like everyone else's — unless the host's blocked words held it back, in
+  /// which case send() hands it to us and only we see it.
   Future<void> _sendChat() async {
     final raw = _chatController.text.trim();
-    if (raw.isEmpty || _chatChannel == null) return;
+    final eventId = _streamEventId;
+    if (raw.isEmpty || eventId == null) return;
     final text = raw.length > 250 ? raw.substring(0, 250) : raw;
     _chatController.clear();
-    await ChatService.send(
-      _chatChannel!,
-      username: _myUsername ?? 'viewer',
-      avatarUrl: _myAvatarUrl,
-      content: text,
-    );
+    try {
+      final own = await ChatService.send(eventId: eventId, content: text);
+      if (own != null) _onChatMessage(own);
+    } on ChatSendException catch (e) {
+      if (!mounted) return;
+      // Give them their words back. Losing what you typed to a rate limit is a
+      // second punishment for the same thing.
+      _chatController.text = text;
+      _showSnack(e.message);
+    }
   }
 
   // ── Reactions ─────────────────────────────────────────────────────────────
@@ -404,7 +747,8 @@ class _ViewerScreenState extends State<ViewerScreen>
     if (channel == null) return;
     final now = DateTime.now();
     if (_lastReactionSentAt != null &&
-        now.difference(_lastReactionSentAt!) < const Duration(milliseconds: 200)) {
+        now.difference(_lastReactionSentAt!) <
+            const Duration(milliseconds: 200)) {
       return;
     }
     _lastReactionSentAt = now;
@@ -430,7 +774,9 @@ class _ViewerScreenState extends State<ViewerScreen>
       backgroundColor: NileColors.bgSurface,
       isScrollControlled: true,
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(NileRadius.lg)),
+        borderRadius: BorderRadius.vertical(
+          top: Radius.circular(NileRadius.lg),
+        ),
       ),
       builder: (_) => _TipSheet(onPick: _startTip),
     );
@@ -463,42 +809,37 @@ class _ViewerScreenState extends State<ViewerScreen>
     }
   }
 
-  /// After returning from checkout, confirm the tip actually paid (webhook may
-  /// lag a beat, so retry once) and broadcast an ephemeral announcement.
-  Future<void> _confirmAndAnnounceTip() async {
-    final eventId = _eventDbId;
-    final channel = _chatChannel;
-    if (eventId == null || channel == null) return;
-    for (var attempt = 0; attempt < 2; attempt++) {
-      final cents = await TipService.latestPaidTipCents(eventId);
-      if (cents != null) {
-        final name = _myUsername ?? 'Someone';
-        await ChatService.sendSystem(
-          channel,
-          content: '$name tipped ${_formatCents(cents)} 🎉',
-        );
-        return;
-      }
-      if (attempt == 0) await Future<void>.delayed(const Duration(seconds: 3));
-    }
-  }
-
-  String _formatCents(int cents) {
-    final dollars = cents / 100;
-    return dollars == dollars.roundToDouble()
-        ? '\$${dollars.toStringAsFixed(0)}'
-        : '\$${dollars.toStringAsFixed(2)}';
-  }
-
-  void _showSnack(String msg) {
+  void _showSnack(
+    String msg, {
+    Duration duration = const Duration(seconds: 4),
+  }) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(msg), duration: duration));
+  }
+
+  /// Chat's private channel refused us, or never answered.
+  ///
+  /// Almost always an authorization failure: the Realtime policy is missing or
+  /// this viewer genuinely isn't entitled to this room's chat. Either way the
+  /// old behaviour — render an empty, permanently silent chat — was the worst
+  /// possible one, because it is indistinguishable from a room where nobody has
+  /// said anything yet. Say it plainly instead.
+  void _onChatStatus(RealtimeSubscribeStatus status, Object? error) {
+    if (!mounted) return;
+    final failed =
+        status == RealtimeSubscribeStatus.channelError ||
+        status == RealtimeSubscribeStatus.timedOut;
+    if (failed == _chatUnavailable) return;
+    setState(() => _chatUnavailable = failed);
   }
 
   // ── Realtime callback ─────────────────────────────────────────────────────
 
   void _onRealtimeUpdate(Map<String, dynamic> record) {
     if (!mounted) return;
+    final wasSoundcheck = _eventStatus == 'soundcheck';
     setState(() {
       if (record['viewer_count'] != null) {
         _viewerCount = record['viewer_count'] as int;
@@ -515,6 +856,23 @@ class _ViewerScreenState extends State<ViewerScreen>
     });
     if (record['status'] == 'live' || record['status'] == 'ended') {
       _teardownLobby();
+    }
+
+    // The token we joined the Lobby with carries no subscribe rights — Sound
+    // Check is a rehearsal and the server withholds them until the show is
+    // actually live (see LivekitService.viewerToken's `lobbySafe`). Going live
+    // therefore needs a fresh token, not just a rebuild. _attemptReconnect is
+    // exactly that job — poll status, re-mint, rejoin, back off on failure — so
+    // reuse it rather than growing a second rejoin path that can rot separately.
+    if (record['status'] == 'live' &&
+        wasSoundcheck &&
+        _state == ViewerState.watching &&
+        !_streamEnded &&
+        !_reconnecting) {
+      _reconnecting = true;
+      _goingLive = true;
+      _reconnectAttempt = 0;
+      _attemptReconnect();
     }
   }
 
@@ -536,13 +894,28 @@ class _ViewerScreenState extends State<ViewerScreen>
     try {
       // Fetch initial event state (viewer count + guard against already-ended)
       final eventState = await EventService.fetchEventState(eventId);
-      if (eventState != null && eventState['status'] == 'ended') {
-        setState(() {
-          _state = ViewerState.idle;
-          _errorMessage = 'This stream has already ended.';
-        });
-        return;
+      if (eventState != null) {
+        // Was `status == 'ended'` only, so an abandoned Sound Check opened a
+        // live viewer onto a room nobody was ever going to publish into.
+        final status = eventState['status'] as String? ?? '';
+        final over = Event.isOverAt(
+          status: status,
+          scheduledAt: _parseTs(eventState['scheduled_at']),
+          endAt: _parseTs(eventState['end_at']),
+        );
+        if (over) {
+          setState(() {
+            _state = ViewerState.idle;
+            _errorMessage = status == 'ended'
+                ? 'This stream has already ended.'
+                : 'This event didn’t take place.';
+          });
+          return;
+        }
       }
+
+      // The room metadata's mode wins once the Studio has set one.
+      _mode = StudioMode.fromWire(eventState?['studio_mode']);
 
       // Viewer identity now comes from the signed-in user's JWT (the Edge
       // Function reads it server-side) — we no longer send a viewerId.
@@ -556,16 +929,24 @@ class _ViewerScreenState extends State<ViewerScreen>
       final token = conn.token;
       final wsUrl = conn.wsUrl;
 
-      room = Room();
+      // adaptiveStream sizes each subscription to the renderer showing it: the
+      // focused feed pulls the full simulcast layer while the multicam
+      // thumbnails pull a low one, and anything scrolled off screen pauses.
+      // Without it every viewer pulls top quality on every feed at once, which
+      // stalls cellular connections into the reconnect loop below.
+      room = Room(roomOptions: const RoomOptions(adaptiveStream: true));
       final listener = room.createListener();
 
       listener
         ..on<TrackSubscribedEvent>(_onTrackSubscribed)
         ..on<TrackUnsubscribedEvent>(_onTrackUnsubscribed)
+        ..on<TrackUnpublishedEvent>(_onTrackUnpublished)
         ..on<ParticipantConnectedEvent>(_onParticipantConnected)
         ..on<ParticipantDisconnectedEvent>(_onParticipantDisconnected)
         ..on<ParticipantMetadataUpdatedEvent>(_onParticipantMetadataUpdated)
+        ..on<RoomMetadataChangedEvent>((e) => _applyRoomMetadata(e.metadata))
         ..on<RoomDisconnectedEvent>(_onRoomDisconnected);
+      _listenStage(listener);
 
       // Fail loudly instead of hanging on "Joining stream…" forever.
       await room
@@ -579,6 +960,11 @@ class _ViewerScreenState extends State<ViewerScreen>
       // Read the master-audio participant's joinedAt before touching any
       // camera — it's the zero reference every camera offset is measured against.
       _audioJoinedAt = _findAudioJoinedAt(room);
+      // Graphics already on air, and the resync stamp we joined with.
+      _applyRoomMetadata(room.metadata, joining: true);
+      // A "Send everyone here" already in place is history to a new viewer.
+      _seenSendAllNonce = _show.sendAll?.nonce;
+      _settleUntil = DateTime.now().add(_settleWindow);
 
       for (final participant in room.remoteParticipants.values) {
         for (final publication in participant.videoTrackPublications) {
@@ -600,19 +986,18 @@ class _ViewerScreenState extends State<ViewerScreen>
           if (publication.subscribed && publication.track != null) {
             _storeAudioPublication(participant, publication);
           } else {
-            publication.subscribe();
+            _pull(publication);
           }
         }
       }
 
-      // Reconcile the viewer count from LiveKit now, then on a light interval —
-      // authoritative and self-healing (replaces the drift-prone increment).
-      LivekitService.reconcileViewers(eventId: eventId).catchError((_) {});
-      _viewerReconcileTimer?.cancel();
-      _viewerReconcileTimer = Timer.periodic(
-        const Duration(seconds: 30),
-        (_) => LivekitService.reconcileViewers(eventId: eventId).catchError((_) {}),
-      );
+      // The viewer count is now reconciled server-side, once per live event, by
+      // the livekit-sweep cron. This used to be a 30s timer per viewer: every
+      // client asking the server to recount the room, each recount writing the
+      // same hot events row, and realtime fanning every write back out to every
+      // viewer — thousands of messages a second at scale for a number that
+      // barely moves, with lock contention peaking exactly at the busiest
+      // moment of the show. We're already subscribed to the row; just read it.
 
       final eventConn = ResilientChannel(
         onResync: () => _resyncEventState(eventId),
@@ -623,17 +1008,44 @@ class _ViewerScreenState extends State<ViewerScreen>
         ),
       );
 
-      // Open the ephemeral chat channel and resolve our username once for
-      // outgoing messages (broadcast carries no profile join).
+      // Open the chat channel. Our own username no longer needs resolving here:
+      // the server stamps it from `profiles` when it broadcasts, which is what
+      // stops one viewer chatting under another's name.
+      // Chat joins a *private* channel, so the join is authorized by the
+      // Realtime policy in migration 0104 rather than by knowing the slug. A
+      // refused join looks exactly like a quiet room from here — nobody is
+      // talking — which is how a broken policy could sit unnoticed. Watch the
+      // subscribe status and say so instead.
       final chatChannel = ChatService.subscribe(
         eventId,
         _onChatMessage,
         onReaction: _onReaction,
+        onRemove: _onChatRemove,
+        onRemoveSender: _onChatRemoveSender,
+        onStatus: _onChatStatus,
       );
-      ProfileService.fetchCurrentProfile().then((p) {
-        _myUsername = p?.username;
-        _myAvatarUrl = p?.avatarUrl;
-      }).catchError((_) => null);
+      // Server-authored announcements (tips) arrive on their own read-only
+      // topic — see ChatService.subscribeSystem.
+      _systemChannel = ChatService.subscribeSystem(
+        eventId,
+        _onChatMessage,
+        onPin: _onPin,
+        onTally: (id, tally) {
+          if (mounted) setState(() => _tallies[id] = tally);
+        },
+      );
+      // Whatever was pinned before we arrived; _onPin keeps it current.
+      ChatService.fetchPinned(eventId).then((p) {
+        if (mounted && !_pinLive && _streamEventId == eventId) {
+          setState(() => _pinned = p);
+        }
+      });
+      // Chat is a broadcast, so a block can only be applied client-side here.
+      BlockService.blockedIds()
+          .then((ids) {
+            if (mounted) setState(() => _blockedChatSenders.addAll(ids));
+          })
+          .catchError((_) {});
 
       final hostProfile = eventState?['profiles'] as Map<String, dynamic>?;
       setState(() {
@@ -646,14 +1058,14 @@ class _ViewerScreenState extends State<ViewerScreen>
         _eventDbId = eventState?['id'] as String?;
         _eventTitle = eventState?['title'] as String?;
         _hostId = eventState?['host_id'] as String?;
-        _scheduledAt = eventState?['scheduled_at'] != null
-            ? DateTime.tryParse(eventState!['scheduled_at'] as String)?.toLocal()
-            : null;
+        _scheduledAt = _parseTs(eventState?['scheduled_at']);
+        _endAt = _parseTs(eventState?['end_at']);
         _coverImageUrl = eventState?['cover_image_url'] as String?;
-        _hostUsername = (hostProfile?['display_name'] ??
-            hostProfile?['username']) as String?;
+        _hostUsername =
+            (hostProfile?['display_name'] ?? hostProfile?['username'])
+                as String?;
         _hostAvatarUrl = hostProfile?['avatar_url'] as String?;
-        _hasIncrementedViewerCount = true;
+        _hostHandle = hostProfile?['username'] as String?;
         _eventConn = eventConn;
         _chatChannel = chatChannel;
         _state = ViewerState.watching;
@@ -661,9 +1073,17 @@ class _ViewerScreenState extends State<ViewerScreen>
 
       // Entering during Sound Check → set up the Pre-Show lobby (sponsor
       // creative + countdown). Live entry skips it entirely.
-      if (_eventStatus == 'soundcheck') _initLobby();
+      if (_inLobby) _initLobby();
 
       _updateAudioRouting();
+      _startRealSync(room);
+      _syncOffAir();
+      _afterAnglesChanged();
+      _angleHeartbeat?.cancel();
+      _angleHeartbeat = Timer.periodic(
+        AngleWatchers.heartbeat,
+        (_) => _reportAngle(force: true),
+      );
     } catch (e) {
       await room?.disconnect();
       if (!mounted) return;
@@ -677,9 +1097,23 @@ class _ViewerScreenState extends State<ViewerScreen>
   // ── LiveKit event handlers ────────────────────────────────────────────────
 
   void _onTrackSubscribed(TrackSubscribedEvent event) {
+    // The room auto-subscribes to anything published while the viewer is away.
+    if (_away) {
+      event.publication.unsubscribe();
+      return;
+    }
+    if (_interview) {
+      _onStageEvent(event);
+      return;
+    }
     // Don't gate on TrackSource (can be `unknown` at subscribe time) — _addCamera
     // checks the participant's role == 'camera' authoritatively.
     if (event.track is VideoTrack) {
+      // Off air (or went off while this was on its way): don't pull it.
+      if (!_onAirParticipant(event.participant)) {
+        event.publication.unsubscribe();
+        return;
+      }
       final isScreen = _isScreenSharePub(event.participant, event.publication);
       final idx = _cameras.indexWhere(
         (c) =>
@@ -693,6 +1127,7 @@ class _ViewerScreenState extends State<ViewerScreen>
             cameraName: _cameras[idx].cameraName,
             track: event.track as VideoTrack,
             isScreenShare: isScreen,
+            slotId: _cameras[idx].slotId,
           );
         });
       } else {
@@ -708,6 +1143,12 @@ class _ViewerScreenState extends State<ViewerScreen>
   }
 
   void _onTrackUnsubscribed(TrackUnsubscribedEvent event) {
+    // Interview reads tracks straight off the room: just redraw. No resync
+    // here — _syncStage is usually what dropped it.
+    if (_interview) {
+      setState(() {});
+      return;
+    }
     if (event.track is VideoTrack) {
       final isScreen = _isScreenSharePub(event.participant, event.publication);
       final idx = _cameras.indexWhere(
@@ -720,39 +1161,48 @@ class _ViewerScreenState extends State<ViewerScreen>
           if (isScreen) {
             // A stopped share is gone for good — drop the tile entirely
             // instead of leaving a dead placeholder.
-            _cameras.removeAt(idx);
-            if (_focusedIndex >= _cameras.length && _cameras.isNotEmpty) {
-              _focusedIndex = _cameras.length - 1;
-            }
+            _keepingFocus(() => _cameras.removeAt(idx));
           } else {
             // A camera can come back (video toggle) — keep the placeholder.
             _cameras[idx] = CameraFeed(
               identity: _cameras[idx].identity,
               cameraName: _cameras[idx].cameraName,
               track: null,
+              slotId: _cameras[idx].slotId,
             );
           }
         });
+        if (isScreen) _afterAnglesChanged();
       }
       _updateAudioRouting();
-    } else if (event.track is AudioTrack) {
-      _audioPublications.remove(event.participant.identity);
+    }
+    // Audio is kept: routing unsubscribes on purpose (the mute button, another
+    // camera's sound), and a forgotten publication could never be turned back
+    // on. It's dropped only once it's really gone (_onTrackUnpublished).
+  }
+
+  void _onTrackUnpublished(TrackUnpublishedEvent event) {
+    final id = event.participant.identity;
+    if (_audioPublications[id]?.sid == event.publication.sid) {
+      _audioPublications.remove(id);
     }
   }
 
   void _onParticipantDisconnected(ParticipantDisconnectedEvent event) {
     _audioPublications.remove(event.participant.identity);
-    setState(() {
-      _cameras.removeWhere((c) => c.identity == event.participant.identity);
-      if (_focusedIndex >= _cameras.length && _cameras.isNotEmpty) {
-        _focusedIndex = _cameras.length - 1;
-      }
-    });
+    setState(
+      () => _keepingFocus(
+        () => _cameras.removeWhere(
+          (c) => c.identity == event.participant.identity,
+        ),
+      ),
+    );
     if (event.participant.identity == _masterAudioIdentity) {
       final newIdentity = _findMasterAudioIdentity(_room);
       setState(() => _masterAudioIdentity = newIdentity);
     }
     _updateAudioRouting();
+    _afterAnglesChanged();
   }
 
   void _onParticipantConnected(ParticipantConnectedEvent event) {
@@ -763,14 +1213,10 @@ class _ViewerScreenState extends State<ViewerScreen>
     }
 
     // Camera sync on (re)join: a fresh token carries a fresh server-stamped
-    // joinedAt. If the master-audio participant (re)joined, refresh the zero
+    // joinedAt. If the master-audio source (re)joined, refresh the zero
     // reference so every subsequent camera offset is measured against it.
-    final meta = _parseMeta(event.participant.metadata);
-    final role = meta['role'];
-    if (role == 'master-audio' ||
-        (role == 'camera' && meta['isMasterAudio'] == true)) {
-      final ja = (meta['joinedAt'] as num?)?.toInt();
-      if (ja != null) _audioJoinedAt = ja;
+    if (event.participant.identity == _masterAudioIdentity) {
+      _audioJoinedAt = _findAudioJoinedAt(_room) ?? _audioJoinedAt;
     }
     // Subscribe this participant's video held back to the audio timeline. Same
     // path as initial join — no special-casing.
@@ -779,6 +1225,7 @@ class _ViewerScreenState extends State<ViewerScreen>
         _delayedSubscribeVideo(event.participant, publication);
       }
     }
+    if (_interview) _onStageEvent(event);
   }
 
   // ── Camera sync ───────────────────────────────────────────────────────────
@@ -794,20 +1241,11 @@ class _ViewerScreenState extends State<ViewerScreen>
 
   /// joinedAt of the master-audio source — the zero reference for offsets.
   int? _findAudioJoinedAt(Room? room) {
-    if (room == null) return null;
-    for (final p in room.remoteParticipants.values) {
-      final meta = _parseMeta(p.metadata);
-      if (meta['role'] == 'master-audio') {
-        return (meta['joinedAt'] as num?)?.toInt();
-      }
-    }
-    for (final p in room.remoteParticipants.values) {
-      final meta = _parseMeta(p.metadata);
-      if (meta['role'] == 'camera' && meta['isMasterAudio'] == true) {
-        return (meta['joinedAt'] as num?)?.toInt();
-      }
-    }
-    return null;
+    final id = _findMasterAudioIdentity(room);
+    final p = id == null ? null : room?.remoteParticipants[id];
+    return p == null
+        ? null
+        : (_parseMeta(p.metadata)['joinedAt'] as num?)?.toInt();
   }
 
   /// Subscribe a camera's video held back so it aligns with the audio timeline.
@@ -819,8 +1257,15 @@ class _ViewerScreenState extends State<ViewerScreen>
     RemoteTrackPublication publication,
   ) {
     // Screen shares aren't part of the audio-sync dance — show immediately.
-    if (publication.source == TrackSource.screenShareVideo) {
-      publication.subscribe();
+    // With RealSync on, nothing waits: it aligns the picture continuously.
+    // An off-air angle isn't pulled at all; _syncOffAir picks it up when it
+    // comes back.
+    if (!_onAirParticipant(participant)) return;
+    // Interview: _syncStage decides, and nothing waits — it's a live
+    // conversation, not angles lined up to one audio timeline.
+    if (_interview) return;
+    if (_realSyncOn || publication.source == TrackSource.screenShareVideo) {
+      _pull(publication);
       return;
     }
     final cameraJoinedAt =
@@ -830,21 +1275,510 @@ class _ViewerScreenState extends State<ViewerScreen>
       delayMs = (_audioJoinedAt! - cameraJoinedAt).clamp(0, _maxSyncDelayMs);
     }
     if (delayMs == 0) {
-      publication.subscribe();
+      _pull(publication);
       return;
     }
     Future.delayed(Duration(milliseconds: delayMs), () {
-      if (!mounted || _room == null) return;
-      if (!publication.subscribed) publication.subscribe();
+      if (!mounted || _room == null || !_onAirParticipant(participant)) return;
+      if (!publication.subscribed) _pull(publication);
     });
   }
 
   void _onParticipantMetadataUpdated(ParticipantMetadataUpdatedEvent event) {
+    // The Studio renamed a camera — the angle picker follows.
+    final name =
+        _parseMeta(event.participant.metadata)['cameraName'] as String?;
+    if (name != null) {
+      final id = event.participant.identity;
+      if (_cameras.any((c) => c.identity == id && c.cameraName != name)) {
+        setState(() {
+          for (var i = 0; i < _cameras.length; i++) {
+            final c = _cameras[i];
+            if (c.identity != id) continue;
+            _cameras[i] = CameraFeed(
+              identity: c.identity,
+              cameraName: name,
+              track: c.track,
+              isScreenShare: c.isScreenShare,
+              slotId: c.slotId,
+            );
+          }
+        });
+      }
+    }
     final newIdentity = _findMasterAudioIdentity(_room);
     if (newIdentity != _masterAudioIdentity) {
       setState(() => _masterAudioIdentity = newIdentity);
       _updateAudioRouting();
     }
+    // A guest's name or title changed.
+    if (_interview) _onStageEvent(event);
+  }
+
+  // ── Room metadata: graphics + show control + resync ───────────────────────
+
+  /// The sponsor's logo is on this viewer's screen: one impression per show.
+  void _countSponsor(List<LiveGraphic> onAir) {
+    final eventId = _eventDbId;
+    if (eventId == null) return;
+    for (final g in onAir) {
+      final id = g.campaignId;
+      if (g.kind == GraphicKind.sponsor && id != null && _sponsorSeen.add(id)) {
+        unawaited(
+          AdService.logInShowSponsorImpression(
+            campaignId: id,
+            eventId: eventId,
+          ),
+        );
+      }
+    }
+  }
+
+  /// A QR code tapped on screen: Nile links open in the app; anything else
+  /// asks first, since it leaves Nile.
+  Future<void> _openGraphicLink(LiveGraphic g) async {
+    final uri = Uri.tryParse(g.url ?? '');
+    if (uri == null || uri.scheme != 'https') return;
+    if (await DeepLinkService.openInApp(uri)) return;
+    if (!mounted) return;
+    final go = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: NileColors.bgSurface,
+        title: Text('Leave Nile?', style: NileTextStyles.headingMd()),
+        content: Text(
+          'This opens ${uri.host} in your browser. The show keeps playing here.',
+          style: NileTextStyles.bodyMd(),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Open'),
+          ),
+        ],
+      ),
+    );
+    if (go == true) {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    }
+  }
+
+  /// The newest `at` stamp on the overlay parts of room metadata.
+  static int? _overlayStamp(String? raw) {
+    final m = parseParticipantMeta(raw);
+    int? at(Object? part) => part is Map ? (part['at'] as num?)?.toInt() : null;
+    final stamps = [
+      at(m['graphics']),
+      at(m['elements']),
+      at(m['layout']),
+    ].whereType<int>();
+    return stamps.isEmpty ? null : stamps.reduce(max);
+  }
+
+  void _applyOverlay(String? raw, {required bool joining}) {
+    final graphics = GraphicsState.fromRoomMetadata(raw);
+    final elements = ElementsState.fromRoomMetadata(raw);
+    final layout = OverlayLayout.fromRoomMetadata(raw);
+    if (graphics == _graphics && elements == _elements && layout == _layout) {
+      return;
+    }
+    if (elements.hasClocks) unawaited(ServerClock.ensure());
+    final seq = ++_overlaySeq;
+    void show() {
+      if (!mounted || seq <= _overlayShown || _overlaySeq < 0) return;
+      _overlayShown = seq;
+      final before = _focused;
+      // Element angles come and go with the elements; keep the viewer on
+      // what they were watching.
+      setState(
+        () => _keepingFocus(() {
+          _graphics = graphics;
+          _elements = elements;
+          _layout = layout;
+          _noteRounds(elements);
+        }),
+      );
+      if (elements.takesTaps) _loadMyChoices();
+      // On (re)join the caller settles angles once the cameras are in.
+      if (!joining) _afterAnglesChanged(watching: before);
+    }
+
+    final focused = _focused;
+    final wait = joining
+        ? Duration.zero
+        : overlayHoldback(
+            contentAtMs: _overlayStamp(raw),
+            serverNowMs: ServerClock.nowIfKnown(),
+            viewerAgeMs: focused == null
+                ? null
+                : _realSync?.ageOf(focused.identity),
+          );
+    wait == Duration.zero ? show() : Timer(wait, show);
+  }
+
+  void _applyRoomMetadata(String? raw, {bool joining = false}) {
+    _applyStage(raw);
+    _applyOverlay(raw, joining: joining);
+    // On (re)join the caller syncs subscriptions and focus once the cameras
+    // are in; only a live change is acted on here.
+    final show = ShowControl.fromRoomMetadata(raw);
+    if (joining) {
+      _show = show;
+    } else if (mounted) {
+      _applyShow(show);
+    }
+    final stamp = (parseParticipantMeta(raw)['resyncAt'] as num?)?.toInt();
+    if (joining) {
+      _seenResyncAt = stamp;
+    } else if (stamp != null && stamp != _seenResyncAt) {
+      _seenResyncAt = stamp;
+      _resyncNow();
+    }
+  }
+
+  /// Drop and re-pick up the angle being watched together with the show
+  /// audio, re-measuring the offset between them. A brief, deliberate pause.
+  Future<void> _resyncNow() async {
+    final room = _room;
+    final focused = _focused;
+    if (room == null || focused == null || _syncing || _interview) return;
+    final cam = room.remoteParticipants[focused.identity];
+    final videoPubs = [
+      ...?cam?.videoTrackPublications.where(
+        (p) => p.subscribed && p.source != TrackSource.screenShareVideo,
+      ),
+    ];
+    final audioId = _masterAudioIdentity;
+    final audioPub = audioId == null ? null : _audioPublications[audioId];
+    setState(() => _syncing = true);
+    _realSync?.reset();
+    try {
+      await Future.wait([
+        for (final p in videoPubs) p.unsubscribe(),
+        if (audioPub != null) audioPub.unsubscribe(),
+      ]);
+      await Future.delayed(const Duration(milliseconds: 300));
+      if (!mounted || _room != room) return;
+      _audioJoinedAt = _findAudioJoinedAt(room) ?? _audioJoinedAt;
+      if (audioPub != null && _audioEnabled) _pull(audioPub);
+      for (final p in videoPubs) {
+        _delayedSubscribeVideo(cam!, p);
+      }
+    } catch (_) {
+      // A pub that vanished mid-resync is picked up by the normal events.
+    } finally {
+      Future.delayed(const Duration(milliseconds: 1500), () {
+        if (mounted) setState(() => _syncing = false);
+      });
+    }
+  }
+
+  /// Start (or restart, after a rejoin) RealSync for [room] when it's allowed.
+  void _startRealSync(Room room) {
+    _realSync?.dispose();
+    _realSync = null;
+    // Interview feeds aren't held to the show audio (see _syncStage).
+    if (_interview) return;
+    RealSyncConfig.correcting().then((on) {
+      if (!mounted || _room != room) return;
+      _realSyncOn = on;
+      if (!on) return;
+      // Holding overlays back to the picture needs the server clock.
+      unawaited(ServerClock.ensure());
+      // Every feed on screen (main view and thumbnails) plus the master
+      // audio, all lined up to the same moment.
+      _realSync = RealSyncDriver(
+        room: room,
+        feeds: () => [
+          for (final c in _cameras) (identity: c.identity, track: c.track),
+        ],
+        masterAudio: () => _masterAudioIdentity,
+      )..start();
+    });
+  }
+
+  /// The camera slot a participant is on, for per-camera graphics.
+  String? _slotOf(String identity) =>
+      _parseMeta(_room?.remoteParticipants[identity]?.metadata)['slotId']
+          as String?;
+
+  // ── Show control + viewers per angle ──────────────────────────────────────
+
+  bool _onAirParticipant(Participant p) =>
+      _show.isOnAir(_parseMeta(p.metadata)['slotId'] as String?);
+
+  /// The angles this viewer can pick right now: off-air ones left out, in the
+  /// host's order. [_focusedIndex] indexes this list, not [_cameras].
+  List<CameraFeed> get _onAir => _show.ordered([
+    for (final c in _cameras)
+      if (_show.isOnAir(c.slotId)) c,
+    for (final e in _elements.angles)
+      if (_show.isOnAir(elementAngleId(e.id)))
+        CameraFeed(
+          identity: elementAngleId(e.id),
+          cameraName: e.name,
+          slotId: elementAngleId(e.id),
+        ),
+  ], (c) => c.slotId);
+
+  LiveElement? _elementOf(CameraFeed f) {
+    final id = elementIdOfAngle(f.identity);
+    return id == null ? null : _elements.byId(id);
+  }
+
+  // ── Viewer taps (phase 5) ─────────────────────────────────────────────────
+
+  ElementInteraction _interactionFor(LiveElement e) {
+    final signedIn = supabase.auth.currentUser != null;
+    return ElementInteraction(
+      mine: _myChoices[e.id] ?? const [],
+      tally: _tallies[e.id],
+      // Signed-in viewers vote; anyone else sees the totals and is asked to
+      // sign in.
+      onTap: signedIn ? (picks) => _respond(e, picks) : null,
+      needsSignIn: !signedIn && e.choices.isNotEmpty,
+    );
+  }
+
+  /// A poll reset since we last looked: your vote and its totals are gone.
+  void _noteRounds(ElementsState elements) {
+    for (final e in elements.items) {
+      final round = (e.state['round'] as num?)?.toInt() ?? 0;
+      final was = _rounds[e.id];
+      _rounds[e.id] = round;
+      if (was != null && was != round) {
+        _myChoices.remove(e.id);
+        _tallies.remove(e.id);
+        _pillDismissed.remove(e.id);
+      }
+    }
+  }
+
+  /// "Poll is live" for an open poll this viewer can't see on [onScreen]
+  /// (the element ids drawn on the angle they're watching) and hasn't voted
+  /// on. Null when there is none.
+  Widget? _pollPill(Set<String> onScreen) {
+    final polls = [
+      for (final e in _elements.items)
+        if (e.kind == ElementKinds.poll.wire &&
+            !onScreen.contains(e.id) &&
+            !_pillDismissed.contains(e.id) &&
+            (_myChoices[e.id] ?? const []).isEmpty &&
+            e.open)
+          e,
+    ];
+    if (polls.isEmpty) return null;
+    return Positioned(
+      top: _syncing ? NileSpacing.s48 : NileSpacing.s12,
+      left: 0,
+      right: 0,
+      child: Center(
+        // Rebuilt while a timer runs, so it goes when voting closes.
+        child: Ticking(
+          running: polls.any((e) => e.state['closesAt'] != null),
+          builder: (context) {
+            final e = polls.where((p) => p.openChoices.isNotEmpty).firstOrNull;
+            if (e == null) return const SizedBox.shrink();
+            return PollLivePill(
+              e: e,
+              onVote: () => showPollVoteSheet(context, e, _interactionFor(e)),
+              onDismiss: () => setState(() => _pillDismissed.add(e.id)),
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  /// What this viewer already picked this show (a rejoin) — once.
+  Future<void> _loadMyChoices() async {
+    final slug = _streamEventId;
+    if (_myChoicesLoaded || slug == null || supabase.auth.currentUser == null) {
+      return;
+    }
+    _myChoicesLoaded = true;
+    try {
+      final mine = await LivekitService.myResponses(eventId: slug);
+      if (mounted) setState(() => _myChoices.addAll(mine));
+    } catch (_) {
+      _myChoicesLoaded = false;
+    }
+  }
+
+  /// A vote on an element: shown at once, undone if the server says no.
+  Future<void> _respond(LiveElement e, List<String> picks) async {
+    final slug = _streamEventId;
+    if (slug == null || listEquals(_myChoices[e.id], picks)) return;
+    final before = _myChoices[e.id];
+    setState(() => _myChoices[e.id] = picks);
+    try {
+      final mine = await LivekitService.respond(
+        eventId: slug,
+        elementId: e.id,
+        picks: picks,
+      );
+      if (mounted) setState(() => _myChoices[e.id] = mine);
+      // The kind (and a poll's type) only — never the choice.
+      NileAnalytics.capture(NileEvent.elementVoteCast, {
+        'kind': e.kind,
+        if (e.kind == ElementKinds.poll.wire)
+          'poll_type': PollConfig.fromJson(e.config).type.name,
+      });
+    } catch (err) {
+      if (!mounted) return;
+      setState(() {
+        before == null ? _myChoices.remove(e.id) : _myChoices[e.id] = before;
+      });
+      _showSnack(err.toString().replaceFirst('Exception: ', ''));
+    }
+  }
+
+  CameraFeed? get _focused {
+    final cams = _onAir;
+    return cams.isEmpty ? null : cams[_focusedIndex.clamp(0, cams.length - 1)];
+  }
+
+  /// Index in [_onAir] of [slot]'s camera, preferring it over its share.
+  int _indexOfSlot(String slot) {
+    final cams = _onAir;
+    final i = cams.indexWhere((c) => c.slotId == slot && !c.isScreenShare);
+    return i != -1 ? i : cams.indexWhere((c) => c.slotId == slot);
+  }
+
+  /// Runs [change] (which may add, hide or reorder angles) and keeps the
+  /// viewer on the angle they were watching, wherever it lands. Call inside
+  /// setState.
+  void _keepingFocus(VoidCallback change) {
+    final before = _focused;
+    change();
+    final cams = _onAir;
+    final i = before == null
+        ? -1
+        : cams.indexWhere(
+            (c) =>
+                c.identity == before.identity &&
+                c.isScreenShare == before.isScreenShare,
+          );
+    if (i != -1) {
+      _focusedIndex = i;
+    } else if (_focusedIndex >= cams.length && cams.isNotEmpty) {
+      _focusedIndex = cams.length - 1;
+    }
+  }
+
+  /// Every focus change goes through here: audio follows the angle when there
+  /// is no master audio, and the per-angle count hears about it.
+  void _focusOn(int index) {
+    setState(() => _focusedIndex = index);
+    _updateAudioRouting();
+    _reportAngle();
+  }
+
+  /// A live show-control change from the room metadata.
+  void _applyShow(ShowControl show) {
+    final before = _focused;
+    if (show != _show) {
+      final back = _show.offAir.difference(show.offAir);
+      setState(() => _keepingFocus(() => _show = show));
+      _syncOffAir(back: back);
+    }
+    _afterAnglesChanged(watching: before);
+  }
+
+  /// Off-air angles aren't watched, so their video isn't pulled at all (the
+  /// tile stays in _cameras, hidden). [back] lists slots that just came back
+  /// on air; they're picked up through the usual subscribe path.
+  void _syncOffAir({Set<String> back = const {}}) {
+    final room = _room;
+    if (room == null || _interview) return;
+    for (final p in room.remoteParticipants.values) {
+      final slot = _parseMeta(p.metadata)['slotId'] as String?;
+      if (slot == null) continue;
+      for (final pub in p.videoTrackPublications) {
+        if (!_show.isOnAir(slot)) {
+          if (pub.subscribed) pub.unsubscribe();
+        } else if (back.contains(slot) && !pub.subscribed) {
+          _delayedSubscribeVideo(p, pub);
+        }
+      }
+    }
+  }
+
+  /// After the angles change: settle a new viewer onto the start angle, act on
+  /// show control, keep the per-angle count current. [watching] is the angle
+  /// the viewer was on before the change (it may just have been hidden).
+  void _afterAnglesChanged({CameraFeed? watching}) {
+    // Interview has no camera angles to settle on, move or count.
+    if (!mounted || _interview) return;
+    _settleStartAngle();
+    _applyShowMove(watching ?? _focused);
+    _reportAngle();
+  }
+
+  void _settleStartAngle() {
+    final until = _settleUntil;
+    if (until == null || DateTime.now().isAfter(until)) return;
+    final cams = _onAir;
+    if (cams.isEmpty) return;
+    final r = _resume;
+    var i = r == null
+        ? -1
+        : cams.indexWhere(
+            (c) => c.identity == r.identity && c.isScreenShare == r.screen,
+          );
+    if (i == -1) {
+      final start = _show.startSlot([
+        for (final c in cams)
+          if (!c.isScreenShare) c.slotId,
+      ]);
+      i = start == null ? 0 : _indexOfSlot(start);
+    }
+    if (i != -1 && i != _focusedIndex) _focusOn(i);
+  }
+
+  /// Off air under the viewer, or "Send everyone here": move them and say why.
+  void _applyShowMove(CameraFeed? watching) {
+    final cams = _onAir;
+    final send = _show.sendAll;
+    // Already where the host is sending everyone: nothing left to act on.
+    if (send != null && watching != null && send.slot == watching.slotId) {
+      _seenSendAllNonce = send.nonce;
+    }
+    final move = _show.viewerMove(
+      watching: watching?.slotId,
+      available: [for (final c in cams) c.slotId],
+      seenNonce: _seenSendAllNonce,
+    );
+    if (move == null) return;
+    final i = _indexOfSlot(move.slot);
+    if (i == -1) return;
+    _seenSendAllNonce = send?.nonce;
+    _settleUntil = null;
+    final to = cams[i].displayName;
+    _focusOn(i);
+    _showSnack(switch (move.reason) {
+      ViewerMoveReason.offAir =>
+        '${watching?.displayName ?? 'Your angle'} went off air — switched to $to',
+      ViewerMoveReason.sendAll => 'The host moved everyone to $to',
+    }, duration: const Duration(seconds: 3));
+  }
+
+  /// Tells the per-angle count which angle this viewer is on: on change, and
+  /// every heartbeat with [force]. Never awaited; anonymous viewers aren't
+  /// counted, so they don't call. A screen share isn't a camera angle.
+  void _reportAngle({bool force = false}) {
+    final slug = _streamEventId;
+    final f = _focused;
+    if (slug == null || f == null || supabase.auth.currentUser == null) return;
+    if (_interview || _away) return;
+    final angle = (slot: f.isScreenShare ? null : f.slotId);
+    if (!force && angle == _reportedAngle) return;
+    _reportedAngle = angle;
+    AngleWatchers.report(slug, angle.slot);
   }
 
   void _onRoomDisconnected(RoomDisconnectedEvent event) {
@@ -860,9 +1794,21 @@ class _ViewerScreenState extends State<ViewerScreen>
         _reconnecting) {
       return;
     }
+    // Away: nobody is watching, so don't fight for the room. _comeBack rejoins.
+    if (_away) {
+      _awayDropped = true;
+      return;
+    }
     _reconnecting = true;
     _reconnectAttempt = 0;
     _attemptReconnect();
+  }
+
+  /// Both flags always clear together; a rejoin is either in flight or it isn't.
+  void _clearReconnect() {
+    _reconnecting = false;
+    _goingLive = false;
+    _resuming = false;
   }
 
   /// Poll the DB status and re-join the room with a fresh token. Retries with
@@ -872,28 +1818,34 @@ class _ViewerScreenState extends State<ViewerScreen>
   Future<void> _attemptReconnect() async {
     final eventId = _streamEventId;
     if (!mounted || eventId == null || _streamEnded) {
-      if (mounted) setState(() => _reconnecting = false);
+      if (mounted) setState(_clearReconnect);
       return;
     }
 
-    final state = await EventService.fetchEventState(eventId);
-    if (!mounted) return;
-    if (state?['status'] == 'ended') {
-      setState(() {
-        _reconnecting = false;
-        _streamEnded = true;
-      });
-      return;
-    }
-
+    // The status poll has to be inside the try. It is the first call to fail
+    // when the network is down — the exact condition this loop exists for — and
+    // an escaping throw would leave _reconnecting stuck true for the rest of
+    // the session, pinning the viewer on "Reconnecting…" and making every
+    // later disconnect early-return, even after the network comes back.
     try {
+      final state = await EventService.fetchEventState(eventId);
+      if (!mounted) return;
+      if (state?['status'] == 'ended') {
+        setState(() {
+          _clearReconnect();
+          _streamEnded = true;
+        });
+        return;
+      }
+
       await _rejoinRoom(eventId);
-      if (mounted) setState(() => _reconnecting = false);
+      if (mounted) setState(_clearReconnect);
     } catch (_) {
       _reconnectAttempt++;
       // Back off: 2s, 4s, 6s … capped at 10s. Keep trying until the host ends.
       final delay = Duration(seconds: (2 * _reconnectAttempt).clamp(2, 10));
-      Future.delayed(delay, () {
+      _reconnectTimer?.cancel();
+      _reconnectTimer = Timer(delay, () {
         if (mounted && _reconnecting && !_streamEnded) _attemptReconnect();
       });
     }
@@ -903,6 +1855,9 @@ class _ViewerScreenState extends State<ViewerScreen>
   /// listeners and re-subscribing to existing tracks. Throws on failure so the
   /// caller can back off and retry.
   Future<void> _rejoinRoom(String eventId) async {
+    // Come back to the angle we were on, if it's still there.
+    final f = _focused;
+    if (f != null) _resume = (identity: f.identity, screen: f.isScreenShare);
     await _listener?.dispose();
     await _room?.disconnect();
 
@@ -911,15 +1866,19 @@ class _ViewerScreenState extends State<ViewerScreen>
       throw Exception('Unsupported stream mode: ${conn.mode}');
     }
 
-    final room = Room();
+    // Same adaptive subscription behaviour as the first join above.
+    final room = Room(roomOptions: const RoomOptions(adaptiveStream: true));
     final listener = room.createListener();
     listener
       ..on<TrackSubscribedEvent>(_onTrackSubscribed)
       ..on<TrackUnsubscribedEvent>(_onTrackUnsubscribed)
+      ..on<TrackUnpublishedEvent>(_onTrackUnpublished)
       ..on<ParticipantConnectedEvent>(_onParticipantConnected)
       ..on<ParticipantDisconnectedEvent>(_onParticipantDisconnected)
       ..on<ParticipantMetadataUpdatedEvent>(_onParticipantMetadataUpdated)
+      ..on<RoomMetadataChangedEvent>((e) => _applyRoomMetadata(e.metadata))
       ..on<RoomDisconnectedEvent>(_onRoomDisconnected);
+    _listenStage(listener);
 
     await room
         .connect(conn.wsUrl, conn.token)
@@ -929,6 +1888,8 @@ class _ViewerScreenState extends State<ViewerScreen>
         );
 
     _audioJoinedAt = _findAudioJoinedAt(room);
+    _applyRoomMetadata(room.metadata, joining: true);
+    _settleUntil = DateTime.now().add(_settleWindow);
     setState(() {
       _cameras.clear();
       _audioPublications.clear();
@@ -954,11 +1915,14 @@ class _ViewerScreenState extends State<ViewerScreen>
         if (publication.subscribed && publication.track != null) {
           _storeAudioPublication(participant, publication);
         } else {
-          publication.subscribe();
+          _pull(publication);
         }
       }
     }
     _updateAudioRouting();
+    _startRealSync(room);
+    _syncOffAir();
+    _afterAnglesChanged();
   }
 
   // ── Audio management ──────────────────────────────────────────────────────
@@ -967,51 +1931,49 @@ class _ViewerScreenState extends State<ViewerScreen>
     RemoteParticipant participant,
     RemoteTrackPublication publication,
   ) {
-    try {
-      final meta = jsonDecode(participant.metadata ?? '{}');
-      final role = meta['role'] as String?;
-      if (role == 'camera' || role == 'master-audio') {
-        _audioPublications[participant.identity] = publication;
-        _updateAudioRouting();
-      }
-    } catch (_) {}
+    if (NileRole.isPublisher(_parseMeta(participant.metadata)['role'])) {
+      _audioPublications[participant.identity] = publication;
+      _updateAudioRouting();
+    }
   }
 
+  /// Whose audio the show carries: the publisher flagged isMasterAudio (a
+  /// camera, the Studio, or Stream Audio — the server keeps it to one), with
+  /// Stream Audio then the earliest camera as the fallback while nobody is.
   String? _findMasterAudioIdentity(Room? room) {
     if (room == null) return null;
-    for (final p in room.remoteParticipants.values) {
-      try {
-        final meta = jsonDecode(p.metadata ?? '{}');
-        if (meta['role'] == 'master-audio') return p.identity;
-      } catch (_) {}
-    }
-    for (final p in room.remoteParticipants.values) {
-      try {
-        final meta = jsonDecode(p.metadata ?? '{}');
-        if (meta['role'] == 'camera' && meta['isMasterAudio'] == true) {
-          return p.identity;
-        }
-      } catch (_) {}
-    }
-    return null;
+    return resolveMasterAudio([
+      for (final p in room.remoteParticipants.values)
+        PublisherInfo.fromMeta(p.identity, _parseMeta(p.metadata)),
+    ]);
   }
 
   void _updateAudioRouting() {
+    // Interview mixes the master audio with every guest on stage instead.
+    if (_interview) {
+      _syncStage();
+      return;
+    }
     if (!_audioEnabled) {
       for (final pub in _audioPublications.values) {
         pub.unsubscribe();
       }
       return;
     }
+    final focused = _focused;
+    // An element angle has no sound of its own: whatever played keeps playing.
+    if (focused != null && !focused.isElementAngle) {
+      _lastCameraAudio = focused.identity;
+    }
     final target =
         _masterAudioIdentity ??
-        (_cameras.isNotEmpty
-            ? _cameras[_focusedIndex.clamp(0, _cameras.length - 1)].identity
-            : null);
+        (focused?.isElementAngle ?? false
+            ? _lastCameraAudio
+            : focused?.identity);
     if (target == null) return;
     for (final entry in _audioPublications.entries) {
       if (entry.key == target) {
-        entry.value.subscribe();
+        _pull(entry.value);
       } else {
         entry.value.unsubscribe();
       }
@@ -1020,6 +1982,8 @@ class _ViewerScreenState extends State<ViewerScreen>
 
   String _masterAudioName() {
     if (_masterAudioIdentity == null) return '';
+    // Interview keeps no camera list; name them as the stage does.
+    if (_interview) return _stagePerson(_masterAudioIdentity!).name;
     for (final c in _cameras) {
       if (c.identity == _masterAudioIdentity) return c.cameraName;
     }
@@ -1064,13 +2028,19 @@ class _ViewerScreenState extends State<ViewerScreen>
     VideoTrack track, {
     bool isScreenShare = false,
   }) {
+    // Interview composes its own stage (guests included); angles are
+    // multicam's.
+    if (_interview) return;
     Map<String, dynamic> meta;
     try {
       meta = jsonDecode(participant.metadata ?? '{}') as Map<String, dynamic>;
     } catch (_) {
       return;
     }
-    if (meta['role'] != 'camera') return;
+    // Cameras, and the Studio's own webcam / screen share.
+    if (meta['role'] != NileRole.camera && meta['role'] != NileRole.studio) {
+      return;
+    }
     if (_cameras.any(
       (c) =>
           c.identity == participant.identity &&
@@ -1083,22 +2053,240 @@ class _ViewerScreenState extends State<ViewerScreen>
         (meta['cameraName'] as String?) ??
         (participant.name.isNotEmpty ? participant.name : participant.identity);
 
-    setState(() {
-      _cameras.add(
-        CameraFeed(
-          identity: participant.identity,
-          cameraName: cameraName,
-          track: track,
-          isScreenShare: isScreenShare,
+    setState(
+      () => _keepingFocus(
+        () => _cameras.add(
+          CameraFeed(
+            identity: participant.identity,
+            cameraName: cameraName,
+            track: track,
+            isScreenShare: isScreenShare,
+            slotId: meta['slotId'] as String?,
+          ),
         ),
-      );
-    });
+      ),
+    );
     _updateAudioRouting();
+    _afterAnglesChanged();
+  }
+
+  // ── Interview (studio modes phase 5) ──────────────────────────────────────
+
+  /// The stage show: Interview, and Premiere's pre-show and Q&A.
+  bool get _interview =>
+      _mode == StudioMode.interview || _mode == StudioMode.premiere;
+
+  bool get _premiere => _mode == StudioMode.premiere;
+
+  ShowSegment get _segment =>
+      _premiere ? segmentOf(_film, ServerClock.now()) : ShowSegment.preShow;
+
+  /// The film stage is up.
+  bool get _filmOn => _segment == ShowSegment.film;
+
+  /// While the film plays the stage's sound is the host's commentary only.
+  bool get _stageAudioOn => !_filmOn || _film.commentary;
+
+  /// While the film plays the stage's pictures are needed only for the
+  /// corner picture or when the viewer picked the host's camera.
+  bool get _stageVideoOn =>
+      !_filmOn || _watchingHost || _film.pip != PipCorner.off;
+
+  /// Room metadata `mode` and `stage`. The mode only changes before the show
+  /// is live (the server locks it, and going live rejoins), so there are no
+  /// feeds to hand over between modes here.
+  void _applyStage(String? raw) {
+    final mode = StudioMode.fromRoomMetadata(raw) ?? _mode;
+    final stage = StageState.fromRoomMetadata(raw);
+    final film = FilmState.fromRoomMetadata(raw);
+    if (mode == _mode && stage == _stage && film == _film) return;
+    void apply() {
+      _mode = mode;
+      _stage = stage;
+      _film = film;
+      // The content angle went away under the viewer: back to the stage.
+      if (ContentAngle.parse(stage.content) == null) _watchingContent = false;
+    }
+
+    mounted ? setState(apply) : apply();
+    // Countdowns are server times: look again once the clock is measured.
+    if (_interview &&
+        stage.entries.isNotEmpty &&
+        ServerClock.offsetMs == null) {
+      ServerClock.ensure().then((_) => _onStageTick());
+    }
+    _onStageTick();
+  }
+
+  /// Countdowns end without any event, so: redraw, pull the feeds of whoever
+  /// is on now, and sleep until the next countdown runs out.
+  void _onStageTick() {
+    _stageTimer?.cancel();
+    _stageTimer = null;
+    if (!mounted || !_interview) return;
+    final wait = nextStageReveal(_stage, ServerClock.now());
+    if (wait != null) {
+      _stageTimer = Timer(Duration(milliseconds: wait + 20), _onStageTick);
+    }
+    _onFilmTick();
+    setState(() {});
+    _syncStage();
+  }
+
+  /// The film changes phase by itself (an intermission ends, the credits
+  /// roll into the Q&A): wake then. The closing slate goes up as the film
+  /// gives way to the Q&A.
+  void _onFilmTick() {
+    _filmTimer?.cancel();
+    _filmTimer = null;
+    if (!_premiere) return;
+    final now = ServerClock.now();
+    final seg = segmentOf(_film, now);
+    if (_lastSegment == ShowSegment.film && seg == ShowSegment.postShow) {
+      _closingSlate = true;
+    }
+    if (seg != ShowSegment.film) _watchingHost = false;
+    _lastSegment = seg;
+    final wait = _film.nextChangeIn(now);
+    if (wait != null) {
+      _filmTimer = Timer(Duration(milliseconds: wait + 50), () {
+        if (!mounted) return;
+        _onFilmTick();
+        setState(() {});
+        _syncStage();
+      });
+    }
+  }
+
+  /// Room events only Interview needs. Each is a no-op in multicam.
+  void _listenStage(EventsListener<RoomEvent> listener) => listener
+    // A guest brought on stage lifts their track restriction: subscribe now.
+    ..on<TrackSubscriptionPermissionChangedEvent>(_onStageEvent)
+    ..on<TrackPublishedEvent>(_onStageEvent)
+    ..on<TrackMutedEvent>(_onStageRedraw)
+    ..on<TrackUnmutedEvent>(_onStageRedraw)
+    ..on<ActiveSpeakersChangedEvent>(_onStageRedraw);
+
+  void _onStageEvent(RoomEvent _) {
+    if (!mounted || !_interview) return;
+    setState(() {});
+    _syncStage();
+  }
+
+  void _onStageRedraw(RoomEvent _) {
+    if (mounted && _interview) setState(() {});
+  }
+
+  /// Every remote participant's role, by identity.
+  Map<String, String?> _roles() => {
+    for (final p in [...?_room?.remoteParticipants.values])
+      p.identity: switch (_parseMeta(p.metadata)['role']) {
+        final String r => r,
+        _ => null,
+      },
+  };
+
+  /// Who is on stage for this viewer right now, in layout order.
+  List<String> _stageNow([Map<String, String?>? roles]) =>
+      stageLineup(_stage, ServerClock.now(), present: roles ?? _roles());
+
+  /// Pull exactly what the stage needs (stageFeeds) and drop everything else.
+  /// Run on every stage, participant and track change. A green-room guest's
+  /// tracks refuse the subscribe; their permission change runs this again.
+  void _syncStage() {
+    final room = _room;
+    if (room == null || !_interview) return;
+    final roles = _roles();
+    final feeds = stageFeeds(
+      stage: _stage,
+      visible: _stageVideoOn ? _stageNow(roles) : const [],
+      roles: roles,
+      masterAudio: _masterAudioIdentity,
+      audioOn: _audioEnabled && _stageAudioOn,
+    );
+    for (final p in room.remoteParticipants.values) {
+      final id = p.identity;
+      for (final pub in p.videoTrackPublications) {
+        final want = pub.source == TrackSource.screenShareVideo
+            ? feeds.share == id
+            : feeds.video.contains(id);
+        want && !_away ? pub.subscribe() : pub.unsubscribe();
+      }
+      for (final pub in p.audioTrackPublications) {
+        feeds.audio.contains(id) && !_away
+            ? pub.subscribe()
+            : pub.unsubscribe();
+      }
+    }
+  }
+
+  StagePerson _stagePerson(String identity) {
+    final p = _room?.remoteParticipants[identity];
+    return stagePersonOf(
+      identity,
+      _parseMeta(p?.metadata),
+      hostId: _hostId,
+      hostName: _hostUsername,
+      hostUsername: _hostHandle,
+      hostAvatarUrl: _hostAvatarUrl,
+      participantName: p?.name,
+    );
+  }
+
+  StageTile _stageTile(String identity) {
+    final p = _room?.remoteParticipants[identity];
+    final person = _stagePerson(identity);
+    final cam = p?.videoTrackPublications
+        .where((v) => v.source != TrackSource.screenShareVideo && !v.muted)
+        .firstOrNull;
+    final mic = p?.audioTrackPublications
+        .where((a) => a.source != TrackSource.screenShareAudio)
+        .firstOrNull;
+    return StageTile(
+      identity: identity,
+      name: person.name,
+      title: person.title,
+      avatarUrl: person.avatarUrl,
+      track: cam?.track,
+      speaking: p?.isSpeaking ?? false,
+      // Crew phones are video only; a muted badge on them would be noise.
+      muted: person.kind == StagePersonKind.guest && (mic?.muted ?? false),
+    );
+  }
+
+  VideoTrack? _shareTrackOf(String identity) => _room
+      ?.remoteParticipants[identity]
+      ?.videoTrackPublications
+      .where((v) => v.source == TrackSource.screenShareVideo)
+      .firstOrNull
+      ?.track;
+
+  /// A guest's or the host's profile over the show. Crew phones have none.
+  void _openStageProfile(StagePerson person) {
+    final userId = person.userId;
+    if (userId == null) return;
+    final me = supabase.auth.currentUser?.id;
+    final canFollow = me != null && me != userId;
+    showStageProfileSheet(
+      context,
+      person: person,
+      isFollowing: canFollow ? () => FollowService.isFollowing(userId) : null,
+      onFollow: canFollow
+          ? (follow) => follow
+                ? FollowService.follow(userId)
+                : FollowService.unfollow(userId)
+          : null,
+      // /u/:id and /watch/:id are both top-level routes, so the profile opens
+      // over the show, which stays connected underneath; Back returns to it.
+      onViewProfile: () => context.push(NileRoutes.profile(userId)),
+    );
   }
 
   // ── Leave ─────────────────────────────────────────────────────────────────
 
   Future<void> _leave() async {
+    _realSync?.dispose();
+    _realSync = null;
     _decrementAndCleanup();
     await _listener?.dispose();
     await _room?.disconnect();
@@ -1122,13 +2310,25 @@ class _ViewerScreenState extends State<ViewerScreen>
       _hostAvatarUrl = null;
       _tipPending = false;
       _chatMessages.clear();
+      _pinned = null;
+      _pinnedExpanded = false;
+      _pinLive = false;
+      _show = ShowControl.empty;
+      _mode = StudioMode.multicam;
+      _stage = StageState.empty;
+      _watchingContent = false;
+      _hostHandle = null;
+      _seenSendAllNonce = null;
+      _settleUntil = null;
+      _resume = null;
+      _reportedAngle = null;
       _chatController.clear();
       _chatOpen = false;
+      _chatPinned = false;
       _hasUnreadChat = false;
       _chatAtBottom = true;
       _pendingChatCount = 0;
       _reactions.clear();
-      _myUsername = null;
       _state = ViewerState.idle;
     });
   }
@@ -1137,6 +2337,12 @@ class _ViewerScreenState extends State<ViewerScreen>
 
   @override
   Widget build(BuildContext context) {
+    // Desktop gets a body of its own rather than conditionals threaded through
+    // the phone one — same split as EventDetailScreen, and for the same reason:
+    // this screen shipped to beta and the phone tree has to stay exactly as it
+    // is. Everything below this line is the compact layout, untouched.
+    if (!NileBreakpoints.of(context).isCompact) return _buildDesktopScaffold();
+    _chatPinned = false;
     return Scaffold(
       backgroundColor: NileColors.bgPage,
       appBar: _state == ViewerState.watching
@@ -1214,62 +2420,10 @@ class _ViewerScreenState extends State<ViewerScreen>
   /// chat available before the show. The realtime flip to 'live' tears this
   /// down and drops everyone into the stream.
   Widget _buildLobby() {
-    final spons = _sponsorship;
-    final controller = _sponsorController;
-    final videoReady = controller != null && controller.value.isInitialized;
-    // Background priority: sponsor video → sponsor image → video thumb while
-    // buffering → event cover → plain surface.
-    final bgImageUrl = spons == null
-        ? _coverImageUrl
-        : (spons.kind == 'image' ? spons.imageUrl : (spons.thumbUrl ?? _coverImageUrl));
-
     return Stack(
       children: [
-        // Full-bleed creative/cover. Tapping a sponsored lobby opens the
-        // sponsor's link (and logs the click).
-        Positioned.fill(
-          child: GestureDetector(
-            onTap: spons != null ? _openSponsorLink : null,
-            child: videoReady
-                ? FittedBox(
-                    fit: BoxFit.cover,
-                    clipBehavior: Clip.hardEdge,
-                    child: SizedBox(
-                      width: controller.value.size.width,
-                      height: controller.value.size.height,
-                      child: VideoPlayer(controller),
-                    ),
-                  )
-                : bgImageUrl != null
-                    ? Image.network(
-                        bgImageUrl,
-                        fit: BoxFit.cover,
-                        errorBuilder: (_, _, _) =>
-                            ColoredBox(color: NileColors.bgSurface),
-                      )
-                    : ColoredBox(color: NileColors.bgSurface),
-          ),
-        ),
-        // Scrims so the top bar and overlay text stay readable on any creative.
-        Positioned.fill(
-          child: IgnorePointer(
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.topCenter,
-                  end: Alignment.bottomCenter,
-                  colors: [
-                    Colors.black.withValues(alpha: 0.55),
-                    Colors.transparent,
-                    Colors.transparent,
-                    Colors.black.withValues(alpha: 0.75),
-                  ],
-                  stops: const [0, 0.25, 0.55, 1],
-                ),
-              ),
-            ),
-          ),
-        ),
+        Positioned.fill(child: _buildLobbyBackground()),
+        Positioned.fill(child: _buildLobbyScrim()),
         Column(
           children: [
             _buildTopBar(),
@@ -1280,91 +2434,15 @@ class _ViewerScreenState extends State<ViewerScreen>
               child: NileMaxWidth(
                 child: Padding(
                   padding: const EdgeInsets.fromLTRB(
-                      NileSpacing.s16, 0, NileSpacing.s16, NileSpacing.s16),
+                    NileSpacing.s16,
+                    0,
+                    NileSpacing.s16,
+                    NileSpacing.s16,
+                  ),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     mainAxisSize: MainAxisSize.min,
-                    children: [
-                      // Persistent sponsorship disclosure.
-                      if (spons != null) ...[
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: NileSpacing.s8,
-                              vertical: NileSpacing.s4),
-                          decoration: BoxDecoration(
-                            color: Colors.black.withValues(alpha: 0.55),
-                            borderRadius:
-                                BorderRadius.circular(NileRadius.xs),
-                          ),
-                          child: Text(
-                            'Sponsored · ${spons.advertiserName}',
-                            style: NileTextStyles.caption().copyWith(
-                              color: Colors.white,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ),
-                        const SizedBox(height: NileSpacing.s8),
-                      ],
-                      Text(
-                        _countdownLabel,
-                        style: NileTextStyles.headingLg()
-                            .copyWith(color: Colors.white),
-                      ),
-                      if (_eventTitle != null) ...[
-                        const SizedBox(height: NileSpacing.s4),
-                        Text(
-                          _eventTitle!,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                          style: NileTextStyles.bodyLg()
-                              .copyWith(color: Colors.white),
-                        ),
-                      ],
-                      if (_hostUsername != null) ...[
-                        const SizedBox(height: NileSpacing.s8),
-                        Row(
-                          children: [
-                            CircleAvatar(
-                              radius: 12,
-                              backgroundColor: NileColors.bgSurface,
-                              backgroundImage: _hostAvatarUrl != null
-                                  ? NetworkImage(_hostAvatarUrl!)
-                                  : null,
-                              child: _hostAvatarUrl == null
-                                  ? const Icon(Icons.person,
-                                      size: 14, color: Colors.white70)
-                                  : null,
-                            ),
-                            const SizedBox(width: NileSpacing.s8),
-                            Expanded(
-                              child: Text(
-                                _hostUsername!,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: NileTextStyles.bodySm().copyWith(
-                                  color: Colors.white.withValues(alpha: 0.85),
-                                ),
-                              ),
-                            ),
-                            // Tap-to-unmute for video creatives.
-                            if (videoReady)
-                              IconButton(
-                                icon: Icon(
-                                  _sponsorMuted
-                                      ? Icons.volume_off
-                                      : Icons.volume_up,
-                                ),
-                                color: Colors.white,
-                                iconSize: 20,
-                                tooltip:
-                                    _sponsorMuted ? 'Unmute' : 'Mute',
-                                onPressed: _toggleSponsorMute,
-                              ),
-                          ],
-                        ),
-                      ],
-                    ],
+                    children: _lobbyBlocks(),
                   ),
                 ),
               ),
@@ -1376,6 +2454,177 @@ class _ViewerScreenState extends State<ViewerScreen>
         if (!_streamEnded) _buildChatOverlay(),
       ],
     );
+  }
+
+  /// The lobby's full-bleed creative, in priority order: sponsor video →
+  /// sponsor image → the video's thumb while it buffers → the event cover →
+  /// a plain surface. Tapping a sponsored lobby opens the sponsor's link (and
+  /// logs the click).
+  ///
+  /// Extracted so the desktop lobby can use the same creative behind its hero.
+  /// The sponsor impression logged in [_initLobby] assumes the creative is the
+  /// whole screen, which is why the desktop layout keeps it full-bleed behind
+  /// the countdown rather than shrinking it into a card.
+  Widget _buildLobbyBackground() {
+    final spons = _sponsorship;
+    // Premiere, unsponsored: the trailer (muted, tap for sound) or the
+    // poster. A sponsor keeps the whole background they paid for.
+    if (_premiere && spons == null && _eventDbId != null) {
+      return PremiereTrailer(
+        key: ValueKey('lobby-trailer-$_eventDbId'),
+        eventId: _eventDbId!,
+        fallback: _coverImageUrl != null
+            ? Image.network(
+                _coverImageUrl!,
+                fit: BoxFit.cover,
+                errorBuilder: (_, _, _) =>
+                    ColoredBox(color: NileColors.bgSurface),
+              )
+            : null,
+      );
+    }
+    final controller = _sponsorController;
+    final videoReady = controller != null && controller.value.isInitialized;
+    final bgImageUrl = spons == null
+        ? _coverImageUrl
+        : (spons.kind == 'image'
+              ? spons.imageUrl
+              : (spons.thumbUrl ?? _coverImageUrl));
+
+    return GestureDetector(
+      onTap: spons != null ? _openSponsorLink : null,
+      child: videoReady
+          ? FittedBox(
+              fit: BoxFit.cover,
+              clipBehavior: Clip.hardEdge,
+              child: SizedBox(
+                width: controller.value.size.width,
+                height: controller.value.size.height,
+                child: VideoPlayer(controller),
+              ),
+            )
+          : bgImageUrl != null
+          ? Image.network(
+              bgImageUrl,
+              fit: BoxFit.cover,
+              errorBuilder: (_, _, _) =>
+                  ColoredBox(color: NileColors.bgSurface),
+            )
+          : ColoredBox(color: NileColors.bgSurface),
+    );
+  }
+
+  /// Scrims so the top bar and overlay text stay readable on any creative.
+  Widget _buildLobbyScrim() {
+    return IgnorePointer(
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [
+              Colors.black.withValues(alpha: 0.55),
+              Colors.transparent,
+              Colors.transparent,
+              Colors.black.withValues(alpha: 0.75),
+            ],
+            stops: const [0, 0.25, 0.55, 1],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Countdown, title and host — the lobby's text, in the order it reads.
+  ///
+  /// [large] is the desktop hero treatment: same blocks, two steps up in type
+  /// and a host avatar that survives being looked at from a metre away. The
+  /// default is the phone measure, so compact renders exactly what it did.
+  List<Widget> _lobbyBlocks({bool large = false}) {
+    final spons = _sponsorship;
+    final controller = _sponsorController;
+    final videoReady = controller != null && controller.value.isInitialized;
+    final avatarRadius = large ? 18.0 : 12.0;
+
+    return [
+      // Persistent sponsorship disclosure.
+      if (spons != null) ...[
+        Container(
+          padding: const EdgeInsets.symmetric(
+            horizontal: NileSpacing.s8,
+            vertical: NileSpacing.s4,
+          ),
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: 0.55),
+            borderRadius: BorderRadius.circular(NileRadius.xs),
+          ),
+          child: Text(
+            'Sponsored · ${spons.advertiserName}',
+            style: NileTextStyles.caption().copyWith(
+              color: Colors.white,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+        const SizedBox(height: NileSpacing.s8),
+      ],
+      Text(
+        _countdownLabel,
+        style: (large ? NileTextStyles.displayMd() : NileTextStyles.headingLg())
+            .copyWith(color: Colors.white),
+      ),
+      if (_eventTitle != null) ...[
+        const SizedBox(height: NileSpacing.s4),
+        Text(
+          _eventTitle!,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          style: (large ? NileTextStyles.headingMd() : NileTextStyles.bodyLg())
+              .copyWith(color: Colors.white),
+        ),
+      ],
+      if (_hostUsername != null) ...[
+        const SizedBox(height: NileSpacing.s8),
+        Row(
+          children: [
+            CircleAvatar(
+              radius: avatarRadius,
+              backgroundColor: NileColors.bgSurface,
+              backgroundImage: _hostAvatarUrl != null
+                  ? NetworkImage(_hostAvatarUrl!)
+                  : null,
+              child: _hostAvatarUrl == null
+                  ? Icon(
+                      Icons.person,
+                      size: avatarRadius + 2,
+                      color: Colors.white70,
+                    )
+                  : null,
+            ),
+            const SizedBox(width: NileSpacing.s8),
+            Expanded(
+              child: Text(
+                _hostUsername!,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style:
+                    (large ? NileTextStyles.bodyLg() : NileTextStyles.bodySm())
+                        .copyWith(color: Colors.white.withValues(alpha: 0.85)),
+              ),
+            ),
+            // Tap-to-unmute for video creatives.
+            if (videoReady)
+              IconButton(
+                icon: Icon(_sponsorMuted ? Icons.volume_off : Icons.volume_up),
+                color: Colors.white,
+                iconSize: 20,
+                tooltip: _sponsorMuted ? 'Unmute' : 'Mute',
+                onPressed: _toggleSponsorMute,
+              ),
+          ],
+        ),
+      ],
+    ];
   }
 
   Widget _buildCameraOffPlaceholder({required bool large}) {
@@ -1405,10 +2654,68 @@ class _ViewerScreenState extends State<ViewerScreen>
     );
   }
 
+  /// Connected, but no camera has published yet. Shared by both bodies so the
+  /// wait reads the same whichever one you are looking at.
+  Widget _buildWaitingForCameras() {
+    // Only a live show is actually waiting for cameras. A 'scheduled' row used
+    // to fall through to here and spin this spinner forever — the reconnect
+    // loop only stops on 'ended', so nothing ever took it off screen.
+    if (_eventStatus != 'live' && !_streamEnded) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(NileSpacing.s24),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(
+                Icons.videocam_off_outlined,
+                size: 40,
+                color: NileColors.txtTertiary,
+              ),
+              const SizedBox(height: 16),
+              Text(
+                _isOver
+                    ? 'This event didn’t take place'
+                    : 'This show hasn’t started yet',
+                textAlign: TextAlign.center,
+                style: NileTextStyles.headingSm(),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                _isOver
+                    ? 'The host never went live.'
+                    : 'Check the event page for the start time.',
+                textAlign: TextAlign.center,
+                style: NileTextStyles.bodyMd().copyWith(
+                  color: NileColors.txtSecondary,
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          CircularProgressIndicator(color: NileColors.volt),
+          const SizedBox(height: 16),
+          Text(
+            'Waiting for cameras to connect...',
+            style: NileTextStyles.bodyMd().copyWith(
+              color: NileColors.txtSecondary,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildWatching() {
     // Lobby: the host is in Sound Check — hold viewers here until Start Show
     // flips status to 'live' (handled by realtime in _onRealtimeUpdate).
-    if (_eventStatus == 'soundcheck' && !_streamEnded) {
+    if (_inLobby) {
       return _buildLobby();
     }
     return Stack(
@@ -1416,24 +2723,10 @@ class _ViewerScreenState extends State<ViewerScreen>
         Column(
           children: [
             _buildTopBar(),
-            if (_cameras.isEmpty)
-              Expanded(
-                child: Center(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      CircularProgressIndicator(color: NileColors.volt),
-                      const SizedBox(height: 16),
-                      Text(
-                        'Waiting for cameras to connect...',
-                        style: NileTextStyles.bodyMd().copyWith(
-                          color: NileColors.txtSecondary,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              )
+            if (_interview)
+              Expanded(child: _buildInterviewShow())
+            else if (_onAir.isEmpty)
+              Expanded(child: _buildWaitingForCameras())
             else
               Expanded(
                 child: OrientationBuilder(
@@ -1464,8 +2757,11 @@ class _ViewerScreenState extends State<ViewerScreen>
         // Collapsible live chat — sits above the video, slides off when closed
         if (!_streamEnded) _buildChatOverlay(),
 
+        if (_closingSlate && !_streamEnded) _buildClosingSlate(),
+
         // Reconnecting overlay — room dropped but the show is still live.
-        if (_reconnecting && !_streamEnded) _buildReconnectingOverlay(),
+        if ((_reconnecting || _resuming) && !_streamEnded)
+          _buildReconnectingOverlay(),
 
         // Stream ended overlay
         if (_streamEnded) _buildStreamEndedOverlay(),
@@ -1483,10 +2779,21 @@ class _ViewerScreenState extends State<ViewerScreen>
             children: [
               CircularProgressIndicator(color: NileColors.volt),
               const SizedBox(height: 16),
-              Text('Reconnecting…', style: NileTextStyles.headingMd()),
+              Text(
+                _resuming
+                    ? 'Resuming…'
+                    : _goingLive
+                    ? 'Starting…'
+                    : 'Reconnecting…',
+                style: NileTextStyles.headingMd(),
+              ),
               const SizedBox(height: 8),
               Text(
-                'The stream dropped briefly. Hang tight.',
+                _resuming
+                    ? 'Picking the show back up.'
+                    : _goingLive
+                    ? 'The show is beginning.'
+                    : 'The stream dropped briefly. Hang tight.',
                 style: NileTextStyles.bodyMd().copyWith(
                   color: NileColors.txtSecondary,
                 ),
@@ -1500,10 +2807,13 @@ class _ViewerScreenState extends State<ViewerScreen>
 
   // ── Top bar (viewer count + leave) ────────────────────────────────────────
 
-  Widget _buildTopBar() {
+  /// [showChatToggle] is false on desktop, where chat is a column that is
+  /// always up — a button that opens what is already open is a button that
+  /// does nothing.
+  Widget _buildTopBar({bool showChatToggle = true}) {
     // In the Lobby the bar floats over the full-bleed creative (the scrim
     // keeps it readable); everywhere else it keeps its solid background.
-    final inLobbyBar = _eventStatus == 'soundcheck' && !_streamEnded;
+    final inLobbyBar = _inLobby;
     return Container(
       padding: EdgeInsets.only(
         top: MediaQuery.of(context).padding.top + 8,
@@ -1517,9 +2827,12 @@ class _ViewerScreenState extends State<ViewerScreen>
           // Status badge — SOUND CHECK (volt) in the Lobby, LIVE (coral) once live
           Builder(
             builder: (_) {
-              final inLobby = _eventStatus == 'soundcheck' && !_streamEnded;
+              final inLobby = _inLobby;
               return Container(
-                padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s8, vertical: NileSpacing.s4),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: NileSpacing.s8,
+                  vertical: NileSpacing.s4,
+                ),
                 decoration: BoxDecoration(
                   color: inLobby ? NileColors.volt : NileColors.coral,
                   borderRadius: BorderRadius.circular(NileRadius.xs),
@@ -1565,11 +2878,12 @@ class _ViewerScreenState extends State<ViewerScreen>
               onPressed: _shareStream,
             ),
           // Chat toggle — available in the Lobby too (pre-show chat, 0079)
-          if (!_streamEnded)
+          if (!_streamEnded && showChatToggle)
             Stack(
               clipBehavior: Clip.none,
               children: [
                 IconButton(
+                  tooltip: _chatOpen ? 'Hide chat' : 'Show chat',
                   icon: Icon(
                     _chatOpen ? Icons.chat_bubble : Icons.chat_bubble_outline,
                   ),
@@ -1682,6 +2996,7 @@ class _ViewerScreenState extends State<ViewerScreen>
         ),
         child: Column(
           children: [
+            if (_pinned != null) _buildPinnedBar(),
             Expanded(
               child: Stack(
                 children: [
@@ -1703,6 +3018,66 @@ class _ViewerScreenState extends State<ViewerScreen>
     );
   }
 
+  /// The pinned message, over the chat list: two lines, the whole thing on
+  /// tap. Only the host's and crew's links are tappable, as in the list.
+  Widget _buildPinnedBar() {
+    final p = _pinned!;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => setState(() => _pinnedExpanded = !_pinnedExpanded),
+      child: Container(
+        margin: const EdgeInsets.fromLTRB(
+          NileSpacing.s12,
+          NileSpacing.s8,
+          NileSpacing.s12,
+          0,
+        ),
+        padding: const EdgeInsets.symmetric(
+          horizontal: NileSpacing.s12,
+          vertical: NileSpacing.s8,
+        ),
+        decoration: BoxDecoration(
+          color: NileColors.bgSurface.withValues(alpha: 0.92),
+          borderRadius: BorderRadius.circular(NileRadius.sm),
+          border: Border.all(color: NileColors.border),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(Icons.push_pin, size: 14, color: NileColors.volt),
+            const SizedBox(width: NileSpacing.s8),
+            Expanded(
+              child: NileLinkText(
+                p.body,
+                linkify: p.mayLink,
+                maxLines: _pinnedExpanded ? null : 2,
+                style: NileTextStyles.bodySm().copyWith(
+                  color: NileColors.txtPrimary,
+                ),
+                prefix: TextSpan(
+                  text: '@${p.username}  ',
+                  style: TextStyle(
+                    color: nileChatNameColor(
+                      p.senderId,
+                      isHost: p.senderRole == 'host',
+                    ),
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(width: NileSpacing.s4),
+            Icon(
+              _pinnedExpanded ? Icons.expand_less : Icons.expand_more,
+              size: 16,
+              color: NileColors.txtTertiary,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildNewMessagesPill() {
     return Material(
       color: NileColors.volt,
@@ -1711,7 +3086,10 @@ class _ViewerScreenState extends State<ViewerScreen>
         customBorder: const StadiumBorder(),
         onTap: _jumpChatToBottom,
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s12, vertical: NileSpacing.s6),
+          padding: const EdgeInsets.symmetric(
+            horizontal: NileSpacing.s12,
+            vertical: NileSpacing.s6,
+          ),
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -1734,7 +3112,29 @@ class _ViewerScreenState extends State<ViewerScreen>
   }
 
   Widget _buildChatList() {
-    if (_chatMessages.isEmpty) {
+    // Distinguishing "nobody has spoken" from "we were never let in" is the
+    // whole point of tracking the subscribe status — the two look identical.
+    if (_chatUnavailable && _chatMessages.isEmpty) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(NileSpacing.s16),
+          child: Text(
+            'Chat isn’t available for this show.',
+            textAlign: TextAlign.center,
+            style: NileTextStyles.bodySm().copyWith(
+              color: NileColors.txtTertiary,
+            ),
+          ),
+        ),
+      );
+    }
+    // Anyone this viewer has blocked drops out here. Chat is a broadcast, so
+    // RLS never gets a look at it — this is the only place a block can apply.
+    final visible = [
+      for (final m in _chatMessages)
+        if (m.isSystem || !_blockedChatSenders.contains(m.senderId)) m,
+    ];
+    if (visible.isEmpty) {
       return Center(
         child: Text(
           'No messages yet. Say hi 👋',
@@ -1746,27 +3146,125 @@ class _ViewerScreenState extends State<ViewerScreen>
     }
     return ListView.builder(
       controller: _chatScrollController,
-      padding: const EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s8, NileSpacing.s16, NileSpacing.s8),
-      itemCount: _chatMessages.length,
+      padding: const EdgeInsets.fromLTRB(
+        NileSpacing.s16,
+        NileSpacing.s8,
+        NileSpacing.s16,
+        NileSpacing.s8,
+      ),
+      itemCount: visible.length,
       itemBuilder: (context, i) {
-        final m = _chatMessages[i];
+        final m = visible[i];
         final row = _buildChatRow(m);
         // Gentle entry animation for the newest message only.
-        if (i == _chatMessages.length - 1) {
+        if (i == visible.length - 1) {
           return TweenAnimationBuilder<double>(
-            key: ValueKey('anim_${m.senderId}_${m.sentAt.microsecondsSinceEpoch}'),
+            key: ValueKey(
+              'anim_${m.senderId}_${m.sentAt.microsecondsSinceEpoch}',
+            ),
             tween: Tween(begin: 0, end: 1),
             duration: const Duration(milliseconds: 220),
             curve: Curves.easeOut,
             builder: (context, t, child) => Opacity(
               opacity: t,
-              child: Transform.translate(offset: Offset(0, (1 - t) * 8), child: child),
+              child: Transform.translate(
+                offset: Offset(0, (1 - t) * 8),
+                child: child,
+              ),
             ),
             child: row,
           );
         }
         return row;
       },
+    );
+  }
+
+  /// Long-press a chat line → report it, or block its author.
+  ///
+  /// Every other user-content surface in the app has had this since the
+  /// blocks/reports work; live chat was the one place a viewer could be
+  /// harassed with no gesture at all. Report targets the message itself when it
+  /// has an id, so the review queue gets the text rather than a bare account.
+  Future<void> _showChatActions(ChatMessage m) async {
+    if (m.isSystem || m.senderId.isEmpty || m.isMine) return;
+
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: NileColors.bgSurface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(
+          top: Radius.circular(NileRadius.lg),
+        ),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(
+                NileSpacing.s16,
+                NileSpacing.s16,
+                NileSpacing.s16,
+                NileSpacing.s8,
+              ),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  '@${m.username}',
+                  style: NileTextStyles.headingSm(),
+                ),
+              ),
+            ),
+            ListTile(
+              leading: Icon(Icons.block, color: NileColors.txtPrimary),
+              title: Text(
+                'Block @${m.username}',
+                style: NileTextStyles.bodyMd(),
+              ),
+              subtitle: Text(
+                'You stop seeing each other across Nile.',
+                style: NileTextStyles.caption().copyWith(
+                  color: NileColors.txtTertiary,
+                ),
+              ),
+              onTap: () => Navigator.pop(ctx, 'block'),
+            ),
+            ListTile(
+              leading: Icon(Icons.flag_outlined, color: NileColors.error),
+              title: Text(
+                m.id != null ? 'Report this message' : 'Report @${m.username}',
+                style: NileTextStyles.bodyMd().copyWith(
+                  color: NileColors.error,
+                ),
+              ),
+              onTap: () => Navigator.pop(ctx, 'report'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (!mounted || action == null) return;
+
+    if (action == 'block') {
+      final blocked = await Moderation.confirmBlock(
+        context,
+        userId: m.senderId,
+        username: m.username,
+      );
+      if (blocked && mounted) {
+        setState(() => _blockedChatSenders.add(m.senderId));
+      }
+      return;
+    }
+
+    final id = m.id;
+    await Moderation.showReportSheet(
+      context,
+      targetType: id != null
+          ? ReportTargetType.liveChatMessage
+          : ReportTargetType.user,
+      targetId: id ?? m.senderId,
     );
   }
 
@@ -1794,14 +3292,15 @@ class _ViewerScreenState extends State<ViewerScreen>
     }
 
     final isHost = _hostId != null && m.senderId == _hostId;
-    final nameColor = isHost
-        ? NileColors.coral
-        : (m.isMine ? NileColors.volt : NileColors.azure);
+    final nameColor = nileChatNameColor(m.senderId, isHost: m.isHost || isHost);
 
-    return Container(
+    final row = Container(
       margin: const EdgeInsets.symmetric(vertical: NileSpacing.s2),
       padding: isHost
-          ? const EdgeInsets.symmetric(horizontal: NileSpacing.s8, vertical: NileSpacing.s6)
+          ? const EdgeInsets.symmetric(
+              horizontal: NileSpacing.s8,
+              vertical: NileSpacing.s6,
+            )
           : EdgeInsets.zero,
       decoration: isHost
           ? BoxDecoration(
@@ -1834,7 +3333,10 @@ class _ViewerScreenState extends State<ViewerScreen>
                     if (isHost) ...[
                       const SizedBox(width: 6),
                       Container(
-                        padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s4, vertical: 1),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: NileSpacing.s4,
+                          vertical: 1,
+                        ),
                         decoration: BoxDecoration(
                           color: NileColors.coral,
                           borderRadius: BorderRadius.circular(NileRadius.xs),
@@ -1851,12 +3353,26 @@ class _ViewerScreenState extends State<ViewerScreen>
                     ],
                   ],
                 ),
-                Text(m.content, style: NileTextStyles.bodyMd()),
+                NileLinkText(
+                  m.content,
+                  style: NileTextStyles.bodyMd(),
+                  linkify: m.mayLink,
+                ),
               ],
             ),
           ),
         ],
       ),
+    );
+
+    // Long-press rather than a hover menu: this row is the same widget on a
+    // phone and in the desktop column, and an overflow icon on every line would
+    // cost more than it is worth in a column this narrow. Your own message has
+    // nothing to report or block.
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onLongPress: m.isMine ? null : () => _showChatActions(m),
+      child: row,
     );
   }
 
@@ -1872,14 +3388,40 @@ class _ViewerScreenState extends State<ViewerScreen>
       backgroundColor: NileColors.bgRaised,
       child: Text(
         initial,
-        style: NileTextStyles.caption().copyWith(color: NileColors.txtSecondary),
+        style: NileTextStyles.caption().copyWith(
+          color: NileColors.txtSecondary,
+        ),
       ),
     );
   }
 
   Widget _buildChatInput(double bottomInset) {
+    if (_filmOn &&
+        _filmChat == ChatPolicy.reactions &&
+        _hostId != supabase.auth.currentUser?.id) {
+      return Padding(
+        padding: EdgeInsets.fromLTRB(
+          NileSpacing.s12,
+          NileSpacing.s12,
+          NileSpacing.s12,
+          NileSpacing.s12 + bottomInset,
+        ),
+        child: Text(
+          'Reactions only while the film plays. Chat opens for the Q&A.',
+          textAlign: TextAlign.center,
+          style: NileTextStyles.bodySm().copyWith(
+            color: NileColors.txtTertiary,
+          ),
+        ),
+      );
+    }
     return Padding(
-      padding: EdgeInsets.fromLTRB(NileSpacing.s12, NileSpacing.s8, NileSpacing.s12, NileSpacing.s8 + bottomInset),
+      padding: EdgeInsets.fromLTRB(
+        NileSpacing.s12,
+        NileSpacing.s8,
+        NileSpacing.s12,
+        NileSpacing.s8 + bottomInset,
+      ),
       child: Row(
         children: [
           Expanded(
@@ -1917,6 +3459,7 @@ class _ViewerScreenState extends State<ViewerScreen>
           ),
           const SizedBox(width: 8),
           IconButton(
+            tooltip: 'Send message',
             icon: const Icon(Icons.send),
             color: NileColors.volt,
             onPressed: _sendChat,
@@ -1931,7 +3474,10 @@ class _ViewerScreenState extends State<ViewerScreen>
   Widget _buildAudioBar() {
     final hasAudio = _masterAudioIdentity != null;
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s16, vertical: NileSpacing.s8),
+      padding: const EdgeInsets.symmetric(
+        horizontal: NileSpacing.s16,
+        vertical: NileSpacing.s8,
+      ),
       color: NileColors.bgSurface,
       child: Row(
         children: [
@@ -1953,6 +3499,7 @@ class _ViewerScreenState extends State<ViewerScreen>
           ),
           const Spacer(),
           IconButton(
+            tooltip: _audioEnabled ? 'Mute' : 'Unmute',
             icon: Icon(_audioEnabled ? Icons.volume_up : Icons.volume_off),
             color: _audioEnabled
                 ? NileColors.txtPrimary
@@ -2024,9 +3571,9 @@ class _ViewerScreenState extends State<ViewerScreen>
     return Column(
       children: [
         Expanded(child: _buildMainCamera()),
-        if (_cameras.length > 1 && _isDesktop)
+        if (_onAir.length > 1 && _isDesktop)
           _buildThumbResizeHandle(horizontal: true),
-        if (_cameras.length > 1) _buildHorizontalThumbnails(),
+        if (_onAir.length > 1) _buildHorizontalThumbnails(),
       ],
     );
   }
@@ -2035,52 +3582,117 @@ class _ViewerScreenState extends State<ViewerScreen>
     return Row(
       children: [
         Expanded(child: _buildMainCamera()),
-        if (_cameras.length > 1 && _isDesktop)
+        if (_onAir.length > 1 && _isDesktop)
           _buildThumbResizeHandle(horizontal: false),
-        if (_cameras.length > 1) _buildVerticalThumbnails(),
+        if (_onAir.length > 1) _buildVerticalThumbnails(),
       ],
     );
   }
 
   Widget _buildMainCamera() {
-    final focused = _cameras[_focusedIndex.clamp(0, _cameras.length - 1)];
+    // Only built while an angle is on air.
+    final focused = _focused!;
+    final element = _elementOf(focused);
+    if (element != null) {
+      // Its own angle: the element, full screen — no camera graphics on it.
+      final angle = NileElementAngle(
+        element: element,
+        interaction: _interactionFor(element),
+      );
+      final pill = _pollPill({element.id});
+      return pill == null
+          ? angle
+          : Stack(fit: StackFit.expand, children: [angle, pill]);
+    }
+    final slot = focused.isScreenShare ? null : _slotOf(focused.identity);
+    final onAir = _graphics.forSlot(slot);
+    // The angle label sits where a lower third or banner goes; graphics win.
+    // Corner graphics (logos, sponsor, QR codes) leave it be.
+    final bottomTaken = onAir.any(
+      (g) => !const {
+        GraphicKind.logo,
+        GraphicKind.sponsor,
+        GraphicKind.qr,
+      }.contains(g.kind),
+    );
+    _countSponsor(onAir);
+    final layers = _layout.layersFor(slot);
+    final pill = _pollPill({
+      for (final e in _elements.forSlot(slot))
+        if (!layers.any((l) => l.id == e.id && l.hidden)) e.id,
+    });
     return Stack(
       fit: StackFit.expand,
       children: [
         focused.track != null
             ? VideoTrackRenderer(focused.track!)
             : _buildCameraOffPlaceholder(large: true),
+        // Graphics follow the angle: show-wide ones plus this camera's own.
+        // A screen share carries only the show-wide ones.
+        NileGraphicsLayer(
+          graphics: onAir,
+          elements: _elements.forSlot(slot),
+          layers: layers,
+          onTapLink: _openGraphicLink,
+          interactionFor: _interactionFor,
+        ),
+        ?pill,
+        if (_syncing)
+          Positioned(
+            top: 12,
+            left: 0,
+            right: 0,
+            child: Center(
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: NileSpacing.s12,
+                  vertical: NileSpacing.s6,
+                ),
+                decoration: BoxDecoration(
+                  color: NileColors.bgPage.withValues(alpha: 0.8),
+                  borderRadius: BorderRadius.circular(NileRadius.pill),
+                ),
+                child: Text('Syncing…', style: NileTextStyles.labelSm()),
+              ),
+            ),
+          ),
         if (focused.identity == _masterAudioIdentity)
           Positioned(
             top: 12,
             right: 12,
             child: Icon(Icons.album, color: NileColors.volt, size: 18),
           ),
-        Positioned(
-          bottom: 12,
-          left: 12,
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s8, vertical: NileSpacing.s4),
-            decoration: BoxDecoration(
-              color: NileColors.bgPage.withValues(alpha: 0.7),
-              borderRadius: BorderRadius.circular(NileRadius.sm),
+        if (!bottomTaken)
+          Positioned(
+            bottom: 12,
+            left: 12,
+            child: Container(
+              padding: const EdgeInsets.symmetric(
+                horizontal: NileSpacing.s8,
+                vertical: NileSpacing.s4,
+              ),
+              decoration: BoxDecoration(
+                color: NileColors.bgPage.withValues(alpha: 0.7),
+                borderRadius: BorderRadius.circular(NileRadius.sm),
+              ),
+              child: Text(focused.displayName, style: NileTextStyles.bodyMd()),
             ),
-            child: Text(focused.displayName, style: NileTextStyles.bodyMd()),
           ),
-        ),
       ],
     );
   }
 
   Widget _buildHorizontalThumbnails() {
+    final cams = _onAir;
     return Container(
       height: 100 * _thumbScale,
       color: NileColors.bgPage,
       child: ListView.builder(
         scrollDirection: Axis.horizontal,
         padding: const EdgeInsets.all(NileSpacing.s8),
-        itemCount: _cameras.length,
+        itemCount: cams.length,
         itemBuilder: (context, index) => _buildThumbnailItem(
+          camera: cams[index],
           index: index,
           width: 140 * _thumbScale,
           height: double.infinity,
@@ -2091,14 +3703,16 @@ class _ViewerScreenState extends State<ViewerScreen>
   }
 
   Widget _buildVerticalThumbnails() {
+    final cams = _onAir;
     return Container(
       width: 110 * _thumbScale,
       color: NileColors.bgPage,
       child: ListView.builder(
         scrollDirection: Axis.vertical,
         padding: const EdgeInsets.all(NileSpacing.s6),
-        itemCount: _cameras.length,
+        itemCount: cams.length,
         itemBuilder: (context, index) => _buildThumbnailItem(
+          camera: cams[index],
           index: index,
           width: double.infinity,
           height: 80 * _thumbScale,
@@ -2109,19 +3723,19 @@ class _ViewerScreenState extends State<ViewerScreen>
   }
 
   Widget _buildThumbnailItem({
+    required CameraFeed camera,
     required int index,
     required double width,
     required double height,
     required EdgeInsets margin,
   }) {
-    final camera = _cameras[index];
     final isFocused = index == _focusedIndex;
     final isMasterAudio = camera.identity == _masterAudioIdentity;
 
     return GestureDetector(
       onTap: () {
-        setState(() => _focusedIndex = index);
-        _updateAudioRouting();
+        _settleUntil = null; // their pick from here on
+        _focusOn(index);
       },
       child: Container(
         width: width,
@@ -2139,9 +3753,12 @@ class _ViewerScreenState extends State<ViewerScreen>
           child: Stack(
             fit: StackFit.expand,
             children: [
-              camera.track != null
-                  ? VideoTrackRenderer(camera.track!)
-                  : _buildCameraOffPlaceholder(large: false),
+              if (_elementOf(camera) case final e?)
+                IgnorePointer(child: NileElementAngle(element: e))
+              else if (camera.track != null)
+                VideoTrackRenderer(camera.track!)
+              else
+                _buildCameraOffPlaceholder(large: false),
               if (isMasterAudio)
                 Positioned(
                   top: 4,
@@ -2164,6 +3781,793 @@ class _ViewerScreenState extends State<ViewerScreen>
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  // ── Interview layout ──────────────────────────────────────────────────────
+
+  /// Interview: the stage (or the host's content angle), the angle choice and
+  /// who's on, in place of multicam's main camera and thumbnails. Phone
+  /// landscape puts the choice and the people down the side, like the rail.
+  Widget _buildInterviewShow({bool desktop = false}) {
+    // Before the show (or one that never happened) reads as multicam's does.
+    if (_eventStatus != 'live' && !_streamEnded) {
+      return _buildWaitingForCameras();
+    }
+    if (_filmOn && !_streamEnded) return _buildFilmShow(desktop: desktop);
+    final lineup = _stageNow();
+    final angles = interviewAngles(
+      _stage.content,
+      hasElement: (id) => _elements.byId(id) != null,
+    );
+    final content = angles.length > 1 ? angles[1] : null;
+    final picture = _buildInterviewPicture(
+      lineup,
+      _watchingContent ? content : null,
+    );
+    return OrientationBuilder(
+      builder: (context, orientation) {
+        final side = !desktop && orientation == Orientation.landscape;
+        final strip = StagePeopleStrip(
+          people: [for (final id in lineup) _stagePerson(id)],
+          onTap: _openStageProfile,
+          vertical: side,
+        );
+        final picker = content == null
+            ? null
+            : _buildInterviewAngles(lineup, content, vertical: side);
+        // Desktop: bursts and the react rail over the picture only, never
+        // across chat (as multicam's desktop body does).
+        final main = desktop
+            ? Stack(
+                children: [
+                  Positioned.fill(child: picture),
+                  _buildReactionOverlay(),
+                  if (_canReact) _buildReactionRail(),
+                ],
+              )
+            : picture;
+        return Column(
+          children: [
+            _buildAudioBar(),
+            Expanded(
+              child: side
+                  ? Row(
+                      children: [
+                        Expanded(child: main),
+                        SizedBox(
+                          width: 110 * _thumbScale,
+                          child: Column(
+                            children: [
+                              ?picker,
+                              Expanded(child: strip),
+                            ],
+                          ),
+                        ),
+                      ],
+                    )
+                  : Column(
+                      children: [
+                        Expanded(child: main),
+                        ?picker,
+                        strip,
+                      ],
+                    ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  /// Premiere's film: full size, the host in a corner when the Studio puts
+  /// them there, and a Film | Host choice under it.
+  Widget _buildFilmShow({required bool desktop}) {
+    final pk = _eventDbId;
+    // Built only when it's on screen: drawing the stage counts a sponsor's
+    // graphics impression.
+    final host = _watchingHost || pk == null || _film.pip != PipCorner.off
+        ? _buildInterviewPicture(_stageNow(), null)
+        : null;
+    final picture = _watchingHost || pk == null
+        ? host!
+        : PremiereFilmStage(
+            eventId: pk,
+            film: _film,
+            now: ServerClock.now,
+            muted: !_audioEnabled,
+            host: host,
+            onPlayback: (p) {
+              if (!mounted) return;
+              setState(() {
+                _askRating = p.askRating;
+                _filmChat = p.chatPolicy;
+              });
+            },
+          );
+    Widget choice(String label, bool host) => Padding(
+      padding: const EdgeInsets.all(NileSpacing.s4),
+      child: ChoiceChip(
+        label: Text(label),
+        selected: _watchingHost == host,
+        onSelected: (_) {
+          setState(() => _watchingHost = host);
+          _syncStage();
+        },
+      ),
+    );
+    return Column(
+      children: [
+        _buildAudioBar(),
+        Expanded(
+          child: desktop
+              ? Stack(
+                  children: [
+                    Positioned.fill(child: picture),
+                    _buildReactionOverlay(),
+                    if (_canReact) _buildReactionRail(),
+                  ],
+                )
+              : picture,
+        ),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [choice('Film', false), choice('Host', true)],
+        ),
+      ],
+    );
+  }
+
+  /// "Thanks for watching" over the Q&A as the film ends.
+  Widget _buildClosingSlate() => Positioned.fill(
+    child: ColoredBox(
+      color: NileColors.bgPage.withValues(alpha: 0.6),
+      child: PremiereClosingSlate(
+        eventId: _eventDbId ?? '',
+        hostName: _hostHandle ?? _hostUsername ?? 'the filmmaker',
+        askRating: _askRating && _eventDbId != null,
+        onClose: () => setState(() => _closingSlate = false),
+        onTip: _canTip
+            ? () {
+                setState(() => _closingSlate = false);
+                _openTipSheet();
+              }
+            : null,
+        onProfile: _hostId == null
+            ? null
+            : () => context.push(NileRoutes.profile(_hostId!)),
+      ),
+    ),
+  );
+
+  /// The stage composed from everyone's own feed, with the "All cameras"
+  /// graphics over it — or, when picked, the content angle full size.
+  Widget _buildInterviewPicture(List<String> lineup, ContentAngle? content) {
+    final Widget picture;
+    final Widget? pill;
+    final element = content?.elementId == null
+        ? null
+        : _elements.byId(content!.elementId!);
+    if (element != null) {
+      picture = NileElementAngle(
+        element: element,
+        interaction: _interactionFor(element),
+      );
+      pill = _pollPill({element.id});
+    } else if (content?.shareOf case final who?) {
+      picture = _buildShareView(who, large: true);
+      pill = _pollPill(const {});
+    } else {
+      final graphics = _graphics.forSlot(null);
+      final elements = _elements.forSlot(null);
+      final layers = _layout.layersFor(null);
+      _countSponsor(graphics);
+      picture = Center(
+        child: InterviewStageView(
+          tiles: [for (final id in lineup) _stageTile(id)],
+          layout: _stage.layout,
+          focusIndex: _stage.focusIndexIn(lineup),
+          onTapTile: (t) => _openStageProfile(_stagePerson(t.identity)),
+          overlay: Positioned.fill(
+            child: NileGraphicsLayer(
+              graphics: graphics,
+              elements: elements,
+              layers: layers,
+              onTapLink: _openGraphicLink,
+              interactionFor: _interactionFor,
+            ),
+          ),
+        ),
+      );
+      pill = _pollPill({
+        for (final e in elements)
+          if (!layers.any((l) => l.id == e.id && l.hidden)) e.id,
+      });
+    }
+    return ColoredBox(
+      color: Colors.black,
+      child: Stack(fit: StackFit.expand, children: [picture, ?pill]),
+    );
+  }
+
+  /// A participant's screen share, letterboxed; a quiet wait until it lands.
+  Widget _buildShareView(String identity, {required bool large}) {
+    final track = _shareTrackOf(identity);
+    if (track != null) {
+      return VideoTrackRenderer(track, fit: VideoViewFit.contain);
+    }
+    return Center(
+      child: large
+          ? Text(
+              'Waiting for the screen share…',
+              style: NileTextStyles.bodyMd().copyWith(
+                color: NileColors.txtTertiary,
+              ),
+            )
+          : Icon(Icons.screen_share_outlined, color: NileColors.txtTertiary),
+    );
+  }
+
+  /// Stage | content angle, as thumbnails in multicam's visual language.
+  Widget _buildInterviewAngles(
+    List<String> lineup,
+    ContentAngle content, {
+    required bool vertical,
+  }) {
+    final element = content.elementId == null
+        ? null
+        : _elements.byId(content.elementId!);
+    final contentLabel =
+        element?.name ?? '${_stagePerson(content.shareOf ?? '').name} — Screen';
+    Widget tile(
+      String label, {
+      required bool isContent,
+      required Widget child,
+    }) {
+      final selected = _watchingContent == isContent;
+      return GestureDetector(
+        onTap: () => setState(() => _watchingContent = isContent),
+        child: Container(
+          margin: EdgeInsets.only(
+            right: vertical ? 0 : NileSpacing.s8,
+            bottom: vertical ? NileSpacing.s8 : 0,
+          ),
+          decoration: BoxDecoration(
+            border: Border.all(
+              color: selected ? NileColors.volt : Colors.transparent,
+              width: 2,
+            ),
+            borderRadius: BorderRadius.circular(NileRadius.sm),
+          ),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(NileRadius.sm - 2),
+            child: AspectRatio(
+              aspectRatio: 16 / 9,
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  ColoredBox(
+                    color: Colors.black,
+                    child: IgnorePointer(child: child),
+                  ),
+                  Positioned(
+                    bottom: 4,
+                    left: 4,
+                    right: 4,
+                    child: Text(
+                      label,
+                      style: NileTextStyles.caption().copyWith(
+                        color: NileColors.txtPrimary,
+                        shadows: const [Shadow(blurRadius: 4)],
+                      ),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    final tiles = [
+      tile(
+        'Stage',
+        isContent: false,
+        child: Center(
+          child: InterviewStageView(
+            tiles: [for (final id in lineup) _stageTile(id)],
+            layout: _stage.layout,
+            focusIndex: _stage.focusIndexIn(lineup),
+            showNames: false,
+            highlightSpeaker: false,
+            compact: true,
+            emptyLabel: '',
+          ),
+        ),
+      ),
+      tile(
+        contentLabel,
+        isContent: true,
+        child: element != null
+            ? NileElementAngle(element: element)
+            : _buildShareView(content.shareOf ?? '', large: false),
+      ),
+    ];
+    return Container(
+      color: NileColors.bgPage,
+      padding: const EdgeInsets.all(NileSpacing.s8),
+      height: vertical ? null : 100 * _thumbScale,
+      child: vertical
+          ? Column(mainAxisSize: MainAxisSize.min, children: tiles)
+          : Row(children: tiles),
+    );
+  }
+
+  // ── Desktop ───────────────────────────────────────────────────────────────
+  //
+  // One route, three states: the countdown before the show, the show itself,
+  // and what is left of it afterwards. The chrome — nav rail, top bar, back —
+  // is already drawn above this route and hands it the full width left of the
+  // rail (NileAppShell.wantsFullWidth), so nothing below draws navigation of
+  // its own. It only decides what to do with ~1470 pt.
+
+  /// Chat, beside the video instead of over it. Wide enough for a name and a
+  /// line of text without every message wrapping twice.
+  static const double _chatColumnWidth = 340;
+
+  /// Narrower than this and the video becomes the thing being squeezed, which
+  /// is the one outcome this layout exists to prevent.
+  static const double _minVideoWidth = 560;
+
+  /// Below this, the phone body is the better use of the space: chat over the
+  /// video beats two columns that are both too small. Measured rather than
+  /// derived from the window class — a nav rail starts at the iPad mini, and
+  /// that window has nothing like the width for a second column.
+  static const double _chatSplitsAt = _minVideoWidth + 1 + _chatColumnWidth;
+
+  /// Square, and large enough to read as artwork rather than a favicon.
+  static const double _lobbyCoverSize = 220;
+
+  Widget _buildDesktopScaffold() {
+    return Scaffold(
+      backgroundColor: NileColors.bgPage,
+      // No AppBar — the chrome's top bar is directly above this, and two
+      // stacked title bars is one too many.
+      body: switch (_state) {
+        ViewerState.idle => NileMaxWidth(child: _buildForm()),
+        ViewerState.connecting => _buildConnecting(),
+        ViewerState.watching => LayoutBuilder(
+          builder: (context, constraints) {
+            final split = constraints.maxWidth >= _chatSplitsAt;
+            // Recorded here because this is the only place that knows whether
+            // the chat list ended up on screen; _onChatMessage reads it to
+            // decide whether to auto-follow or raise the unread dot.
+            _chatPinned = split;
+            return split ? _buildDesktopWatching() : _buildWatching();
+          },
+        ),
+      },
+    );
+  }
+
+  /// The three states, each with a chat column pinned beside it.
+  Widget _buildDesktopWatching() {
+    final Widget main;
+    if (_streamEnded) {
+      main = _buildDesktopEnded();
+    } else if (_inLobby) {
+      main = _buildDesktopLobby();
+    } else {
+      main = _buildDesktopLive();
+    }
+    // The chrome's top bar already sits above this, so the status-bar inset has
+    // been dealt with — but nothing has *removed* it from the MediaQuery, and
+    // _buildTopBar adds padding.top to itself. Dropping it here stops the
+    // status bar being paid for twice on an iPad; on a Mac it is zero either
+    // way. SafeArea still handles the bottom and the sides.
+    return MediaQuery.removePadding(
+      context: context,
+      removeTop: true,
+      child: SafeArea(
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Expanded(child: main),
+            const VerticalDivider(width: 1),
+            SizedBox(
+              width: _chatColumnWidth,
+              child: _streamEnded
+                  ? _buildEndedChatColumn()
+                  : _buildChatColumn(),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// A — before the show.
+  ///
+  /// The creative stays full-bleed: the impression logged in [_initLobby]
+  /// assumes it is the whole screen, so shrinking it into a card would quietly
+  /// change what we told the advertiser they bought. What changes is the text
+  /// at its foot, which becomes a hero — countdown two type steps up, title,
+  /// host. The event's own cover art joins it only when the background is a
+  /// sponsor's creative; when the background *is* the cover, a second copy of
+  /// it is noise.
+  ///
+  /// There is no ticket gate here to lay out. Access to a stream is decided
+  /// server-side by the viewer token, and the buy/you're-in UI lives on the
+  /// event page — by the time you are on this route you are already in.
+  Widget _buildDesktopLobby() {
+    final showCoverArt = _sponsorship != null && _coverImageUrl != null;
+    return Stack(
+      children: [
+        Positioned.fill(child: _buildLobbyBackground()),
+        Positioned.fill(child: _buildLobbyScrim()),
+        Column(
+          children: [
+            _buildTopBar(showChatToggle: false),
+            const Spacer(),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(
+                NileSpacing.s40,
+                0,
+                NileSpacing.s40,
+                NileSpacing.s40,
+              ),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  if (showCoverArt) ...[
+                    SizedBox(
+                      width: _lobbyCoverSize,
+                      height: _lobbyCoverSize,
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(NileRadius.lg),
+                        child: Image.network(
+                          _coverImageUrl!,
+                          fit: BoxFit.cover,
+                          cacheWidth: nileDecodeWidth(_lobbyCoverSize),
+                          errorBuilder: (_, _, _) =>
+                              ColoredBox(color: NileColors.bgSurface),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: NileSpacing.s32),
+                  ],
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: _lobbyBlocks(large: true),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  /// B — the show.
+  ///
+  /// The video fills the main area. The angle strip runs along its bottom edge
+  /// rather than its side: the right edge belongs to chat now, and a contained
+  /// 16:9 frame in an area this wide has its slack top and bottom anyway — the
+  /// strip lands in space the video was never going to use, so putting it there
+  /// costs the picture nothing. Reactions and the tip button stay where they
+  /// are, over the video and in the status bar respectively.
+  Widget _buildDesktopLive() {
+    return Stack(
+      children: [
+        Positioned.fill(
+          child: Column(
+            children: [
+              _buildTopBar(showChatToggle: false),
+              if (_interview)
+                Expanded(child: _buildInterviewShow(desktop: true))
+              else if (_onAir.isEmpty)
+                Expanded(child: _buildWaitingForCameras())
+              else ...[
+                _buildAudioBar(),
+                Expanded(
+                  child: Column(
+                    children: [
+                      Expanded(
+                        child: Stack(
+                          children: [
+                            Positioned.fill(child: _buildMainCamera()),
+                            // Bursts and the react rail sit over the video
+                            // only, so they never drift across chat.
+                            _buildReactionOverlay(),
+                            if (_canReact) _buildReactionRail(),
+                          ],
+                        ),
+                      ),
+                      if (_onAir.length > 1 && _isDesktop)
+                        _buildThumbResizeHandle(horizontal: true),
+                      if (_onAir.length > 1) _buildHorizontalThumbnails(),
+                    ],
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+        if (_closingSlate) _buildClosingSlate(),
+        if (_reconnecting || _resuming) _buildReconnectingOverlay(),
+      ],
+    );
+  }
+
+  /// C — after the show.
+  ///
+  /// This screen has no replay pipeline and no "up next" of its own, and it is
+  /// not the place to grow one: a published replay, its price, the calendar
+  /// link and the host's next date all already exist on the event page. So the
+  /// end of a stream keeps the show's identity — cover, title, host — and hands
+  /// off there, rather than ending on a black rectangle.
+  Widget _buildDesktopEnded() {
+    return Stack(
+      children: [
+        if (_coverImageUrl != null)
+          Positioned.fill(
+            child: Image.network(
+              _coverImageUrl!,
+              fit: BoxFit.cover,
+              errorBuilder: (_, _, _) => ColoredBox(color: NileColors.bgPage),
+            ),
+          ),
+        // The cover is atmosphere at this point, not content.
+        Positioned.fill(
+          child: ColoredBox(color: NileColors.bgPage.withValues(alpha: 0.92)),
+        ),
+        Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 460),
+            child: Padding(
+              padding: const EdgeInsets.all(NileSpacing.s32),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    Icons.stop_circle_outlined,
+                    size: 72,
+                    color: NileColors.txtTertiary,
+                  ),
+                  const SizedBox(height: NileSpacing.s24),
+                  Text('Stream ended', style: NileTextStyles.headingLg()),
+                  if (_eventTitle != null) ...[
+                    const SizedBox(height: NileSpacing.s8),
+                    Text(
+                      _eventTitle!,
+                      textAlign: TextAlign.center,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: NileTextStyles.bodyLg(),
+                    ),
+                  ],
+                  if (_hostUsername != null) ...[
+                    const SizedBox(height: NileSpacing.s12),
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        CircleAvatar(
+                          radius: 12,
+                          backgroundColor: NileColors.bgRaised,
+                          backgroundImage: _hostAvatarUrl != null
+                              ? nileAvatarImage(_hostAvatarUrl!, 12)
+                              : null,
+                          child: _hostAvatarUrl == null
+                              ? Icon(
+                                  Icons.person,
+                                  size: 14,
+                                  color: NileColors.txtSecondary,
+                                )
+                              : null,
+                        ),
+                        const SizedBox(width: NileSpacing.s8),
+                        Text(_hostUsername!, style: NileTextStyles.bodySm()),
+                      ],
+                    ),
+                  ],
+                  const SizedBox(height: NileSpacing.s32),
+                  if (_eventDbId != null)
+                    SizedBox(
+                      width: double.infinity,
+                      child: FilledButton.icon(
+                        onPressed: _openEventPage,
+                        icon: const Icon(Icons.event_outlined),
+                        label: const Text('Go to the event page'),
+                        style: FilledButton.styleFrom(
+                          backgroundColor: NileColors.volt,
+                          foregroundColor: NileColors.onVolt,
+                          padding: const EdgeInsets.symmetric(
+                            vertical: NileSpacing.s16,
+                          ),
+                          textStyle: NileTextStyles.labelLg(),
+                          shape: const StadiumBorder(),
+                        ),
+                      ),
+                    ),
+                  const SizedBox(height: NileSpacing.s12),
+                  Text(
+                    'A replay shows up there if the host publishes one, along '
+                    'with their next date.',
+                    textAlign: TextAlign.center,
+                    style: NileTextStyles.caption(),
+                  ),
+                  const SizedBox(height: NileSpacing.s16),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      if (_eventDbId != null)
+                        TextButton.icon(
+                          onPressed: _shareStream,
+                          icon: const Icon(Icons.ios_share, size: 18),
+                          label: const Text('Share'),
+                        ),
+                      TextButton(onPressed: _leave, child: const Text('Close')),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// Replaces this route rather than pushing over it, so the viewer tears down
+  /// — the realtime channels, the chat channel and the reconcile timer go with
+  /// it — instead of staying connected to a show that is over behind a page
+  /// about that same show.
+  void _openEventPage() {
+    final id = _eventDbId;
+    if (id == null) return;
+    context.go(NileRoutes.event(id));
+  }
+
+  /// Chat as a column beside the video instead of a panel over it.
+  ///
+  /// On a phone chat floats over the picture because there is nowhere else for
+  /// it to go; here there is, and covering the show to read it is exactly what
+  /// this layout exists to stop. Same list, same input, same controllers — only
+  /// the frame differs, so a message takes one path on both platforms.
+  Widget _buildChatColumn() {
+    return ColoredBox(
+      color: NileColors.bgPage,
+      child: Column(
+        children: [
+          NileSectionHeader(
+            'Live chat',
+            dense: true,
+            accent: _inLobby ? NileColors.volt : NileColors.coral,
+            padding: const EdgeInsets.fromLTRB(
+              NileSpacing.s16,
+              NileSpacing.s16,
+              NileSpacing.s16,
+              NileSpacing.s12,
+            ),
+          ),
+          const Divider(height: 1),
+          if (_pinned != null) _buildPinnedBar(),
+          Expanded(
+            child: Stack(
+              children: [
+                _buildChatList(),
+                if (_pendingChatCount > 0)
+                  Positioned(
+                    bottom: NileSpacing.s8,
+                    left: 0,
+                    right: 0,
+                    child: Center(child: _buildNewMessagesPill()),
+                  ),
+              ],
+            ),
+          ),
+          const Divider(height: 1),
+          // The SafeArea above already ate the bottom inset.
+          _buildChatInput(0),
+        ],
+      ),
+    );
+  }
+
+  /// C — the chat that was.
+  ///
+  /// There is nothing to re-sync. Live chat is a Supabase *broadcast* channel
+  /// with no table behind it (see ChatService): no history, no fetch, no
+  /// timestamps to reconcile against a recording. What can honestly be shown is
+  /// the buffer this client accumulated while it was connected — so that is
+  /// what this shows, labelled as exactly that, rather than a "comments" list
+  /// implying a record that does not exist.
+  Widget _buildEndedChatColumn() {
+    return ColoredBox(
+      color: NileColors.bgPage,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          NileSectionHeader(
+            'Chat from this session',
+            dense: true,
+            padding: const EdgeInsets.fromLTRB(
+              NileSpacing.s16,
+              NileSpacing.s16,
+              NileSpacing.s16,
+              NileSpacing.s4,
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(
+              NileSpacing.s16,
+              0,
+              NileSpacing.s16,
+              NileSpacing.s12,
+            ),
+            child: Text(
+              'Chat is broadcast live and never stored, so this is only what '
+              'arrived while you were watching.',
+              style: NileTextStyles.caption(),
+            ),
+          ),
+          const Divider(height: 1),
+          Expanded(
+            child: _chatMessages.isEmpty
+                ? Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(NileSpacing.s24),
+                      child: Text(
+                        'Nothing was said while you were here.',
+                        textAlign: TextAlign.center,
+                        style: NileTextStyles.bodySm().copyWith(
+                          color: NileColors.txtTertiary,
+                        ),
+                      ),
+                    ),
+                  )
+                : ListView.builder(
+                    // Deliberately not _chatScrollController: that one belongs
+                    // to the live list, and two views can't share one.
+                    padding: const EdgeInsets.fromLTRB(
+                      NileSpacing.s16,
+                      NileSpacing.s8,
+                      NileSpacing.s16,
+                      NileSpacing.s16,
+                    ),
+                    itemCount: _chatMessages.length,
+                    itemBuilder: (context, i) {
+                      final m = _chatMessages[i];
+                      return Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Padding(
+                            padding: const EdgeInsets.only(
+                              top: NileSpacing.s4,
+                              right: NileSpacing.s8,
+                            ),
+                            child: SizedBox(
+                              width: 52,
+                              child: Text(
+                                nileClock(m.sentAt.toLocal()),
+                                style: NileTextStyles.caption().tabular,
+                              ),
+                            ),
+                          ),
+                          Expanded(child: _buildChatRow(m)),
+                        ],
+                      );
+                    },
+                  ),
+          ),
+        ],
       ),
     );
   }
@@ -2263,7 +4667,9 @@ class _TipSheetState extends State<_TipSheet> {
           const SizedBox(height: NileSpacing.s4),
           Text(
             'Support the host. Goes straight to them, minus a small platform fee.',
-            style: NileTextStyles.bodySm().copyWith(color: NileColors.txtSecondary),
+            style: NileTextStyles.bodySm().copyWith(
+              color: NileColors.txtSecondary,
+            ),
           ),
           const SizedBox(height: NileSpacing.s16),
           Wrap(
@@ -2365,14 +4771,15 @@ class _FloatingReactionWidgetState extends State<_FloatingReactionWidget>
     final rnd = Random();
     _drift = (rnd.nextDouble() - 0.5) * 70;
     _startRight = 16 + rnd.nextDouble() * 44;
-    _c = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 2200),
-    )
-      ..addStatusListener((s) {
-        if (s == AnimationStatus.completed) widget.onDone();
-      })
-      ..forward();
+    _c =
+        AnimationController(
+            vsync: this,
+            duration: const Duration(milliseconds: 2200),
+          )
+          ..addStatusListener((s) {
+            if (s == AnimationStatus.completed) widget.onDone();
+          })
+          ..forward();
   }
 
   @override
@@ -2388,8 +4795,10 @@ class _FloatingReactionWidgetState extends State<_FloatingReactionWidget>
       builder: (context, _) {
         final t = _c.value;
         // Fade in quickly, then out over the rest of the rise.
-        final opacity = (t < 0.15 ? t / 0.15 : 1 - (t - 0.15) / 0.85)
-            .clamp(0.0, 1.0);
+        final opacity = (t < 0.15 ? t / 0.15 : 1 - (t - 0.15) / 0.85).clamp(
+          0.0,
+          1.0,
+        );
         return Positioned(
           right: _startRight + _drift * t,
           bottom: 110 + 230 * t,

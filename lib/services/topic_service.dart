@@ -88,6 +88,27 @@ class TopicService {
     return (rows as List).map((r) => r['topic_id'] as String).toList();
   }
 
+  /// Topic ids for many events at once, as eventId → topicIds.
+  ///
+  /// The schedule grid colour-codes a whole week of events; per-event lookups
+  /// would be one round trip per cell. Returns an empty map for an empty input
+  /// rather than issuing a query with an empty `in` list.
+  static Future<Map<String, List<String>>> topicIdsForEvents(
+    List<String> eventIds,
+  ) async {
+    if (eventIds.isEmpty) return const {};
+    final rows = await supabase
+        .from('event_topics')
+        .select('event_id, topic_id')
+        .inFilter('event_id', eventIds);
+    final out = <String, List<String>>{};
+    for (final r in rows as List) {
+      final map = r as Map<String, dynamic>;
+      (out[map['event_id'] as String] ??= []).add(map['topic_id'] as String);
+    }
+    return out;
+  }
+
   /// Replace [eventId]'s tags with [topicIds] (insert added, delete removed).
   /// RLS restricts writes to the event's host.
   static Future<void> setEventTopics(

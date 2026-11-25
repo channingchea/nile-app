@@ -14,7 +14,9 @@
 //   supabase functions deploy create-tip-payment        (KEEP JWT on — reads the user session)
 //
 // Request (POST, Bearer = tipper JWT):
-//   { "event_id": "uuid", "amount_cents": 500 }
+//   { "event_id": "uuid", "amount_cents": 500, "origin": "macos" }
+//   origin is optional and recorded in Stripe metadata (see
+//   _shared/checkout_origin.ts) — omitted ⇒ "unknown".
 //
 // Response: { "checkout_url": "https://checkout.stripe.com/..." }  or  { "error": "..." }
 
@@ -22,6 +24,11 @@ import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import Stripe from "https://esm.sh/stripe@14?target=deno";
 import { corsHeaders as corsHeadersFor } from "../_shared/cors.ts";
+import { failure } from "../_shared/errors.ts";
+import { checkoutOrigin } from "../_shared/checkout_origin.ts";
+import {
+  CURRENCY, priceTaxParams, taxParams, TIP_REFUND_POLICY,
+} from "../_shared/money.ts";
 
 const stripe = new Stripe(Deno.env.get("STRIPE_SECRET_KEY")!, {
   apiVersion: "2023-10-16",
@@ -62,8 +69,10 @@ serve(async (req) => {
     const { data: { user }, error: authError } = await supabase.auth.getUser();
     if (authError || !user) return json({ error: "Unauthorized" }, 401);
 
-    const { event_id, amount_cents } = await req.json();
+    const { event_id, amount_cents, origin: rawOrigin } = await req.json();
     if (!event_id) return json({ error: "Missing event_id" }, 400);
+    // Which app the tip came from. Older clients send nothing → "unknown".
+    const origin = checkoutOrigin(rawOrigin);
     // Server-side amount validation — never trust the client.
     const amt = Number(amount_cents);
     const validAmount =
@@ -111,13 +120,16 @@ serve(async (req) => {
       payment_method_types: ["card"],
       line_items: [{
         price_data: {
-          currency: "usd",
+          currency: CURRENCY,
           unit_amount: amt,
           product_data: { name: `Tip for “${ev.title}”` },
+          ...priceTaxParams(),
         },
         quantity: 1,
       }],
       mode: "payment",
+      ...taxParams(),
+      custom_text: { submit: { message: TIP_REFUND_POLICY } },
       // Atomic split: application fee to the platform, remainder to the host.
       payment_intent_data: {
         application_fee_amount: fee,
@@ -132,6 +144,7 @@ serve(async (req) => {
         host_id: ev.host_id,
         amount_cents: String(amt),
         fee_cents: String(fee),
+        origin,
       },
     });
 
@@ -150,7 +163,7 @@ serve(async (req) => {
     return json({ checkout_url: session.url });
   } catch (err) {
     console.error(err);
-    return json({ error: String(err) }, 500);
+    return json(failure(err, "create-tip-payment"), 500);
   }
 });
 

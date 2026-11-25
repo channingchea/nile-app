@@ -1,10 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
+import 'package:go_router/go_router.dart';
 
+import '../../router.dart';
 import '../../services/mfa_service.dart';
 import '../../theme.dart';
-import 'mfa_backup_codes_screen.dart';
 
 /// TOTP enrollment: scan the QR (or copy the key) into an authenticator app,
 /// then verify a code. On success, generates backup codes and shows them once.
@@ -64,11 +65,10 @@ class _MfaEnrollScreenState extends State<MfaEnrollScreen> {
       final codes = await MfaService.generateRecoveryCodes();
       _completed = true; // keep dispose from unenrolling the now-verified factor
       if (!mounted) return;
-      await Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(
-          builder: (_) => MfaBackupCodesScreen(codes: codes),
-        ),
+      // Replaces this screen so Back from the codes doesn't re-enter enrollment.
+      context.pushReplacement(
+        NileRoutes.mfaBackupCodes,
+        extra: BackupCodesArgs(codes: codes),
       );
     } catch (_) {
       if (mounted) {

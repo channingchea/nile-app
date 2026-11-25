@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 import '../services/ticket_service.dart';
+import '../router.dart';
 import '../theme.dart';
-import 'profile_screen.dart';
 import 'widgets/load_more_footer.dart';
+import '../services/formats.dart';
 
 /// Host-only list of paid attendees for an event.
 class AttendeeListScreen extends StatefulWidget {
@@ -22,6 +24,10 @@ class AttendeeListScreen extends StatefulWidget {
 class _AttendeeListScreenState extends State<AttendeeListScreen> {
   List<Attendee>? _attendees;
   String? _error;
+
+  /// Totals across every page, not just the loaded one — see
+  /// [TicketService.eventTotals].
+  ({int grossCents, int netCents, int feeCents, int paidCount})? _totals;
 
   final _scroll = ScrollController();
   String? _cursor;
@@ -55,10 +61,14 @@ class _AttendeeListScreenState extends State<AttendeeListScreen> {
       _error = null;
     });
     try {
-      final page = await TicketService.attendees(widget.eventId);
+      final (page, totals) = await (
+        TicketService.attendees(widget.eventId),
+        TicketService.eventTotals(widget.eventId),
+      ).wait;
       if (mounted) {
         setState(() {
           _attendees = page.items;
+          _totals = totals;
           _cursor = page.nextCursor;
           _hasMore = page.hasMore;
         });
@@ -91,10 +101,7 @@ class _AttendeeListScreenState extends State<AttendeeListScreen> {
 
   void _openProfile(String userId) {
     if (userId.isEmpty) return;
-    Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => ProfileScreen(userId: userId)),
-    );
+    context.push(NileRoutes.profile(userId));
   }
 
   Future<void> _onTapAttendee(Attendee a) async {
@@ -110,15 +117,20 @@ class _AttendeeListScreenState extends State<AttendeeListScreen> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            ListTile(
-              leading: Icon(
-                Icons.person_outline,
-                color: NileColors.txtSecondary,
+            // No profile to open once the buyer has deleted their account —
+            // the sale stays, the person doesn't (migration 0118).
+            if (!a.isDeletedBuyer)
+              ListTile(
+                leading: Icon(
+                  Icons.person_outline,
+                  color: NileColors.txtSecondary,
+                ),
+                title: Text('View profile', style: NileTextStyles.labelLg()),
+                onTap: () => Navigator.pop(context, 'profile'),
               ),
-              title: Text('View profile', style: NileTextStyles.labelLg()),
-              onTap: () => Navigator.pop(context, 'profile'),
-            ),
-            if (!a.isRefunded)
+            // Nothing left to refund on a refunded or charged-back ticket —
+            // the bank already took the money on a dispute.
+            if (!a.isVoid)
               ListTile(
                 leading: const Icon(Icons.undo, color: NileColors.coral),
                 title: Text(
@@ -128,7 +140,8 @@ class _AttendeeListScreenState extends State<AttendeeListScreen> {
                   ),
                 ),
                 subtitle: Text(
-                  'Returns \$${(a.amountCents / 100).toStringAsFixed(2)} to @${a.username}',
+                  'Returns \$${(a.amountCents / 100).toStringAsFixed(2)} to '
+                  '${a.isDeletedBuyer ? 'the original card' : '@${a.username}'}',
                   style: NileTextStyles.caption().copyWith(
                     color: NileColors.txtTertiary,
                   ),
@@ -266,10 +279,16 @@ class _AttendeeListScreenState extends State<AttendeeListScreen> {
       );
     }
 
-    // Revenue and head-count reflect active (paid) tickets only; refunded
-    // rows stay visible for history but don't count.
-    final paid = _attendees!.where((a) => !a.isRefunded);
-    final total = paid.fold<int>(0, (s, a) => s + a.amountCents);
+    // Revenue and head-count reflect active (paid) tickets only; refunded and
+    // charged-back rows stay visible for history but don't count. Totals come
+    // from the server so they cover every page, not just the loaded one —
+    // falling back to the loaded page if the RPC failed.
+    final paid = _attendees!.where((a) => !a.isVoid);
+    final totals = _totals;
+    final count = totals?.paidCount ?? paid.length;
+    final total =
+        totals?.grossCents ?? paid.fold<int>(0, (s, a) => s + a.amountCents);
+    final net = totals?.netCents ?? 0;
 
     return ListView.separated(
       controller: _scroll,
@@ -279,7 +298,11 @@ class _AttendeeListScreenState extends State<AttendeeListScreen> {
           i == 0 ? const SizedBox(height: 12) : const SizedBox(height: 8),
       itemBuilder: (_, i) {
         if (i == 0) {
-          return _SummaryRow(count: paid.length, totalCents: total);
+          return _SummaryRow(
+            count: count,
+            totalCents: total,
+            netCents: net,
+          );
         }
         if (i > _attendees!.length) return const LoadMoreFooter();
         final a = _attendees![i - 1];
@@ -292,16 +315,44 @@ class _AttendeeListScreenState extends State<AttendeeListScreen> {
 class _SummaryRow extends StatelessWidget {
   final int count;
   final int totalCents;
-  const _SummaryRow({required this.count, required this.totalCents});
+  final int netCents;
+  const _SummaryRow({
+    required this.count,
+    required this.totalCents,
+    required this.netCents,
+  });
 
   @override
   Widget build(BuildContext context) {
-    final revenue = '\$${(totalCents / 100).toStringAsFixed(2)}';
-    return Row(
+    String money(int cents) => '\$${(cents / 100).toStringAsFixed(2)}';
+    // This screen used to show gross while Payouts showed net — same sales,
+    // two numbers, no explanation of the platform cut on either. Both are here
+    // now, and the caption says which is which.
+    final showNet = netCents > 0 && netCents != totalCents;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _Stat(label: count == 1 ? 'attendee' : 'attendees', value: '$count'),
-        const SizedBox(width: 12),
-        _Stat(label: 'revenue', value: revenue),
+        Row(
+          children: [
+            _Stat(label: count == 1 ? 'attendee' : 'attendees', value: '$count'),
+            const SizedBox(width: 12),
+            _Stat(label: 'ticket sales', value: money(totalCents)),
+            if (showNet) ...[
+              const SizedBox(width: 12),
+              _Stat(label: 'your share', value: money(netCents)),
+            ],
+          ],
+        ),
+        if (showNet) ...[
+          const SizedBox(height: 8),
+          Text(
+            'Ticket sales is what buyers paid. Your share is what reaches your '
+            'payouts after the platform fee — the same figure Payouts shows.',
+            style: NileTextStyles.caption().copyWith(
+              color: NileColors.txtTertiary,
+            ),
+          ),
+        ],
       ],
     );
   }
@@ -387,9 +438,11 @@ class _AttendeeTile extends StatelessWidget {
                           style: NileTextStyles.labelLg(),
                         ),
                       ),
-                      if (attendee.isRefunded) ...[
+                      if (attendee.isVoid) ...[
                         const SizedBox(width: 8),
-                        const _RefundedBadge(),
+                        _VoidBadge(
+                          label: attendee.isDisputed ? 'chargeback' : 'refunded',
+                        ),
                       ],
                     ],
                   ),
@@ -406,10 +459,10 @@ class _AttendeeTile extends StatelessWidget {
             Text(
               '\$${(attendee.amountCents / 100).toStringAsFixed(2)}',
               style: NileTextStyles.labelMd().copyWith(
-                color: attendee.isRefunded
+                color: attendee.isVoid
                     ? NileColors.txtTertiary
                     : NileColors.volt,
-                decoration: attendee.isRefunded
+                decoration: attendee.isVoid
                     ? TextDecoration.lineThrough
                     : null,
               ),
@@ -420,28 +473,13 @@ class _AttendeeTile extends StatelessWidget {
     );
   }
 
-  static String _formatDate(DateTime d) {
-    const m = [
-      'Jan',
-      'Feb',
-      'Mar',
-      'Apr',
-      'May',
-      'Jun',
-      'Jul',
-      'Aug',
-      'Sep',
-      'Oct',
-      'Nov',
-      'Dec',
-    ];
-    final l = d.toLocal();
-    return '${m[l.month - 1]} ${l.day}, ${l.year}';
-  }
+  static String _formatDate(DateTime d) =>
+      NileFormats.dayMonthYear(d.toLocal());
 }
 
-class _RefundedBadge extends StatelessWidget {
-  const _RefundedBadge();
+class _VoidBadge extends StatelessWidget {
+  final String label;
+  const _VoidBadge({required this.label});
 
   @override
   Widget build(BuildContext context) {
@@ -452,7 +490,7 @@ class _RefundedBadge extends StatelessWidget {
         borderRadius: BorderRadius.circular(NileRadius.pill),
       ),
       child: Text(
-        'refunded',
+        label,
         style: NileTextStyles.caption().copyWith(color: NileColors.coral),
       ),
     );

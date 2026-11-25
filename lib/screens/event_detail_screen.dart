@@ -1,37 +1,43 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:go_router/go_router.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../services/ad_service.dart';
+import '../services/analytics.dart';
 import '../services/calendar_ics.dart';
 import '../services/crew_service.dart';
 import '../services/share_urls.dart';
 import '../services/event_service.dart';
 import '../services/follow_service.dart';
+import '../services/interview.dart';
+import '../services/interview_service.dart';
+import '../services/live_elements.dart';
 import '../services/livekit_service.dart';
+import '../services/money.dart';
 import '../services/report_service.dart';
 import '../services/supabase_client.dart';
 import '../services/ticket_service.dart';
+import '../router.dart';
 import '../theme.dart';
+import '../widgets/element_results.dart';
 import '../widgets/live_badge.dart';
+import '../widgets/nile_desktop.dart';
 import '../widgets/official_badge.dart';
 import '../widgets/photo_viewer.dart';
 import '../widgets/rolling_number.dart';
-import 'attendee_list_screen.dart';
-import 'audio_screen.dart';
-import 'boost_performance_screen.dart';
-import 'camera_screen.dart';
-import 'crew_setup_screen.dart';
 import 'widgets/moderation_menu.dart';
-import 'edit_event_screen.dart';
-import 'profile_screen.dart';
-import 'replay_pricing_screen.dart';
-import 'replay_screen.dart';
-import 'viewer_screen.dart';
+import '../services/formats.dart';
+import '../services/premiere.dart';
+import '../services/premiere_service.dart';
+import '../services/studio_mode.dart';
+import '../widgets/premiere_checklist.dart';
+import '../widgets/premiere_widgets.dart';
 
 /// Detail screen for a single event (scheduled, live, or ended).
 ///
@@ -52,11 +58,10 @@ class EventDetailScreen extends StatefulWidget {
     this.event,
     this.eventId,
     this.fromProfileId,
-  })
-    : assert(
-        event != null || eventId != null,
-        'EventDetailScreen needs either event or eventId',
-      );
+  }) : assert(
+         event != null || eventId != null,
+         'EventDetailScreen needs either event or eventId',
+       );
 
   @override
   State<EventDetailScreen> createState() => _EventDetailScreenState();
@@ -77,9 +82,27 @@ class _EventDetailScreenState extends State<EventDetailScreen>
   bool _ticketBusy = false;
   int? _ticketsRemaining; // null = unlimited
 
+  /// True between opening Stripe checkout and seeing the ticket land, so a
+  /// return from the browser gets the full poll and an idle refocus doesn't.
+  bool _checkoutPending = false;
+
+  /// Re-entrancy guard on [_refreshTicketStatus] — see the lifecycle hook.
+  bool _pollingTicket = false;
+
+  /// One event_viewed per screen, not per refresh. _load() also runs on
+  /// pull-to-refresh and on returning from checkout, and counting those would
+  /// make the denominator of every conversion rate meaningless.
+  bool _viewLogged = false;
+
   // Crew: assigned camera operators get free access to the event.
   bool _isOperator = false;
   MyOperatorAssignment? _assignment;
+
+  // Interview mode: this user's own guest invitation, if they have one.
+  InterviewGuest? _invite;
+
+  /// Premiere mode, host only: the film's readiness (0151).
+  EventFilm? _film;
 
   // Replay/VOD. _replayWatchable: a ready replay this user may watch now (→
   // "Watch Replay"). _replayLockedByTicket: a ready replay exists but the user
@@ -90,12 +113,22 @@ class _EventDetailScreenState extends State<EventDetailScreen>
   bool _replayPublished = false;
   int? _replayPrice; // cents, from replay-exists (server-authoritative)
 
+  // Host, after the show: every element and the final totals of those
+  // viewers could tap (livekit list-elements).
+  ({List<LiveElement> elements, Map<String, ElementTally> tallies})? _results;
+
   // Countdown
   Timer? _ticker;
   Duration _remaining = Duration.zero;
 
-  // Active sponsorship (0079): advertiser name for the "Sponsored by" line.
+  // Active sponsorship (0079): advertiser name for the "Sponsored by" line, and
+  // (0098) whether the host's auto-accept rule took it rather than the host.
   String? _sponsorName;
+  bool _sponsorAutoAccepted = false;
+
+  // Host-only: open offers on THIS event (0097). Empty is a real state, not a
+  // "not loaded yet" — see [_hostSponsorshipBlock].
+  List<SponsorshipOffer> _offers = const [];
 
   // Realtime
   RealtimeChannel? _channel;
@@ -128,29 +161,56 @@ class _EventDetailScreenState extends State<EventDetailScreen>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed) return;
     // Returning from the Stripe browser flow — re-check ticket status.
-    if (state == AppLifecycleState.resumed) _refreshTicketStatus();
+    //
+    // On desktop `resumed` fires on every window refocus, not just on a return
+    // from another app, so the two cases are told apart: a checkout we started
+    // gets the full poll (the webhook lags a beat), any other refocus gets one
+    // cheap re-check (it catches a purchase made on another device). Without
+    // the split, clicking between windows during a show would stack overlapping
+    // five-request poll loops.
+    _refreshTicketStatus(attempts: _checkoutPending ? 5 : 1);
   }
 
   /// Poll ticket status a few times to absorb Stripe webhook latency.
-  Future<void> _refreshTicketStatus() async {
+  Future<void> _refreshTicketStatus({int attempts = 5}) async {
     final event = _event;
     if (event == null ||
+        _pollingTicket ||
         _hasTicket ||
         _isOwnEvent ||
         event.price == null ||
         event.price! <= 0) {
       return;
     }
-    for (var attempt = 0; attempt < 5; attempt++) {
-      final purchased = await TicketService.hasPurchased(event.id);
-      if (!mounted) return;
-      if (purchased) {
-        setState(() => _hasTicket = true);
-        _offerAddToCalendar(event);
-        return;
+    _pollingTicket = true;
+    try {
+      for (var attempt = 0; attempt < attempts; attempt++) {
+        final purchased = await TicketService.hasPurchased(event.id);
+        if (!mounted) return;
+        if (purchased) {
+          // Only when a checkout we started actually landed. This poll also
+          // runs on plain screen-opens for a ticket bought days ago, and
+          // counting those would inflate conversion with repeat visits.
+          if (_checkoutPending) {
+            NileAnalytics.capture(NileEvent.ticketConfirmed, {
+              'event_id': event.id,
+              'price_cents': event.price ?? 0,
+            });
+          }
+          _checkoutPending = false;
+          setState(() => _hasTicket = true);
+          _offerAddToCalendar(event);
+          return;
+        }
+        // No sleep after the final attempt — it only delayed the caller.
+        if (attempt < attempts - 1) {
+          await Future.delayed(const Duration(seconds: 2));
+        }
       }
-      await Future.delayed(const Duration(seconds: 2));
+    } finally {
+      _pollingTicket = false;
     }
   }
 
@@ -180,6 +240,19 @@ class _EventDetailScreenState extends State<EventDetailScreen>
     try {
       _event ??= await EventService.fetchById(widget.eventId!);
       if (_event == null) throw Exception('Event not found');
+
+      // Top of the funnel. is_ticketed and price_cents ride along so the
+      // conversion rate can be read per price band — "20% buy" means nothing
+      // without knowing whether that's a $5 show or a $50 one.
+      if (!_viewLogged) {
+        _viewLogged = true;
+        NileAnalytics.capture(NileEvent.eventViewed, {
+          'event_id': _event!.id,
+          'is_ticketed': (_event!.price ?? 0) > 0,
+          'price_cents': _event!.price ?? 0,
+          'is_own_event': _isOwnEvent,
+        });
+      }
 
       // Follow state (skip for own events)
       bool following = false;
@@ -220,14 +293,22 @@ class _EventDetailScreenState extends State<EventDetailScreen>
       _initCountdown();
       _initRealtime();
       _checkReplay();
+      _loadResults();
+      _loadInvite();
+      _loadFilm();
 
       // Best-effort "Sponsored by" line (0079) — only set for an active,
       // approved sponsorship; never blocks or fails the screen.
       AdService.lobbySponsorship(_event!.id).then((s) {
         if (mounted && s != null) {
-          setState(() => _sponsorName = s.advertiserName);
+          setState(() {
+            _sponsorName = s.advertiserName;
+            _sponsorAutoAccepted = s.autoAccepted;
+          });
         }
       });
+
+      _loadOffers();
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -237,10 +318,66 @@ class _EventDetailScreenState extends State<EventDetailScreen>
     }
   }
 
+  /// Interview mode: best-effort, never blocks the page. Guests may read their
+  /// own row (0147); everyone else gets nothing back.
+  Future<void> _loadInvite() async {
+    final event = _event;
+    if (event == null || _isOwnEvent || event.isOver) return;
+    try {
+      final invite = await InterviewService.myInvite(event.id);
+      if (mounted) setState(() => _invite = invite);
+    } catch (_) {}
+  }
+
+  /// Premiere mode, host only: best-effort, never blocks the page.
+  Future<void> _loadFilm() async {
+    final event = _event;
+    if (event == null ||
+        !_isOwnEvent ||
+        event.isOver ||
+        event.studioMode != StudioMode.premiere) {
+      return;
+    }
+    try {
+      final film = await PremiereService.fetch(event.id);
+      if (mounted) setState(() => _film = film);
+    } catch (_) {}
+  }
+
+  Future<void> _openFilm() async {
+    await context.push(NileRoutes.eventFilm(_event!.id));
+    _loadFilm();
+  }
+
+  /// Host-only: open offers on this event. There is no per-event RPC — the
+  /// host's whole set comes back at once — so this filters client-side rather
+  /// than adding a second query shape for one banner.
+  Future<void> _loadOffers() async {
+    final event = _event;
+    if (event == null ||
+        !_isOwnEvent ||
+        !event.sponsorshipOpen ||
+        event.isOver) {
+      return;
+    }
+    try {
+      final all = await AdService.hostOffers();
+      if (!mounted) return;
+      setState(
+        () => _offers = all.where((o) => o.eventId == event.id).toList(),
+      );
+    } catch (_) {
+      // The Payouts card and the notification both still lead here; a failure
+      // on someone else's event page isn't worth an error state.
+    }
+  }
+
   void _initCountdown() {
     _ticker?.cancel();
     final target = _event?.scheduledAt;
     if (_event?.isScheduled != true || target == null) return;
+    // Nothing to count down to on a window that has already closed.
+    if (_event!.isOver) return;
     _tick(target);
     _ticker = Timer.periodic(const Duration(seconds: 1), (_) => _tick(target));
   }
@@ -257,7 +394,7 @@ class _EventDetailScreenState extends State<EventDetailScreen>
   /// former still gets a buy-ticket CTA. (fix 1)
   Future<void> _checkReplay() async {
     final event = _event;
-    if (event == null || !event.isEnded) return;
+    if (event == null || !event.isOver) return;
     final slug = event.liveKitEventId ?? event.id;
     final r = await LivekitService.replayExists(eventId: slug);
     if (!mounted) return;
@@ -270,14 +407,27 @@ class _EventDetailScreenState extends State<EventDetailScreen>
     });
   }
 
+  /// Host, after the show: element results. Best-effort — the section just
+  /// doesn't appear without them.
+  Future<void> _loadResults() async {
+    final event = _event;
+    if (event == null || !_isOwnEvent || !event.isOver) return;
+    try {
+      final r = await LivekitService.listElements(
+        eventId: event.liveKitEventId ?? event.id,
+      );
+      if (mounted) setState(() => _results = r);
+    } catch (_) {}
+  }
+
   /// Host: open the pricing screen; refresh the replay probe on return so the
   /// CTA flips from "Set replay price" once published.
   Future<void> _priceReplay() async {
     final event = _event;
     if (event == null) return;
-    final published = await Navigator.push<bool>(
-      context,
-      MaterialPageRoute(builder: (_) => ReplayPricingScreen(event: event)),
+    final published = await context.push<bool>(
+      NileRoutes.eventReplayPricing(event.id),
+      extra: event,
     );
     if (published == true && mounted) {
       await _load();
@@ -287,10 +437,7 @@ class _EventDetailScreenState extends State<EventDetailScreen>
   void _watchReplay() {
     final event = _event;
     if (event == null) return;
-    Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => ReplayScreen(event: event)),
-    );
+    context.push(NileRoutes.eventReplay(event.id), extra: event);
   }
 
   void _initRealtime() {
@@ -323,8 +470,10 @@ class _EventDetailScreenState extends State<EventDetailScreen>
             'is_official': _event!.hostIsOfficial,
           },
         };
+        final wasEnded = _event!.isEnded;
         setState(() => _event = Event.fromJson(merged));
         if (_event!.isLive || _event!.isEnded) _ticker?.cancel();
+        if (_event!.isEnded && !wasEnded) _loadResults();
       },
     );
   }
@@ -375,13 +524,24 @@ class _EventDetailScreenState extends State<EventDetailScreen>
   Future<void> _buyTicket({String kind = 'live'}) async {
     if (_event == null) return;
     setState(() => _ticketBusy = true);
+    // Fired BEFORE the network call, not after: a checkout that fails to even
+    // start is exactly the kind of drop-off this funnel exists to surface, and
+    // an event only logged on success would hide it.
+    NileAnalytics.capture(
+      kind == 'replay'
+          ? NileEvent.replayCheckoutStarted
+          : NileEvent.ticketCheckoutStarted,
+      {'event_id': _event!.id, 'price_cents': _event!.price ?? 0},
+    );
     try {
       final url = await TicketService.createCheckoutUrl(
         eventId: _event!.id,
         kind: kind,
       );
       final uri = Uri.parse(url);
+      _checkoutPending = true;
       if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
+        _checkoutPending = false;
         throw Exception('Could not open checkout');
       }
       // Poll for ticket confirmation after returning from browser
@@ -410,13 +570,13 @@ class _EventDetailScreenState extends State<EventDetailScreen>
   /// browser (not an in-app webview). All checkout happens on the web, so there
   /// is no in-app purchase path — this CTA is just a link out, never a buy button.
   Future<void> _boost() async {
-    if (_event == null || !_isOwnEvent || _event!.isEnded) return;
+    if (_event == null || !_isOwnEvent || _event!.isOver) return;
     final uri = Uri.parse(ShareUrls.boost(_event!.id));
     if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('Could not open the boost page')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Could not open the boost page')),
+      );
     }
   }
 
@@ -424,22 +584,15 @@ class _EventDetailScreenState extends State<EventDetailScreen>
   /// clicks, CTR, and spend.
   void _openBoostPerformance() {
     if (!_isOwnEvent) return;
-    Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => const BoostPerformanceScreen()),
-    );
+    context.push(NileRoutes.boost);
   }
 
   void _watch() {
     // Allow entry once the show is live OR while the host is in Sound Check
     // (the viewer lands in the Lobby until Start Show).
-    if (_event == null || !(_event!.isLive || _event!.isSoundCheck)) return;
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => ViewerScreen(initialEventId: _event!.liveKitEventId),
-      ),
-    );
+    if (_event == null || _event!.isOver) return;
+    if (!(_event!.isLive || _event!.isSoundCheck)) return;
+    context.push(NileRoutes.watch(_event!.liveKitEventId!));
   }
 
   /// Host/operator entry. The host kicking off a not-yet-started show first
@@ -448,48 +601,28 @@ class _EventDetailScreenState extends State<EventDetailScreen>
   /// Operators (and the host re-entering a show already in Sound Check or live)
   /// go straight to streaming.
   void _enterAsCamera() {
-    if (_event == null || !(_isOwnEvent || _isOperator)) return;
+    if (_event == null || _event!.isOver) return;
+    if (!(_isOwnEvent || _isOperator)) return;
     final needsSetup = _isOwnEvent && !_event!.isSoundCheck && !_event!.isLive;
+    // Audio operators run the audio feed; everyone else runs a camera.
+    final audio = _assignment?.isAudioOperator == true;
     if (needsSetup) {
-      Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (_) => CrewSetupScreen(
-            eventId: _event!.id,
-            onContinue: () {
-              if (!mounted) return;
-              // Replace the setup screen with the streaming screen so Back
-              // from streaming returns to event detail, not the setup list.
-              Navigator.pushReplacement(
-                context,
-                MaterialPageRoute(builder: (_) => _streamScreen()),
-              );
-            },
-          ),
-        ),
-      );
+      // The crew route's Continue replaces the setup screen with the streaming
+      // screen, so Back from streaming returns to event detail, not the setup
+      // list.
+      context.push(NileRoutes.eventCrew(_event!.id, audio: audio));
       return;
     }
-    Navigator.push(context, MaterialPageRoute(builder: (_) => _streamScreen()));
-  }
-
-  /// The streaming screen for this user on this event: audio operators run the
-  /// audio feed; everyone else runs a camera. Operators get their assigned slot
-  /// label pre-filled; the host defaults to their own handle.
-  Widget _streamScreen() {
-    if (_assignment?.isAudioOperator == true) {
-      return AudioScreen(
-        initialEventId: _event!.liveKitEventId,
-        isHost: _isOwnEvent,
-      );
-    }
-    final cameraName =
-        _assignment?.cameraLabel ??
-        (_isOwnEvent ? '@${_event!.hostUsername}' : null);
-    return CameraScreen(
-      initialEventId: _event!.liveKitEventId,
-      initialCameraName: cameraName,
-      isHost: _isOwnEvent,
+    context.push(
+      NileRoutes.stream(
+        _event!.liveKitEventId!,
+        audio: audio,
+        host: _isOwnEvent,
+        // Carry the Crew Setup slot so the streaming screen auto-connects
+        // rather than asking for the camera name by hand. Null (unassigned)
+        // keeps the manual form.
+        cameraName: _assignment?.cameraLabel,
+      ),
     );
   }
 
@@ -501,17 +634,14 @@ class _EventDetailScreenState extends State<EventDetailScreen>
       Navigator.pop(context);
       return;
     }
-    Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => ProfileScreen(userId: _event!.hostId)),
-    );
+    context.push(NileRoutes.profile(_event!.hostId));
   }
 
   Future<void> _edit() async {
     if (_event == null || !_isOwnEvent) return;
-    final updated = await Navigator.push<Event>(
-      context,
-      MaterialPageRoute(builder: (_) => EditEventScreen(event: _event!)),
+    final updated = await context.push<Event>(
+      NileRoutes.eventEdit(_event!.id),
+      extra: _event!,
     );
     if (updated != null && mounted) {
       setState(() => _event = updated);
@@ -554,7 +684,7 @@ class _EventDetailScreenState extends State<EventDetailScreen>
         liveKitEventId: _event!.liveKitEventId,
       );
       if (!mounted) return;
-      Navigator.pop(context, true); // signal deletion to the previous screen
+      context.pop(true); // signal deletion to the previous screen
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(const SnackBar(content: Text('Event deleted')));
@@ -568,24 +698,375 @@ class _EventDetailScreenState extends State<EventDetailScreen>
 
   void _openAttendees() {
     if (_event == null || !_isOwnEvent) return;
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) =>
-            AttendeeListScreen(eventId: _event!.id, eventTitle: _event!.title),
-      ),
-    );
+    context.push(NileRoutes.eventAttendees(_event!.id), extra: _event!);
   }
 
   // ── UI ──────────────────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
+    // A pushed detail screen covers the shell, so on desktop this widget owns
+    // the whole window — far more width than the phone layout was drawn for.
+    // The desktop variant is a separate body rather than conditionals inside
+    // the phone one, for the same reason HomeScreen splits into two shells.
+    if (!NileBreakpoints.of(context).isCompact && _event != null) {
+      return Scaffold(
+        backgroundColor: NileColors.bgPage,
+        body: _buildDesktopBody(),
+      );
+    }
     return Scaffold(
       backgroundColor: NileColors.bgPage,
       body: NileMaxWidth(child: SafeArea(child: _buildBody())),
     );
   }
+
+  /// The action icons carried by the phone's SliverAppBar and, on desktop, by
+  /// the hero overlay. One list so the two can't drift.
+  List<Widget> _appBarActions() => [
+    if (_isOwnEvent) ...[
+      IconButton(
+        tooltip: 'Attendees',
+        icon: Icon(Icons.people_outline, color: NileColors.txtPrimary),
+        onPressed: _openAttendees,
+      ),
+      IconButton(
+        tooltip: 'Edit',
+        icon: Icon(Icons.edit_outlined, color: NileColors.txtPrimary),
+        onPressed: _edit,
+      ),
+      IconButton(
+        tooltip: 'Delete',
+        icon: const Icon(Icons.delete_outline, color: NileColors.coral),
+        onPressed: _delete,
+      ),
+    ],
+    IconButton(
+      tooltip: 'Share',
+      icon: Icon(Icons.ios_share, color: NileColors.txtPrimary),
+      onPressed: _share,
+    ),
+    IconButton(
+      tooltip: 'Copy ID',
+      icon: Icon(Icons.link, color: NileColors.txtPrimary),
+      onPressed: _copyId,
+    ),
+    if (!_isOwnEvent)
+      IconButton(
+        tooltip: 'Report event',
+        icon: Icon(Icons.flag_outlined, color: NileColors.txtPrimary),
+        onPressed: () => Moderation.showReportSheet(
+          context,
+          targetType: ReportTargetType.event,
+          targetId: _event!.id,
+        ),
+      ),
+    const SizedBox(width: 4),
+  ];
+
+  /// The host's view of this event's sponsorship, or null when there's nothing
+  /// honest to say — someone else's event, an event not open to sponsors, or
+  /// one whose window has closed.
+  ///
+  /// The empty case is deliberate. A host flips "open to sponsorship" on and
+  /// then sees nothing anywhere, which reads as a broken switch rather than as
+  /// "no brand has bid yet"; this says which it is.
+  List<Widget>? _hostSponsorshipBlock() {
+    final e = _event;
+    if (e == null || !_isOwnEvent || !e.sponsorshipOpen || e.isOver) {
+      return null;
+    }
+    if (_offers.isNotEmpty) {
+      return [
+        _HostOffersBanner(
+          offers: _offers,
+          onTap: () async {
+            await context.push(NileRoutes.sponsorshipOffers(eventId: e.id));
+            if (mounted) await _loadOffers();
+          },
+        ),
+        const SizedBox(height: 20),
+      ];
+    }
+    // Already sponsored — the "Sponsored by" line below says so, and "no offers
+    // yet" would contradict it.
+    if (_sponsorName != null) return null;
+    return [
+      _HostAwaitingOffersNote(autoAccept: e.sponsorshipAutoAccept),
+      const SizedBox(height: 20),
+    ];
+  }
+
+  /// Everything about the event that isn't an action: status, title, host,
+  /// sponsor, countdown, description.
+  ///
+  /// [showPrice] is false on desktop, where the price belongs in the ticket
+  /// panel next to the button you'd press after reading it.
+  List<Widget> _detailBlocks({bool showPrice = true}) => [
+    // Pinned above everything else, and only ever visible to the host: an offer
+    // on this event has a 48-hour fuse, which outranks anything below it.
+    ...?_hostSponsorshipBlock(),
+    Row(
+      children: [
+        _StatusChip(event: _event!),
+        if (showPrice && _event!.price != null && _event!.price! > 0) ...[
+          const SizedBox(width: 8),
+          _PriceChip(
+            priceCents: _event!.price!,
+            ticketsRemaining: _ticketsRemaining,
+            hasTicket: _hasTicket,
+            isOperator: _isOperator,
+          ),
+        ],
+      ],
+    ),
+    const SizedBox(height: 12),
+    Text(_event!.title, style: NileTextStyles.headingLg()),
+    const SizedBox(height: 16),
+    _HostRow(
+      event: _event!,
+      isOwn: _isOwnEvent,
+      isFollowing: _isFollowing,
+      busy: _followBusy,
+      onTapHost: _openHost,
+      onToggleFollow: _toggleFollow,
+    ),
+    const SizedBox(height: 20),
+    // Active sponsorship disclosure (0079) — mirrors the lobby's "Sponsored"
+    // tag so viewers aren't surprised at showtime.
+    if (_sponsorName != null) ...[
+      Row(
+        children: [
+          Icon(Icons.workspace_premium, size: 16, color: NileColors.volt),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              'Sponsored by $_sponsorName',
+              style: NileTextStyles.bodySm().copyWith(
+                color: NileColors.txtSecondary,
+              ),
+            ),
+          ),
+        ],
+      ),
+      // Host-only, and about THIS campaign rather than the event's setting
+      // (0098 returns `auto_accepted` on the sponsorship itself). A host who
+      // accepted by hand before the rule could fire is not told otherwise, and
+      // a viewer is told nothing at all — to them it's a disclaimer about a
+      // decision that was never theirs.
+      if (_isOwnEvent && _sponsorAutoAccepted) ...[
+        const SizedBox(height: 4),
+        Padding(
+          padding: const EdgeInsets.only(left: 22),
+          child: Text(
+            'Accepted automatically — this brand met your minimum.',
+            style: NileTextStyles.caption(),
+          ),
+        ),
+      ],
+      const SizedBox(height: 16),
+    ],
+    // No countdown once the window has passed — that block's expired state
+    // spins "Waiting for host to start the stream…" forever otherwise.
+    if (_event!.isScheduled && !_event!.isOver) ...[
+      _CountdownBlock(
+        scheduledAt: _event!.scheduledAt,
+        remaining: _remaining,
+        expired: _countdownExpired,
+      ),
+      const SizedBox(height: 20),
+    ],
+    if (_event!.description != null &&
+        _event!.description!.trim().isNotEmpty) ...[
+      Text('About', style: NileTextStyles.labelSm()),
+      const SizedBox(height: 6),
+      Text(_event!.description!, style: NileTextStyles.bodyMd()),
+      const SizedBox(height: 24),
+    ],
+    // Host-only (the server answers the host alone): how viewers tapped.
+    if (_results case final r?
+        when ElementResults.tappable(r.elements).isNotEmpty) ...[
+      ElementResults(elements: r.elements, tallies: r.tallies),
+      const SizedBox(height: 16),
+    ],
+    // FUTURE (agreed 2026-08-08, unscoped): a `Sponsored by` block listing
+    // vendor logos off ad_campaigns, and a `Collaborating with` block for
+    // co-hosts and guest artists with follow buttons. Crew is deliberately
+    // NOT here — it is host-only, and reaches the host through the crew setup
+    // route rather than the public page.
+  ];
+
+  /// The ticket panel: price, the one primary action, and the host's promotion
+  /// tools. On desktop this is pinned beside the content; on a phone it is the
+  /// tail of the same column.
+  List<Widget> _actionBlocks({bool showPrice = false}) => [
+    if (showPrice && _event!.price != null && _event!.price! > 0) ...[
+      _PriceChip(
+        priceCents: _event!.price!,
+        ticketsRemaining: _ticketsRemaining,
+        hasTicket: _hasTicket,
+        isOperator: _isOperator,
+      ),
+      const SizedBox(height: 16),
+    ],
+    if (_film case final film? when _isOwnEvent && !_event!.isOver) ...[
+      PremiereChecklist(film: film, onOpen: _openFilm),
+      const SizedBox(height: 16),
+    ],
+    if (_invite case final invite?
+        when invite.status != GuestStatus.removed && !_event!.isOver) ...[
+      _GuestEntry(
+        onJoin: () => context.push(NileRoutes.eventGreenRoom(_event!.id)),
+      ),
+      const SizedBox(height: 16),
+    ],
+    _PrimaryCta(
+      event: _event!,
+      countdownExpired: _countdownExpired,
+      isOwn: _isOwnEvent,
+      hasTicket: _hasTicket,
+      isOperator: _isOperator,
+      isAudioOperator: _assignment?.isAudioOperator ?? false,
+      ticketBusy: _ticketBusy,
+      ticketsRemaining: _ticketsRemaining,
+      replayWatchable: _replayWatchable,
+      replayLockedByTicket: _replayLockedByTicket,
+      replayExistsForEvent: _replayHasReplay,
+      replayPublished: _replayPublished,
+      replayPriceCents: _replayPrice,
+      onWatch: _watch,
+      onBuyTicket: _buyTicket,
+      onBuyReplay: () => _buyTicket(kind: 'replay'),
+      onEnterAsCamera: _enterAsCamera,
+      onWatchReplay: _watchReplay,
+      onPriceReplay: _priceReplay,
+    ),
+    // Host-only: promote this event via the web ad portal. Opens in the
+    // external browser — a link out, not an in-app purchase.
+    if (_isOwnEvent && !_event!.isOver) ...[
+      const SizedBox(height: 12),
+      SizedBox(
+        width: double.infinity,
+        child: OutlinedButton.icon(
+          onPressed: _boost,
+          icon: const Icon(Icons.campaign_outlined),
+          label: const Text('Boost this event'),
+          style: OutlinedButton.styleFrom(
+            foregroundColor: NileColors.txtPrimary,
+            side: BorderSide(color: NileColors.border),
+            padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
+            shape: const StadiumBorder(),
+          ),
+        ),
+      ),
+      TextButton.icon(
+        onPressed: _openBoostPerformance,
+        icon: const Icon(Icons.insights_outlined, size: 18),
+        label: const Text('View boost performance'),
+        style: TextButton.styleFrom(foregroundColor: NileColors.txtSecondary),
+      ),
+    ],
+  ];
+
+  /// Desktop: a full-bleed hero holding the window edges, then a content column
+  /// with the ticket panel pinned beside it.
+  ///
+  /// The hero is what makes the centred body below it read as deliberate rather
+  /// than as a column floating in a gutter — the mistake the shell's first two
+  /// zone attempts made.
+  Widget _buildDesktopBody() => Column(
+    children: [
+      SizedBox(
+        height: _heroHeight,
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            _heroMedia(),
+            // No back button here — the chrome's top bar carries it now, and
+            // two would be two.
+            SafeArea(
+              bottom: false,
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: _appBarActions(),
+              ),
+            ),
+          ],
+        ),
+      ),
+      Expanded(
+        child: NileDesktopSplit(
+          content: ListView(
+            padding: const EdgeInsets.fromLTRB(
+              0,
+              NileSpacing.s24,
+              0,
+              NileSpacing.s48,
+            ),
+            children: _detailBlocks(showPrice: false),
+          ),
+          side: ListView(
+            padding: const EdgeInsets.fromLTRB(
+              0,
+              NileSpacing.s24,
+              0,
+              NileSpacing.s48,
+            ),
+            children: [
+              Container(
+                padding: const EdgeInsets.all(NileSpacing.s24),
+                decoration: BoxDecoration(
+                  color: NileColors.bgSurface,
+                  borderRadius: BorderRadius.circular(NileRadius.lg),
+                  border: Border.all(color: NileColors.border),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: _actionBlocks(showPrice: true),
+                ),
+              ),
+            ],
+          ),
+          // Between the desktop threshold and the split threshold there is a
+          // rail but not room for two columns: one column, panel at the foot.
+          narrow: ListView(
+            padding: const EdgeInsets.fromLTRB(
+              NileSpacing.s16,
+              NileSpacing.s24,
+              NileSpacing.s16,
+              NileSpacing.s48,
+            ),
+            children: [
+              ..._detailBlocks(),
+              const SizedBox(height: NileSpacing.s8),
+              ..._actionBlocks(),
+            ],
+          ),
+        ),
+      ),
+    ],
+  );
+
+  /// Premiere: the trailer plays at the top (muted, tap for sound) for anyone,
+  /// ticket or not, with the poster while it loads. Otherwise the cover.
+  Widget _heroMedia() {
+    final event = _event!;
+    if (!_premiereHero) return _CoverImage(event: event);
+    return PremiereTrailer(
+      key: ValueKey('trailer-${event.id}'),
+      eventId: event.id,
+      cinema: true,
+      backdropUrl: event.thumbnailUrl,
+      fallback: _CoverImage(event: event),
+    );
+  }
+
+  bool get _premiereHero =>
+      _event!.studioMode == StudioMode.premiere && !_event!.isOver;
+
+  /// Tall enough to be a hero, short enough to leave the fold above the ticket
+  /// button on a 900 pt-high window.
+  static const double _heroHeight = 300;
 
   Widget _buildBody() {
     // Render immediately when an event was passed in so the Hero flight from
@@ -609,174 +1090,27 @@ class _EventDetailScreenState extends State<EventDetailScreen>
         SliverAppBar(
           pinned: true,
           backgroundColor: NileColors.bgPage,
-          expandedHeight: 240,
-          actions: [
-            if (_isOwnEvent) ...[
-              IconButton(
-                tooltip: 'Attendees',
-                icon: Icon(
-                  Icons.people_outline,
-                  color: NileColors.txtPrimary,
-                ),
-                onPressed: _openAttendees,
-              ),
-              IconButton(
-                tooltip: 'Edit',
-                icon: Icon(
-                  Icons.edit_outlined,
-                  color: NileColors.txtPrimary,
-                ),
-                onPressed: _edit,
-              ),
-              IconButton(
-                tooltip: 'Delete',
-                icon: const Icon(Icons.delete_outline, color: NileColors.coral),
-                onPressed: _delete,
-              ),
-            ],
-            IconButton(
-              tooltip: 'Share',
-              icon: Icon(Icons.ios_share, color: NileColors.txtPrimary),
-              onPressed: _share,
-            ),
-            IconButton(
-              tooltip: 'Copy ID',
-              icon: Icon(Icons.link, color: NileColors.txtPrimary),
-              onPressed: _copyId,
-            ),
-            if (!_isOwnEvent)
-              IconButton(
-                tooltip: 'Report event',
-                icon: Icon(
-                  Icons.flag_outlined,
-                  color: NileColors.txtPrimary,
-                ),
-                onPressed: () => Moderation.showReportSheet(
-                  context,
-                  targetType: ReportTargetType.event,
-                  targetId: _event!.id,
-                ),
-              ),
-            const SizedBox(width: 4),
-          ],
-          flexibleSpace: FlexibleSpaceBar(
-            background: _CoverImage(event: _event!),
-          ),
+          // Premiere: as tall as a 16:9 trailer at full width, so it fills.
+          expandedHeight: _premiereHero
+              ? math.min(
+                      MediaQuery.sizeOf(context).width,
+                      NileMaxWidth.columnFor(context),
+                    ) *
+                    9 /
+                    16
+              : 240,
+          actions: _appBarActions(),
+          flexibleSpace: FlexibleSpaceBar(background: _heroMedia()),
         ),
         SliverPadding(
-          padding: const EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s16, NileSpacing.s16, NileSpacing.s32),
+          padding: const EdgeInsets.fromLTRB(
+            NileSpacing.s16,
+            NileSpacing.s16,
+            NileSpacing.s16,
+            NileSpacing.s32,
+          ),
           sliver: SliverList.list(
-            children: [
-              Row(
-                children: [
-                  _StatusChip(event: _event!),
-                  if (_event!.price != null && _event!.price! > 0) ...[
-                    const SizedBox(width: 8),
-                    _PriceChip(
-                      priceCents: _event!.price!,
-                      ticketsRemaining: _ticketsRemaining,
-                      hasTicket: _hasTicket,
-                      isOperator: _isOperator,
-                    ),
-                  ],
-                ],
-              ),
-              const SizedBox(height: 12),
-              Text(_event!.title, style: NileTextStyles.headingLg()),
-              const SizedBox(height: 16),
-              _HostRow(
-                event: _event!,
-                isOwn: _isOwnEvent,
-                isFollowing: _isFollowing,
-                busy: _followBusy,
-                onTapHost: _openHost,
-                onToggleFollow: _toggleFollow,
-              ),
-              const SizedBox(height: 20),
-              // Active sponsorship disclosure (0079) — mirrors the lobby's
-              // "Sponsored" tag so viewers aren't surprised at showtime.
-              if (_sponsorName != null) ...[
-                Row(
-                  children: [
-                    Icon(Icons.workspace_premium,
-                        size: 16, color: NileColors.volt),
-                    const SizedBox(width: 6),
-                    Expanded(
-                      child: Text(
-                        'Sponsored by $_sponsorName',
-                        style: NileTextStyles.bodySm().copyWith(
-                          color: NileColors.txtSecondary,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 16),
-              ],
-              if (_event!.isScheduled) ...[
-                _CountdownBlock(
-                  scheduledAt: _event!.scheduledAt,
-                  remaining: _remaining,
-                  expired: _countdownExpired,
-                ),
-                const SizedBox(height: 20),
-              ],
-              if (_event!.description != null &&
-                  _event!.description!.trim().isNotEmpty) ...[
-                Text('About', style: NileTextStyles.labelSm()),
-                const SizedBox(height: 6),
-                Text(_event!.description!, style: NileTextStyles.bodyMd()),
-                const SizedBox(height: 24),
-              ],
-              _PrimaryCta(
-                event: _event!,
-                countdownExpired: _countdownExpired,
-                isOwn: _isOwnEvent,
-                hasTicket: _hasTicket,
-                isOperator: _isOperator,
-                isAudioOperator: _assignment?.isAudioOperator ?? false,
-                ticketBusy: _ticketBusy,
-                ticketsRemaining: _ticketsRemaining,
-                replayWatchable: _replayWatchable,
-                replayLockedByTicket: _replayLockedByTicket,
-                replayExistsForEvent: _replayHasReplay,
-                replayPublished: _replayPublished,
-                replayPriceCents: _replayPrice,
-                onWatch: _watch,
-                onBuyTicket: _buyTicket,
-                onBuyReplay: () => _buyTicket(kind: 'replay'),
-                onEnterAsCamera: _enterAsCamera,
-                onWatchReplay: _watchReplay,
-                onPriceReplay: _priceReplay,
-              ),
-              // Host-only: promote this event via the web ad portal. Opens in
-              // the external browser — a link out, not an in-app purchase.
-              if (_isOwnEvent && !_event!.isEnded) ...[
-                const SizedBox(height: 12),
-                SizedBox(
-                  width: double.infinity,
-                  child: OutlinedButton.icon(
-                    onPressed: _boost,
-                    icon: const Icon(Icons.campaign_outlined),
-                    label: const Text('Boost this event'),
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: NileColors.txtPrimary,
-                      side: BorderSide(color: NileColors.border),
-                      padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
-                      shape: const StadiumBorder(),
-                    ),
-                  ),
-                ),
-                TextButton.icon(
-                  onPressed: _openBoostPerformance,
-                  icon: const Icon(Icons.insights_outlined, size: 18),
-                  label: const Text('View boost performance'),
-                  style: TextButton.styleFrom(
-                    foregroundColor: NileColors.txtSecondary,
-                  ),
-                ),
-              ],
-            ],
+            children: [..._detailBlocks(), ..._actionBlocks()],
           ),
         ),
       ],
@@ -813,9 +1147,9 @@ class _CoverImage extends StatelessWidget {
           onTap: event.thumbnailUrl == null
               ? null
               : () => PhotoViewerScreen.open(
-                    context,
-                    image: NetworkImage(event.thumbnailUrl!),
-                  ),
+                  context,
+                  image: NetworkImage(event.thumbnailUrl!),
+                ),
           child: Hero(
             tag: 'event-cover-${event.id}',
             child: event.thumbnailUrl != null
@@ -857,7 +1191,13 @@ class _StatusChip extends StatelessWidget {
     late final Color bg;
     late final Color fg;
     late final String label;
-    if (event.isSoundCheck) {
+    // isOver first: a sound check the host abandoned yesterday is over, not
+    // "starting soon", and a no-show never flips to status == 'ended'.
+    if (event.isOver) {
+      bg = NileColors.bgRaised;
+      fg = NileColors.txtSecondary;
+      label = 'ENDED';
+    } else if (event.isSoundCheck) {
       bg = NileColors.bgRaised;
       fg = NileColors.volt;
       label = 'STARTING SOON';
@@ -872,7 +1212,10 @@ class _StatusChip extends StatelessWidget {
       label = 'SCHEDULED';
     }
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s8, vertical: NileSpacing.s4),
+      padding: const EdgeInsets.symmetric(
+        horizontal: NileSpacing.s8,
+        vertical: NileSpacing.s4,
+      ),
       decoration: BoxDecoration(
         color: bg,
         borderRadius: BorderRadius.circular(NileRadius.xs),
@@ -972,6 +1315,43 @@ class _HostRow extends StatelessWidget {
   }
 }
 
+/// Interview mode: the signed-in user is on this show's guest list.
+class _GuestEntry extends StatelessWidget {
+  final VoidCallback onJoin;
+
+  const _GuestEntry({required this.onJoin});
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          children: [
+            Icon(Icons.mic_external_on, size: 16, color: NileColors.volt),
+            const SizedBox(width: NileSpacing.s6),
+            Text(
+              'You’re a guest on this show',
+              style: NileTextStyles.labelMd(),
+            ),
+          ],
+        ),
+        const SizedBox(height: NileSpacing.s8),
+        FilledButton.icon(
+          onPressed: onJoin,
+          style: FilledButton.styleFrom(
+            padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
+            backgroundColor: NileColors.volt,
+            foregroundColor: NileColors.onVolt,
+          ),
+          icon: const Icon(Icons.meeting_room_outlined),
+          label: const Text('Join green room'),
+        ),
+      ],
+    );
+  }
+}
+
 class _CountdownBlock extends StatelessWidget {
   final DateTime? scheduledAt;
   final Duration remaining;
@@ -990,24 +1370,8 @@ class _CountdownBlock extends StatelessWidget {
         local.year == now.year &&
         local.month == now.month &&
         local.day == now.day;
-    const months = [
-      'Jan',
-      'Feb',
-      'Mar',
-      'Apr',
-      'May',
-      'Jun',
-      'Jul',
-      'Aug',
-      'Sep',
-      'Oct',
-      'Nov',
-      'Dec',
-    ];
-    final time =
-        '${local.hour.toString().padLeft(2, '0')}:${local.minute.toString().padLeft(2, '0')}';
-    if (sameDay) return 'Today at $time';
-    return '${months[local.month - 1]} ${local.day} · $time';
+    if (sameDay) return 'Today at ${NileFormats.time(local)}';
+    return NileFormats.dayMonthTime(local);
   }
 
   @override
@@ -1149,7 +1513,10 @@ class _PriceChip extends StatelessWidget {
         : NileColors.txtPrimary;
 
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s8, vertical: NileSpacing.s4),
+      padding: const EdgeInsets.symmetric(
+        horizontal: NileSpacing.s8,
+        vertical: NileSpacing.s4,
+      ),
       decoration: BoxDecoration(
         color: bg,
         borderRadius: BorderRadius.circular(NileRadius.xs),
@@ -1222,7 +1589,9 @@ class _PrimaryCta extends StatelessWidget {
     // camera, available on scheduled/soundcheck/live events (so they can enter
     // Sound Check, set up, and press Start Show). The host runs the show, so the
     // host always gets this entry even without an event_operators row.
-    if ((isOwn || isOperator) && !event.isEnded) {
+    // isOver, not isEnded: once the scheduled window has passed there is
+    // nothing left to start, even if the row never flipped to 'ended'.
+    if ((isOwn || isOperator) && !event.isOver) {
       return Column(
         children: [
           SizedBox(
@@ -1251,7 +1620,9 @@ class _PrimaryCta extends StatelessWidget {
                 icon: const Icon(Icons.play_arrow),
                 label: Text(event.isLive ? 'Watch instead' : 'View Lobby'),
                 style: OutlinedButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
+                  padding: const EdgeInsets.symmetric(
+                    vertical: NileSpacing.s16,
+                  ),
                 ),
               ),
             ),
@@ -1260,7 +1631,9 @@ class _PrimaryCta extends StatelessWidget {
       );
     }
 
-    if (event.isLive || event.isSoundCheck) {
+    // A sound check whose window has passed is an abandoned lobby, not an
+    // event about to start — fall through to the ended branch below.
+    if (event.isLive || (event.isSoundCheck && !event.isOver)) {
       // Paid event — user needs a ticket (gate applies in the Lobby too)
       if (_isPaid && !_canWatch) {
         return _GetTicketButton(
@@ -1302,7 +1675,10 @@ class _PrimaryCta extends StatelessWidget {
               const Text('Watch Now'),
               const SizedBox(width: 8),
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s6, vertical: NileSpacing.s2),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: NileSpacing.s6,
+                  vertical: NileSpacing.s2,
+                ),
                 decoration: BoxDecoration(
                   color: Colors.white24,
                   borderRadius: BorderRadius.circular(NileRadius.xs),
@@ -1318,7 +1694,7 @@ class _PrimaryCta extends StatelessWidget {
       );
     }
 
-    if (event.isEnded) {
+    if (event.isOver) {
       final children = <Widget>[];
 
       // A ready replay this user may watch → primary "Watch Replay" CTA.
@@ -1476,9 +1852,27 @@ class _GetTicketButton extends StatelessWidget {
       ),
     );
     // Faint volt glow on the screen's single primary CTA.
-    return enabled
+    final cta = enabled
         ? DecoratedBox(decoration: NileEffects.voltGlow, child: button)
         : button;
+    // Currency and cancellation stated before the tap, not after it (#37).
+    // Stripe repeats the full policy above its own pay button; this is the
+    // version the buyer reads while still deciding.
+    if (soldOut) return cta;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        cta,
+        const SizedBox(height: NileSpacing.s8),
+        Text(
+          kTicketRefundPolicyShort,
+          textAlign: TextAlign.center,
+          style: NileTextStyles.caption().copyWith(
+            color: NileColors.txtTertiary,
+          ),
+        ),
+      ],
+    );
   }
 }
 
@@ -1511,4 +1905,118 @@ class _ErrorView extends StatelessWidget {
       ),
     );
   }
+}
+
+// ── Host sponsorship blocks (0097) ────────────────────────────────────────────
+
+/// "N brands want to sponsor this" — the whole point of the banner is the
+/// headline number and the best amount, so the host can tell at a glance
+/// whether it's worth opening.
+class _HostOffersBanner extends StatelessWidget {
+  final List<SponsorshipOffer> offers;
+  final VoidCallback onTap;
+  const _HostOffersBanner({required this.offers, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    // The RPC orders by amount desc within an event, but this banner shouldn't
+    // depend on that holding.
+    final best = offers
+        .map((o) => o.budgetCents)
+        .reduce((a, b) => a > b ? a : b);
+    final actionable = offers.where((o) => o.isActionable).length;
+    final soonest = offers
+        .map((o) => o.offerExpiresAt)
+        .reduce((a, b) => a.isBefore(b) ? a : b);
+    final dollars = best / 100;
+    final money = dollars == dollars.roundToDouble()
+        ? '\$${dollars.toStringAsFixed(0)}'
+        : '\$${dollars.toStringAsFixed(2)}';
+
+    return Material(
+      color: NileColors.volt.withValues(alpha: 0.08),
+      borderRadius: BorderRadius.circular(NileRadius.lg),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(NileRadius.lg),
+        child: Container(
+          padding: const EdgeInsets.all(NileSpacing.s16),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(NileRadius.lg),
+            border: Border.all(color: NileColors.volt),
+          ),
+          child: Row(
+            children: [
+              Icon(Icons.workspace_premium, color: NileColors.volt, size: 20),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      actionable == 1
+                          ? 'A brand wants to sponsor this event'
+                          : '${offers.length} brands want to sponsor this event',
+                      style: NileTextStyles.headingSm(),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Best offer $money · '
+                      '${SponsorshipOffer.expiresLabelFor(soonest)}',
+                      style: NileTextStyles.bodySm().copyWith(
+                        color: NileColors.txtSecondary,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Icon(Icons.chevron_right, size: 18, color: NileColors.volt),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Open to sponsorship, nothing offered yet. Quiet by design — it exists to
+/// stop the toggle reading as broken, not to occupy the top of the page.
+class _HostAwaitingOffersNote extends StatelessWidget {
+  final bool autoAccept;
+  const _HostAwaitingOffersNote({required this.autoAccept});
+
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.all(NileSpacing.s12),
+    decoration: BoxDecoration(
+      color: NileColors.bgSurface,
+      borderRadius: BorderRadius.circular(NileRadius.md),
+      border: Border.all(color: NileColors.border),
+    ),
+    child: Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Icon(
+          Icons.workspace_premium_outlined,
+          size: 16,
+          color: NileColors.txtTertiary,
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(
+            autoAccept
+                ? 'Open to sponsorship — no offers yet. Anything at or above '
+                      'your minimum is accepted automatically, and we\'ll tell '
+                      'you when it happens.'
+                : 'Open to sponsorship — no offers yet. We\'ll notify you when '
+                      'a brand makes one. Offers close 48 hours before '
+                      'showtime.',
+            style: NileTextStyles.bodySm().copyWith(
+              color: NileColors.txtSecondary,
+            ),
+          ),
+        ),
+      ],
+    ),
+  );
 }

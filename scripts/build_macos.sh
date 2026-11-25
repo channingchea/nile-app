@@ -82,8 +82,30 @@ fi
 
 # ---------------------------------------------------------------- build
 if [[ $SKIP_BUILD -eq 0 ]]; then
-  step "flutter build macos --release  (v${SHORT}, build ${VERSION##*+})"
-  flutter build macos --release
+  # P4 #39: this used to be a bare `flutter build macos --release`, with no
+  # --dart-define at all — which is why no Mac build has EVER carried the
+  # Sentry DSN. Every Mac crash since the desktop app shipped went unreported,
+  # and nobody noticed precisely because the reports that would have told us
+  # were the missing thing.
+  #
+  # Both values are read from the environment and are optional: absent, the
+  # app skips Sentry / PostHog exactly as it does today, so a local build with
+  # no secrets set behaves the same as before.
+  DEFINES=()
+  [[ -n "${SENTRY_DSN:-}" ]]      && DEFINES+=(--dart-define=SENTRY_DSN="$SENTRY_DSN")
+  [[ -n "${POSTHOG_API_KEY:-}" ]] && DEFINES+=(--dart-define=POSTHOG_API_KEY="$POSTHOG_API_KEY")
+  [[ -n "${POSTHOG_HOST:-}" ]]    && DEFINES+=(--dart-define=POSTHOG_HOST="$POSTHOG_HOST")
+
+  if [[ ${#DEFINES[@]} -eq 0 ]]; then
+    warn "no SENTRY_DSN or POSTHOG_API_KEY in the environment — this build will report nothing"
+  fi
+
+  step "flutter build macos --release  (v${SHORT}, build ${VERSION##*+}, ${#DEFINES[@]} define(s))"
+  # The +"..." guard is not decoration: macOS ships bash 3.2, where expanding
+  # an EMPTY array as "${DEFINES[@]}" under `set -u` dies with "unbound
+  # variable". A build with no secrets configured is the common local case, so
+  # the plain form would break exactly the path most people take.
+  flutter build macos --release "${DEFINES[@]+"${DEFINES[@]}"}"
 else
   step "Reusing existing Release build"
 fi

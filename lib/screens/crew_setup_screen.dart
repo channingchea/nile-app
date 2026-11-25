@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 
 import '../services/crew_service.dart';
+import '../services/event_service.dart';
+import '../services/supabase_client.dart';
 import '../theme.dart';
 
 /// Host-facing Crew Setup. Before going live, the host maps each crew member to
@@ -15,9 +17,10 @@ class CrewSetupScreen extends StatefulWidget {
   /// The events-table UUID (not the LiveKit id) — keys event_operators / cameras.
   final String eventId;
 
-  /// Invoked when the host taps Continue after a successful save. The caller
+  /// Invoked when the host taps Continue after a successful save, with the
+  /// event's LiveKit room slug and the camera slot label to open on. The caller
   /// pushes the camera/audio screen; this screen does not own that navigation.
-  final VoidCallback onContinue;
+  final void Function(String liveKitRoom, String cameraName) onContinue;
 
   const CrewSetupScreen({
     super.key,
@@ -99,6 +102,22 @@ class _CrewSetupScreenState extends State<CrewSetupScreen> {
     return null;
   }
 
+  /// The camera slot label to open the streaming screen on, so it auto-connects
+  /// instead of dropping the user on the manual ID / Camera Name form (which
+  /// discarded the mapping made right here). Uses the caller's own assignment;
+  /// anyone left on "Any camera" — usually the host — falls back to the first
+  /// slot, which is what they would have typed anyway.
+  String _cameraNameForMe() {
+    final uid = supabase.auth.currentUser?.id;
+    for (final pick in _picks) {
+      if (pick.profile.id != uid || pick.slotIndex == null) continue;
+      for (final c in _cameras) {
+        if (c.slotIndex == pick.slotIndex) return c.label;
+      }
+    }
+    return _cameras.isEmpty ? 'Camera 1' : _cameras.first.label;
+  }
+
   Future<void> _saveAndContinue() async {
     setState(() {
       _saving = true;
@@ -115,13 +134,21 @@ class _CrewSetupScreenState extends State<CrewSetupScreen> {
           isAudioOperator: pick.isAudioOperator,
         );
       }
+      // The streaming screen resolves the event by its LiveKit room slug, not
+      // the UUID this screen carries. Handing over the UUID dead-ended every
+      // first-time host at "Event not found".
+      final event = await EventService.fetchById(widget.eventId);
+      final room = event?.liveKitEventId;
+      if (room == null || room.isEmpty) {
+        throw StateError('This event has no stream room yet.');
+      }
       if (!mounted) return;
-      widget.onContinue();
+      widget.onContinue(room, _cameraNameForMe());
     } catch (e) {
       if (!mounted) return;
       setState(() {
         _saving = false;
-        _error = 'Couldn\'t save assignments. ${e.toString()}';
+        _error = 'Couldn\'t continue to Sound Check. ${e.toString()}';
       });
     }
   }

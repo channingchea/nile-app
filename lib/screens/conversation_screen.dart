@@ -3,6 +3,7 @@ import 'dart:ui' show ImageFilter;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../services/app_lifecycle.dart';
 import '../services/event_service.dart';
@@ -10,27 +11,60 @@ import '../services/message_service.dart';
 import '../services/post_service.dart';
 import '../services/profile_service.dart';
 import '../services/realtime.dart';
+import '../router.dart';
 import '../theme.dart';
 import '../widgets/offline_banner.dart';
 import '../widgets/official_badge.dart';
-import 'event_detail_screen.dart';
 import 'messages_screen.dart' show NileAvatar;
-import 'post_detail_screen.dart';
-import 'profile_screen.dart';
-import 'viewer_screen.dart';
+import '../services/formats.dart';
+import '../services/nile_navigation.dart';
 
-class ConversationScreen extends StatefulWidget {
+/// The thread as a full-screen route: `/dm/:userId`, and every push from a
+/// phone. A titled frame around [ConversationView] and nothing else — the
+/// thread itself lives in that widget so Messages can host it in a pane on
+/// desktop without inheriting a second Scaffold or a back button it has no use
+/// for.
+class ConversationScreen extends StatelessWidget {
   final Conversation conversation;
   const ConversationScreen({super.key, required this.conversation});
 
   @override
-  State<ConversationScreen> createState() => _ConversationScreenState();
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: NileColors.bgPage,
+      body: NileMaxWidth(
+        child: SafeArea(
+          child: Column(
+            children: [
+              _AppBar(conv: conversation),
+              Expanded(child: ConversationView(conversation: conversation)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// One thread's messages, composer and reaction handling. No Scaffold, no app
+/// bar, so it drops into a route or a pane equally well.
+///
+/// Everything it owns — three realtime channels, two timers, three controllers
+/// — is scoped to [conversation]. A host that swaps threads in place should key
+/// it on `conversation.id` so the State is rebuilt from scratch; see
+/// [_ConversationViewState.didUpdateWidget] for what happens if it doesn't.
+class ConversationView extends StatefulWidget {
+  final Conversation conversation;
+  const ConversationView({super.key, required this.conversation});
+
+  @override
+  State<ConversationView> createState() => _ConversationViewState();
 }
 
 /// Quick-reaction emojis shown in the long-press bar (a `+` opens the picker).
 const _kQuickReactions = ['❤️', '😂', '👍', '😮', '😢', '🔥'];
 
-class _ConversationScreenState extends State<ConversationScreen> {
+class _ConversationViewState extends State<ConversationView> {
   final _input = TextEditingController();
   final _scroll = ScrollController();
   final _focusNode = FocusNode();
@@ -64,29 +98,64 @@ class _ConversationScreenState extends State<ConversationScreen> {
   @override
   void initState() {
     super.initState();
-    _loadHistory();
-    _subscribeRealtime();
-    _subscribeReactions();
-    _subscribeTyping();
     _input.addListener(_onInputChanged);
     AppLifecycle.instance.state.addListener(_onLifecycle);
-    MessageService.markRead(_conv.id);
+    _openThread();
+  }
+
+  @override
+  void didUpdateWidget(ConversationView old) {
+    super.didUpdateWidget(old);
+    if (old.conversation.id == widget.conversation.id) return;
+    // The three-pane host keys this on the conversation id, so switching
+    // threads there disposes this State and builds a fresh one. This is the
+    // safety net for a host that doesn't: every channel below is opened per
+    // conversation, so reusing the State without closing them first leaks a
+    // channel — and keeps delivering the old thread's messages — per switch.
+    _closeThread();
+    _messages = [];
+    _hasMore = false;
+    _cursor = null;
+    _loadingHistory = true;
+    _otherTyping = false;
+    _connState = RealtimeConnState.connecting;
+    _input.clear();
+    _openThread();
   }
 
   @override
   void dispose() {
     AppLifecycle.instance.state.removeListener(_onLifecycle);
+    _closeThread();
+    _input.removeListener(_onInputChanged);
+    _input.dispose();
+    _scroll.dispose();
+    _focusNode.dispose();
+    super.dispose();
+  }
+
+  /// Opens everything scoped to one thread. Paired with [_closeThread]; the
+  /// controllers and the lifecycle listener outlive both and stay in
+  /// initState/dispose.
+  void _openThread() {
+    _loadHistory();
+    _subscribeRealtime();
+    _subscribeReactions();
+    _subscribeTyping();
+    MessageService.markRead(_conv.id);
+  }
+
+  /// Closes the same. Nulls the handles so a second call is a no-op.
+  void _closeThread() {
     _typingStopTimer?.cancel();
     _otherTypingTimeout?.cancel();
     _stopTyping();
     _typingChannel?.unsubscribe();
     _reactionChannel?.unsubscribe();
     _conn?.dispose();
-    _input.removeListener(_onInputChanged);
-    _input.dispose();
-    _scroll.dispose();
-    _focusNode.dispose();
-    super.dispose();
+    _typingChannel = null;
+    _reactionChannel = null;
+    _conn = null;
   }
 
   // On resume from background, backfill any messages missed while suspended.
@@ -142,11 +211,16 @@ class _ConversationScreenState extends State<ConversationScreen> {
     }
   }
 
+  /// The conversation id is captured before the await and re-checked after it,
+  /// here and in [_loadMore] / [_resyncMessages]. Without that, a thread
+  /// swapped in place while a page was in flight would be handed the previous
+  /// thread's messages.
   Future<void> _loadHistory() async {
+    final convId = _conv.id;
     setState(() => _loadingHistory = true);
     try {
-      final page = await MessageService.getMessages(_conv.id);
-      if (!mounted) return;
+      final page = await MessageService.getMessages(convId);
+      if (!mounted || convId != _conv.id) return;
       setState(() {
         // Reverse so newest is at the bottom.
         _messages = page.items.reversed.toList();
@@ -156,15 +230,18 @@ class _ConversationScreenState extends State<ConversationScreen> {
       WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
     } catch (_) {
     } finally {
-      if (mounted) setState(() => _loadingHistory = false);
+      if (mounted && convId == _conv.id) {
+        setState(() => _loadingHistory = false);
+      }
     }
   }
 
   Future<void> _loadMore() async {
     if (!_hasMore || _cursor == null) return;
+    final convId = _conv.id;
     try {
-      final page = await MessageService.getMessages(_conv.id, cursor: _cursor);
-      if (!mounted) return;
+      final page = await MessageService.getMessages(convId, cursor: _cursor);
+      if (!mounted || convId != _conv.id) return;
       setState(() {
         // Prepend older messages.
         _messages = [...page.items.reversed, ..._messages];
@@ -220,9 +297,10 @@ class _ConversationScreenState extends State<ConversationScreen> {
   /// resume): pulls the newest page, appends any messages we missed, patches
   /// read receipts, and re-marks the thread read. Cheap and best-effort.
   Future<void> _resyncMessages() async {
+    final convId = _conv.id;
     try {
-      final page = await MessageService.getMessages(_conv.id);
-      if (!mounted) return;
+      final page = await MessageService.getMessages(convId);
+      if (!mounted || convId != _conv.id) return;
       final known = {for (final m in _messages) m.id};
       var changed = false;
       for (final m in page.items) {
@@ -312,7 +390,8 @@ class _ConversationScreenState extends State<ConversationScreen> {
     // plain text messages.
     final canCopy = !msg.isSharedPost && !msg.isSharedEvent && !msg.isImage;
 
-    final result = await Navigator.of(context).push<_ReactionMenuResult>(
+    final result = await NileNav.push<_ReactionMenuResult>(
+      context,
       _ReactionMenuRoute(
         bubbleRect: bubbleRect,
         isMine: isMine,
@@ -577,141 +656,133 @@ class _ConversationScreenState extends State<ConversationScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: NileColors.bgPage,
-      body: NileMaxWidth(
-        child: SafeArea(
-          child: Column(
-            children: [
-              _AppBar(conv: _conv),
-              const OfflineBanner(),
-              if (_connState == RealtimeConnState.reconnecting)
-                const ReconnectingPill(),
-              Expanded(
-                child: _loadingHistory
-                    ? Center(
-                        child: CircularProgressIndicator(
-                          color: NileColors.volt,
-                        ),
-                      )
-                    : NotificationListener<ScrollNotification>(
-                        onNotification: (n) {
-                          if (n is ScrollStartNotification &&
-                              _scroll.position.pixels <= 100) {
-                            _loadMore();
-                          }
-                          return false;
-                        },
-                        child: ListView.builder(
-                          controller: _scroll,
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: NileSpacing.s16,
-                            vertical: NileSpacing.s8,
+    return Column(
+      children: [
+        const OfflineBanner(),
+        if (_connState == RealtimeConnState.reconnecting)
+          const ReconnectingPill(),
+        Expanded(
+          child: _loadingHistory
+              ? Center(
+                  child: CircularProgressIndicator(
+                    color: NileColors.volt,
+                  ),
+                )
+              : NotificationListener<ScrollNotification>(
+                  onNotification: (n) {
+                    if (n is ScrollStartNotification &&
+                        _scroll.position.pixels <= 100) {
+                      _loadMore();
+                    }
+                    return false;
+                  },
+                  child: ListView.builder(
+                    controller: _scroll,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: NileSpacing.s16,
+                      vertical: NileSpacing.s8,
+                    ),
+                    itemCount: _messages.length + (_hasMore ? 1 : 0),
+                    itemBuilder: (_, i) {
+                      if (i == 0 && _hasMore) {
+                        return Padding(
+                          padding: EdgeInsets.only(bottom: NileSpacing.s8),
+                          child: Center(
+                            child: SizedBox(
+                              width: 20,
+                              height: 20,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: NileColors.txtTertiary,
+                              ),
+                            ),
                           ),
-                          itemCount: _messages.length + (_hasMore ? 1 : 0),
-                          itemBuilder: (_, i) {
-                            if (i == 0 && _hasMore) {
-                              return Padding(
-                                padding: EdgeInsets.only(bottom: NileSpacing.s8),
-                                child: Center(
-                                  child: SizedBox(
-                                    width: 20,
-                                    height: 20,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                      color: NileColors.txtTertiary,
-                                    ),
-                                  ),
-                                ),
-                              );
-                            }
-                            final msgIndex = _hasMore ? i - 1 : i;
-                            final msg = _messages[msgIndex];
-                            final isMe = msg.senderId == _myId;
-                            final prev = msgIndex > 0
-                                ? _messages[msgIndex - 1]
-                                : null;
-                            final next = msgIndex < _messages.length - 1
-                                ? _messages[msgIndex + 1]
-                                : null;
-                            // Date separator when the calendar day changes.
-                            final showDateSeparator =
-                                prev == null ||
-                                !_sameDay(prev.createdAt, msg.createdAt);
-                            // Group consecutive bubbles from the same sender
-                            // within 5 minutes (a new day always breaks groups).
-                            final isFirstInGroup =
-                                showDateSeparator ||
-                                prev.senderId != msg.senderId ||
-                                msg.createdAt
-                                        .difference(prev.createdAt)
-                                        .inMinutes
-                                        .abs() >
-                                    5;
-                            final isLastInGroup =
-                                next == null ||
-                                next.senderId != msg.senderId ||
-                                !_sameDay(msg.createdAt, next.createdAt) ||
-                                next.createdAt
-                                        .difference(msg.createdAt)
-                                        .inMinutes
-                                        .abs() >
-                                    5;
-                            // Receipt shows only under my most-recent sent
-                            // message (last in the list authored by me).
-                            final isLastSent =
-                                isMe && msgIndex == _lastSentIndex;
-                            return _MessageBubble(
-                              message: msg,
-                              isMe: isMe,
-                              myId: _myId,
-                              isFirstInGroup: isFirstInGroup,
-                              isLastInGroup: isLastInGroup,
-                              showDateSeparator: showDateSeparator,
-                              isLastSent: isLastSent,
-                              onLongPress:
-                                  msg.id.startsWith('opt_')
-                                  ? null
-                                  : (rect) => _showReactionMenu(msg, rect),
-                              // Tapping a chip toggles that emoji (off if it's
-                              // your own active reaction).
-                              onReactionTap: msg.id.startsWith('opt_')
-                                  ? null
-                                  : (emoji) => _toggleReaction(msg, emoji),
-                            );
-                          },
-                        ),
-                      ),
-              ),
-              AnimatedSwitcher(
-                duration: NileMotion.fast,
-                child: _otherTyping
-                    ? Padding(
-                        key: const ValueKey('typing'),
-                        padding: const EdgeInsets.fromLTRB(
-                          NileSpacing.s16,
-                          0,
-                          NileSpacing.s16,
-                          NileSpacing.s4,
-                        ),
-                        child: Align(
-                          alignment: Alignment.centerLeft,
-                          child: _TypingBubble(),
-                        ),
-                      )
-                    : const SizedBox.shrink(),
-              ),
-              _InputBar(
-                controller: _input,
-                focusNode: _focusNode,
-                onSend: _send,
-                onAttach: _showAttachMenu,
-                sending: _sending,
-              ),
-            ],
-          ),
+                        );
+                      }
+                      final msgIndex = _hasMore ? i - 1 : i;
+                      final msg = _messages[msgIndex];
+                      final isMe = msg.senderId == _myId;
+                      final prev = msgIndex > 0
+                          ? _messages[msgIndex - 1]
+                          : null;
+                      final next = msgIndex < _messages.length - 1
+                          ? _messages[msgIndex + 1]
+                          : null;
+                      // Date separator when the calendar day changes.
+                      final showDateSeparator =
+                          prev == null ||
+                          !_sameDay(prev.createdAt, msg.createdAt);
+                      // Group consecutive bubbles from the same sender
+                      // within 5 minutes (a new day always breaks groups).
+                      final isFirstInGroup =
+                          showDateSeparator ||
+                          prev.senderId != msg.senderId ||
+                          msg.createdAt
+                                  .difference(prev.createdAt)
+                                  .inMinutes
+                                  .abs() >
+                              5;
+                      final isLastInGroup =
+                          next == null ||
+                          next.senderId != msg.senderId ||
+                          !_sameDay(msg.createdAt, next.createdAt) ||
+                          next.createdAt
+                                  .difference(msg.createdAt)
+                                  .inMinutes
+                                  .abs() >
+                              5;
+                      // Receipt shows only under my most-recent sent
+                      // message (last in the list authored by me).
+                      final isLastSent =
+                          isMe && msgIndex == _lastSentIndex;
+                      return _MessageBubble(
+                        message: msg,
+                        isMe: isMe,
+                        myId: _myId,
+                        isFirstInGroup: isFirstInGroup,
+                        isLastInGroup: isLastInGroup,
+                        showDateSeparator: showDateSeparator,
+                        isLastSent: isLastSent,
+                        onLongPress:
+                            msg.id.startsWith('opt_')
+                            ? null
+                            : (rect) => _showReactionMenu(msg, rect),
+                        // Tapping a chip toggles that emoji (off if it's
+                        // your own active reaction).
+                        onReactionTap: msg.id.startsWith('opt_')
+                            ? null
+                            : (emoji) => _toggleReaction(msg, emoji),
+                      );
+                    },
+                  ),
+                ),
         ),
-      ),
+        AnimatedSwitcher(
+          duration: NileMotion.fast,
+          child: _otherTyping
+              ? Padding(
+                  key: const ValueKey('typing'),
+                  padding: const EdgeInsets.fromLTRB(
+                    NileSpacing.s16,
+                    0,
+                    NileSpacing.s16,
+                    NileSpacing.s4,
+                  ),
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: _TypingBubble(),
+                  ),
+                )
+              : const SizedBox.shrink(),
+        ),
+        _InputBar(
+          controller: _input,
+          focusNode: _focusNode,
+          onSend: _send,
+          onAttach: _showAttachMenu,
+          sending: _sending,
+        ),
+      ],
     );
   }
 }
@@ -729,24 +800,26 @@ class _AppBar extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(NileSpacing.s4, NileSpacing.s4, NileSpacing.s16, NileSpacing.s4),
       child: Row(
         children: [
-          IconButton(
-            icon: Icon(
-              Icons.arrow_back_ios_new,
-              size: 18,
-              color: NileColors.txtPrimary,
-            ),
-            onPressed: () => Navigator.pop(context),
-          ),
+          // On desktop the chrome's top bar already carries back, and this
+          // screen is only reached there by a deep link or a push from a
+          // profile — two back arrows a few points apart is one too many.
+          if (NileBreakpoints.of(context).isCompact)
+            IconButton(
+              tooltip: 'Back to messages',
+              icon: Icon(
+                Icons.arrow_back_ios_new,
+                size: 18,
+                color: NileColors.txtPrimary,
+              ),
+              onPressed: () => context.pop(),
+            )
+          else
+            const SizedBox(width: NileSpacing.s12),
           // Avatar and name are one tap target — both open the profile.
           Expanded(
             child: GestureDetector(
               behavior: HitTestBehavior.opaque,
-              onTap: () => Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (_) => ProfileScreen(userId: conv.otherUserId),
-                ),
-              ),
+              onTap: () => context.push(NileRoutes.profile(conv.otherUserId)),
               child: Row(
                 children: [
                   NileAvatar(
@@ -809,12 +882,7 @@ class _MessageBubble extends StatelessWidget {
     onLongPress?.call(box.localToGlobal(Offset.zero) & box.size);
   }
 
-  String _formatTime(DateTime dt) {
-    final h = dt.hour % 12 == 0 ? 12 : dt.hour % 12;
-    final m = dt.minute.toString().padLeft(2, '0');
-    final period = dt.hour >= 12 ? 'PM' : 'AM';
-    return '$h:$m $period';
-  }
+  String _formatTime(DateTime dt) => NileFormats.time(dt);
 
   String _formatDate(DateTime dt) {
     final now = DateTime.now();
@@ -823,15 +891,7 @@ class _MessageBubble extends StatelessWidget {
     final diff = today.difference(that).inDays;
     if (diff == 0) return 'Today';
     if (diff == 1) return 'Yesterday';
-    const days = [
-      'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun',
-    ];
-    const months = [
-      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
-    ];
-    final base = '${days[dt.weekday - 1]}, ${months[dt.month - 1]} ${dt.day}';
-    return dt.year == now.year ? base : '$base, ${dt.year}';
+    return NileFormats.weekdayDayMonth(dt, withYear: dt.year != now.year);
   }
 
   @override
@@ -1530,7 +1590,7 @@ class _ImageBubble extends StatelessWidget {
             final url = snap.data;
             if (url == null) return placeholder();
             return GestureDetector(
-              onTap: () => Navigator.push(
+              onTap: () => NileNav.push(
                 context,
                 MaterialPageRoute(builder: (_) => _ImageViewer(imageUrl: url)),
               ),
@@ -1597,10 +1657,7 @@ class _SharedPostBubble extends StatelessWidget {
       );
     }
     return GestureDetector(
-      onTap: () => Navigator.push(
-        context,
-        MaterialPageRoute(builder: (_) => PostDetailScreen(post: p)),
-      ),
+      onTap: () => context.push(NileRoutes.post(p.id), extra: p),
       child: Container(
         decoration: BoxDecoration(
           color: NileColors.bgSurface,
@@ -1683,13 +1740,13 @@ class _SharedEventBubble extends StatelessWidget {
       );
     }
     return GestureDetector(
-      onTap: () => Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (_) => e.isLive
-              ? ViewerScreen(initialEventId: e.liveKitEventId)
-              : EventDetailScreen(event: e),
+      onTap: () => context.push(
+        NileRoutes.eventOrWatch(
+          isLive: e.isLive,
+          eventId: e.id,
+          liveKitEventId: e.liveKitEventId,
         ),
+        extra: e,
       ),
       child: Container(
         decoration: BoxDecoration(
@@ -1792,6 +1849,7 @@ class _InputBar extends StatelessWidget {
       child: Row(
         children: [
           IconButton(
+            tooltip: 'Attach a photo',
             icon: Icon(Icons.add_circle_outline_rounded,
                 color: NileColors.txtSecondary),
             onPressed: sending ? null : onAttach,

@@ -24,6 +24,14 @@
 	<array>
 		<string>9LTD86C5X7.com.nilestreaming.app</string>
 	</array>
+	<!-- Push. "production" because the embedded "Nile macOS Developer ID"
+	     profile carries com.apple.developer.aps-environment = production —
+	     a Developer ID build has no sandbox/development APNs to talk to.
+	     Registering here is what lets FirebaseMessaging obtain an APNs token
+	     on the Mac; without it getToken() fails and the device never lands in
+	     device_tokens, so no push ever arrives. -->
+	<key>com.apple.developer.aps-environment</key>
+	<string>production</string>
 	<!-- Deliberately NO com.apple.developer.applesignin. Apple does not support
 	     Sign in with Apple for Developer ID distribution — the capability is
 	     absent from the Developer ID column of "Supported capabilities (macOS)",

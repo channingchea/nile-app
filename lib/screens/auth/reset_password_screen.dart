@@ -193,6 +193,7 @@ class NilePasswordField extends StatelessWidget {
         labelText: label,
         prefixIcon: Icon(Icons.lock_outline, color: NileColors.txtTertiary),
         suffixIcon: IconButton(
+          tooltip: obscure ? 'Show password' : 'Hide password',
           icon: Icon(
             obscure ? Icons.visibility_outlined : Icons.visibility_off_outlined,
             color: NileColors.txtTertiary,

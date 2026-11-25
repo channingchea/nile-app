@@ -1,3 +1,4 @@
+import 'checkout_origin.dart';
 import 'event_service.dart';
 import 'pagination.dart';
 import 'supabase_client.dart';
@@ -81,7 +82,11 @@ class TicketService {
   }) async {
     final response = await supabase.functions.invoke(
       'create-payment-intent',
-      body: {'event_id': eventId, 'kind': kind},
+      body: {
+        'event_id': eventId,
+        'kind': kind,
+        'origin': NileCheckoutOrigin.current,
+      },
     );
 
     if (response.status != 200) {
@@ -129,6 +134,31 @@ class TicketService {
     return Paged(items: items, hasMore: hasMore, nextCursor: nextCursor);
   }
 
+  /// Gross, net and head-count for one event's paid tickets, across every page.
+  ///
+  /// The Attendee list used to sum the loaded page and label it "revenue",
+  /// which was gross — while the Payouts screen showed net. Same sales, two
+  /// numbers, no explanation on either screen. This is host-only (migration
+  /// 0094 checks host_id server-side).
+  static Future<({int grossCents, int netCents, int feeCents, int paidCount})>
+  eventTotals(String eventId) async {
+    final rows = await supabase.rpc(
+      'host_event_ticket_totals',
+      params: {'p_event_id': eventId},
+    );
+    final list = rows as List;
+    if (list.isEmpty) {
+      return (grossCents: 0, netCents: 0, feeCents: 0, paidCount: 0);
+    }
+    final r = list.first as Map<String, dynamic>;
+    return (
+      grossCents: (r['gross_cents'] as num?)?.toInt() ?? 0,
+      netCents: (r['net_cents'] as num?)?.toInt() ?? 0,
+      feeCents: (r['fee_cents'] as num?)?.toInt() ?? 0,
+      paidCount: (r['paid_count'] as num?)?.toInt() ?? 0,
+    );
+  }
+
   /// Attendees for [eventId] with buyer profiles joined, newest first.
   /// Keyset-paged by created_at via [cursor]. Includes paid and refunded
   /// tickets (pending hidden). RLS (`tickets_select_host`) restricts to host.
@@ -143,7 +173,7 @@ class TicketService {
           'profiles!tickets_buyer_id_fkey(id, username, avatar_url)',
         )
         .eq('event_id', eventId)
-        .inFilter('status', ['paid', 'refunded']);
+        .inFilter('status', ['paid', 'refunded', 'disputed']);
     if (cursor != null) b = b.lt('created_at', cursor);
     final rows = await b.order('created_at', ascending: false).limit(kPageSize);
 
@@ -158,9 +188,14 @@ class TicketService {
     );
   }
 
-  /// Host-initiated refund of a single ticket. The Edge Function authorizes
-  /// the caller as the event host and issues the Stripe refund; the ticket
-  /// flips to 'refunded' (optimistically server-side, confirmed by webhook).
+  /// Refund a single ticket. The Edge Function authorizes the caller as either
+  /// the event host (any time) or the buyer (only inside the disclosed
+  /// cancellation window — see services/money.dart), then issues the Stripe
+  /// refund; the ticket flips to 'refunded' (optimistically server-side,
+  /// confirmed by webhook).
+  ///
+  /// Throws with the server's own message when the window has closed, so
+  /// callers can surface it verbatim rather than inventing their own wording.
   static Future<void> refund(String ticketId) async {
     final response = await supabase.functions.invoke(
       'refund-ticket',
@@ -180,7 +215,7 @@ class Attendee {
   final String username;
   final String? avatarUrl;
   final int amountCents;
-  final String status; // 'paid' | 'refunded'
+  final String status; // 'paid' | 'refunded' | 'disputed'
   final DateTime purchasedAt;
 
   const Attendee({
@@ -195,12 +230,26 @@ class Attendee {
 
   bool get isRefunded => status == 'refunded';
 
+  /// A chargeback: the buyer's bank pulled the money back. Access is revoked
+  /// exactly like a refund, but the host can't refund it again and it isn't
+  /// their decision — so it reads differently on screen.
+  bool get isDisputed => status == 'disputed';
+
+  /// Not a live entitlement any more, whichever way it ended. Head-counts,
+  /// revenue, and the refund action all key on this rather than on 'refunded'.
+  bool get isVoid => status != 'paid';
+
+  /// True once the buyer deleted their account: migration 0118 nulls
+  /// `tickets.buyer_id` and the profile join comes back empty, while the sale
+  /// itself stays on the host's books.
+  bool get isDeletedBuyer => buyerId.isEmpty;
+
   factory Attendee.fromJson(Map<String, dynamic> j) {
     final p = (j['profiles'] as Map<String, dynamic>?) ?? const {};
     return Attendee(
       ticketId: j['id'] as String,
       buyerId: p['id'] as String? ?? '',
-      username: p['username'] as String? ?? 'unknown',
+      username: p['username'] as String? ?? 'deleted account',
       avatarUrl: p['avatar_url'] as String?,
       amountCents: (j['amount_cents'] as num).toInt(),
       status: j['status'] as String? ?? 'paid',

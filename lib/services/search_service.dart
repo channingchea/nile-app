@@ -196,9 +196,11 @@ class SearchService {
         .select('*, profiles!events_host_id_fkey(username, avatar_url, is_official)')
         .inFilter('id', ids)
         .neq('status', 'draft');
-    final events = (rows as List)
-        .map((r) => Event.fromJson(r as Map<String, dynamic>))
-        .toList();
+    // Drafts were the only thing filtered here, so fully ended shows were being
+    // actively recommended — including in a brand-new user's first feed.
+    final events = EventService.dropOver(
+      (rows as List).map((r) => Event.fromJson(r as Map<String, dynamic>)),
+    );
     _reorder(events, ids, (e) => e.id);
     return EventService.hydrateLikes(events);
   }
@@ -214,9 +216,10 @@ class SearchService {
         .select('*, profiles!events_host_id_fkey(username, avatar_url, is_official)')
         .inFilter('id', ids)
         .neq('status', 'draft');
-    final events = (rows as List)
-        .map((r) => Event.fromJson(r as Map<String, dynamic>))
-        .toList();
+    // Same as recommendedEvents: drafts were the only exclusion.
+    final events = EventService.dropOver(
+      (rows as List).map((r) => Event.fromJson(r as Map<String, dynamic>)),
+    );
     _reorder(events, ids, (e) => e.id);
     return EventService.hydrateLikes(events);
   }
@@ -241,11 +244,20 @@ class SearchService {
   }
 
   static Paged<Event> _pageEvents(List rows) {
-    final items = rows
+    final fetched = rows
         .map((r) => Event.fromJson(r as Map<String, dynamic>))
         .toList();
-    final hasMore = items.length == kPageSize;
-    final nextCursor = hasMore ? items.last.createdAt.toIso8601String() : null;
+    // hasMore / cursor come from the RAW page so dropping rows below can't
+    // shorten a page into a false end-of-list.
+    final hasMore = fetched.length == kPageSize;
+    final nextCursor = hasMore
+        ? fetched.last.createdAt.toIso8601String()
+        : null;
+    // The `.neq('status','ended')` filters upstream only catch shows the sweep
+    // has already closed; a host no-show stays 'scheduled' and an abandoned
+    // Sound Check stays 'soundcheck', so both stayed searchable forever with an
+    // ENDED pill painted on them.
+    final items = EventService.dropOver(fetched);
     // Live-first within the page (created_at cursor stays based on raw order).
     items.sort((a, b) {
       if (a.isLive != b.isLive) return a.isLive ? -1 : 1;

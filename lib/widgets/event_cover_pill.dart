@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../services/event_service.dart';
+import '../services/formats.dart';
 import '../theme.dart';
 import 'live_badge.dart';
 
@@ -10,42 +11,31 @@ class EventCoverPill extends StatelessWidget {
   final Event event;
   const EventCoverPill({super.key, required this.event});
 
-  static const _months = [
-    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
-  ];
-
   /// "Fri · 9:00 PM" for a same-week date, else "Jun 21 · 9:00 PM".
+  /// Both shapes now come from intl, so a 24-hour-clock locale gets "21:00"
+  /// instead of the AM/PM this used to hardcode for everyone.
   static String _label(DateTime dt) {
-    final h = dt.hour % 12 == 0 ? 12 : dt.hour % 12;
-    final m = dt.minute.toString().padLeft(2, '0');
-    final ampm = dt.hour < 12 ? 'AM' : 'PM';
-    final time = '$h:$m $ampm';
-    final now = DateTime.now();
-    final days = dt.difference(DateTime(now.year, now.month, now.day)).inDays;
-    if (days >= 0 && days < 7) {
-      const wd = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-      return '${wd[dt.weekday - 1]} · $time';
-    }
-    return '${_months[dt.month - 1]} ${dt.day} · $time';
+    return NileFormats.upcoming(dt);
   }
 
   @override
   Widget build(BuildContext context) {
     if (event.isLive) return const LiveBadge();
 
-    // The scheduled end has passed — show ENDED even if the show never
-    // actually started (host no-show) or the status hasn't flipped yet.
-    final endAt = event.endAt;
-    final endedByTime =
-        !event.isDraft && endAt != null && DateTime.now().isAfter(endAt);
-
     late final Color bg, fg;
     late final String text;
-    if (event.isEnded || endedByTime) {
+    // Event.isOver covers host no-shows, abandoned sound checks, and the gap
+    // before the auto-end sweep runs — not just status == 'ended'.
+    if (event.isOver) {
       bg = Colors.black.withValues(alpha: 0.6); // over image — fixed dark
       fg = Colors.white;
       text = 'ENDED';
+    } else if (event.isSoundCheck) {
+      // The one state that means "the lobby is open, come in now" had no badge
+      // at all — the least advertised of the lot.
+      bg = NileColors.volt;
+      fg = NileColors.onVolt;
+      text = 'LOBBY OPEN';
     } else if (event.isScheduled && event.scheduledAt != null) {
       bg = NileColors.volt;
       fg = NileColors.onVolt;

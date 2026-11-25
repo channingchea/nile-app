@@ -12,7 +12,11 @@ import '../theme.dart';
 /// since true clipping happens at the hardware ADC and can't be undone in
 /// software.
 class AudioMeter extends StatefulWidget {
-  final Participant participant;
+  final Participant? participant;
+
+  /// Reads the current 0–1 level, for a mic with no room behind it (Studio
+  /// Preview). Wins over [participant] when both are given.
+  final double Function()? level;
   final double height;
 
   /// When false the meter is greyed and frozen at zero — used on a camera whose
@@ -21,10 +25,11 @@ class AudioMeter extends StatefulWidget {
 
   const AudioMeter({
     super.key,
-    required this.participant,
+    this.participant,
+    this.level,
     this.height = 220,
     this.active = true,
-  });
+  }) : assert(participant != null || level != null);
 
   @override
   State<AudioMeter> createState() => _AudioMeterState();
@@ -68,7 +73,10 @@ class _AudioMeterState extends State<AudioMeter> {
       }
       return;
     }
-    final raw = widget.participant.audioLevel.clamp(0.0, 1.0);
+    final raw = (widget.level?.call() ?? widget.participant!.audioLevel).clamp(
+      0.0,
+      1.0,
+    );
     // light smoothing for the bar, instant for clip detection
     final smoothed = _level + (raw - _level) * 0.5;
     var peak = (_peak - _peakDecay).clamp(0.0, 1.0);

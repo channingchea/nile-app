@@ -1,0 +1,233 @@
+import 'package:flutter/foundation.dart'
+    show defaultTargetPlatform, TargetPlatform;
+import 'package:flutter/material.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+
+import '../router.dart';
+import '../services/nile_badges.dart';
+import '../services/profile_service.dart';
+import '../theme.dart';
+import 'nile_command_palette.dart';
+import 'nile_nav_rail.dart' show NileCountBadge;
+
+/// The desktop top bar, sitting above the content column (never above the nav
+/// rail). Search on the left, page-specific actions in the middle, account on
+/// the right.
+///
+/// It carries the search affordance because the ⌘K palette needs somewhere
+/// discoverable to advertise itself — the shortcut is the fast path, the pill
+/// is how people learn the shortcut exists.
+class NileTopBar extends StatelessWidget {
+  const NileTopBar({super.key, this.actions = const [], this.leading});
+
+  /// Page-specific controls (filter chips, date scrubbers) rendered to the
+  /// right of the search field. Phase 7 fills these in per screen.
+  final List<Widget> actions;
+
+  /// Back, when something is pushed above the tab shell. Null at a branch root.
+  /// Lives here rather than on each screen because the chrome now persists
+  /// across a push, so there is one bar to put it in instead of one per screen.
+  final Widget? leading;
+
+  static const double height = 54;
+
+  @override
+  Widget build(BuildContext context) {
+    // On iPad the window runs under the status bar; the bar's background fills
+    // that strip and its contents start below it. Zero on macOS.
+    final top = MediaQuery.paddingOf(context).top;
+    return Container(
+      height: height + top,
+      padding: EdgeInsets.fromLTRB(NileSpacing.s16, top, NileSpacing.s16, 0),
+      decoration: BoxDecoration(
+        color: NileColors.bgPage,
+        border: Border(bottom: BorderSide(color: NileColors.border)),
+      ),
+      child: Row(
+        children: [
+          if (leading != null) ...[
+            leading!,
+            const SizedBox(width: NileSpacing.s8),
+          ],
+          const _SearchPill(),
+          const SizedBox(width: NileSpacing.s16),
+          ...actions,
+          const Spacer(),
+          const NileNotificationsBell(),
+          const SizedBox(width: NileSpacing.s4),
+          const _AccountButton(),
+        ],
+      ),
+    );
+  }
+}
+
+class _SearchPill extends StatelessWidget {
+  const _SearchPill();
+
+  /// The palette is bound to ⌘K on macOS and Ctrl+K everywhere else, so the
+  /// hint has to say the same thing the shortcut handler listens for.
+  /// Read from `defaultTargetPlatform`, not `dart:io`, to keep this file
+  /// web-safe for the deferred Flutter Web build.
+  static String get shortcutLabel =>
+      defaultTargetPlatform == TargetPlatform.macOS ? '⌘K' : 'Ctrl K';
+
+  @override
+  Widget build(BuildContext context) {
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 420),
+      child: InkWell(
+        onTap: () => NileCommandPalette.show(context),
+        borderRadius: BorderRadius.circular(NileRadius.pill),
+        child: Container(
+          height: 32,
+          padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s12),
+          decoration: BoxDecoration(
+            color: NileColors.bgSurface,
+            borderRadius: BorderRadius.circular(NileRadius.pill),
+            border: Border.all(color: NileColors.border),
+          ),
+          child: Row(
+            children: [
+              Icon(Icons.search, size: 16, color: NileColors.txtTertiary),
+              const SizedBox(width: NileSpacing.s8),
+              Flexible(
+                child: Text(
+                  'Search events, people, topics',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: NileTextStyles.bodySm().copyWith(
+                    color: NileColors.txtTertiary,
+                  ),
+                ),
+              ),
+              const SizedBox(width: NileSpacing.s12),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                decoration: BoxDecoration(
+                  border: Border.all(color: NileColors.border),
+                  borderRadius: BorderRadius.circular(NileRadius.xs),
+                ),
+                child: Text(shortcutLabel, style: NileTextStyles.caption()),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Bell beside the avatar — Notifications' home on desktop since Studio Preview
+/// took its rail slot. Joins the shared [NileBadges] poll rather than running
+/// its own, so the count matches the Dock badge.
+class NileNotificationsBell extends StatefulWidget {
+  const NileNotificationsBell({super.key});
+
+  @override
+  State<NileNotificationsBell> createState() => _NileNotificationsBellState();
+}
+
+class _NileNotificationsBellState extends State<NileNotificationsBell> {
+  @override
+  void initState() {
+    super.initState();
+    NileBadges.listen();
+  }
+
+  @override
+  void dispose() {
+    NileBadges.release();
+    super.dispose();
+  }
+
+  void _open() {
+    NileBadges.clearNotifications();
+    nileRouter.push(NileRoutes.notifications);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<int>(
+      valueListenable: NileBadges.notifications,
+      builder: (context, count, _) => Semantics(
+        button: true,
+        label: count > 0 ? 'Notifications, $count unread' : 'Notifications',
+        excludeSemantics: true,
+        child: IconButton(
+          onPressed: _open,
+          tooltip: 'Notifications',
+          color: NileColors.txtSecondary,
+          icon: NileCountBadge(
+            count: count,
+            child: const Icon(Icons.notifications_outlined, size: 22),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Current user's avatar, straight through to their profile.
+///
+/// Cached in a static so switching tabs doesn't re-fetch the profile on every
+/// shell rebuild; cleared when the signed-in user changes.
+class _AccountButton extends StatefulWidget {
+  const _AccountButton();
+
+  @override
+  State<_AccountButton> createState() => _AccountButtonState();
+}
+
+class _AccountButtonState extends State<_AccountButton> {
+  static UserProfile? _cached;
+  static String? _cachedFor;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final uid = Supabase.instance.client.auth.currentUser?.id;
+    if (uid == null) return;
+    if (_cachedFor == uid && _cached != null) return;
+    try {
+      final profile = await ProfileService.fetchCurrentProfile();
+      if (profile == null) return;
+      _cached = profile;
+      _cachedFor = uid;
+      if (mounted) setState(() {});
+    } catch (_) {
+      // Falls back to the generic glyph.
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final url = _cached?.avatarUrl;
+    return Tooltip(
+      message: 'Your profile',
+      child: InkWell(
+        onTap: () => nileRouter.go('/profile'),
+        borderRadius: BorderRadius.circular(NileRadius.pill),
+        child: Padding(
+          padding: const EdgeInsets.all(NileSpacing.s4),
+          child: CircleAvatar(
+            radius: 14,
+            backgroundColor: NileColors.bgRaised,
+            backgroundImage: url == null ? null : nileAvatarImage(url, 14),
+            child: url == null
+                ? Icon(
+                    Icons.person_outline,
+                    size: 16,
+                    color: NileColors.txtSecondary,
+                  )
+                : null,
+          ),
+        ),
+      ),
+    );
+  }
+}

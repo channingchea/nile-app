@@ -1,23 +1,18 @@
 import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import '../config.dart';
+import '../services/analytics.dart';
 import '../services/account_service.dart';
+import '../services/mac_host.dart';
 import '../services/profile_service.dart';
+import '../router.dart';
 import '../theme.dart';
+import '../widgets/legal_links.dart';
 import '../widgets/nile_glass_app_bar.dart';
 import '../widgets/pressable.dart';
-import 'appearance_screen.dart';
 import 'auth/feature_intro_screen.dart';
-import 'auth/interest_picker_screen.dart';
-import 'auth/mfa_settings_screen.dart';
-import 'blocked_accounts_screen.dart';
-import 'change_password_screen.dart';
-import 'edit_profile_screen.dart';
-import 'my_currents_screen.dart';
-import 'my_tickets_screen.dart';
-import 'notification_preferences_screen.dart';
-import 'payouts_screen.dart';
-import 'report_issue_screen.dart';
 
 /// Own-profile settings hub: edit profile, my tickets, payouts, sign out.
 class SettingsScreen extends StatelessWidget {
@@ -26,82 +21,52 @@ class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key, required this.profile});
 
   Future<void> _editProfile(BuildContext context) async {
-    final updated = await Navigator.push<UserProfile>(
-      context,
-      MaterialPageRoute(builder: (_) => EditProfileScreen(profile: profile)),
+    final updated = await context.push<UserProfile>(
+      NileRoutes.settingsEditProfile,
+      extra: profile,
     );
     // Bubble the updated profile back to ProfileScreen.
-    if (updated != null && context.mounted) Navigator.pop(context, updated);
+    if (updated != null && context.mounted) context.pop(updated);
   }
 
   void _appearance(BuildContext context) {
-    Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => const AppearanceScreen()),
-    );
+    context.push(NileRoutes.settingsAppearance);
   }
 
   void _myCurrents(BuildContext context) {
-    Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => const MyCurrentsScreen()),
-    );
+    context.push(NileRoutes.settingsCurrents);
   }
 
   void _reportIssue(BuildContext context) {
-    Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => const ReportIssueScreen()),
-    );
+    context.push(NileRoutes.settingsReport);
   }
 
   void _myTickets(BuildContext context) {
-    Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => const MyTicketsScreen()),
-    );
+    context.push(NileRoutes.settingsTickets);
   }
 
   void _payouts(BuildContext context) {
-    Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => const PayoutsScreen()),
-    );
+    context.push(NileRoutes.settingsPayouts);
   }
 
   void _interests(BuildContext context) {
-    Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => const InterestPickerScreen()),
-    );
+    context.push(NileRoutes.settingsInterests);
   }
 
   void _notifications(BuildContext context) {
-    Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => const NotificationPreferencesScreen()),
-    );
+    context.push(NileRoutes.settingsNotifications);
   }
 
   void _changePassword(BuildContext context) {
-    Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => const ChangePasswordScreen()),
-    );
+    context.push(NileRoutes.settingsPassword);
   }
 
   void _twoFactor(BuildContext context) {
-    Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => const MfaSettingsScreen()),
-    );
+    context.push(NileRoutes.settingsMfa);
   }
 
   void _blockedAccounts(BuildContext context) {
-    Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => const BlockedAccountsScreen()),
-    );
+    context.push(NileRoutes.settingsBlocked);
   }
 
   Future<void> _signOut(BuildContext context) async {
@@ -148,8 +113,10 @@ class SettingsScreen extends StatelessWidget {
     );
     try {
       await AccountService.deleteAccount();
-      // Sign-out triggers _AuthGate to route back to login; just pop dialogs.
-      if (context.mounted) Navigator.popUntil(context, (r) => r.isFirst);
+      // Deleting signs out, and the gate redirect reacts to that on its own.
+      // Going to the root just unwinds this stack (and the spinner) so the
+      // redirect lands them on login from a clean slate.
+      if (context.mounted) context.go(NileRoutes.feed);
     } catch (e) {
       if (!context.mounted) return;
       Navigator.pop(context); // dismiss the spinner
@@ -238,6 +205,7 @@ class SettingsScreen extends StatelessWidget {
                 ),
               ],
             ),
+            const _DesktopSection(),
             _SettingsSection(
               header: 'SUPPORT',
               rows: [
@@ -245,6 +213,50 @@ class SettingsScreen extends StatelessWidget {
                   icon: Icons.bug_report_outlined,
                   label: 'Report a bug or idea',
                   onTap: () => _reportIssue(context),
+                ),
+                _SettingsRow(
+                  icon: Icons.gavel_outlined,
+                  label: 'Content decisions',
+                  onTap: () => context.push(NileRoutes.settingsDecisions),
+                ),
+                _SettingsRow(
+                  icon: Icons.mail_outline,
+                  label: 'Contact us',
+                  onTap: () => openLegalUrl(contactUrl),
+                ),
+              ],
+            ),
+            // P4 #39. Analytics is on by default (legitimate interest: we
+            // can't run the product blind), but it has to be refusable in one
+            // tap from a place people can find, and the switch has to do
+            // something real — PostHog's disable() drops queued events and
+            // stops sending, it isn't a UI placebo.
+            const _PrivacySection(),
+            // App Store Guideline 1.2: the EULA (our Terms) and the content
+            // policy have to be reachable from inside the app, not only from
+            // the marketing site. Reviewers look for exactly this list.
+            _SettingsSection(
+              header: 'LEGAL',
+              rows: [
+                _SettingsRow(
+                  icon: Icons.description_outlined,
+                  label: 'Terms of Service',
+                  onTap: () => openLegalUrl(termsUrl),
+                ),
+                _SettingsRow(
+                  icon: Icons.privacy_tip_outlined,
+                  label: 'Privacy Policy',
+                  onTap: () => openLegalUrl(privacyUrl),
+                ),
+                _SettingsRow(
+                  icon: Icons.rule_outlined,
+                  label: 'Community Guidelines',
+                  onTap: () => openLegalUrl(guidelinesUrl),
+                ),
+                _SettingsRow(
+                  icon: Icons.cookie_outlined,
+                  label: 'Cookie Policy',
+                  onTap: () => openLegalUrl(cookiesUrl),
                 ),
               ],
             ),
@@ -283,6 +295,114 @@ class SettingsScreen extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// Mac-only preferences. Absent entirely everywhere else — and also on macOS 12,
+/// where `SMAppService` does not exist and the OS cannot answer whether Nile is
+/// a login item. A switch that cannot move is worse than no switch.
+/// P4 #39. Analytics is on by default (we can't run the product blind), but
+/// it has to be refusable in one tap from somewhere findable, and the switch
+/// has to do something real — PostHog's disable() drops queued events and
+/// stops sending, it isn't a UI placebo.
+class _PrivacySection extends StatefulWidget {
+  const _PrivacySection();
+
+  @override
+  State<_PrivacySection> createState() => _PrivacySectionState();
+}
+
+class _PrivacySectionState extends State<_PrivacySection> {
+  // Shown as "share", stored as "opt out" — the switch reads as a positive
+  // permission, which is the right way round for a consent control.
+  bool _share = !NileAnalytics.isOptedOut;
+
+  Future<void> _set(bool share) async {
+    setState(() => _share = share);
+    await NileAnalytics.setOptOut(!share);
+  }
+
+  @override
+  Widget build(BuildContext context) => _SettingsSection(
+    header: 'PRIVACY',
+    rows: [
+      _SettingsRow(
+        icon: Icons.insights_outlined,
+        label: 'Share usage data',
+        onTap: () => _set(!_share),
+        trailing: Switch(
+          value: _share,
+          activeThumbColor: NileColors.volt,
+          onChanged: _set,
+        ),
+      ),
+    ],
+  );
+}
+
+class _DesktopSection extends StatefulWidget {
+  const _DesktopSection();
+
+  @override
+  State<_DesktopSection> createState() => _DesktopSectionState();
+}
+
+class _DesktopSectionState extends State<_DesktopSection> {
+  bool? _launchAtLogin;
+  bool _busy = false;
+
+  @override
+  void initState() {
+    super.initState();
+    if (MacHost.supported) _load();
+  }
+
+  Future<void> _load() async {
+    final state = await MacHost.launchAtLoginEnabled();
+    if (mounted) setState(() => _launchAtLogin = state);
+  }
+
+  Future<void> _set(bool value) async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    // The reply is the state actually in force, not what was asked for: the
+    // user can have revoked the login item in System Settings, and registering
+    // can fail outright on an unsigned build.
+    final applied = await MacHost.setLaunchAtLogin(value);
+    if (!mounted) return;
+    setState(() {
+      _busy = false;
+      _launchAtLogin = applied ?? _launchAtLogin;
+    });
+    if (applied == value) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: const Text(
+          "macOS wouldn't change that. Check Login Items in System Settings.",
+        ),
+        backgroundColor: NileColors.error,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final on = _launchAtLogin;
+    if (on == null) return const SizedBox.shrink();
+    return _SettingsSection(
+      header: 'DESKTOP',
+      rows: [
+        _SettingsRow(
+          icon: Icons.rocket_launch_outlined,
+          label: 'Open Nile at login',
+          onTap: () => _set(!on),
+          trailing: Switch(
+            value: on,
+            onChanged: _busy ? null : _set,
+          ),
+        ),
+      ],
     );
   }
 }
@@ -350,7 +470,10 @@ class _DeleteAccountDialogState extends State<_DeleteAccountDialog> {
 /// rows stacked inside with no dividers. Header is optional (Sign out has none).
 class _SettingsSection extends StatelessWidget {
   final String? header;
-  final List<_SettingsRow> rows;
+
+  /// Widgets rather than `_SettingsRow` so a row can carry its own state — the
+  /// launch-at-login switch has to remember whether it is on.
+  final List<Widget> rows;
   const _SettingsSection({required this.rows, this.header});
 
   @override
@@ -389,11 +512,16 @@ class _SettingsRow extends StatelessWidget {
   final String label;
   final Color? color;
   final VoidCallback onTap;
+
+  /// Replaces the chevron. A row with a control on it is a setting you change
+  /// here, not a door to somewhere else, so the two are mutually exclusive.
+  final Widget? trailing;
   const _SettingsRow({
     required this.icon,
     required this.label,
     required this.onTap,
     this.color,
+    this.trailing,
   });
 
   @override
@@ -416,7 +544,9 @@ class _SettingsRow extends StatelessWidget {
                 style: NileTextStyles.labelLg().copyWith(color: c),
               ),
             ),
-            if (color == null)
+            if (trailing != null)
+              trailing!
+            else if (color == null)
               Icon(
                 Icons.chevron_right,
                 color: NileColors.txtTertiary,

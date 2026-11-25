@@ -1,10 +1,13 @@
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 import '../services/calendar_ics.dart';
 import '../services/event_service.dart';
+import '../services/formats.dart';
+import '../services/money.dart';
 import '../services/ticket_service.dart';
+import '../router.dart';
 import '../theme.dart';
 import '../widgets/empty_state.dart';
-import 'event_detail_screen.dart';
 import 'widgets/load_more_footer.dart';
 
 /// The current user's purchased tickets.
@@ -83,11 +86,51 @@ class _MyTicketsScreenState extends State<MyTicketsScreen> {
   }
 
   Future<void> _openEvent(Event event) async {
-    final deleted = await Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => EventDetailScreen(event: event)),
-    );
+    final deleted = await context.push(NileRoutes.event(event.id), extra: event);
     if (deleted == true) _load();
+  }
+
+  /// Buyer-initiated cancellation inside the disclosed window (#37). The
+  /// amount is quoted in the confirmation because the refund is the whole
+  /// point of the tap — nobody should have to remember what they paid.
+  Future<void> _cancelTicket(MyTicket t) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Cancel this ticket?'),
+        content: Text(
+          '${nileMoneyUsd(t.ticket.amountCents)} goes back to the card you paid '
+          'with, usually within 5–10 business days. You will lose access to '
+          '“${t.event?.title ?? 'this event'}”.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Keep it'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Cancel ticket'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    try {
+      await TicketService.refund(t.ticket.id);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Ticket cancelled — refund on its way.')),
+      );
+      await _load();
+    } catch (e) {
+      if (!mounted) return;
+      // The server owns the deadline, so this is the path that fires when the
+      // window closed while the list sat on screen. Show what it said.
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))),
+      );
+    }
   }
 
   @override
@@ -142,6 +185,7 @@ class _MyTicketsScreenState extends State<MyTicketsScreen> {
         return _TicketCard(
           myTicket: t,
           onTap: t.event == null ? null : () => _openEvent(t.event!),
+          onCancel: () => _cancelTicket(t),
         );
       },
     );
@@ -151,7 +195,8 @@ class _MyTicketsScreenState extends State<MyTicketsScreen> {
 class _TicketCard extends StatelessWidget {
   final MyTicket myTicket;
   final VoidCallback? onTap;
-  const _TicketCard({required this.myTicket, this.onTap});
+  final VoidCallback? onCancel;
+  const _TicketCard({required this.myTicket, this.onTap, this.onCancel});
 
   @override
   Widget build(BuildContext context) {
@@ -221,13 +266,34 @@ class _TicketCard extends StatelessWidget {
                           ),
                         const SizedBox(width: 8),
                         Text(
-                          '\$${(myTicket.ticket.amountCents / 100).toStringAsFixed(2)}',
+                          nileMoney(myTicket.ticket.amountCents),
                           style: NileTextStyles.labelMd().copyWith(
                             color: NileColors.volt,
                           ),
                         ),
                       ],
                     ),
+                    // Self-cancellation (#37). Drawn only inside the disclosed
+                    // window; the edge function re-checks it, so a card that
+                    // has been on screen since before the cutoff fails loudly
+                    // rather than refunding late.
+                    if (_canCancel)
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: TextButton(
+                          onPressed: onCancel,
+                          style: TextButton.styleFrom(
+                            padding: EdgeInsets.zero,
+                            minimumSize: Size.zero,
+                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                            foregroundColor: NileColors.txtSecondary,
+                          ),
+                          child: Text(
+                            'Cancel ticket',
+                            style: NileTextStyles.caption(),
+                          ),
+                        ),
+                      ),
                   ],
                 ),
               ),
@@ -238,34 +304,28 @@ class _TicketCard extends StatelessWidget {
     );
   }
 
+  /// Paid, still ours to cancel, and the event hasn't started.
+  bool get _canCancel =>
+      onCancel != null &&
+      myTicket.ticket.status == 'paid' &&
+      myTicket.event != null &&
+      canCancelTicket(
+        scheduledAt: myTicket.event!.scheduledAt,
+        eventStatus: myTicket.event!.status,
+      );
+
   String _subtitle(Event e) {
     final when = e.scheduledAt ?? e.startedAt;
     if (when == null) return 'by @${e.hostUsername}';
     return '${_fmtDate(when)} · by @${e.hostUsername}';
   }
 
-  static String _fmtDate(DateTime d) {
-    const m = [
-      'Jan',
-      'Feb',
-      'Mar',
-      'Apr',
-      'May',
-      'Jun',
-      'Jul',
-      'Aug',
-      'Sep',
-      'Oct',
-      'Nov',
-      'Dec',
-    ];
-    final l = d.toLocal();
-    return '${m[l.month - 1]} ${l.day}, ${l.year}';
-  }
+  static String _fmtDate(DateTime d) =>
+      NileFormats.dayMonthYear(d.toLocal());
 }
 
 class _StatusBadge extends StatelessWidget {
-  final String status; // pending | paid | refunded
+  final String status; // pending | paid | refunded | disputed
   const _StatusBadge({required this.status});
 
   @override
@@ -280,6 +340,12 @@ class _StatusBadge extends StatelessWidget {
       case 'refunded':
         color = NileColors.txtTertiary;
         label = 'Refunded';
+        break;
+      case 'disputed':
+        // The buyer's own bank pulled this back, so they know why. Saying
+        // "Refunded" would be a lie and "Pending" would imply it's coming.
+        color = NileColors.coral;
+        label = 'Charged back';
         break;
       default:
         color = NileColors.warning;
