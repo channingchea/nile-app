@@ -105,6 +105,7 @@ import {
 import { angleIdsOf, cleanAppliedShow, planElements, validateApply } from "../_shared/layouts.ts";
 import { timelineOf } from "../_shared/replay_marks.ts";
 import { applyFilmControl, compactFilm, filmOf, initialFilm } from "../_shared/film.ts";
+import { presignGet } from "../_shared/r2.ts";
 
 // CORS headers are per-request, so the JSON responder is built per-request too
 // and handed to the helpers below (they run outside the handler's scope).
@@ -117,11 +118,13 @@ const makeJson = (cors: Record<string, string>): Json =>
     });
 import {
   AccessToken,
+  AudioCodec,
   EgressClient,
   EncodedFileOutput,
   EncodedFileType,
-  EncodingOptionsPreset,
+  EncodingOptions,
   RoomServiceClient,
+  VideoCodec,
   S3Upload,
   TrackSource,
 } from "https://esm.sh/livekit-server-sdk@2.9.7?target=deno";
@@ -139,16 +142,28 @@ const roomService = new RoomServiceClient(
 );
 const egressClient = new EgressClient(LIVEKIT_HTTP_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET);
 
-// Replay egress → Supabase Storage 'replays' bucket via its S3-compatible
-// endpoint. These secrets are set alongside the LiveKit ones (see header §3.4):
-//   REPLAYS_S3_ENDPOINT   = https://<project-ref>.storage.supabase.co/storage/v1/s3
-//   REPLAYS_S3_REGION     = e.g. us-east-1 (Supabase storage region)
-//   REPLAYS_S3_ACCESS_KEY / REPLAYS_S3_SECRET_KEY  (Supabase storage S3 access keys)
+// Replay egress → Cloudflare R2 (docs/plans/replays-on-r2.md). Supabase
+// Storage's Free plan caps a file at 50 MB, about four minutes of replay.
+//   REPLAYS_S3_ENDPOINT   = https://<account>.r2.cloudflarestorage.com
+//   REPLAYS_S3_REGION     = auto
+//   REPLAYS_S3_ACCESS_KEY / REPLAYS_S3_SECRET_KEY  (R2 token, nile-replays only)
+//   REPLAYS_BUCKET        = nile-replays
+// Playback links are signed for R2 (_shared/r2.ts); R2 deletes files after 31
+// days, and purge_expired_replays drops the rows at 30.
 const REPLAYS_S3_ENDPOINT = Deno.env.get("REPLAYS_S3_ENDPOINT") ?? "";
-const REPLAYS_S3_REGION = Deno.env.get("REPLAYS_S3_REGION") ?? "us-east-1";
+const REPLAYS_S3_REGION = Deno.env.get("REPLAYS_S3_REGION") ?? "auto";
 const REPLAYS_S3_ACCESS_KEY = Deno.env.get("REPLAYS_S3_ACCESS_KEY") ?? "";
 const REPLAYS_S3_SECRET_KEY = Deno.env.get("REPLAYS_S3_SECRET_KEY") ?? "";
-const REPLAYS_BUCKET = "replays";
+const REPLAYS_BUCKET = Deno.env.get("REPLAYS_BUCKET") ?? "replays";
+
+/** A playback link for a replay file, valid for `ttl` seconds. */
+const signReplay = (path: string, ttl: number) =>
+  presignGet(`${REPLAYS_S3_ENDPOINT.replace(/\/$/, "")}/${REPLAYS_BUCKET}/${path}`, {
+    region: REPLAYS_S3_REGION,
+    accessKey: REPLAYS_S3_ACCESS_KEY,
+    secretKey: REPLAYS_S3_SECRET_KEY,
+    expiresSeconds: ttl,
+  });
 // Nile's recorder page (recorder/index.html, hosted on R2). Unset = no grid
 // replay; the combined recording alone still runs.
 const REPLAY_RECORDER_URL = Deno.env.get("REPLAY_RECORDER_URL") ?? "";
@@ -502,6 +517,15 @@ async function handle(req: Request, ctx: ReqCtx, json: Json): Promise<Response> 
 
 // ── Host authorization ────────────────────────────────────────────────────────
 
+type OperatedEvent = { id: string; host_id: string; livekit_room: string | null; price: number | null };
+
+/**
+ * A free show (no ticket price) runs under the cost controls: publishers send
+ * 480p and nothing is recorded (docs/plans/cost-controls-and-60-payout.md).
+ * Tokens tell the app with `freeShow`; start-show skips the replay.
+ */
+const isFreeShow = (event: { price: number | null }) => !event.price || event.price <= 0;
+
 /**
  * Confirm the caller may operate this event (publish cameras/audio, manage the
  * room). Returns the event row, or a Response error.
@@ -516,13 +540,13 @@ async function requireOperator(
   userId: string,
   admin: ReturnType<typeof createClient>,
   json: Json,
-): Promise<{ event: { id: string; host_id: string; livekit_room: string | null } } | Response> {
+): Promise<{ event: OperatedEvent } | Response> {
   // `eventId` here is the client-side LiveKit slug (events.livekit_room), NOT
   // the events PK (a uuid). Every live-time screen carries the slug, so resolve
   // the row by livekit_room.
   const { data: event, error } = await admin
     .from("events")
-    .select("id, host_id, livekit_room")
+    .select("id, host_id, livekit_room, price")
     .eq("livekit_room", eventId)
     .maybeSingle();
 
@@ -546,7 +570,7 @@ async function requireHost(
   userId: string,
   admin: ReturnType<typeof createClient>,
   json: Json,
-): Promise<{ event: { id: string; host_id: string; livekit_room: string | null } } | Response> {
+): Promise<{ event: OperatedEvent } | Response> {
   const gate = await requireOperator(eventId, userId, admin, json);
   if (gate instanceof Response) return gate;
   if (gate.event.host_id !== userId) {
@@ -750,7 +774,14 @@ async function cameraToken(body: any, userId: string, admin: any, json: Json): P
     }),
   });
 
-  return json({ token, wsUrl: LIVEKIT_URL, isMasterAudio, slotId: slot?.id ?? null, cameraName: name });
+  return json({
+    token,
+    wsUrl: LIVEKIT_URL,
+    isMasterAudio,
+    slotId: slot?.id ?? null,
+    cameraName: name,
+    freeShow: isFreeShow(gate.event),
+  });
 }
 
 // audio-token (was POST /api/audio-token) — audio-only master publisher
@@ -832,7 +863,7 @@ async function studioToken(body: any, userId: string, admin: any, json: Json): P
     }),
   });
 
-  return json({ token, wsUrl: LIVEKIT_URL, isMasterAudio });
+  return json({ token, wsUrl: LIVEKIT_URL, isMasterAudio, freeShow: isFreeShow(gate.event) });
 }
 
 // studio-camera — the Studio turns its own webcam on or off.
@@ -1816,7 +1847,7 @@ async function guestToken(body: any, userId: string, admin: any, json: Json): Pr
   if (!eventId) return json({ error: "eventId is required" }, 400);
   const { data: ev } = await admin
     .from("events")
-    .select("id, title, status, studio_mode")
+    .select("id, title, status, studio_mode, price")
     .eq("livekit_room", eventId)
     .maybeSingle();
   if (!ev) return json({ error: "Event not found" }, 404);
@@ -1868,7 +1899,15 @@ async function guestToken(body: any, userId: string, admin: any, json: Json): Pr
       device: deviceLabel(body.device),
     }),
   });
-  return json({ token, wsUrl: LIVEKIT_URL, identity, status, eventTitle: ev.title, mode: ev.studio_mode });
+  return json({
+    token,
+    wsUrl: LIVEKIT_URL,
+    identity,
+    status,
+    eventTitle: ev.title,
+    mode: ev.studio_mode,
+    freeShow: isFreeShow(ev),
+  });
 }
 
 // set-guest-title — { eventId, title }. A guest edits their own name tag.
@@ -2216,6 +2255,11 @@ async function startShow(body: any, userId: string, admin: any, json: Json): Pro
     // Room metadata unreadable — fall back to a bare anchor.
   }
 
+  // Free shows aren't recorded. `freeShow` tells the Studio why there is no
+  // replay; builds that predate the flag read egressStarted: false and show
+  // their "not recording" warning, which is still true.
+  const freeShow = isFreeShow(gate.event);
+
   // Idempotent: if the show already has an anchor (host rejoining after a drop,
   // or a duplicate call), keep the original showStartedAt so the camera-sync
   // timeline never shifts for viewers, and skip a second egress.
@@ -2233,7 +2277,7 @@ async function startShow(body: any, userId: string, admin: any, json: Json): Pro
       .eq("status", "recording")
       .maybeSingle();
     log("info", { action: "start-show", note: "already started; no-op", eventId });
-    return json({ success: true, alreadyStarted: true, egressStarted: !!recording });
+    return json({ success: true, alreadyStarted: true, egressStarted: !!recording, freeShow });
   }
 
   const startedAt = Date.now();
@@ -2241,6 +2285,8 @@ async function startShow(body: any, userId: string, admin: any, json: Json): Pro
     roomName,
     JSON.stringify({ ...meta, showStartedAt: startedAt }),
   );
+
+  if (freeShow) return json({ success: true, egressStarted: false, freeShow });
 
   // Kick off the composited replay recording. Still non-fatal — a failed egress
   // must never block the live show — but no longer silent. This used to swallow
@@ -2264,7 +2310,7 @@ async function startShow(body: any, userId: string, admin: any, json: Json): Pro
       });
   }
 
-  return json({ success: true, egressStarted });
+  return json({ success: true, egressStarted, freeShow });
 }
 
 // Start Room Composite Egress → an MP4 in the 'replays' bucket, and record the
@@ -2283,13 +2329,14 @@ async function startReplayEgress(
   // Object path inside the bucket: <eventPk>/<startedAt>.mp4
   const filepath = `${eventPk}/${startedAt}.mp4`;
   const output = replayFile(filepath);
+  const encodingOptions = await replayEncoding(admin);
 
   // opts.layout = "speaker" → active-speaker composite. RoomCompositeOptions is
   // a plain options object (interface), not a constructed class.
   const info = await egressClient.startRoomCompositeEgress(
     roomName,
     { file: output },
-    { layout: "speaker" },
+    { layout: "speaker", encodingOptions },
   );
 
   const { data: replay } = await admin.from("replays").insert({
@@ -2302,12 +2349,31 @@ async function startReplayEgress(
 
   // The grid replay (phase 6) rides alongside; it never decides egressStarted.
   if (replay?.id && REPLAY_RECORDER_URL) {
-    await startGridEgress(eventPk, replay.id, roomName, startedAt, admin).catch((err) =>
+    await startGridEgress(eventPk, replay.id, roomName, startedAt, encodingOptions, admin).catch((err) =>
       log("error", { reqId: "-", action: "start-grid-egress", error: String(err) })
     );
   }
 
   return true;
+}
+
+/**
+ * Both replays record at 720p30 and app_config.replay_video_kbps (0155). The
+ * default 1500 kbps is about 12 MB a minute — the main replay used LiveKit's
+ * 3000 kbps default and the grid 1080p at 4500, and each megabyte is paid for
+ * twice: recorded, then stored.
+ */
+async function replayEncoding(admin: any): Promise<EncodingOptions> {
+  const { data } = await admin.from("app_config").select("replay_video_kbps").eq("id", 1).maybeSingle();
+  return new EncodingOptions({
+    width: 1280,
+    height: 720,
+    framerate: 30,
+    videoCodec: VideoCodec.H264_MAIN,
+    videoBitrate: (data?.replay_video_kbps as number | null) ?? 1500,
+    audioCodec: AudioCodec.AAC,
+    audioBitrate: 128,
+  });
 }
 
 function replayFile(filepath: string) {
@@ -2335,7 +2401,14 @@ function replayFile(filepath: string) {
  * proving itself with the row's recorder_key. The row exists before the
  * egress does, so the page's first report always has somewhere to land.
  */
-async function startGridEgress(eventPk: string, replayId: string, roomName: string, startedAt: number, admin: any) {
+async function startGridEgress(
+  eventPk: string,
+  replayId: string,
+  roomName: string,
+  startedAt: number,
+  encodingOptions: EncodingOptions,
+  admin: any,
+) {
   const filepath = `${eventPk}/${startedAt}-grid.mp4`;
   const { data: grid, error } = await admin.from("replay_grids").insert({
     replay_id: replayId,
@@ -2351,7 +2424,7 @@ async function startGridEgress(eventPk: string, replayId: string, roomName: stri
     const info = await egressClient.startRoomCompositeEgress(roomName, { file: replayFile(filepath) }, {
       layout: "nile-grid",
       customBaseUrl: page.toString(),
-      encodingOptions: EncodingOptionsPreset.H264_1080P_30,
+      encodingOptions,
     });
     await admin.from("replay_grids").update({ egress_id: info.egressId }).eq("id", grid.id);
   } catch (err) {
@@ -2610,7 +2683,7 @@ async function replayUrl(body: any, userId: string, admin: any, json: Json): Pro
     .maybeSingle();
   if (!replay?.playback_path) return json({ error: "No replay available" }, 404);
 
-  // A Storage signed URL carries no identity: whoever holds the string can
+  // A signed URL carries no identity: whoever holds the string can
   // fetch the file. A flat four hours meant every replay — a ten-minute clip
   // included — was a shareable download link for the rest of the afternoon.
   //
@@ -2632,12 +2705,7 @@ async function replayUrl(body: any, userId: string, admin: any, json: Json): Pro
       Math.ceil((durationMs ?? 0) / 1000) + REPLAY_URL_SLACK_SECONDS,
     ),
   );
-  const { data: signed, error: signErr } = await admin.storage
-    .from(REPLAYS_BUCKET)
-    .createSignedUrl(replay.playback_path, ttl);
-  if (signErr || !signed) return json({ error: "Could not sign replay URL" }, 500);
-
-  return json({ url: signed.signedUrl, durationMs, expiresInSeconds: ttl });
+  return json({ url: await signReplay(replay.playback_path, ttl), durationMs, expiresInSeconds: ttl });
 }
 
 // replay-grid — the grid replay (phase 6) and its overlay timeline, behind the
@@ -2684,14 +2752,9 @@ async function replayGrid(body: any, userId: string, admin: any, json: Json): Pr
     REPLAY_URL_MAX_TTL_SECONDS,
     Math.max(REPLAY_URL_MIN_TTL_SECONDS, Math.ceil((durationMs ?? 0) / 1000) + REPLAY_URL_SLACK_SECONDS),
   );
-  const { data: signed, error: signErr } = await admin.storage
-    .from(REPLAYS_BUCKET)
-    .createSignedUrl(grid.playback_path, ttl);
-  if (signErr || !signed) return json({ error: "Could not sign replay URL" }, 500);
-
   return json({
     available: true,
-    url: signed.signedUrl,
+    url: await signReplay(grid.playback_path, ttl),
     durationMs,
     expiresInSeconds: ttl,
     marks: timelineOf(rows, grid.recorder_started_at),

@@ -165,7 +165,8 @@ serve(async (req) => {
     const ok = e.status === 3; // EGRESS_COMPLETE; 4/5 = failed/aborted
     // file result carries the finalized location + duration (nanoseconds → ms).
     const file = e.fileResults?.[0];
-    const durationMs = file?.duration ? Number(file.duration) / 1_000_000 : null;
+    // Rounded: duration_ms is a bigint, and ns → ms leaves a fraction.
+    const durationMs = file?.duration ? Math.round(Number(file.duration) / 1_000_000) : null;
 
     const { data: updated, error } = await admin
       .from("replays")
