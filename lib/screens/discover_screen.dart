@@ -11,6 +11,7 @@ import '../services/post_service.dart';
 import '../services/profile_service.dart';
 import '../services/search_service.dart';
 import '../router.dart';
+import '../services/iap_service.dart';
 import '../theme.dart';
 import '../widgets/event_cover_pill.dart';
 import '../widgets/event_link_card.dart';
@@ -108,7 +109,9 @@ class _DiscoverScreenState extends State<DiscoverScreen>
   Future<void> _loadFeatured() async {
     try {
       final f = await FeaturedService.getFeatured();
-      await _loadFollowStates(f.creators); // for the creator cards' follow button
+      await _loadFollowStates(
+        f.creators,
+      ); // for the creator cards' follow button
       if (!mounted) return;
       setState(() {
         _featuredEvents = f.events;
@@ -473,7 +476,12 @@ class _DiscoverScreenState extends State<DiscoverScreen>
 
   Widget _buildSearchBar() {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s12, NileSpacing.s16, NileSpacing.s8),
+      padding: const EdgeInsets.fromLTRB(
+        NileSpacing.s16,
+        NileSpacing.s12,
+        NileSpacing.s16,
+        NileSpacing.s8,
+      ),
       child: TextField(
         controller: _controller,
         focusNode: _focusNode,
@@ -581,9 +589,7 @@ class _DiscoverScreenState extends State<DiscoverScreen>
 
   /// Horizontal page padding for the result grids. [NileSectionHeader] brings
   /// its own, so the two line up without repeating the measure.
-  static const _gridPadding = EdgeInsets.symmetric(
-    horizontal: NileSpacing.s16,
-  );
+  static const _gridPadding = EdgeInsets.symmetric(horizontal: NileSpacing.s16);
 
   /// Foot of every desktop grid: the pagination spinner, then room to breathe.
   /// No nav-bar reservation — that bar is a phone thing.
@@ -844,7 +850,12 @@ class _DiscoverScreenState extends State<DiscoverScreen>
       child: ListView.separated(
         controller: _scroll[_Tab.posts],
         physics: const AlwaysScrollableScrollPhysics(),
-        padding: EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s12, NileSpacing.s16, NileGlassNavBar.reservedHeight + NileSpacing.s24),
+        padding: EdgeInsets.fromLTRB(
+          NileSpacing.s16,
+          NileSpacing.s12,
+          NileSpacing.s16,
+          NileGlassNavBar.reservedHeight + NileSpacing.s24,
+        ),
         itemCount: header + posts.length + (_hasMore[_Tab.posts]! ? 1 : 0),
         separatorBuilder: (_, i) =>
             SizedBox(height: showRail && i == 0 ? 20 : 12),
@@ -923,7 +934,12 @@ class _DiscoverScreenState extends State<DiscoverScreen>
       child: ListView.separated(
         controller: _scroll[_Tab.events],
         physics: const AlwaysScrollableScrollPhysics(),
-        padding: EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s12, NileSpacing.s16, NileGlassNavBar.reservedHeight + NileSpacing.s24),
+        padding: EdgeInsets.fromLTRB(
+          NileSpacing.s16,
+          NileSpacing.s12,
+          NileSpacing.s16,
+          NileGlassNavBar.reservedHeight + NileSpacing.s24,
+        ),
         itemCount:
             headers.length + events.length + (_hasMore[_Tab.events]! ? 1 : 0),
         separatorBuilder: (_, i) =>
@@ -960,7 +976,10 @@ class _DiscoverScreenState extends State<DiscoverScreen>
       child: ListView.separated(
         controller: _scroll[_Tab.people],
         physics: const AlwaysScrollableScrollPhysics(),
-        padding: EdgeInsets.only(top: NileSpacing.s4, bottom: NileGlassNavBar.reservedHeight + NileSpacing.s24),
+        padding: EdgeInsets.only(
+          top: NileSpacing.s4,
+          bottom: NileGlassNavBar.reservedHeight + NileSpacing.s24,
+        ),
         itemCount: header + users.length + (_hasMore[_Tab.people]! ? 1 : 0),
         separatorBuilder: (_, i) {
           if (showFeatured && i == 0) return const SizedBox(height: 8);
@@ -973,7 +992,10 @@ class _DiscoverScreenState extends State<DiscoverScreen>
           if (showFeatured && i == 0) {
             return Padding(
               padding: const EdgeInsets.fromLTRB(
-                NileSpacing.s16, NileSpacing.s12, NileSpacing.s16, NileSpacing.s4,
+                NileSpacing.s16,
+                NileSpacing.s12,
+                NileSpacing.s16,
+                NileSpacing.s4,
               ),
               child: _RailShelf(
                 icon: Icons.star,
@@ -1036,7 +1058,10 @@ class _UserTile extends StatelessWidget {
     return InkWell(
       onTap: onTap,
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s16, vertical: NileSpacing.s12),
+        padding: const EdgeInsets.symmetric(
+          horizontal: NileSpacing.s16,
+          vertical: NileSpacing.s12,
+        ),
         child: Row(
           children: [
             Hero(
@@ -1122,7 +1147,10 @@ class _FollowButton extends StatelessWidget {
       return OutlinedButton(
         onPressed: isLoading ? null : onTap,
         style: OutlinedButton.styleFrom(
-          padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s16, vertical: NileSpacing.s8),
+          padding: const EdgeInsets.symmetric(
+            horizontal: NileSpacing.s16,
+            vertical: NileSpacing.s8,
+          ),
           minimumSize: const Size(90, 34),
           tapTargetSize: MaterialTapTargetSize.shrinkWrap,
         ),
@@ -1141,7 +1169,10 @@ class _FollowButton extends StatelessWidget {
     return FilledButton(
       onPressed: isLoading ? null : onTap,
       style: FilledButton.styleFrom(
-        padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s16, vertical: NileSpacing.s8),
+        padding: const EdgeInsets.symmetric(
+          horizontal: NileSpacing.s16,
+          vertical: NileSpacing.s8,
+        ),
         minimumSize: const Size(90, 34),
         tapTargetSize: MaterialTapTargetSize.shrinkWrap,
       ),
@@ -1285,7 +1316,8 @@ class _DiscoverPostCard extends StatelessWidget {
 
 class _DiscoverEventCard extends StatelessWidget {
   final Event event;
-  final bool featured; // shows a "Featured" chip when this event is also curated
+  final bool
+  featured; // shows a "Featured" chip when this event is also curated
   final VoidCallback onTap;
   final VoidCallback? onLikeToggle;
   const _DiscoverEventCard({
@@ -1426,17 +1458,12 @@ class _EventThumbnail extends StatelessWidget {
     final stack = Stack(
       fit: StackFit.expand,
       children: [
-        if (hero)
-          Hero(tag: 'event-cover-${event.id}', child: image)
-        else
-          image,
+        if (hero) Hero(tag: 'event-cover-${event.id}', child: image) else image,
         const DecoratedBox(decoration: NileEffects.coverScrim),
         Positioned(top: 8, left: 8, child: EventCoverPill(event: event)),
       ],
     );
-    return flexible
-        ? stack
-        : AspectRatio(aspectRatio: 16 / 9, child: stack);
+    return flexible ? stack : AspectRatio(aspectRatio: 16 / 9, child: stack);
   }
 }
 
@@ -1821,7 +1848,8 @@ class _UpcomingEventCard extends StatelessWidget {
   String? get _price {
     final p = event.price;
     if (p == null || p <= 0) return null;
-    final dollars = p / 100;
+    // iPhone/iPad: the in-app price where the show is sold in the app.
+    final dollars = IapService.displayCents(p) / 100;
     return dollars == dollars.roundToDouble()
         ? '\$${dollars.toStringAsFixed(0)}'
         : '\$${dollars.toStringAsFixed(2)}';

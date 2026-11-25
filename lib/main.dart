@@ -28,6 +28,7 @@ import 'services/shell_state.dart';
 import 'services/theme_service.dart';
 import 'theme.dart';
 import 'services/feedback_service.dart';
+import 'services/iap_service.dart';
 import 'widgets/force_update_gate.dart';
 import 'widgets/nile_menu_bar.dart';
 import 'widgets/nile_mini_player.dart';
@@ -143,6 +144,10 @@ Future<void> _bootstrap() async {
   // The router's redirect reads this synchronously, so it has to be listening
   // to the auth stream before the first route is resolved.
   AuthGate.instance.start();
+
+  // iPhone/iPad in-app purchases: listen before the first frame so a purchase
+  // interrupted last time (app killed mid-checkout) is finished now.
+  unawaited(IapService.init());
 
   runApp(const NileApp());
 }

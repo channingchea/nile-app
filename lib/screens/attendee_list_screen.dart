@@ -130,7 +130,28 @@ class _AttendeeListScreenState extends State<AttendeeListScreen> {
               ),
             // Nothing left to refund on a refunded or charged-back ticket —
             // the bank already took the money on a dispute.
-            if (!a.isVoid)
+            // App store purchases can only be refunded by the store.
+            if (!a.isVoid && a.viaAppStore)
+              ListTile(
+                leading: Icon(
+                  Icons.storefront_outlined,
+                  color: NileColors.txtSecondary,
+                ),
+                title: Text(
+                  'Refunds through the app store',
+                  style: NileTextStyles.labelLg().copyWith(
+                    color: NileColors.txtSecondary,
+                  ),
+                ),
+                subtitle: Text(
+                  'This ticket was bought in the app. The buyer can request a '
+                  'refund from the app store; it shows here if it\'s granted.',
+                  style: NileTextStyles.caption().copyWith(
+                    color: NileColors.txtTertiary,
+                  ),
+                ),
+              ),
+            if (!a.isVoid && !a.viaAppStore)
               ListTile(
                 leading: const Icon(Icons.undo, color: NileColors.coral),
                 title: Text(
@@ -214,7 +235,12 @@ class _AttendeeListScreenState extends State<AttendeeListScreen> {
         bottom: PreferredSize(
           preferredSize: const Size.fromHeight(28),
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(NileSpacing.s16, 0, NileSpacing.s16, NileSpacing.s8),
+            padding: const EdgeInsets.fromLTRB(
+              NileSpacing.s16,
+              0,
+              NileSpacing.s16,
+              NileSpacing.s8,
+            ),
             child: Align(
               alignment: Alignment.centerLeft,
               child: Text(
@@ -253,9 +279,7 @@ class _AttendeeListScreenState extends State<AttendeeListScreen> {
       );
     }
     if (_attendees == null) {
-      return Center(
-        child: CircularProgressIndicator(color: NileColors.volt),
-      );
+      return Center(child: CircularProgressIndicator(color: NileColors.volt));
     }
     if (_attendees!.isEmpty) {
       return _Centered(
@@ -292,17 +316,18 @@ class _AttendeeListScreenState extends State<AttendeeListScreen> {
 
     return ListView.separated(
       controller: _scroll,
-      padding: const EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s12, NileSpacing.s16, NileSpacing.s32),
+      padding: const EdgeInsets.fromLTRB(
+        NileSpacing.s16,
+        NileSpacing.s12,
+        NileSpacing.s16,
+        NileSpacing.s32,
+      ),
       itemCount: _attendees!.length + 1 + (_hasMore ? 1 : 0),
       separatorBuilder: (_, i) =>
           i == 0 ? const SizedBox(height: 12) : const SizedBox(height: 8),
       itemBuilder: (_, i) {
         if (i == 0) {
-          return _SummaryRow(
-            count: count,
-            totalCents: total,
-            netCents: net,
-          );
+          return _SummaryRow(count: count, totalCents: total, netCents: net);
         }
         if (i > _attendees!.length) return const LoadMoreFooter();
         final a = _attendees![i - 1];
@@ -334,7 +359,10 @@ class _SummaryRow extends StatelessWidget {
       children: [
         Row(
           children: [
-            _Stat(label: count == 1 ? 'attendee' : 'attendees', value: '$count'),
+            _Stat(
+              label: count == 1 ? 'attendee' : 'attendees',
+              value: '$count',
+            ),
             const SizedBox(width: 12),
             _Stat(label: 'ticket sales', value: money(totalCents)),
             if (showNet) ...[
@@ -367,7 +395,10 @@ class _Stat extends StatelessWidget {
   Widget build(BuildContext context) {
     return Expanded(
       child: Container(
-        padding: const EdgeInsets.symmetric(vertical: NileSpacing.s12, horizontal: NileSpacing.s16),
+        padding: const EdgeInsets.symmetric(
+          vertical: NileSpacing.s12,
+          horizontal: NileSpacing.s16,
+        ),
         decoration: BoxDecoration(
           color: NileColors.bgSurface,
           borderRadius: BorderRadius.circular(NileRadius.lg),
@@ -416,11 +447,7 @@ class _AttendeeTile extends StatelessWidget {
                   ? nileAvatarImage(url, 22)
                   : null,
               child: (url == null || url.isEmpty)
-                  ? Icon(
-                      Icons.person,
-                      color: NileColors.txtTertiary,
-                      size: 22,
-                    )
+                  ? Icon(Icons.person, color: NileColors.txtTertiary, size: 22)
                   : null,
             ),
             const SizedBox(width: 12),
@@ -441,7 +468,9 @@ class _AttendeeTile extends StatelessWidget {
                       if (attendee.isVoid) ...[
                         const SizedBox(width: 8),
                         _VoidBadge(
-                          label: attendee.isDisputed ? 'chargeback' : 'refunded',
+                          label: attendee.isDisputed
+                              ? 'chargeback'
+                              : 'refunded',
                         ),
                       ],
                     ],
@@ -462,9 +491,7 @@ class _AttendeeTile extends StatelessWidget {
                 color: attendee.isVoid
                     ? NileColors.txtTertiary
                     : NileColors.volt,
-                decoration: attendee.isVoid
-                    ? TextDecoration.lineThrough
-                    : null,
+                decoration: attendee.isVoid ? TextDecoration.lineThrough : null,
               ),
             ),
           ],
@@ -484,7 +511,10 @@ class _VoidBadge extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s8, vertical: NileSpacing.s2),
+      padding: const EdgeInsets.symmetric(
+        horizontal: NileSpacing.s8,
+        vertical: NileSpacing.s2,
+      ),
       decoration: BoxDecoration(
         color: NileColors.coral.withValues(alpha: 0.15),
         borderRadius: BorderRadius.circular(NileRadius.pill),
@@ -508,7 +538,10 @@ class _Centered extends StatelessWidget {
       children: [
         SizedBox(height: MediaQuery.of(context).size.height * 0.3),
         Center(
-          child: Padding(padding: const EdgeInsets.all(NileSpacing.s24), child: child),
+          child: Padding(
+            padding: const EdgeInsets.all(NileSpacing.s24),
+            child: child,
+          ),
         ),
       ],
     );

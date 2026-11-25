@@ -16,6 +16,9 @@ enum NotificationType {
   /// when it never happened is both wrong and hides the thing they care about:
   /// the host still has their money.
   eventNoShow,
+
+  /// The host cancelled a show the user has a ticket for (migration 0159).
+  eventCancelled,
   operatorAssigned,
   newMessage,
   messageReaction,
@@ -91,6 +94,7 @@ class AppNotification {
     'event_live' => NotificationType.eventLive,
     'event_ended' => NotificationType.eventEnded,
     'event_no_show' => NotificationType.eventNoShow,
+    'event_cancelled' => NotificationType.eventCancelled,
     'operator_assigned' => NotificationType.operatorAssigned,
     'new_message' => NotificationType.newMessage,
     'message_reaction' => NotificationType.messageReaction,

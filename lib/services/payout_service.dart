@@ -68,6 +68,16 @@ class PayoutService {
     return TicketEarnings.fromRow(list.first as Map<String, dynamic>);
   }
 
+  /// Ticket earnings split by how buyers paid (migration 0160): card checkout
+  /// vs the app store, plus app store refunds waiting to come off the next
+  /// month-end payout. Best-effort — the card just hides the split on error.
+  static Future<TicketSources> ticketSources() async {
+    final rows = await supabase.rpc('host_ticket_earnings_by_source');
+    final list = rows as List;
+    if (list.isEmpty) return TicketSources.empty;
+    return TicketSources.fromRow(list.first as Map<String, dynamic>);
+  }
+
   /// Event sponsorship earnings (0081 host_sponsorship_earnings): the host's
   /// share of Pre-Show lobby sponsorships, paid at approval via Connect.
   static Future<SponsorshipEarnings> sponsorshipEarnings() async {
@@ -164,4 +174,51 @@ class TicketEarnings {
     fallbackOwedCents: (r['fallback_owed_cents'] as num?)?.toInt() ?? 0,
     fallbackCount: (r['fallback_count'] as num?)?.toInt() ?? 0,
   );
+}
+
+/// Ticket earnings by how the buyer paid. App store sales reach the host in
+/// the month-end payout, after the show has taken place.
+class TicketSources {
+  final int cardNetCents;
+  final int cardCount;
+  final int storeNetCents;
+  final int storeCount;
+
+  /// App store earnings not yet sent (next month-end payout).
+  final int storeUnpaidCents;
+
+  /// App store refunds after a payout, to come off the next one.
+  final int storeDeductionCents;
+
+  const TicketSources({
+    required this.cardNetCents,
+    required this.cardCount,
+    required this.storeNetCents,
+    required this.storeCount,
+    required this.storeUnpaidCents,
+    required this.storeDeductionCents,
+  });
+
+  static const empty = TicketSources(
+    cardNetCents: 0,
+    cardCount: 0,
+    storeNetCents: 0,
+    storeCount: 0,
+    storeUnpaidCents: 0,
+    storeDeductionCents: 0,
+  );
+
+  bool get hasStoreSales => storeCount > 0 || storeDeductionCents > 0;
+
+  factory TicketSources.fromRow(Map<String, dynamic> r) {
+    int n(String k) => (r[k] as num?)?.toInt() ?? 0;
+    return TicketSources(
+      cardNetCents: n('card_net_cents'),
+      cardCount: n('card_count'),
+      storeNetCents: n('store_net_cents'),
+      storeCount: n('store_count'),
+      storeUnpaidCents: n('store_unpaid_cents'),
+      storeDeductionCents: n('store_deduction_cents'),
+    );
+  }
 }

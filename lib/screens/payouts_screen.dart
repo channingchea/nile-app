@@ -21,6 +21,7 @@ class _PayoutsScreenState extends State<PayoutsScreen> {
   PayoutStatus? _status;
   TipEarnings? _tips;
   TicketEarnings? _tickets;
+  TicketSources _sources = TicketSources.empty;
   SponsorshipEarnings? _sponsorships;
   int _pendingOffers = 0;
   String? _error;
@@ -42,10 +43,15 @@ class _PayoutsScreenState extends State<PayoutsScreen> {
       final tips = await TipService.hostEarnings().catchError(
         (_) => const TipEarnings(grossCents: 0, feeCents: 0, count: 0),
       );
-      final tickets = await PayoutService.ticketEarnings()
-          .catchError((_) => TicketEarnings.empty);
-      final sponsorships = await PayoutService.sponsorshipEarnings()
-          .catchError((_) => SponsorshipEarnings.empty);
+      final tickets = await PayoutService.ticketEarnings().catchError(
+        (_) => TicketEarnings.empty,
+      );
+      final sources = await PayoutService.ticketSources().catchError(
+        (_) => TicketSources.empty,
+      );
+      final sponsorships = await PayoutService.sponsorshipEarnings().catchError(
+        (_) => SponsorshipEarnings.empty,
+      );
       // Already best-effort (returns 0 on failure), so no catchError here.
       final offers = await AdService.hostOfferCount();
       if (mounted) {
@@ -53,6 +59,7 @@ class _PayoutsScreenState extends State<PayoutsScreen> {
           _status = s;
           _tips = tips;
           _tickets = tickets;
+          _sources = sources;
           _sponsorships = sponsorships;
           _pendingOffers = offers;
         });
@@ -124,14 +131,17 @@ class _PayoutsScreenState extends State<PayoutsScreen> {
       );
     }
     if (_status == null) {
-      return Center(
-        child: CircularProgressIndicator(color: NileColors.volt),
-      );
+      return Center(child: CircularProgressIndicator(color: NileColors.volt));
     }
 
     final s = _status!;
     return ListView(
-      padding: const EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s16, NileSpacing.s16, NileSpacing.s32),
+      padding: const EdgeInsets.fromLTRB(
+        NileSpacing.s16,
+        NileSpacing.s16,
+        NileSpacing.s16,
+        NileSpacing.s32,
+      ),
       children: [
         _StatusCard(status: s),
         const SizedBox(height: 12),
@@ -146,7 +156,7 @@ class _PayoutsScreenState extends State<PayoutsScreen> {
         ),
         if (_tickets?.hasSales ?? false) ...[
           const SizedBox(height: 12),
-          _TicketsCard(tickets: _tickets!),
+          _TicketsCard(tickets: _tickets!, sources: _sources),
         ],
         if (_tips?.hasTips ?? false) ...[
           const SizedBox(height: 12),
@@ -188,7 +198,10 @@ class _PayoutsScreenState extends State<PayoutsScreen> {
     children: [
       SizedBox(height: MediaQuery.of(context).size.height * 0.3),
       Center(
-        child: Padding(padding: const EdgeInsets.all(NileSpacing.s24), child: child),
+        child: Padding(
+          padding: const EdgeInsets.all(NileSpacing.s24),
+          child: child,
+        ),
       ),
     ],
   );
@@ -350,7 +363,40 @@ class _OffersCard extends StatelessWidget {
 
 class _TicketsCard extends StatelessWidget {
   final TicketEarnings tickets;
-  const _TicketsCard({required this.tickets});
+  final TicketSources sources;
+  const _TicketsCard({
+    required this.tickets,
+    this.sources = TicketSources.empty,
+  });
+
+  Widget _line(String label, String value, {String? note}) => Padding(
+    padding: const EdgeInsets.only(top: NileSpacing.s8),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                label,
+                style: NileTextStyles.bodySm().copyWith(
+                  color: NileColors.txtSecondary,
+                ),
+              ),
+            ),
+            Text(value, style: NileTextStyles.labelMd()),
+          ],
+        ),
+        if (note != null)
+          Text(
+            note,
+            style: NileTextStyles.caption().copyWith(
+              color: NileColors.txtTertiary,
+            ),
+          ),
+      ],
+    ),
+  );
 
   @override
   Widget build(BuildContext context) {
@@ -365,8 +411,11 @@ class _TicketsCard extends StatelessWidget {
         children: [
           Row(
             children: [
-              Icon(Icons.confirmation_number_outlined,
-                  color: NileColors.volt, size: 20),
+              Icon(
+                Icons.confirmation_number_outlined,
+                color: NileColors.volt,
+                size: 20,
+              ),
               const SizedBox(width: 12),
               Expanded(
                 child: Column(
@@ -387,11 +436,33 @@ class _TicketsCard extends StatelessWidget {
               ),
               Text(
                 _money(tickets.lifetimeNetCents),
-                style: NileTextStyles.headingSm()
-                    .copyWith(color: NileColors.volt),
+                style: NileTextStyles.headingSm().copyWith(
+                  color: NileColors.volt,
+                ),
               ),
             ],
           ),
+          // App store sales are paid in the month-end payout (Phase 5 of
+          // docs/plans/apple-iap-tickets.md). Neutral words: this screen
+          // ships on every platform.
+          if (sources.hasStoreSales) ...[
+            const SizedBox(height: NileSpacing.s4),
+            _line('Tickets paid by card', _money(sources.cardNetCents)),
+            _line(
+              'Tickets bought through the app store',
+              _money(sources.storeNetCents),
+              note: sources.storeUnpaidCents > 0
+                  ? '${_money(sources.storeUnpaidCents)} arrives with your '
+                        'month-end payout after the show.'
+                  : null,
+            ),
+            if (sources.storeDeductionCents > 0)
+              _line(
+                'App store refunds to deduct',
+                '−${_money(sources.storeDeductionCents)}',
+                note: 'Comes off your next month-end payout.',
+              ),
+          ],
           // Sales made before the host finished Stripe onboarding land on the
           // platform account, so the money is earned but hasn't moved. It used
           // to be invisible here — and, until migration 0092, counted as $0.
@@ -405,7 +476,11 @@ class _TicketsCard extends StatelessWidget {
               ),
               child: Row(
                 children: [
-                  Icon(Icons.schedule, size: 16, color: NileColors.txtSecondary),
+                  Icon(
+                    Icons.schedule,
+                    size: 16,
+                    color: NileColors.txtSecondary,
+                  ),
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(

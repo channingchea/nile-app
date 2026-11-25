@@ -201,6 +201,8 @@ class _NotificationTile extends StatelessWidget {
       '@${notification.actorUsername}’s event ended',
     NotificationType.eventNoShow =>
       '@${notification.actorUsername}’s event didn’t take place',
+    NotificationType.eventCancelled =>
+      '@${notification.actorUsername} cancelled their event. See My Tickets for a refund.',
     NotificationType.operatorAssigned =>
       '@${notification.actorUsername} added you as a camera operator',
     NotificationType.newMessage =>
@@ -236,6 +238,7 @@ class _NotificationTile extends StatelessWidget {
     NotificationType.eventLive => Icons.sensors,
     NotificationType.eventEnded => Icons.replay,
     NotificationType.eventNoShow => Icons.event_busy,
+    NotificationType.eventCancelled => Icons.event_busy,
     NotificationType.operatorAssigned => Icons.videocam,
     NotificationType.newMessage => Icons.send_rounded,
     NotificationType.messageReaction => Icons.favorite,
@@ -257,6 +260,7 @@ class _NotificationTile extends StatelessWidget {
     NotificationType.eventLive => NileColors.coral,
     NotificationType.eventEnded => NileColors.txtSecondary,
     NotificationType.eventNoShow => NileColors.txtSecondary,
+    NotificationType.eventCancelled => NileColors.txtSecondary,
     NotificationType.operatorAssigned => NileColors.azure,
     NotificationType.newMessage => NileColors.volt,
     NotificationType.messageReaction => NileColors.coral,
@@ -287,7 +291,10 @@ class _NotificationTile extends StatelessWidget {
         color: unread
             ? NileColors.volt.withValues(alpha: 0.04)
             : Colors.transparent,
-        padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s16, vertical: NileSpacing.s12),
+        padding: const EdgeInsets.symmetric(
+          horizontal: NileSpacing.s16,
+          vertical: NileSpacing.s12,
+        ),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -387,6 +394,10 @@ class _CenterMessage extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) =>
-      NileEmptyState(icon: icon, iconColor: iconColor, title: title, body: body);
+  Widget build(BuildContext context) => NileEmptyState(
+    icon: icon,
+    iconColor: iconColor,
+    title: title,
+    body: body,
+  );
 }

@@ -15,6 +15,7 @@ class PricingConfig {
   final int maxStreamMinutes;
   final int freeMaxStreamMinutes;
   final double creatorRevenueShare;
+  final double appleFeePct;
 
   const PricingConfig({
     required this.minTicketCents,
@@ -25,6 +26,7 @@ class PricingConfig {
     required this.maxStreamMinutes,
     required this.freeMaxStreamMinutes,
     required this.creatorRevenueShare,
+    this.appleFeePct = 0.30,
   });
 
   /// Used until the real config lands (and if the fetch ever fails). Matches
@@ -38,6 +40,7 @@ class PricingConfig {
     maxStreamMinutes: 480,
     freeMaxStreamMinutes: 120,
     creatorRevenueShare: 0.50,
+    appleFeePct: 0.30,
   );
 
   factory PricingConfig.fromJson(Map<String, dynamic> j) {
@@ -60,6 +63,7 @@ class PricingConfig {
       creatorRevenueShare:
           double.tryParse('${j['creator_revenue_share']}') ??
           f.creatorRevenueShare,
+      appleFeePct: double.tryParse('${j['apple_fee_pct']}') ?? f.appleFeePct,
     );
   }
 
@@ -87,6 +91,23 @@ class PricingConfig {
   /// What the host keeps from one ticket sold at [priceCents].
   int creatorEarningsCents(int priceCents) =>
       (priceCents * creatorRevenueShare).round();
+
+  /// iPhone/iPad price for a web price: web ÷ (1 − Apple's fee), rounded up
+  /// to the next .99, never below $1.99. Null above $99.99, the top of the
+  /// product ladder. Must match SQL `compute_iap_price_cents` (migration 0157).
+  int? iapPriceCentsFor(int? webCents) {
+    if (webCents == null || webCents <= 0) return null;
+    // Whole-cent maths so 700 / 0.70 is exactly 1000, as in Postgres numeric.
+    final keep = ((1 - appleFeePct) * 10000).round();
+    final raw = (webCents * 10000 + keep - 1) ~/ keep;
+    final cents = ((raw + 1 + 99) ~/ 100) * 100 - 1;
+    final priced = cents < 199 ? 199 : cents;
+    return priced > 9999 ? null : priced;
+  }
+
+  /// The App Store product that sells [iapCents] (`com.nilestreaming.app.ppv.1499`).
+  static String iapProductId(int iapCents) =>
+      'com.nilestreaming.app.ppv.${iapCents.toString().padLeft(4, '0')}';
 
   int get maxStreamHours => maxStreamMinutes ~/ 60;
   int get freeMaxStreamHours => freeMaxStreamMinutes ~/ 60;
@@ -116,7 +137,7 @@ class PricingService {
           .select(
             'min_ticket_cents, floor_base_cents, floor_step_cents, '
             'floor_step_minutes, floor_assumed_tickets, max_stream_minutes, '
-            'free_max_stream_minutes, creator_revenue_share',
+            'free_max_stream_minutes, creator_revenue_share, apple_fee_pct',
           )
           .eq('id', 1)
           .limit(1)

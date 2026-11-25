@@ -9,6 +9,7 @@ import 'package:livekit_client/livekit_client.dart' hide ChatMessage;
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:video_player/video_player.dart';
+import '../services/iap_service.dart';
 import '../services/ad_service.dart';
 import '../services/analytics.dart';
 import '../services/away_pause.dart';
@@ -4666,7 +4667,10 @@ class _TipSheetState extends State<_TipSheet> {
           Text('Send a tip', style: NileTextStyles.headingSm()),
           const SizedBox(height: NileSpacing.s4),
           Text(
-            'Support the host. Goes straight to them, minus a small platform fee.',
+            // iPhone/iPad tips carry no Nile fee (create-tip-payment, origin ios).
+            IapService.enabled
+                ? 'Support the host. 100% goes to them.'
+                : 'Support the host. Goes straight to them, minus a small platform fee.',
             style: NileTextStyles.bodySm().copyWith(
               color: NileColors.txtSecondary,
             ),

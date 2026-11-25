@@ -15,6 +15,7 @@ import '../services/crew_service.dart';
 import '../services/share_urls.dart';
 import '../services/event_service.dart';
 import '../services/follow_service.dart';
+import '../services/iap_service.dart';
 import '../services/interview.dart';
 import '../services/interview_service.dart';
 import '../services/live_elements.dart';
@@ -26,6 +27,7 @@ import '../services/ticket_service.dart';
 import '../router.dart';
 import '../theme.dart';
 import '../widgets/element_results.dart';
+import '../widgets/iap_confirm_sheet.dart';
 import '../widgets/live_badge.dart';
 import '../widgets/nile_desktop.dart';
 import '../widgets/official_badge.dart';
@@ -520,9 +522,17 @@ class _EventDetailScreenState extends State<EventDetailScreen>
   }
 
   /// [kind] 'live' buys a ticket to the show; 'replay' buys the published VOD.
-  /// Price is read server-side from the event either way.
-  Future<void> _buyTicket({String kind = 'live'}) async {
+  /// Price is read server-side from the event either way. On iPhone/iPad the
+  /// buy goes through Apple unless [viaWeb] (the US-only web link, or a show
+  /// priced above the in-app ladder).
+  Future<void> _buyTicket({String kind = 'live', bool viaWeb = false}) async {
     if (_event == null) return;
+    final webCents = kind == 'replay'
+        ? (_replayPrice ?? _event!.price)
+        : _event!.price;
+    if (!viaWeb && IapService.storeCentsFor(webCents) != null) {
+      return _buyInApp(kind);
+    }
     setState(() => _ticketBusy = true);
     // Fired BEFORE the network call, not after: a checkout that fails to even
     // start is exactly the kind of drop-off this funnel exists to surface, and
@@ -564,6 +574,87 @@ class _EventDetailScreenState extends State<EventDetailScreen>
     } finally {
       if (mounted) setState(() => _ticketBusy = false);
     }
+  }
+
+  /// Apple in-app purchase (docs/plans/apple-iap-tickets.md, Phase 3).
+  Future<void> _buyInApp(String kind) async {
+    final event = _event!;
+    setState(() => _ticketBusy = true);
+    NileAnalytics.capture(
+      kind == 'replay'
+          ? NileEvent.replayCheckoutStarted
+          : NileEvent.ticketCheckoutStarted,
+      {'event_id': event.id, 'price_cents': event.price ?? 0, 'store': 'apple'},
+    );
+    // The confirming sheet appears once Apple's own sheet has been accepted.
+    var sheetOpen = false;
+    void onStage() {
+      final s = IapService.stage.value;
+      if (!sheetOpen &&
+          mounted &&
+          (s == IapStage.confirming || s == IapStage.slow)) {
+        sheetOpen = true;
+        IapConfirmSheet.show(context).whenComplete(() => sheetOpen = false);
+      }
+    }
+
+    IapService.stage.addListener(onStage);
+    try {
+      final outcome = await IapService.buy(eventId: event.id, kind: kind);
+      if (!mounted) return;
+      final done =
+          outcome == IapOutcome.ticket || outcome == IapOutcome.duplicate;
+      if (done && sheetOpen) Navigator.of(context).pop();
+      if (done) {
+        NileAnalytics.capture(NileEvent.ticketConfirmed, {
+          'event_id': event.id,
+          'price_cents': event.price ?? 0,
+          'store': 'apple',
+        });
+        setState(() => _hasTicket = true);
+        if (kind == 'replay') unawaited(_checkReplay());
+      }
+      if (outcome == IapOutcome.ticket && kind == 'live') {
+        _offerAddToCalendar(event);
+      }
+      if (outcome == IapOutcome.duplicate) await _explainDuplicate();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))),
+      );
+    } finally {
+      IapService.stage.removeListener(onStage);
+      if (mounted) setState(() => _ticketBusy = false);
+    }
+  }
+
+  /// Apple charged a buyer who already held this ticket (bought on another
+  /// device while this purchase was open). Offer Apple's refund form.
+  Future<void> _explainDuplicate() async {
+    final txn = IapService.lastTransactionId;
+    final refund = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('You already had this ticket'),
+        content: const Text(
+          'This purchase went through, but you already had access. '
+          'You can ask Apple to refund it.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Not now'),
+          ),
+          if (txn != null)
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Request refund'),
+            ),
+        ],
+      ),
+    );
+    if (refund == true && txn != null) await IapService.requestRefund(txn);
   }
 
   /// Opens the web ad portal's boost flow for this event in the EXTERNAL
@@ -690,9 +781,13 @@ class _EventDetailScreenState extends State<EventDetailScreen>
       ).showSnackBar(const SnackBar(content: Text('Event deleted')));
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Couldn\'t delete: $e')));
+      // Migration 0159: app store sales have to stay on record for refunds
+      // and payouts, so the show is cancelled rather than deleted.
+      final msg = e.toString().contains('event_has_store_sales')
+          ? 'This event has app store sales, so it can’t be deleted. '
+                'Cancel it instead.'
+          : 'Couldn\'t delete: $e';
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
     }
   }
 
@@ -937,6 +1032,8 @@ class _EventDetailScreenState extends State<EventDetailScreen>
       onWatch: _watch,
       onBuyTicket: _buyTicket,
       onBuyReplay: () => _buyTicket(kind: 'replay'),
+      onWebBuyTicket: () => _buyTicket(viaWeb: true),
+      onWebBuyReplay: () => _buyTicket(kind: 'replay', viaWeb: true),
       onEnterAsCamera: _enterAsCamera,
       onWatchReplay: _watchReplay,
       onPriceReplay: _priceReplay,
@@ -1503,7 +1600,7 @@ class _PriceChip extends StatelessWidget {
         ? '✓ Ticket'
         : soldOut
         ? 'Sold Out'
-        : '\$${(priceCents / 100).toStringAsFixed(priceCents % 100 == 0 ? 0 : 2)}';
+        : _money(IapService.displayCents(priceCents));
 
     final bg = hasAccess ? NileColors.volt.withAlpha(30) : NileColors.bgRaised;
     final fg = hasAccess
@@ -1552,6 +1649,8 @@ class _PrimaryCta extends StatelessWidget {
   final VoidCallback onWatch;
   final VoidCallback onBuyTicket;
   final VoidCallback onBuyReplay;
+  final VoidCallback onWebBuyTicket;
+  final VoidCallback onWebBuyReplay;
   final VoidCallback onEnterAsCamera;
   final VoidCallback onWatchReplay;
   final VoidCallback onPriceReplay;
@@ -1573,6 +1672,8 @@ class _PrimaryCta extends StatelessWidget {
     required this.onWatch,
     required this.onBuyTicket,
     required this.onBuyReplay,
+    required this.onWebBuyTicket,
+    required this.onWebBuyReplay,
     required this.onEnterAsCamera,
     required this.onWatchReplay,
     required this.onPriceReplay,
@@ -1641,6 +1742,7 @@ class _PrimaryCta extends StatelessWidget {
           soldOut: _soldOut,
           busy: ticketBusy,
           onBuy: onBuyTicket,
+          onWebBuy: onWebBuyTicket,
         );
       }
       // Sound Check → "Join Lobby" (volt), no viewer count yet.
@@ -1753,6 +1855,7 @@ class _PrimaryCta extends StatelessWidget {
           soldOut: false,
           busy: ticketBusy,
           onBuy: onBuyReplay,
+          onWebBuy: onWebBuyReplay,
           labelPrefix: 'Get Replay',
         );
       }
@@ -1791,6 +1894,7 @@ class _PrimaryCta extends StatelessWidget {
         soldOut: _soldOut,
         busy: ticketBusy,
         onBuy: onBuyTicket,
+        onWebBuy: onWebBuyTicket,
       );
     }
 
@@ -1813,6 +1917,11 @@ class _GetTicketButton extends StatelessWidget {
   final bool soldOut;
   final bool busy;
   final VoidCallback onBuy;
+
+  /// Card checkout on joinnile.com. On iPhone/iPad it's offered only to US
+  /// App Store buyers (a small link under the main button, or the only way
+  /// to buy when the show is priced above the in-app ladder).
+  final VoidCallback onWebBuy;
   final String labelPrefix; // 'Get Ticket' (live) or 'Get Replay' (VOD)
 
   const _GetTicketButton({
@@ -1820,18 +1929,32 @@ class _GetTicketButton extends StatelessWidget {
     required this.soldOut,
     required this.busy,
     required this.onBuy,
+    required this.onWebBuy,
     this.labelPrefix = 'Get Ticket',
   });
 
   @override
   Widget build(BuildContext context) {
-    final priceLabel =
-        '\$${(priceCents / 100).toStringAsFixed(priceCents % 100 == 0 ? 0 : 2)}';
-    final enabled = !soldOut && !busy;
+    final inApp = IapService.enabled;
+    final storeCents = IapService.storeCentsFor(priceCents);
+    final usLink = inApp && IapService.isUsStorefront;
+    // iPhone/iPad, priced above the ladder: US → web checkout; elsewhere the
+    // show can't be bought here (no link outside the US).
+    final webOnly = inApp && storeCents == null;
+    final unavailable = webOnly && !usLink;
+    final priceLabel = _money(storeCents ?? priceCents);
+    final enabled = !soldOut && !busy && !unavailable;
+    final label = soldOut
+        ? 'Sold Out'
+        : unavailable
+        ? 'Available on joinnile.com'
+        : webOnly
+        ? '$labelPrefix at joinnile.com — $priceLabel'
+        : '$labelPrefix — $priceLabel';
     final button = SizedBox(
       width: double.infinity,
       child: FilledButton.icon(
-        onPressed: (soldOut || busy) ? null : onBuy,
+        onPressed: enabled ? (webOnly ? onWebBuy : onBuy) : null,
         style: FilledButton.styleFrom(
           padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
           backgroundColor: NileColors.volt,
@@ -1848,7 +1971,7 @@ class _GetTicketButton extends StatelessWidget {
                 ),
               )
             : const Icon(Icons.confirmation_number_outlined),
-        label: Text(soldOut ? 'Sold Out' : '$labelPrefix — $priceLabel'),
+        label: Text(label),
       ),
     );
     // Faint volt glow on the screen's single primary CTA.
@@ -1858,14 +1981,30 @@ class _GetTicketButton extends StatelessWidget {
     // Currency and cancellation stated before the tap, not after it (#37).
     // Stripe repeats the full policy above its own pay button; this is the
     // version the buyer reads while still deciding.
-    if (soldOut) return cta;
+    if (soldOut || unavailable) return cta;
+    final apple = inApp && !webOnly;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         cta,
-        const SizedBox(height: NileSpacing.s8),
+        // US App Store only: the cheaper card checkout, as a small link.
+        if (apple && usLink)
+          TextButton(
+            onPressed: busy ? null : onWebBuy,
+            child: Text(
+              'Or pay ${_money(priceCents)} at joinnile.com',
+              style: NileTextStyles.caption().copyWith(
+                color: NileColors.txtSecondary,
+                decoration: TextDecoration.underline,
+              ),
+            ),
+          )
+        else
+          const SizedBox(height: NileSpacing.s8),
         Text(
-          kTicketRefundPolicyShort,
+          apple
+              ? 'Refunds for in-app purchases are handled by Apple.'
+              : kTicketRefundPolicyShort,
           textAlign: TextAlign.center,
           style: NileTextStyles.caption().copyWith(
             color: NileColors.txtTertiary,
@@ -2020,3 +2159,6 @@ class _HostAwaitingOffersNote extends StatelessWidget {
     ),
   );
 }
+
+String _money(int cents) =>
+    '\$${(cents / 100).toStringAsFixed(cents % 100 == 0 ? 0 : 2)}';

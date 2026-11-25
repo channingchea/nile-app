@@ -7,7 +7,8 @@
 //   supabase functions deploy create-payment-intent
 //
 // Request (POST, Bearer = user JWT):
-//   { "event_id": "uuid", "kind": "live" | "replay", "origin": "macos" }
+//   { "event_id": "uuid", "kind": "live" | "replay", "origin": "macos",
+//     "provider": "apple" }
 //   kind defaults to "live"; origin is optional and recorded in Stripe
 //   metadata (see _shared/checkout_origin.ts) — omitted ⇒ "unknown".
 //   Price and title are read server-side from events — the client cannot set
@@ -16,6 +17,10 @@
 //
 // Response:
 //   { "checkout_url": "https://checkout.stripe.com/..." }
+//   provider "apple" (iPhone/iPad in-app purchase, docs/plans/apple-iap-tickets.md):
+//   { "ticket_id": "uuid", "product_id": "com.nilestreaming.app.ppv.1499",
+//     "store_price_cents": 1499 } — the app buys that product with the ticket
+//   id as StoreKit's appAccountToken, then calls apple-iap/verify.
 //   or { "error": "..." }
 
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
@@ -24,6 +29,7 @@ import Stripe from "https://esm.sh/stripe@14?target=deno";
 import { corsHeaders as corsHeadersFor } from "../_shared/cors.ts";
 import { failure } from "../_shared/errors.ts";
 import { checkoutOrigin } from "../_shared/checkout_origin.ts";
+import { productIdFor } from "../_shared/apple_iap.ts";
 import {
   CURRENCY, priceTaxParams, taxParams, TICKET_REFUND_POLICY,
 } from "../_shared/money.ts";
@@ -63,7 +69,7 @@ serve(async (req) => {
       return json({ error: "Unauthorized" }, 401);
     }
 
-    const { event_id, kind: rawKind, origin: rawOrigin } = await req.json();
+    const { event_id, kind: rawKind, origin: rawOrigin, provider } = await req.json();
     const kind = rawKind === "replay" ? "replay" : "live";
     // Which app the sale came from. Older clients send nothing → "unknown".
     const origin = checkoutOrigin(rawOrigin);
@@ -148,6 +154,49 @@ serve(async (req) => {
     // replay, and a replay purchase can't be bought twice.
     if (existing?.status === "paid") {
       return json({ error: "Already purchased" }, 409);
+    }
+
+    if (provider === "apple") {
+      // iPhone price = web price ÷ (1 − Apple's fee), up to .99 (migration 0157).
+      // Null above the $99.99 top of the product ladder: the app shows the web
+      // link (US) or "Available on joinnile.com" instead.
+      const { data: storeCents } = await adminClient.rpc("compute_iap_price_cents", {
+        p_web_cents: amount_cents,
+      });
+      if (!storeCents) {
+        return json({ error: "Not sold in the app at this price", code: "iap_unavailable" }, 409);
+      }
+      // Pending entitlement; its id is the appAccountToken that comes back
+      // inside Apple's signed transaction. The host's share is frozen when the
+      // purchase settles (settle_apple_ticket). Apple-only columns aren't
+      // touched here so an earlier refunded Apple purchase keeps its history.
+      const { data: pending, error: pendErr } = await adminClient
+        .from("tickets")
+        .upsert(
+          {
+            event_id,
+            buyer_id: user.id,
+            stripe_payment_intent_id: `apple:${event_id}:${user.id}`,
+            amount_cents,
+            status: "pending",
+            kind,
+            split_status: "apple",
+            payment_provider: "apple",
+            store_price_cents: storeCents,
+          },
+          { onConflict: "event_id,buyer_id", ignoreDuplicates: false },
+        )
+        .select("id")
+        .single();
+      if (pendErr || !pending) {
+        console.error("apple pending ticket failed:", pendErr?.message);
+        return json({ error: "Could not start the purchase. Please try again." }, 500);
+      }
+      return json({
+        ticket_id: pending.id,
+        product_id: productIdFor(storeCents),
+        store_price_cents: storeCents,
+      });
     }
 
     // Revenue split: the creator's share is deposited to their Connect account

@@ -76,7 +76,7 @@ serve(async (req) => {
       .from("tickets")
       // Must stay one string literal — supabase-js infers the row type from it,
       // and a concatenated expression collapses every field to `unknown`.
-      .select("id, status, buyer_id, stripe_payment_intent_id, split_status, events!tickets_event_id_fkey(host_id, status, livekit_room, scheduled_at)")
+      .select("id, status, buyer_id, stripe_payment_intent_id, split_status, payment_provider, events!tickets_event_id_fkey(host_id, status, livekit_room, scheduled_at)")
       .eq("id", ticket_id)
       .maybeSingle();
 
@@ -125,6 +125,15 @@ serve(async (req) => {
 
     if (ticket.status !== "paid") {
       return json({ error: `Cannot refund a ${ticket.status} ticket` }, 409);
+    }
+
+    // App Store purchases can only be refunded by Apple. The app opens Apple's
+    // refund form for the buyer; the REFUND notification updates the ticket.
+    if (ticket.payment_provider === "apple") {
+      return json(
+        { error: "This ticket was bought through the app store. Refunds go through the app store.", code: "store_refund" },
+        409,
+      );
     }
 
     const pi = ticket.stripe_payment_intent_id as string | null;

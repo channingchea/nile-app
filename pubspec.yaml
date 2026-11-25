@@ -82,6 +82,8 @@ dependencies:
   posthog_flutter: ^5.36.4
   intl: ^0.20.2
   qr_flutter: ^4.1.0
+  in_app_purchase: ^3.3.1  # Apple IAP for tickets/replays on iPhone/iPad (docs/plans/apple-iap-tickets.md)
+  in_app_purchase_storekit: ^0.4.17  # StoreKit 2 storefront country
 dependency_overrides:
   app_links: 6.4.0
 

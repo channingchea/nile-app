@@ -1,4 +1,5 @@
 import Flutter
+import StoreKit
 import UIKit
 
 @main
@@ -48,6 +49,30 @@ import UIKit
           }
         }
         result(on && UIScreen.main.isCaptured)
+      }
+    }
+
+    // Apple's refund form for a ticket bought through the App Store
+    // (lib/services/iap_service.dart, IapService.requestRefund). The Flutter
+    // purchase plugin has no refund API.
+    if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "NileStoreRefund") {
+      let channel = FlutterMethodChannel(
+        name: "nile/store_refund", binaryMessenger: registrar.messenger())
+      channel.setMethodCallHandler { call, result in
+        guard call.method == "request",
+          let id = (call.arguments as? String).flatMap({ UInt64($0) })
+        else { return result(FlutterMethodNotImplemented) }
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        guard let scene = scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first
+        else { return result("unavailable") }
+        Task { @MainActor in
+          do {
+            let status = try await Transaction.beginRefundRequest(for: id, in: scene)
+            result(status == .success ? "submitted" : "cancelled")
+          } catch {
+            result("failed")
+          }
+        }
       }
     }
 

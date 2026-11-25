@@ -56,10 +56,29 @@ class PayoutPreviewCard extends StatelessWidget {
           ),
           if (price > 0) ...[
             const SizedBox(height: NileSpacing.s6),
+            // Buyers on iPhone/iPad pay more (the store's fee is added on top);
+            // the host earns the same either way. Neutral wording on purpose:
+            // the same card ships on every platform (Apple 2.3.10).
+            _row('Card checkout', _money(price)),
+            const SizedBox(height: NileSpacing.s4),
+            _row('App store purchases', switch (config.iapPriceCentsFor(
+              price,
+            )) {
+              final c? => _money(c),
+              null => 'Card only',
+            }),
+            const SizedBox(height: NileSpacing.s6),
             _row(
               'You earn per ticket',
               '~${_money(perTicket)}',
               emphasize: true,
+            ),
+            const SizedBox(height: NileSpacing.s4),
+            Text(
+              'The same on every device.',
+              style: NileTextStyles.caption().copyWith(
+                color: NileColors.txtTertiary,
+              ),
             ),
             const SizedBox(height: NileSpacing.s8),
             Text(

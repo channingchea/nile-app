@@ -4,6 +4,7 @@ import '../services/calendar_ics.dart';
 import '../services/event_service.dart';
 import '../services/formats.dart';
 import '../services/money.dart';
+import '../services/iap_service.dart';
 import '../services/ticket_service.dart';
 import '../router.dart';
 import '../theme.dart';
@@ -85,8 +86,46 @@ class _MyTicketsScreenState extends State<MyTicketsScreen> {
     }
   }
 
+  /// App store tickets: Apple's own refund form (Phase 4). Apple decides, and
+  /// its notification updates the ticket.
+  Future<void> _requestStoreRefund(MyTicket t) async {
+    final txn = t.ticket.appleTransactionId;
+    final messenger = ScaffoldMessenger.of(context);
+    if (txn == null || !IapService.enabled) {
+      messenger.showSnackBar(
+        const SnackBar(
+          content: Text(
+            'This ticket was bought in the app. Open Nile on the device you '
+            'bought it on to request a refund from the app store.',
+          ),
+        ),
+      );
+      return;
+    }
+    final result = await IapService.requestRefund(txn);
+    if (!mounted) return;
+    if (result == 'submitted') {
+      messenger.showSnackBar(
+        const SnackBar(
+          content: Text('Refund requested. Apple will email you its decision.'),
+        ),
+      );
+    } else if (result != 'cancelled') {
+      messenger.showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Couldn’t open the refund form. Try again, or visit reportaproblem.apple.com.',
+          ),
+        ),
+      );
+    }
+  }
+
   Future<void> _openEvent(Event event) async {
-    final deleted = await context.push(NileRoutes.event(event.id), extra: event);
+    final deleted = await context.push(
+      NileRoutes.event(event.id),
+      extra: event,
+    );
     if (deleted == true) _load();
   }
 
@@ -94,6 +133,7 @@ class _MyTicketsScreenState extends State<MyTicketsScreen> {
   /// amount is quoted in the confirmation because the refund is the whole
   /// point of the tap — nobody should have to remember what they paid.
   Future<void> _cancelTicket(MyTicket t) async {
+    if (t.ticket.isAppStore) return _requestStoreRefund(t);
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -162,9 +202,7 @@ class _MyTicketsScreenState extends State<MyTicketsScreen> {
       );
     }
     if (_tickets == null) {
-      return Center(
-        child: CircularProgressIndicator(color: NileColors.volt),
-      );
+      return Center(child: CircularProgressIndicator(color: NileColors.volt));
     }
     if (_tickets!.isEmpty) {
       return NileEmptyState(
@@ -176,7 +214,12 @@ class _MyTicketsScreenState extends State<MyTicketsScreen> {
 
     return ListView.separated(
       controller: _scroll,
-      padding: const EdgeInsets.fromLTRB(NileSpacing.s16, NileSpacing.s16, NileSpacing.s16, NileSpacing.s32),
+      padding: const EdgeInsets.fromLTRB(
+        NileSpacing.s16,
+        NileSpacing.s16,
+        NileSpacing.s16,
+        NileSpacing.s32,
+      ),
       itemCount: _tickets!.length + (_hasMore ? 1 : 0),
       separatorBuilder: (_, _) => const SizedBox(height: 10),
       itemBuilder: (_, i) {
@@ -217,13 +260,14 @@ class _TicketCard extends StatelessWidget {
               width: 128,
               height: 72,
               child: (cover != null && cover.isNotEmpty)
-                  ? Image.network(cover, fit: BoxFit.cover, cacheWidth: nileDecodeWidth(128))
+                  ? Image.network(
+                      cover,
+                      fit: BoxFit.cover,
+                      cacheWidth: nileDecodeWidth(128),
+                    )
                   : Container(
                       color: NileColors.bgRaised,
-                      child: Icon(
-                        Icons.event,
-                        color: NileColors.txtTertiary,
-                      ),
+                      child: Icon(Icons.event, color: NileColors.txtTertiary),
                     ),
             ),
             Expanded(
@@ -266,7 +310,7 @@ class _TicketCard extends StatelessWidget {
                           ),
                         const SizedBox(width: 8),
                         Text(
-                          nileMoney(myTicket.ticket.amountCents),
+                          nileMoney(myTicket.ticket.paidCents),
                           style: NileTextStyles.labelMd().copyWith(
                             color: NileColors.volt,
                           ),
@@ -277,6 +321,18 @@ class _TicketCard extends StatelessWidget {
                     // window; the edge function re-checks it, so a card that
                     // has been on screen since before the cutoff fails loudly
                     // rather than refunding late.
+                    if (_showNotice)
+                      Padding(
+                        padding: const EdgeInsets.only(top: NileSpacing.s4),
+                        child: Text(
+                          myTicket.event!.status == 'cancelled'
+                              ? 'This show was cancelled.'
+                              : 'This show didn’t take place.',
+                          style: NileTextStyles.caption().copyWith(
+                            color: NileColors.txtSecondary,
+                          ),
+                        ),
+                      ),
                     if (_canCancel)
                       Align(
                         alignment: Alignment.centerLeft,
@@ -289,7 +345,9 @@ class _TicketCard extends StatelessWidget {
                             foregroundColor: NileColors.txtSecondary,
                           ),
                           child: Text(
-                            'Cancel ticket',
+                            myTicket.ticket.isAppStore
+                                ? 'Request refund'
+                                : 'Cancel ticket',
                             style: NileTextStyles.caption(),
                           ),
                         ),
@@ -304,15 +362,27 @@ class _TicketCard extends StatelessWidget {
     );
   }
 
-  /// Paid, still ours to cancel, and the event hasn't started.
+  /// Paid, still ours to cancel, and the event hasn't started. An app store
+  /// ticket can also be refunded (by Apple) when the show was cancelled or
+  /// never went live — that is what the "Request refund" button is for.
   bool get _canCancel =>
       onCancel != null &&
       myTicket.ticket.status == 'paid' &&
       myTicket.event != null &&
-      canCancelTicket(
-        scheduledAt: myTicket.event!.scheduledAt,
-        eventStatus: myTicket.event!.status,
-      );
+      (canCancelTicket(
+            scheduledAt: myTicket.event!.scheduledAt,
+            eventStatus: myTicket.event!.status,
+          ) ||
+          _showNotice);
+
+  /// App store ticket for a show that was cancelled or never happened.
+  bool get _showNotice {
+    final e = myTicket.event;
+    return e != null &&
+        myTicket.ticket.isAppStore &&
+        myTicket.ticket.status == 'paid' &&
+        (e.status == 'cancelled' || (e.isEnded && e.startedAt == null));
+  }
 
   String _subtitle(Event e) {
     final when = e.scheduledAt ?? e.startedAt;
@@ -320,8 +390,7 @@ class _TicketCard extends StatelessWidget {
     return '${_fmtDate(when)} · by @${e.hostUsername}';
   }
 
-  static String _fmtDate(DateTime d) =>
-      NileFormats.dayMonthYear(d.toLocal());
+  static String _fmtDate(DateTime d) => NileFormats.dayMonthYear(d.toLocal());
 }
 
 class _StatusBadge extends StatelessWidget {
@@ -352,7 +421,10 @@ class _StatusBadge extends StatelessWidget {
         label = 'Pending';
     }
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s8, vertical: NileSpacing.s2),
+      padding: const EdgeInsets.symmetric(
+        horizontal: NileSpacing.s8,
+        vertical: NileSpacing.s2,
+      ),
       decoration: BoxDecoration(
         color: color.withValues(alpha: 0.15),
         borderRadius: BorderRadius.circular(NileRadius.pill),
@@ -379,7 +451,10 @@ class _Centered extends StatelessWidget {
       children: [
         SizedBox(height: MediaQuery.of(context).size.height * 0.3),
         Center(
-          child: Padding(padding: const EdgeInsets.all(NileSpacing.s24), child: child),
+          child: Padding(
+            padding: const EdgeInsets.all(NileSpacing.s24),
+            child: child,
+          ),
         ),
       ],
     );

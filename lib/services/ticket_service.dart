@@ -14,6 +14,16 @@ class Ticket {
   final String status; // 'pending' | 'paid' | 'refunded'
   final DateTime createdAt;
 
+  /// 'stripe' (card) or 'apple' (App Store in-app purchase).
+  final String paymentProvider;
+
+  /// Apple's transaction id — what Apple's refund form is opened with.
+  final String? appleTransactionId;
+
+  /// What the buyer paid the store, when that differs from [amountCents]
+  /// (the web price the host's share is based on).
+  final int? storePriceCents;
+
   const Ticket({
     required this.id,
     required this.eventId,
@@ -22,9 +32,16 @@ class Ticket {
     required this.amountCents,
     required this.status,
     required this.createdAt,
+    this.paymentProvider = 'stripe',
+    this.appleTransactionId,
+    this.storePriceCents,
   });
 
   bool get isPaid => status == 'paid';
+  bool get isAppStore => paymentProvider == 'apple';
+
+  /// What the buyer actually paid.
+  int get paidCents => storePriceCents ?? amountCents;
 
   factory Ticket.fromJson(Map<String, dynamic> j) => Ticket(
     id: j['id'] as String,
@@ -34,6 +51,9 @@ class Ticket {
     amountCents: (j['amount_cents'] as num).toInt(),
     status: j['status'] as String,
     createdAt: DateTime.parse(j['created_at'] as String),
+    paymentProvider: j['payment_provider'] as String? ?? 'stripe',
+    appleTransactionId: j['apple_transaction_id'] as String?,
+    storePriceCents: (j['store_price_cents'] as num?)?.toInt(),
   );
 }
 
@@ -169,7 +189,7 @@ class TicketService {
     var b = supabase
         .from('tickets')
         .select(
-          'id, amount_cents, created_at, status, '
+          'id, amount_cents, created_at, status, payment_provider, '
           'profiles!tickets_buyer_id_fkey(id, username, avatar_url)',
         )
         .eq('event_id', eventId)
@@ -218,6 +238,9 @@ class Attendee {
   final String status; // 'paid' | 'refunded' | 'disputed'
   final DateTime purchasedAt;
 
+  /// Bought through the app store: only the store can refund it.
+  final bool viaAppStore;
+
   const Attendee({
     required this.ticketId,
     required this.buyerId,
@@ -226,6 +249,7 @@ class Attendee {
     required this.amountCents,
     required this.status,
     required this.purchasedAt,
+    this.viaAppStore = false,
   });
 
   bool get isRefunded => status == 'refunded';
@@ -254,6 +278,7 @@ class Attendee {
       amountCents: (j['amount_cents'] as num).toInt(),
       status: j['status'] as String? ?? 'paid',
       purchasedAt: DateTime.parse(j['created_at'] as String),
+      viaAppStore: j['payment_provider'] == 'apple',
     );
   }
 }

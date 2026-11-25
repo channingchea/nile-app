@@ -68,6 +68,9 @@ function buildMessage(p: Payload): { title: string; body: string } {
         title: "Event didn't take place",
         body: `${who}'s event never started`,
       };
+    case "event_cancelled":
+      // Migration 0159. Ticket holders; My Tickets has the refund button.
+      return { title: "Event cancelled", body: `${who} cancelled their event. See My Tickets for a refund.` };
     case "operator_assigned":
       return { title: "You're on the crew", body: `${who} added you as a camera operator` };
     case "guest_invited":

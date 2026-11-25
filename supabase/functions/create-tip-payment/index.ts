@@ -113,7 +113,11 @@ serve(async (req) => {
       .select("tip_fee_share")
       .eq("id", 1)
       .maybeSingle();
-    const feeShare = Number(cfg?.tip_fee_share ?? DEFAULT_TIP_FEE_SHARE);
+    // Tips sent from the iPhone/iPad app carry no Nile fee — 100% goes to the
+    // host (Nile covers Stripe's fee). That keeps them a pure person-to-person
+    // gift, which is what lets them skip Apple's in-app purchase.
+    // Web, Mac and Android keep the configured fee.
+    const feeShare = origin === "ios" ? 0 : Number(cfg?.tip_fee_share ?? DEFAULT_TIP_FEE_SHARE);
     const fee = Math.round(amt * feeShare);
 
     const session = await stripe.checkout.sessions.create({
@@ -132,7 +136,7 @@ serve(async (req) => {
       custom_text: { submit: { message: TIP_REFUND_POLICY } },
       // Atomic split: application fee to the platform, remainder to the host.
       payment_intent_data: {
-        application_fee_amount: fee,
+        ...(fee > 0 ? { application_fee_amount: fee } : {}),
         transfer_data: { destination: hostAccountId },
       },
       success_url: `${Deno.env.get("TIP_SUCCESS_URL")}?event_id=${event_id}&session_id={CHECKOUT_SESSION_ID}`,
