@@ -94,11 +94,17 @@ class _EditEventScreenState extends State<EditEventScreen> {
   // Server pricing constants; local fallback until the real config loads.
   PricingConfig _pricing = PricingService.current;
 
+  /// The floor the price field last saw — see [_followFloor].
+  int _floorSeen = 0;
+
   @override
   void initState() {
     super.initState();
     PricingService.load().then((c) {
-      if (mounted) setState(() => _pricing = c);
+      if (!mounted) return;
+      setState(() => _pricing = c);
+      // A new config isn't the host changing the show: don't move their price.
+      _floorSeen = _minPriceCents;
     });
     final e = widget.event;
     // Seed cameras from the event row so the ticket floor is right before the
@@ -135,7 +141,11 @@ class _EditEventScreenState extends State<EditEventScreen> {
       text: _trimNum(mins / 60),
     ); // hours by default
     _initialDurationText = _durationController.text;
-    _durationController.addListener(() => setState(() {}));
+    _floorSeen = _minPriceCents;
+    _durationController.addListener(() {
+      _followFloor();
+      setState(() {});
+    });
     _priceController.addListener(() => setState(() {}));
 
     _loadCrew();
@@ -148,9 +158,20 @@ class _EditEventScreenState extends State<EditEventScreen> {
 
   int get _minPriceCents => _pricing.minTicketCentsFor(
     durationMinutes: _parsedDurationMinutes() ?? 60,
-    cameraCount: _cameraCount,
-    mode: _studioMode,
   );
+
+  /// The price follows the floor. When the minimum moves (a longer or shorter
+  /// show), a price that sat on the old minimum — or would now fall under the
+  /// new one — moves with it. A blank (free) price is left alone.
+  void _followFloor() {
+    final min = _minPriceCents;
+    if (min == _floorSeen) return;
+    final typed = _typedPriceCents;
+    if (typed > 0 && (typed == _floorSeen || typed < min)) {
+      _priceController.text = (min / 100).toStringAsFixed(2);
+    }
+    _floorSeen = min;
+  }
 
   int get _typedPriceCents {
     final raw = _priceController.text.trim();
@@ -337,9 +358,7 @@ class _EditEventScreenState extends State<EditEventScreen> {
       firstDate: now,
       lastDate: now.add(const Duration(days: 365 * 2)),
       builder: (ctx, child) => Theme(
-        data: Theme.of(ctx).copyWith(
-          colorScheme: Theme.of(ctx).colorScheme,
-        ),
+        data: Theme.of(ctx).copyWith(colorScheme: Theme.of(ctx).colorScheme),
         child: child!,
       ),
     );
@@ -348,9 +367,7 @@ class _EditEventScreenState extends State<EditEventScreen> {
       context: context,
       initialTime: TimeOfDay.fromDateTime(seed),
       builder: (ctx, child) => Theme(
-        data: Theme.of(ctx).copyWith(
-          colorScheme: Theme.of(ctx).colorScheme,
-        ),
+        data: Theme.of(ctx).copyWith(colorScheme: Theme.of(ctx).colorScheme),
         child: child!,
       ),
     );
@@ -496,8 +513,10 @@ class _EditEventScreenState extends State<EditEventScreen> {
       // isAtSameMomentAs, not ==: _scheduledAt is local and event.scheduledAt is
       // UTC, and Dart's == compares isUtc as well as the instant. Every save
       // therefore wrote both fields whether or not anything had changed.
-      final scheduledChanged =
-          !_sameInstant(_scheduledAt, widget.event.scheduledAt);
+      final scheduledChanged = !_sameInstant(
+        _scheduledAt,
+        widget.event.scheduledAt,
+      );
       final endChanged = !_sameInstant(newEndAt, widget.event.endAt);
       final priceChanged = priceCents != widget.event.price;
       final limitChanged = ticketLimit != widget.event.ticketLimit;
@@ -549,8 +568,9 @@ class _EditEventScreenState extends State<EditEventScreen> {
         // it must not wipe a minimum the host set. Auto-accept is the exception:
         // _toggleSponsorship clears it on the way out, and that clear has to
         // land.
-        sponsorshipMinOfferCents:
-            _sponsorshipOpen && minOfferChanged ? minOfferCents : null,
+        sponsorshipMinOfferCents: _sponsorshipOpen && minOfferChanged
+            ? minOfferCents
+            : null,
         clearSponsorshipMinOffer:
             _sponsorshipOpen && minOfferChanged && minOfferCents == null,
         sponsorshipAutoAccept:
@@ -635,7 +655,12 @@ class _EditEventScreenState extends State<EditEventScreen> {
       ),
       body: NileMaxWidth(
         child: SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(NileSpacing.s24, NileSpacing.s8, NileSpacing.s24, NileSpacing.s40),
+          padding: const EdgeInsets.fromLTRB(
+            NileSpacing.s24,
+            NileSpacing.s8,
+            NileSpacing.s24,
+            NileSpacing.s40,
+          ),
           child: AbsorbPointer(
             absorbing: _saving,
             child: Form(
@@ -690,7 +715,10 @@ class _EditEventScreenState extends State<EditEventScreen> {
                     inHours: _durationInHours,
                     onUnitChanged: _changeUnit,
                     preview: _durationPreview(),
-                    maxMinutes: _pricing.maxStreamMinutes,
+                    maxMinutes: _typedPriceCents > 0
+                        ? _pricing.maxStreamMinutes
+                        : _pricing.freeMaxStreamMinutes,
+                    freeCap: _typedPriceCents == 0,
                   ),
                   const SizedBox(height: 20),
                   _SectionLabel('Studio Mode'),
@@ -796,6 +824,15 @@ class _EditEventScreenState extends State<EditEventScreen> {
                       ),
                     ],
                   ),
+                  if (_typedPriceCents == 0) ...[
+                    const SizedBox(height: 6),
+                    Text(
+                      _pricing.freeShowRule,
+                      style: NileTextStyles.caption().copyWith(
+                        color: NileColors.txtTertiary,
+                      ),
+                    ),
+                  ],
                   if (_cameraCount > 1 || _typedPriceCents > 0) ...[
                     const SizedBox(height: 16),
                     PayoutPreviewCard(
@@ -872,9 +909,8 @@ class _EditEventScreenState extends State<EditEventScreen> {
                       contentPadding: EdgeInsets.zero,
                       controlAffinity: ListTileControlAffinity.leading,
                       value: _sponsorshipAutoAccept,
-                      onChanged: (v) => setState(
-                        () => _sponsorshipAutoAccept = v ?? false,
-                      ),
+                      onChanged: (v) =>
+                          setState(() => _sponsorshipAutoAccept = v ?? false),
                       title: Text(
                         'Automatically accept offers at or above my minimum',
                         style: NileTextStyles.bodyMd(),
@@ -961,7 +997,9 @@ class _EditEventScreenState extends State<EditEventScreen> {
                           : (_isDraft ? 'Publish Event' : 'Save Changes'),
                     ),
                     style: FilledButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
+                      padding: const EdgeInsets.symmetric(
+                        vertical: NileSpacing.s16,
+                      ),
                       textStyle: NileTextStyles.labelLg(),
                     ),
                   ),
@@ -1133,7 +1171,10 @@ class _DateField extends StatelessWidget {
           onTap: onTap,
           borderRadius: BorderRadius.circular(NileRadius.sm),
           child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s12, vertical: NileSpacing.s12),
+            padding: const EdgeInsets.symmetric(
+              horizontal: NileSpacing.s12,
+              vertical: NileSpacing.s12,
+            ),
             decoration: BoxDecoration(
               color: NileColors.bgSurface,
               border: Border.all(
@@ -1175,7 +1216,10 @@ class _DateField extends StatelessWidget {
         ),
         if (errorText != null)
           Padding(
-            padding: const EdgeInsets.only(left: NileSpacing.s12, top: NileSpacing.s8),
+            padding: const EdgeInsets.only(
+              left: NileSpacing.s12,
+              top: NileSpacing.s8,
+            ),
             child: Text(
               errorText!,
               style: NileTextStyles.caption().copyWith(color: NileColors.error),

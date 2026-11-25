@@ -5,13 +5,12 @@ import '../theme.dart';
 
 /// Inline pricing coach for the create/edit event forms: the minimum this
 /// event can be ticketed at, and what the host keeps per ticket at the price
-/// they've typed. Deliberately shows only host-facing numbers — the cost
-/// drivers behind the floor stay server-side.
+/// they've typed, with the rule behind the minimum in words.
 class PayoutPreviewCard extends StatelessWidget {
   /// Price currently typed, in cents. Null/0 = free.
   final int? priceCents;
 
-  /// Break-even floor for the current duration + camera count.
+  /// Ticket floor for the current duration.
   final int minCents;
 
   final int cameraCount;
@@ -43,10 +42,25 @@ class PayoutPreviewCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _row('Minimum for this event', _money(minCents), emphasize: price == 0),
+          _row(
+            'Minimum for this event',
+            _money(minCents),
+            emphasize: price == 0,
+          ),
+          const SizedBox(height: NileSpacing.s4),
+          Text(
+            '${config.floorRule}.',
+            style: NileTextStyles.caption().copyWith(
+              color: NileColors.txtTertiary,
+            ),
+          ),
           if (price > 0) ...[
             const SizedBox(height: NileSpacing.s6),
-            _row('You earn per ticket', '~${_money(perTicket)}', emphasize: true),
+            _row(
+              'You earn per ticket',
+              '~${_money(perTicket)}',
+              emphasize: true,
+            ),
             const SizedBox(height: NileSpacing.s8),
             Text(
               '$sample tickets → ${_money(perTicket * sample)}',
@@ -57,8 +71,7 @@ class PayoutPreviewCard extends StatelessWidget {
           ] else if (cameraCount > 1) ...[
             const SizedBox(height: NileSpacing.s8),
             Text(
-              'Multi-camera streams cost more to run — tickets start at '
-              '${_money(minCents)}.',
+              'Multi-camera streams need a ticket.',
               style: NileTextStyles.caption().copyWith(
                 color: NileColors.txtTertiary,
               ),

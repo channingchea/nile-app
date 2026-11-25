@@ -13,6 +13,7 @@ import '../services/backstage.dart';
 import '../services/event_service.dart';
 import '../services/interview.dart';
 import '../services/interview_service.dart';
+import '../services/free_show.dart';
 import '../services/livekit_service.dart';
 import '../services/profile_service.dart';
 import '../services/screen_capture_permission.dart';
@@ -217,10 +218,17 @@ class _GuestGreenRoomScreenState extends State<GuestGreenRoomScreen> {
   bool get _cameraLive => _lp?.isCameraEnabled() ?? _cameraOn;
   bool get _isLive => _status == 'live';
 
+  /// The show has no ticket price (from the token): publish at 480p.
+  bool _freeShow = false;
+
   CameraCaptureOptions get _cameraOptions => _cameraId != null
-      ? CameraCaptureOptions(deviceId: _cameraId)
+      ? CameraCaptureOptions(
+          deviceId: _cameraId,
+          params: FreeShowVideo.capture(_freeShow),
+        )
       : CameraCaptureOptions(
           cameraPosition: _front ? CameraPosition.front : CameraPosition.back,
+          params: FreeShowVideo.capture(_freeShow),
         );
 
   /// iPad and Mac pick devices from a menu; phones flip front/back.
@@ -576,9 +584,15 @@ class _GuestGreenRoomScreenState extends State<GuestGreenRoomScreen> {
       title: title,
       device: _device,
     );
+    _freeShow = conn.freeShow;
     // adaptiveStream sizes each subscribed feed to its tile, so the small
     // stage preview pulls a low layer and the on-stage view a high one.
-    final room = Room(roomOptions: const RoomOptions(adaptiveStream: true));
+    final room = Room(
+      roomOptions: RoomOptions(
+        adaptiveStream: true,
+        defaultVideoPublishOptions: FreeShowVideo.publish(_freeShow),
+      ),
+    );
     final listener = room.createListener();
     _wire(listener);
     try {
@@ -930,6 +944,7 @@ class _GuestGreenRoomScreenState extends State<GuestGreenRoomScreen> {
             cameraPosition: nowFront
                 ? CameraPosition.front
                 : CameraPosition.back,
+            params: track.currentOptions.params,
           );
         } else {
           await track.setCameraPosition(

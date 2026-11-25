@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:video_player/video_player.dart';
 
+import '../services/away_pause.dart';
 import '../services/event_service.dart';
 import '../services/livekit_service.dart';
 import '../services/mini_player.dart';
@@ -51,9 +52,16 @@ class _ReplayScreenState extends State<ReplayScreen> {
   VideoPlayerController? _film;
   String? _filmError;
 
+  /// Leaving the app pauses playback; coming back picks it up.
+  late final AwayPause _awayPause;
+
   @override
   void initState() {
     super.initState();
+    _awayPause = AwayPause(
+      () => [_controller, _film],
+      onChange: () => mounted ? setState(() {}) : null,
+    );
     // Arriving from the dock: the controller is already initialised and mid-
     // playback. Reusing it skips a second signed-URL round-trip and picks up
     // exactly where the mini player was.
@@ -248,6 +256,7 @@ class _ReplayScreenState extends State<ReplayScreen> {
 
   @override
   void dispose() {
+    _awayPause.dispose();
     _film?.dispose();
     _controller?.removeListener(_onRecordingTick);
     final c = _controller;

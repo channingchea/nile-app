@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:video_player/video_player.dart';
 
+import '../services/away_pause.dart';
 import '../services/capture_guard.dart';
 import '../services/film_sync.dart';
 import '../services/premiere.dart';
@@ -62,6 +63,10 @@ class _FilmSyncPlayerState extends State<FilmSyncPlayer> {
   String? _captionsFor;
   bool _held = false;
 
+  /// Away from the app the film stops being fetched (it is billed per minute
+  /// delivered); back, it catches up with the show clock.
+  AwayWatcher? _away;
+
   @override
   void initState() {
     super.initState();
@@ -78,6 +83,10 @@ class _FilmSyncPlayerState extends State<FilmSyncPlayer> {
     }
     unawaited(_open());
     _tick = Timer.periodic(const Duration(seconds: 1), (_) => _sync());
+    _away = AwayWatcher(
+      onAway: () => _c?.pause(),
+      onBack: () => _sync(force: true),
+    );
   }
 
   @override
@@ -95,6 +104,7 @@ class _FilmSyncPlayerState extends State<FilmSyncPlayer> {
 
   @override
   void dispose() {
+    _away?.dispose();
     _tick?.cancel();
     _renew?.cancel();
     _c?.dispose();
@@ -205,6 +215,10 @@ class _FilmSyncPlayerState extends State<FilmSyncPlayer> {
   void _sync({bool force = false}) {
     final c = _c;
     if (c == null || !c.value.isInitialized) return;
+    if (_away?.away ?? false) {
+      if (c.value.isPlaying) c.pause();
+      return;
+    }
     final n = widget.film.nowAt(widget.now());
     final at = c.value.position.inMilliseconds;
     if (!n.moving) {

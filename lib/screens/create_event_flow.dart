@@ -34,7 +34,11 @@ class EventDraft {
   String description = '';
   DateTime? scheduledAt;
   int durationMinutes = 60; // default 1h
-  int? priceCents;
+
+  /// Starts on the minimum for a one-hour show; cleared = a free show.
+  int? priceCents = PricingService.current.minTicketCentsFor(
+    durationMinutes: 60,
+  );
   int? ticketLimit;
 
   /// How the Studio runs the show; changeable in the Studio until live.
@@ -167,6 +171,9 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
   // real config as soon as it loads.
   PricingConfig _pricing = PricingService.current;
 
+  /// The floor the price field last saw — see [_followFloor].
+  int _floorSeen = 0;
+
   /// Signed-in host, for the preview card's byline. Null until it loads — and
   /// always, on a phone, where there is no preview to put it in.
   UserProfile? _host;
@@ -178,7 +185,9 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
   void initState() {
     super.initState();
     PricingService.load().then((c) {
-      if (mounted) setState(() => _pricing = c);
+      if (!mounted) return;
+      setState(() => _pricing = c);
+      _followFloor();
     });
     _nameController = TextEditingController(text: _draft.name);
     _descriptionController = TextEditingController(text: _draft.description);
@@ -201,7 +210,11 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
     );
     // Live preview: rebuild on every keystroke so the "ends at" caption and the
     // payout card track what's typed.
-    _durationController.addListener(() => setState(() {}));
+    _floorSeen = _minPriceCents;
+    _durationController.addListener(() {
+      _followFloor();
+      setState(() {});
+    });
     _priceController.addListener(() => setState(() {}));
   }
 
@@ -226,12 +239,23 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
 
   int get _cameraCount => _draft.crew.cameraCount;
 
-  /// Break-even ticket floor for the currently-entered duration + cameras.
+  /// Ticket floor for the currently-entered duration.
   int get _minPriceCents => _pricing.minTicketCentsFor(
     durationMinutes: _parsedDurationMinutes() ?? 60,
-    cameraCount: _cameraCount,
-    mode: _draft.studioMode,
   );
+
+  /// The price follows the floor. When the minimum moves (a longer or shorter
+  /// show), a price that sat on the old minimum — or would now fall under the
+  /// new one — moves with it. A blank (free) price is left alone.
+  void _followFloor() {
+    final min = _minPriceCents;
+    if (min == _floorSeen) return;
+    final typed = _typedPriceCents;
+    if (typed > 0 && (typed == _floorSeen || typed < min)) {
+      _priceController.text = (min / 100).toStringAsFixed(2);
+    }
+    _floorSeen = min;
+  }
 
   /// Price typed right now, in cents (0 when blank).
   int get _typedPriceCents {
@@ -398,9 +422,7 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
       firstDate: now,
       lastDate: now.add(const Duration(days: 365 * 2)),
       builder: (ctx, child) => Theme(
-        data: Theme.of(ctx).copyWith(
-          colorScheme: Theme.of(ctx).colorScheme,
-        ),
+        data: Theme.of(ctx).copyWith(colorScheme: Theme.of(ctx).colorScheme),
         child: child!,
       ),
     );
@@ -411,9 +433,7 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
         _draft.scheduledAt ?? now.add(const Duration(hours: 1)),
       ),
       builder: (ctx, child) => Theme(
-        data: Theme.of(ctx).copyWith(
-          colorScheme: Theme.of(ctx).colorScheme,
-        ),
+        data: Theme.of(ctx).copyWith(colorScheme: Theme.of(ctx).colorScheme),
         child: child!,
       ),
     );
@@ -645,7 +665,12 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
   /// inline. Scrolls itself, so a short window can still reach the bottom.
   Widget _previewPanel() {
     return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(0, NileSpacing.s8, NileSpacing.s24, NileSpacing.s40),
+      padding: const EdgeInsets.fromLTRB(
+        0,
+        NileSpacing.s8,
+        NileSpacing.s24,
+        NileSpacing.s40,
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -674,7 +699,12 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
   /// sticky panel instead, so the estimate stays put while the host scrolls.
   Widget _formColumn({required bool inlinePayout}) {
     return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(NileSpacing.s24, NileSpacing.s8, NileSpacing.s24, NileSpacing.s40),
+      padding: const EdgeInsets.fromLTRB(
+        NileSpacing.s24,
+        NileSpacing.s8,
+        NileSpacing.s24,
+        NileSpacing.s40,
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -737,7 +767,10 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
             inHours: _durationInHours,
             onUnitChanged: _changeUnit,
             preview: _durationPreview(),
-            maxMinutes: _pricing.maxStreamMinutes,
+            maxMinutes: _typedPriceCents > 0
+                ? _pricing.maxStreamMinutes
+                : _pricing.freeMaxStreamMinutes,
+            freeCap: _typedPriceCents == 0,
           ),
           const SizedBox(height: 20),
           _SectionLabel('Studio Mode'),
@@ -785,10 +818,9 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
                     const SizedBox(height: 6),
                     TextFormField(
                       controller: _priceController,
-                      keyboardType:
-                          const TextInputType.numberWithOptions(
-                            decimal: true,
-                          ),
+                      keyboardType: const TextInputType.numberWithOptions(
+                        decimal: true,
+                      ),
                       inputFormatters: [
                         FilteringTextInputFormatter.allow(
                           RegExp(r'^\d*\.?\d{0,2}'),
@@ -815,9 +847,7 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
                     TextFormField(
                       controller: _ticketLimitController,
                       keyboardType: TextInputType.number,
-                      inputFormatters: [
-                        FilteringTextInputFormatter.digitsOnly,
-                      ],
+                      inputFormatters: [FilteringTextInputFormatter.digitsOnly],
                       decoration: const InputDecoration(
                         hintText: 'Unlimited',
                         helperText:
@@ -842,6 +872,15 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
               ),
             ],
           ),
+          if (_typedPriceCents == 0) ...[
+            const SizedBox(height: 6),
+            Text(
+              _pricing.freeShowRule,
+              style: NileTextStyles.caption().copyWith(
+                color: NileColors.txtTertiary,
+              ),
+            ),
+          ],
           if (inlinePayout && _showPayout) ...[
             const SizedBox(height: 16),
             _payoutCard(),
@@ -852,10 +891,7 @@ class _EventDetailsPageState extends State<EventDetailsPage> {
             contentPadding: EdgeInsets.zero,
             value: _draft.sponsorshipOpen,
             onChanged: _toggleSponsorship,
-            title: Text(
-              'Open to sponsorship',
-              style: NileTextStyles.bodyMd(),
-            ),
+            title: Text('Open to sponsorship', style: NileTextStyles.bodyMd()),
             subtitle: Text(
               'Let a brand sponsor your pre-show lobby. You keep 70% '
               'of the sponsorship price; every ad is reviewed by Nile '
@@ -1078,7 +1114,12 @@ class _ChooseCrewPageState extends State<ChooseCrewPage> {
         child: AbsorbPointer(
           absorbing: _committing,
           child: SingleChildScrollView(
-            padding: const EdgeInsets.fromLTRB(NileSpacing.s24, NileSpacing.s8, NileSpacing.s24, NileSpacing.s40),
+            padding: const EdgeInsets.fromLTRB(
+              NileSpacing.s24,
+              NileSpacing.s8,
+              NileSpacing.s24,
+              NileSpacing.s40,
+            ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
@@ -1118,7 +1159,9 @@ class _ChooseCrewPageState extends State<ChooseCrewPage> {
                 FilledButton(
                   onPressed: _committing ? null : () => _commit(asDraft: false),
                   style: FilledButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
+                    padding: const EdgeInsets.symmetric(
+                      vertical: NileSpacing.s16,
+                    ),
                     textStyle: NileTextStyles.labelLg().copyWith(color: null),
                   ),
                   child: _committing
@@ -1216,7 +1259,12 @@ class EventCreatedPage extends StatelessWidget {
       ),
       body: NileMaxWidth(
         child: SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(NileSpacing.s24, NileSpacing.s8, NileSpacing.s24, NileSpacing.s40),
+          padding: const EdgeInsets.fromLTRB(
+            NileSpacing.s24,
+            NileSpacing.s8,
+            NileSpacing.s24,
+            NileSpacing.s40,
+          ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
@@ -1268,7 +1316,9 @@ class EventCreatedPage extends StatelessWidget {
                 icon: const Icon(Icons.edit_outlined),
                 label: const Text('Post About It'),
                 style: FilledButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
+                  padding: const EdgeInsets.symmetric(
+                    vertical: NileSpacing.s16,
+                  ),
                   textStyle: NileTextStyles.labelLg().copyWith(color: null),
                 ),
               ),
@@ -1279,7 +1329,9 @@ class EventCreatedPage extends StatelessWidget {
                 icon: const Icon(Icons.ios_share),
                 label: const Text('Share With Friends'),
                 style: OutlinedButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(vertical: NileSpacing.s16),
+                  padding: const EdgeInsets.symmetric(
+                    vertical: NileSpacing.s16,
+                  ),
                 ),
               ),
 
@@ -1493,7 +1545,10 @@ class _DateField extends StatelessWidget {
           onTap: onTap,
           borderRadius: BorderRadius.circular(NileRadius.sm),
           child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s12, vertical: NileSpacing.s12),
+            padding: const EdgeInsets.symmetric(
+              horizontal: NileSpacing.s12,
+              vertical: NileSpacing.s12,
+            ),
             decoration: BoxDecoration(
               color: NileColors.bgSurface,
               border: Border.all(
@@ -1535,7 +1590,10 @@ class _DateField extends StatelessWidget {
         ),
         if (errorText != null)
           Padding(
-            padding: const EdgeInsets.only(left: NileSpacing.s12, top: NileSpacing.s8),
+            padding: const EdgeInsets.only(
+              left: NileSpacing.s12,
+              top: NileSpacing.s8,
+            ),
             child: Text(
               errorText!,
               style: NileTextStyles.caption().copyWith(color: NileColors.error),

@@ -1,8 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nile_app/services/film_sync.dart';
-import 'package:nile_app/services/pricing_service.dart';
-import 'package:nile_app/services/studio_mode.dart';
 import 'package:nile_app/widgets/premiere_panel.dart';
 import 'package:nile_app/widgets/premiere_widgets.dart';
 
@@ -99,33 +97,6 @@ void main() {
     // Nonsense presses change nothing.
     expect(rehearseFilmControl(f, 'pause', 1), f);
     expect(rehearseFilmControl(f, 'end', 1), f);
-  });
-
-  group('ticket floor by mode (0153)', () {
-    const c = PricingConfig.fallback;
-    test(
-      'every mode carries the recording; Premiere and Interview cost more',
-      () {
-        final multi = c.minTicketCentsFor(durationMinutes: 120, cameraCount: 1);
-        final interview = c.minTicketCentsFor(
-          durationMinutes: 120,
-          cameraCount: 1,
-          mode: StudioMode.interview,
-        );
-        final premiere = c.minTicketCentsFor(
-          durationMinutes: 120,
-          cameraCount: 1,
-          mode: StudioMode.premiere,
-        );
-        expect(interview, greaterThanOrEqualTo(multi));
-        expect(premiere, greaterThan(multi));
-        // 2 h, 1 camera, multicam: 30 + 54 + (80 + 240) / 10 = 116c over the
-        // 0.471 margin → 246c → $2.50.
-        expect(multi, 250);
-        // Premiere adds 12c delivery + 6c storage → 134c → 284c → $3.00.
-        expect(premiere, 300);
-      },
-    );
   });
 
   testWidgets('the rehearsal film plays a stand-in, never the real stream', (

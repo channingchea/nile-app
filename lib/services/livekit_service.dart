@@ -596,11 +596,12 @@ class LivekitService {
   /// or a LiveKit error. The show is live either way; what changes is that the
   /// host finds out now instead of after the show, with nothing to sell.
   /// Old servers omit the flag; absence is treated as "started", which is the
-  /// behaviour that shipped before this existed.
+  /// behaviour that shipped before this existed. A free show is never
+  /// recorded, and says so rather than reporting a failure.
   ///
   /// [studio] marks the call as coming from the desktop Studio. While a Studio
   /// is in the room the server refuses Start Show from anywhere else.
-  static Future<bool> startShow({
+  static Future<ShowRecording> startShow({
     required String eventId,
     bool studio = false,
   }) async {
@@ -609,7 +610,10 @@ class LivekitService {
       'eventId': eventId,
       if (studio) 'studio': true,
     });
-    return d['egressStarted'] != false;
+    if (d['freeShow'] == true) return ShowRecording.freeShow;
+    return d['egressStarted'] != false
+        ? ShowRecording.started
+        : ShowRecording.failed;
   }
 
   /// Host: disconnect one participant from the live room.
@@ -759,10 +763,16 @@ class LivekitService {
   }
 }
 
+/// What Start Show did about the replay recording.
+enum ShowRecording { started, failed, freeShow }
+
 class LivekitToken {
   final String token;
   final String wsUrl;
   final bool isMasterAudio;
+
+  /// The event has no ticket price: publish at [FreeShowVideo], no replay.
+  final bool freeShow;
 
   /// Camera slot this token holds (event_cameras.id), when it has one.
   final String? slotId;
@@ -775,6 +785,7 @@ class LivekitToken {
     required this.token,
     required this.wsUrl,
     this.isMasterAudio = false,
+    this.freeShow = false,
     this.slotId,
     this.cameraName,
   });
@@ -783,6 +794,7 @@ class LivekitToken {
     token: d['token'] as String,
     wsUrl: d['wsUrl'] as String,
     isMasterAudio: d['isMasterAudio'] == true,
+    freeShow: d['freeShow'] == true,
     slotId: d['slotId'] as String?,
     cameraName: d['cameraName'] as String? ?? fallbackName,
   );
@@ -897,6 +909,7 @@ class GuestConnection {
     required this.status,
     this.eventTitle,
     this.mode,
+    this.freeShow = false,
   });
 
   factory GuestConnection.fromJson(Map d) => GuestConnection(
@@ -906,6 +919,7 @@ class GuestConnection {
     status: GuestStatus.fromWire(d['status']),
     eventTitle: d['eventTitle'] as String?,
     mode: d['mode'] as String?,
+    freeShow: d['freeShow'] == true,
   );
 
   final String token;
@@ -914,4 +928,7 @@ class GuestConnection {
   final GuestStatus status;
   final String? eventTitle;
   final String? mode;
+
+  /// The event has no ticket price: publish at [FreeShowVideo].
+  final bool freeShow;
 }

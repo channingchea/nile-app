@@ -204,6 +204,7 @@ class NileStudioStats {
     this.quality = NileStudioQuality.unknown,
     this.audioSourceLabel,
     this.notRecording = false,
+    this.freeShow = false,
   });
 
   final bool isLive;
@@ -234,6 +235,9 @@ class NileStudioStats {
   /// message has no way of finding out until the show is over and there is
   /// nothing to sell, and by then it is unfixable.
   final bool notRecording;
+
+  /// A show with no ticket price: never recorded, by rule.
+  final bool freeShow;
 
   static String formatClock(Duration d) {
     final h = d.inHours;
@@ -629,6 +633,14 @@ class _StudioStatsRow extends StatelessWidget {
               'The replay recording never started — there will be no '
               'replay to sell for this show',
           color: NileColors.error,
+        ),
+      ],
+      if (stats.freeShow && stats.isLive) ...[
+        const SizedBox(width: NileSpacing.s12),
+        const _Stat(
+          icon: Icons.fiber_smart_record,
+          label: 'NOT RECORDED',
+          tooltip: 'Free shows aren’t recorded',
         ),
       ],
       if (stats.elapsed != null) ...[

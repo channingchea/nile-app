@@ -11,6 +11,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:video_player/video_player.dart';
 import '../services/ad_service.dart';
 import '../services/analytics.dart';
+import '../services/away_pause.dart';
 import '../services/block_service.dart';
 import '../services/chat_service.dart';
 import '../services/deep_link_service.dart';
@@ -214,6 +215,16 @@ class _ViewerScreenState extends State<ViewerScreen>
   String? _eventTitle;
   String? _hostId;
   bool _tipPending = false;
+
+  // Away (cost controls, phase 4): the viewer left the app or hid the window.
+  // Nothing is pulled while away; after [_awayLimit] the room is dropped too,
+  // which is also what takes this viewer out of the count.
+  static const _awayLimit = Duration(minutes: 2);
+  late final AwayWatcher _awayWatcher;
+  Timer? _awayTimer;
+  bool _awayDropped = false;
+  bool _resuming = false;
+  bool get _away => _awayWatcher.away;
   // True while the room dropped (e.g. all cameras left) but the show is still
   // live in the DB — we hold a "reconnecting" overlay and retry rather than
   // ending. Only an `ended` DB status actually ends the show.
@@ -303,6 +314,7 @@ class _ViewerScreenState extends State<ViewerScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _awayWatcher = AwayWatcher(onAway: _goAway, onBack: _comeBack);
     _chatScrollController.addListener(_onChatScroll);
     if (widget.initialEventId != null) {
       _eventIdController.text = widget.initialEventId!;
@@ -324,9 +336,93 @@ class _ViewerScreenState extends State<ViewerScreen>
     }
   }
 
+  // ── Away ──────────────────────────────────────────────────────────────────
+
+  /// Subscribe — unless the viewer is away, when nothing is pulled and
+  /// [_comeBack] picks it up instead.
+  void _pull(RemoteTrackPublication pub) {
+    if (!_away) pub.subscribe();
+  }
+
+  /// Left the app: stop pulling every feed, and start the clock on the room.
+  void _goAway() {
+    final room = _room;
+    if (room == null || _state != ViewerState.watching || _streamEnded) return;
+    // Come back to the angle being watched (a screen share's tile is rebuilt).
+    final f = _focused;
+    if (f != null) _resume = (identity: f.identity, screen: f.isScreenShare);
+    _realSync?.reset();
+    for (final p in room.remoteParticipants.values) {
+      for (final pub in [
+        ...p.videoTrackPublications,
+        ...p.audioTrackPublications,
+      ]) {
+        if (pub.subscribed) pub.unsubscribe();
+      }
+    }
+    _awayTimer?.cancel();
+    _awayTimer = Timer(_awayLimit, () {
+      // Still away: leave the room too. The server's sweep counts this viewer
+      // out, once; coming back rejoins.
+      if (!mounted || !_away) return;
+      _awayDropped = true;
+      _room?.disconnect();
+    });
+  }
+
+  /// Back in view: pull the show again, or rejoin if the room was dropped.
+  void _comeBack() {
+    _awayTimer?.cancel();
+    _awayTimer = null;
+    final dropped = _awayDropped;
+    _awayDropped = false;
+    if (!mounted ||
+        _room == null ||
+        _state != ViewerState.watching ||
+        _streamEnded) {
+      return;
+    }
+    setState(() => _resuming = true);
+    if (dropped) {
+      if (_reconnecting) return;
+      _reconnecting = true;
+      _reconnectAttempt = 0;
+      _attemptReconnect();
+      return;
+    }
+    _settleUntil = DateTime.now().add(_settleWindow);
+    _pullAgain();
+    _reportAngle(force: true);
+    Future.delayed(const Duration(milliseconds: 1500), () {
+      if (mounted && !_reconnecting) setState(() => _resuming = false);
+    });
+  }
+
+  /// Every feed the show needs right now, through the usual subscribe paths.
+  void _pullAgain() {
+    final room = _room;
+    if (room == null) return;
+    if (_interview) return _syncStage();
+    _audioJoinedAt = _findAudioJoinedAt(room) ?? _audioJoinedAt;
+    for (final p in room.remoteParticipants.values) {
+      for (final pub in p.videoTrackPublications) {
+        if (!pub.subscribed) _delayedSubscribeVideo(p, pub);
+      }
+      // Audio published while away was never stored: pull it once, and the
+      // usual routing keeps or drops it.
+      if (!_audioPublications.containsKey(p.identity)) {
+        p.audioTrackPublications.forEach(_pull);
+      }
+    }
+    _updateAudioRouting();
+    _syncOffAir();
+  }
+
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _awayWatcher.dispose();
+    _awayTimer?.cancel();
     _overlaySeq = -1;
     _realSync?.dispose();
     _decrementAndCleanup();
@@ -343,6 +439,9 @@ class _ViewerScreenState extends State<ViewerScreen>
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
     _clearReconnect();
+    _awayTimer?.cancel();
+    _awayTimer = null;
+    _awayDropped = false;
     // No recount on the way out either. It existed to make the count settle
     // immediately when the last viewer left, but at the end of a real show
     // everyone leaves at once — which is precisely when a per-client write to
@@ -887,7 +986,7 @@ class _ViewerScreenState extends State<ViewerScreen>
           if (publication.subscribed && publication.track != null) {
             _storeAudioPublication(participant, publication);
           } else {
-            publication.subscribe();
+            _pull(publication);
           }
         }
       }
@@ -998,6 +1097,11 @@ class _ViewerScreenState extends State<ViewerScreen>
   // ── LiveKit event handlers ────────────────────────────────────────────────
 
   void _onTrackSubscribed(TrackSubscribedEvent event) {
+    // The room auto-subscribes to anything published while the viewer is away.
+    if (_away) {
+      event.publication.unsubscribe();
+      return;
+    }
     if (_interview) {
       _onStageEvent(event);
       return;
@@ -1161,7 +1265,7 @@ class _ViewerScreenState extends State<ViewerScreen>
     // conversation, not angles lined up to one audio timeline.
     if (_interview) return;
     if (_realSyncOn || publication.source == TrackSource.screenShareVideo) {
-      publication.subscribe();
+      _pull(publication);
       return;
     }
     final cameraJoinedAt =
@@ -1171,12 +1275,12 @@ class _ViewerScreenState extends State<ViewerScreen>
       delayMs = (_audioJoinedAt! - cameraJoinedAt).clamp(0, _maxSyncDelayMs);
     }
     if (delayMs == 0) {
-      publication.subscribe();
+      _pull(publication);
       return;
     }
     Future.delayed(Duration(milliseconds: delayMs), () {
       if (!mounted || _room == null || !_onAirParticipant(participant)) return;
-      if (!publication.subscribed) publication.subscribe();
+      if (!publication.subscribed) _pull(publication);
     });
   }
 
@@ -1360,7 +1464,7 @@ class _ViewerScreenState extends State<ViewerScreen>
       await Future.delayed(const Duration(milliseconds: 300));
       if (!mounted || _room != room) return;
       _audioJoinedAt = _findAudioJoinedAt(room) ?? _audioJoinedAt;
-      if (audioPub != null && _audioEnabled) await audioPub.subscribe();
+      if (audioPub != null && _audioEnabled) _pull(audioPub);
       for (final p in videoPubs) {
         _delayedSubscribeVideo(cam!, p);
       }
@@ -1670,7 +1774,7 @@ class _ViewerScreenState extends State<ViewerScreen>
     final slug = _streamEventId;
     final f = _focused;
     if (slug == null || f == null || supabase.auth.currentUser == null) return;
-    if (_interview) return;
+    if (_interview || _away) return;
     final angle = (slot: f.isScreenShare ? null : f.slotId);
     if (!force && angle == _reportedAngle) return;
     _reportedAngle = angle;
@@ -1690,6 +1794,11 @@ class _ViewerScreenState extends State<ViewerScreen>
         _reconnecting) {
       return;
     }
+    // Away: nobody is watching, so don't fight for the room. _comeBack rejoins.
+    if (_away) {
+      _awayDropped = true;
+      return;
+    }
     _reconnecting = true;
     _reconnectAttempt = 0;
     _attemptReconnect();
@@ -1699,6 +1808,7 @@ class _ViewerScreenState extends State<ViewerScreen>
   void _clearReconnect() {
     _reconnecting = false;
     _goingLive = false;
+    _resuming = false;
   }
 
   /// Poll the DB status and re-join the room with a fresh token. Retries with
@@ -1805,7 +1915,7 @@ class _ViewerScreenState extends State<ViewerScreen>
         if (publication.subscribed && publication.track != null) {
           _storeAudioPublication(participant, publication);
         } else {
-          publication.subscribe();
+          _pull(publication);
         }
       }
     }
@@ -1863,7 +1973,7 @@ class _ViewerScreenState extends State<ViewerScreen>
     if (target == null) return;
     for (final entry in _audioPublications.entries) {
       if (entry.key == target) {
-        entry.value.subscribe();
+        _pull(entry.value);
       } else {
         entry.value.unsubscribe();
       }
@@ -2100,10 +2210,12 @@ class _ViewerScreenState extends State<ViewerScreen>
         final want = pub.source == TrackSource.screenShareVideo
             ? feeds.share == id
             : feeds.video.contains(id);
-        want ? pub.subscribe() : pub.unsubscribe();
+        want && !_away ? pub.subscribe() : pub.unsubscribe();
       }
       for (final pub in p.audioTrackPublications) {
-        feeds.audio.contains(id) ? pub.subscribe() : pub.unsubscribe();
+        feeds.audio.contains(id) && !_away
+            ? pub.subscribe()
+            : pub.unsubscribe();
       }
     }
   }
@@ -2648,7 +2760,8 @@ class _ViewerScreenState extends State<ViewerScreen>
         if (_closingSlate && !_streamEnded) _buildClosingSlate(),
 
         // Reconnecting overlay — room dropped but the show is still live.
-        if (_reconnecting && !_streamEnded) _buildReconnectingOverlay(),
+        if ((_reconnecting || _resuming) && !_streamEnded)
+          _buildReconnectingOverlay(),
 
         // Stream ended overlay
         if (_streamEnded) _buildStreamEndedOverlay(),
@@ -2667,12 +2780,18 @@ class _ViewerScreenState extends State<ViewerScreen>
               CircularProgressIndicator(color: NileColors.volt),
               const SizedBox(height: 16),
               Text(
-                _goingLive ? 'Starting…' : 'Reconnecting…',
+                _resuming
+                    ? 'Resuming…'
+                    : _goingLive
+                    ? 'Starting…'
+                    : 'Reconnecting…',
                 style: NileTextStyles.headingMd(),
               ),
               const SizedBox(height: 8),
               Text(
-                _goingLive
+                _resuming
+                    ? 'Picking the show back up.'
+                    : _goingLive
                     ? 'The show is beginning.'
                     : 'The stream dropped briefly. Hang tight.',
                 style: NileTextStyles.bodyMd().copyWith(
@@ -4182,7 +4301,7 @@ class _ViewerScreenState extends State<ViewerScreen>
           ),
         ),
         if (_closingSlate) _buildClosingSlate(),
-        if (_reconnecting) _buildReconnectingOverlay(),
+        if (_reconnecting || _resuming) _buildReconnectingOverlay(),
       ],
     );
   }

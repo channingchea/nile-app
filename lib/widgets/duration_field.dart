@@ -17,6 +17,9 @@ class DurationField extends StatelessWidget {
   /// enforced by the validator (the server enforces it too).
   final int? maxMinutes;
 
+  /// [maxMinutes] is the free-show cap: the error says a ticket price lifts it.
+  final bool freeCap;
+
   const DurationField({
     super.key,
     required this.controller,
@@ -24,6 +27,7 @@ class DurationField extends StatelessWidget {
     required this.onUnitChanged,
     required this.preview,
     this.maxMinutes,
+    this.freeCap = false,
   });
 
   @override
@@ -43,6 +47,7 @@ class DurationField extends StatelessWidget {
                   ),
                 ],
                 decoration: InputDecoration(
+                  errorMaxLines: 3,
                   hintText: maxMinutes == null
                       ? (inHours ? 'e.g. 1.5' : 'e.g. 90')
                       : (inHours
@@ -57,7 +62,10 @@ class DurationField extends StatelessWidget {
                   if (max != null) {
                     final mins = inHours ? (n * 60).round() : n.round();
                     if (mins > max) {
-                      return 'Streams are capped at ${max ~/ 60}h';
+                      return freeCap
+                          ? 'Free shows run up to ${max ~/ 60}h — add a '
+                                'ticket price for longer shows'
+                          : 'Streams are capped at ${max ~/ 60}h';
                     }
                   }
                   return null;
@@ -72,11 +80,7 @@ class DurationField extends StatelessWidget {
           const SizedBox(height: 8),
           Row(
             children: [
-              Icon(
-                Icons.schedule,
-                size: 14,
-                color: NileColors.txtTertiary,
-              ),
+              Icon(Icons.schedule, size: 14, color: NileColors.txtTertiary),
               const SizedBox(width: 6),
               Text(
                 preview!,
@@ -120,7 +124,10 @@ class _UnitToggle extends StatelessWidget {
       onTap: onTap,
       borderRadius: BorderRadius.circular(NileRadius.sm),
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: NileSpacing.s16, vertical: NileSpacing.s12),
+        padding: const EdgeInsets.symmetric(
+          horizontal: NileSpacing.s16,
+          vertical: NileSpacing.s12,
+        ),
         decoration: BoxDecoration(
           color: selected ? NileColors.volt : Colors.transparent,
           borderRadius: BorderRadius.circular(NileRadius.sm),

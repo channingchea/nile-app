@@ -2,6 +2,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:video_player/video_player.dart';
 
+import 'away_pause.dart';
+
 /// Owns the currently-docked replay so playback outlives the screen that
 /// started it.
 ///
@@ -18,6 +20,10 @@ class MiniPlayer extends ChangeNotifier {
   static final MiniPlayer instance = MiniPlayer._();
 
   VideoPlayerController? _controller;
+
+  /// Leaving the app pauses the docked replay too (the dock outlives screens,
+  /// not the app being in view).
+  AwayPause? _awayPause;
   String? _eventId;
   String _title = '';
   String? _subtitle;
@@ -41,6 +47,7 @@ class MiniPlayer extends ChangeNotifier {
     String? subtitle,
   }) {
     if (identical(_controller, controller)) return;
+    _awayPause ??= AwayPause(() => [_controller], onChange: notifyListeners);
     _controller?.dispose();
     _controller = controller;
     _eventId = eventId;
@@ -68,7 +75,9 @@ class MiniPlayer extends ChangeNotifier {
     // Disposed after the frame that removes the dock. Tearing down the texture
     // while `VideoPlayer` is still mounted logs a platform-view error.
     if (controller != null) {
-      SchedulerBinding.instance.addPostFrameCallback((_) => controller.dispose());
+      SchedulerBinding.instance.addPostFrameCallback(
+        (_) => controller.dispose(),
+      );
     }
   }
 

@@ -29,6 +29,7 @@ import '../services/live_elements.dart';
 import '../services/overlay_layout.dart';
 import '../services/server_clock.dart';
 import '../services/film_sync.dart';
+import '../services/free_show.dart';
 import '../services/studio_elements_controller.dart';
 import '../services/layout_templates.dart';
 import '../services/studio_layouts.dart';
@@ -245,11 +246,15 @@ class _CameraScreenState extends State<CameraScreen> {
   /// The capture options every (re)publish path uses: an explicitly picked
   /// device wins; otherwise fall back to front/back position (mobile).
   CameraCaptureOptions get _cameraCaptureOptions => _selectedCameraId != null
-      ? CameraCaptureOptions(deviceId: _selectedCameraId)
+      ? CameraCaptureOptions(
+          deviceId: _selectedCameraId,
+          params: FreeShowVideo.capture(_freeShow),
+        )
       : CameraCaptureOptions(
           cameraPosition: _isFrontCamera
               ? CameraPosition.front
               : CameraPosition.back,
+          params: FreeShowVideo.capture(_freeShow),
         );
 
   /// The local CAMERA publication specifically — never the screen share,
@@ -1610,6 +1615,10 @@ class _CameraScreenState extends State<CameraScreen> {
   /// know now rather than discovering it when they go to sell the replay.
   bool _notRecording = false;
 
+  /// The event has no ticket price (from the token): it publishes at 480p and
+  /// isn't recorded, which is a rule rather than a failure.
+  bool _freeShow = false;
+
   DateTime? get _effectiveEndAt {
     final started = _startedAt;
     final planned = _plannedDuration;
@@ -1873,6 +1882,7 @@ class _CameraScreenState extends State<CameraScreen> {
             );
       final token = conn.token;
       final wsUrl = conn.wsUrl;
+      _freeShow = conn.freeShow;
 
       // Tear down any prior room first — a lingering connection holds the
       // camera/mic and makes the next connect hang.
@@ -1881,8 +1891,14 @@ class _CameraScreenState extends State<CameraScreen> {
 
       // adaptiveStream is subscriber-side only: it lets the Studio's thumbnail
       // grid pull low layers while the monitor pulls full resolution. Nothing
-      // about publishing changes, on any platform.
-      room = Room(roomOptions: const RoomOptions(adaptiveStream: true));
+      // about publishing changes, on any platform. A free show publishes
+      // smaller (FreeShowVideo).
+      room = Room(
+        roomOptions: RoomOptions(
+          adaptiveStream: true,
+          defaultVideoPublishOptions: FreeShowVideo.publish(_freeShow),
+        ),
+      );
       final listener = room.createListener();
 
       listener.on<ParticipantMetadataUpdatedEvent>((event) {
@@ -4289,10 +4305,10 @@ class _CameraScreenState extends State<CameraScreen> {
   Future<void> _anchorShow() async {
     final eventId = _eventId;
     if (eventId == null) return;
-    final started = await _retryValue(
+    final recording = await _retryValue(
       () => LivekitService.startShow(eventId: eventId, studio: true),
     );
-    if (started != true && mounted) setState(() => _notRecording = true);
+    if (mounted) _noteRecording(recording);
   }
 
   /// Studio: the event's camera slots, for the slot-ordered source list.
@@ -4532,17 +4548,23 @@ class _CameraScreenState extends State<CameraScreen> {
     // refused the egress). Both mean "assume there is no replay": the server
     // used to swallow the second case entirely and answer success, so a host
     // only discovered it after the show, with nothing to sell.
-    final egressStarted = await _retryValue(
+    final recording = await _retryValue(
       () => LivekitService.startShow(eventId: _eventId!, studio: _isStudio),
     );
-    if (egressStarted != true) {
-      if (mounted) setState(() => _notRecording = true);
+    if (mounted) _noteRecording(recording);
+    if (recording == null || recording == ShowRecording.failed) {
       _toast(
         'You’re live, but the recording didn’t start. There will be no replay '
         'for this show.',
       );
     }
   }
+
+  /// What Start Show said about the replay. Null = the call never got through.
+  void _noteRecording(ShowRecording? recording) => setState(() {
+    _freeShow = _freeShow || recording == ShowRecording.freeShow;
+    _notRecording = recording == null || recording == ShowRecording.failed;
+  });
 
   /// Host: disconnect a crew feed from the room.
   ///
@@ -5625,8 +5647,9 @@ class _CameraScreenState extends State<CameraScreen> {
         // The Studio gets this as a stats chip; the phone layout needs its own,
         // because most hosts run the show from a phone and a toast they scrolled
         // past is the same as never being told. Sticky for the session: there is
-        // no recovering the recording mid-show.
-        if (_notRecording)
+        // no recovering the recording mid-show. A free show is never recorded;
+        // it says so plainly instead of raising the alarm.
+        if (_notRecording || (_freeShow && _state == CameraState.live))
           Positioned(
             top: 48,
             left: 16,
@@ -5636,7 +5659,7 @@ class _CameraScreenState extends State<CameraScreen> {
                 vertical: NileSpacing.s4,
               ),
               decoration: BoxDecoration(
-                color: NileColors.error,
+                color: _freeShow ? Colors.black54 : NileColors.error,
                 borderRadius: BorderRadius.circular(NileRadius.pill),
               ),
               child: Row(
@@ -5649,7 +5672,7 @@ class _CameraScreenState extends State<CameraScreen> {
                   ),
                   const SizedBox(width: 6),
                   Text(
-                    'NOT RECORDING',
+                    _freeShow ? 'FREE SHOWS AREN’T RECORDED' : 'NOT RECORDING',
                     style: NileTextStyles.labelSm().copyWith(
                       color: Colors.white,
                       letterSpacing: 1.5,
@@ -6099,7 +6122,8 @@ class _CameraScreenState extends State<CameraScreen> {
             .length,
         quality: _quality,
         audioSourceLabel: _audioSourceLabel,
-        notRecording: _notRecording,
+        notRecording: _notRecording && !_freeShow,
+        freeShow: _freeShow,
       ),
       leading: IconButton(
         onPressed: _leaveStream,

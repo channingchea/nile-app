@@ -68,20 +68,28 @@ void main() {
     test('the monitor keeps usable width at the minimum macOS window', () {
       // MainFlutterWindow pins minSize to 740×600, so this is the narrowest
       // Studio that can exist on a Mac. Two columns there, not three.
-      expect(NileBreakpoints.classify(const Size(740, 600)).hasContextRail,
-          isFalse);
+      expect(
+        NileBreakpoints.classify(const Size(740, 600)).hasContextRail,
+        isFalse,
+      );
       expect(_monitorWidth(740), greaterThan(500));
     });
 
-    test('the chat column arrives with the shell\'s context rail, not before',
-        () {
-      expect(NileBreakpoints.classify(const Size(1179, 900)).hasContextRail,
-          isFalse);
-      expect(NileBreakpoints.classify(const Size(1180, 900)).hasContextRail,
-          isTrue);
-      // Adding a third column must not starve the monitor at the threshold.
-      expect(_monitorWidth(1180), greaterThan(600));
-    });
+    test(
+      'the chat column arrives with the shell\'s context rail, not before',
+      () {
+        expect(
+          NileBreakpoints.classify(const Size(1179, 900)).hasContextRail,
+          isFalse,
+        );
+        expect(
+          NileBreakpoints.classify(const Size(1180, 900)).hasContextRail,
+          isTrue,
+        );
+        // Adding a third column must not starve the monitor at the threshold.
+        expect(_monitorWidth(1180), greaterThan(600));
+      },
+    );
 
     test('a maximised 16-inch MacBook gives the monitor the surplus', () {
       expect(_monitorWidth(1728), closeTo(1174, 1));
@@ -257,6 +265,31 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     });
 
+    // A free show is never recorded: a plain note, not the alarm.
+    testWidgets('a free show says it is not recorded, once live', (
+      tester,
+    ) async {
+      Widget studio({required bool isLive}) => _wrap(
+        NileStudio(
+          sources: [_source('camera-1')],
+          selectedIdentity: 'camera-1',
+          onSelectSource: (_) {},
+          selfIdentity: null,
+          stats: NileStudioStats(isLive: isLive, freeShow: true),
+          controls: const SizedBox.shrink(),
+          showChatColumn: false,
+        ),
+      );
+
+      await tester.pumpWidget(studio(isLive: false));
+      expect(find.text('NOT RECORDED'), findsNothing);
+
+      await tester.pumpWidget(studio(isLive: true));
+      expect(find.text('NOT RECORDED'), findsOneWidget);
+      expect(find.text('NOT RECORDING'), findsNothing);
+      await tester.pumpWidget(const SizedBox());
+    });
+
     testWidgets('reports the show state a host asks about', (tester) async {
       await tester.pumpWidget(
         _wrap(
@@ -380,8 +413,11 @@ void main() {
           sources: [
             _source('camera-me', label: 'You', isLocal: true),
             _source('camera-2', label: 'Stage Right', isRemovable: true),
-            _source('camera-2#share', label: 'Stage Right — screen',
-                isScreenShare: true),
+            _source(
+              'camera-2#share',
+              label: 'Stage Right — screen',
+              isScreenShare: true,
+            ),
             _source('crew:abc', label: '@notyethere'),
           ],
           onRemove: (_) {},
@@ -494,11 +530,7 @@ void main() {
         kind: 'system',
       );
       await tester.pumpWidget(
-        chatPanel(
-          messages: [system],
-          hidden: const {''},
-          blocked: const {''},
-        ),
+        chatPanel(messages: [system], hidden: const {''}, blocked: const {''}),
       );
       expect(find.text('Someone tipped \$5'), findsOneWidget);
       // …and there is nobody to moderate on an app-generated line.
@@ -595,9 +627,7 @@ void main() {
     });
 
     testWidgets('settings are the host\'s alone', (tester) async {
-      await tester.pumpWidget(
-        chatPanel(messages: [_msg('u1', 'alice', 'hi')]),
-      );
+      await tester.pumpWidget(chatPanel(messages: [_msg('u1', 'alice', 'hi')]));
       expect(find.byIcon(Icons.tune), findsNothing);
 
       var opened = false;
@@ -616,9 +646,7 @@ void main() {
       // Slow mode and follower-only chat both look exactly like a quiet room.
       // A host who forgot they turned one on would otherwise read the silence
       // as chat being broken — which is the failure #15 spent a whole fix on.
-      await tester.pumpWidget(
-        chatPanel(messages: [_msg('u1', 'alice', 'hi')]),
-      );
+      await tester.pumpWidget(chatPanel(messages: [_msg('u1', 'alice', 'hi')]));
       expect(find.textContaining('Slow mode'), findsNothing);
 
       await tester.pumpWidget(
